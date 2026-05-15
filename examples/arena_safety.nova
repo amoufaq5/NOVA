@@ -1,0 +1,53 @@
+-- Nova: Arena memory management and safety features
+
+-- Arena-based allocation with budget
+arena gpu(budget=1073741824) {
+    -- 1GB budget
+    let weights = tensor[f32, 256, 256].zeros()
+    print("Allocated weights in arena: " + weights)
+    print("Shape: " + weights.shape)
+}
+-- Entire arena freed here
+
+-- Sandbox: restricted execution
+sandbox(net=false, fs="readonly") {
+    let x = 42
+    let y = x * 2
+    print("Sandboxed computation: " + y)
+}
+
+-- Distribute block (runs locally in bootstrap)
+distribute(data_parallel, devices=4) {
+    let batch = tensor[f32, 32, 768].ones()
+    print("Distributed batch: " + batch)
+}
+
+-- Result types for error handling
+fn load_data(path: str) -> Result[str, str] {
+    if path == "" {
+        return Err("empty path")
+    }
+    return Ok("data from " + path)
+}
+
+-- Using try for error propagation
+fn process_pipeline() {
+    let data = try load_data("train.csv")
+    print("Loaded: " + data)
+    return Ok("pipeline complete")
+}
+
+let pipeline_result = process_pipeline()
+match pipeline_result {
+    Ok(msg) => print(msg),
+    Err(e) => print("Pipeline error: " + e),
+}
+
+-- Ownership demonstration
+fn consume_data(move data) {
+    print("Consumed: " + data)
+    return data
+}
+
+let original = [1, 2, 3]
+print("Original: " + original)

@@ -1,0 +1,31 @@
+-- Nova: Tensor operations demo
+
+-- Create tensors
+let a = tensor[f32, 3, 3].zeros()
+print("Zeros: " + a)
+
+let b = tensor[f32, 3, 3].ones()
+print("Ones: " + b)
+
+-- Tensor properties
+print("Shape: " + b.shape)
+print("Dtype: " + b.dtype)
+print("Ndim: " + b.ndim)
+print("Size: " + b.size)
+
+-- Scalar arithmetic on tensors
+let c = b * 5.0
+print("Ones * 5: " + c)
+
+let d = c + b
+print("After + ones: " + d)
+
+-- Autograd (numerical gradient in bootstrap)
+fn f(x) {
+    return (x * x).sum()
+}
+
+let df = grad(f)
+let input = tensor[f32, 3].ones()
+let gradient = df(input)
+print("grad of sum(x^2) at ones(3): " + gradient)
