@@ -391,3 +391,108 @@ class IdentPattern(ASTNode):
 class ConstructorPattern(ASTNode):
     name: str = ""
     args: list[ASTNode] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Causal Constructs (v2)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CausalGraphDecl(ASTNode):
+    name: str = ""
+    params: list[Param] = field(default_factory=list)
+    nodes: list['CausalNodeDecl'] = field(default_factory=list)
+    edges: list['CausalEdgeDecl'] = field(default_factory=list)
+    confounders: list['ConfounderDecl'] = field(default_factory=list)
+    invariances: list['InvarianceDecl'] = field(default_factory=list)
+    mechanisms: list['MechanismDecl'] = field(default_factory=list)
+
+@dataclass
+class CausalNodeDecl(ASTNode):
+    name: str = ""
+    node_type: str = "continuous"
+    default: ASTNode | None = None
+
+@dataclass
+class CausalEdgeDecl(ASTNode):
+    source: str = ""
+    target: str = ""
+    annotation: str | None = None
+
+@dataclass
+class ConfounderDecl(ASTNode):
+    variable: str = ""
+    between: tuple[str, str] = ("", "")
+
+@dataclass
+class InvarianceDecl(ASTNode):
+    variable: str = ""
+    independent_of: list[str] = field(default_factory=list)
+    given: list[str] = field(default_factory=list)
+
+@dataclass
+class MechanismDecl(ASTNode):
+    name: str = ""
+    params: list[Param] = field(default_factory=list)
+    body: list[ASTNode] = field(default_factory=list)
+    equation: ASTNode | None = None
+
+@dataclass
+class InterveneExpr(ASTNode):
+    graph: ASTNode | None = None
+    interventions: dict[str, ASTNode] = field(default_factory=dict)
+    body: list[ASTNode] = field(default_factory=list)
+
+@dataclass
+class CounterfactualExpr(ASTNode):
+    graph: ASTNode | None = None
+    observed: ASTNode | None = None
+    body: list[ASTNode] = field(default_factory=list)
+
+@dataclass
+class WorldModelDecl(ASTNode):
+    name: str = ""
+    params: list[Param] = field(default_factory=list)
+    graph_ref: str | None = None
+    state_vars: list[LetDecl] = field(default_factory=list)
+    mechanisms: list['MechanismDecl'] = field(default_factory=list)
+    transitions: list['TransitionRule'] = field(default_factory=list)
+    predict_fn: FnDecl | None = None
+    what_if_fn: FnDecl | None = None
+
+@dataclass
+class TransitionRule(ASTNode):
+    variable: str = ""
+    time_offset: int = 1
+    equation: ASTNode | None = None
+
+@dataclass
+class ObjectiveDecl(ASTNode):
+    name: str = ""
+    params: list[Param] = field(default_factory=list)
+    clauses: list['ObjectiveClause'] = field(default_factory=list)
+
+@dataclass
+class ObjectiveClause(ASTNode):
+    kind: str = ""  # "invariance", "structure", "bound", "transfer"
+    expr: ASTNode | None = None
+    target: ASTNode | None = None
+    condition: ASTNode | None = None
+
+@dataclass
+class TrainDecl(ASTNode):
+    model_name: str = ""
+    config: dict[str, ASTNode] = field(default_factory=dict)
+    body: list[ASTNode] = field(default_factory=list)
+
+@dataclass
+class CurriculumDecl(ASTNode):
+    name: str = ""
+    params: list[Param] = field(default_factory=list)
+    stages: list['StageDecl'] = field(default_factory=list)
+
+@dataclass
+class StageDecl(ASTNode):
+    name: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    body: list[ASTNode] = field(default_factory=list)

@@ -1,0 +1,239 @@
+-- Nova v2: Causal Constructs Test Suite
+
+-- Define a causal graph
+causal graph Weather {
+    nodes {
+        rain: binary
+        sprinkler: binary
+        wet_grass: binary
+        season: categorical[4]
+    }
+
+    edges {
+        season -> rain
+        season -> sprinkler
+        rain -> wet_grass
+        sprinkler -> wet_grass
+    }
+
+    confounders {
+        season confounds (rain, sprinkler)
+    }
+
+    invariance: wet_grass is_independent_of season given [rain, sprinkler]
+}
+
+causal graph SimpleChain {
+    nodes {
+        x: continuous
+        y: continuous
+        z: continuous
+    }
+
+    edges {
+        x -> y
+        y -> z
+    }
+}
+
+causal graph Collider {
+    nodes {
+        a: continuous
+        b: continuous
+        c: continuous
+    }
+
+    edges {
+        a -> c
+        b -> c
+    }
+}
+
+-- Test: causal graph creation and basic properties
+fn test_causal_graph_creation() {
+    assert_true(type_of(Weather) == "CausalGraph")
+    let nodes = Weather.nodes
+    assert_eq(len(nodes), 4)
+    assert_true(Weather.name == "Weather")
+}
+
+fn test_causal_graph_edges() {
+    let edges = Weather.edges
+    assert_eq(len(edges), 4)
+}
+
+fn test_causal_parents() {
+    let parents = Weather.parents("wet_grass")
+    assert_eq(len(parents), 2)
+}
+
+fn test_causal_children() {
+    let children = Weather.children("season")
+    assert_eq(len(children), 2)
+}
+
+fn test_causal_ancestors() {
+    let anc = Weather.ancestors("wet_grass")
+    assert_eq(len(anc), 3)
+}
+
+fn test_causal_descendants() {
+    let desc = Weather.descendants("season")
+    assert_eq(len(desc), 3)
+}
+
+fn test_topological_sort() {
+    let order = SimpleChain.topological_sort()
+    assert_eq(len(order), 3)
+    assert_eq(order[0], "x")
+    assert_eq(order[1], "y")
+    assert_eq(order[2], "z")
+}
+
+fn test_d_separation_chain() {
+    -- In x -> y -> z: x _|_ z | y
+    let separated = SimpleChain.is_d_separated("x", "z", ["y"])
+    assert_true(separated)
+    -- But x is NOT d-separated from z unconditionally
+    let connected = SimpleChain.is_d_separated("x", "z", [])
+    assert_true(not connected)
+}
+
+fn test_d_separation_collider() {
+    -- In a -> c <- b: a _|_ b unconditionally
+    let separated = Collider.is_d_separated("a", "b", [])
+    assert_true(separated)
+    -- But NOT d-separated when conditioning on collider
+    let connected = Collider.is_d_separated("a", "b", ["c"])
+    assert_true(not connected)
+}
+
+fn test_do_calculus() {
+    -- Mutilated graph removes incoming edges to intervened variable
+    let mutilated = Weather.do({"rain": true})
+    -- In mutilated graph, rain has no parents
+    let rain_parents = mutilated.parents("rain")
+    assert_eq(len(rain_parents), 0)
+    -- But wet_grass still has rain as parent
+    let wg_parents = mutilated.parents("wet_grass")
+    assert_eq(len(wg_parents), 2)
+}
+
+fn test_adjustment_set() {
+    let adj = Weather.adjustment_set("rain", "wet_grass")
+    -- Season is a parent of rain and not a descendant
+    assert_true(len(adj) >= 1)
+}
+
+fn test_independent_mechanisms() {
+    let groups = Collider.independent_mechanisms()
+    assert_true(len(groups) >= 1)
+}
+
+fn test_causal_chains() {
+    let chains = SimpleChain.causal_chains()
+    assert_eq(len(chains), 1)
+    assert_eq(len(chains[0]), 3)
+}
+
+-- Test: intervene expression
+fn test_intervene_basic() {
+    let result = intervene(Weather, rain := 1) {
+        return rain
+    }
+    assert_eq(result, 1)
+}
+
+fn test_intervene_graph_surgery() {
+    let result = intervene(Weather, rain := 1) {
+        -- Inside intervention, the graph is mutilated
+        let g = __graph__
+        let parents = g.parents("rain")
+        return len(parents)
+    }
+    -- Rain should have no parents in mutilated graph
+    assert_eq(result, 0)
+}
+
+-- Test: counterfactual expression
+fn test_counterfactual_basic() {
+    let result = counterfactual(Weather, observed: {"rain": 1}) {
+        return rain
+    }
+    assert_eq(result, 1)
+}
+
+-- Test: world model
+world_model Counter {
+    state {
+        count: int = 0
+        step_size: int = 1
+    }
+
+    transition {
+        count(t+1) = count + step_size
+    }
+
+    predict(steps: int) {
+        let states = []
+        let c = count
+        for i in range(steps) {
+            c = c + step_size
+            states.push(c)
+        }
+        return states
+    }
+}
+
+fn test_world_model_creation() {
+    assert_true(type_of(Counter) == "WorldModel")
+    assert_true(Counter.name == "Counter")
+}
+
+fn test_world_model_state() {
+    let s = Counter.state
+    assert_eq(s["count"], 0)
+    assert_eq(s["step_size"], 1)
+}
+
+-- Test: objective declaration
+objective Accuracy {
+    bound: loss <= 0.01
+}
+
+fn test_objective_creation() {
+    assert_true(type_of(Accuracy) == "Objective")
+    assert_true(Accuracy.name == "Accuracy")
+}
+
+-- Test: curriculum declaration
+curriculum BasicTraining(model: str) {
+    stage warmup {
+        let x = 1
+    }
+
+    stage main_training {
+        depends_on: [warmup]
+        let x = 2
+    }
+
+    stage evaluation {
+        depends_on: [main_training]
+        let x = 3
+    }
+}
+
+fn test_curriculum_creation() {
+    assert_true(type_of(BasicTraining) == "Curriculum")
+    let stages = BasicTraining.stages
+    assert_eq(len(stages), 3)
+    assert_eq(stages[0], "warmup")
+    assert_eq(stages[1], "main_training")
+    assert_eq(stages[2], "evaluation")
+}
+
+fn test_curriculum_ready_stages() {
+    -- Initially only warmup (no deps) should be ready
+    let ready = BasicTraining.ready_stages()
+    assert_eq(len(ready), 1)
+}

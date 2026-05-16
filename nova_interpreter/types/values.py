@@ -343,6 +343,276 @@ class NovaChannel(NovaValue):
 
 
 # ---------------------------------------------------------------------------
+# Causal Values (v2)
+# ---------------------------------------------------------------------------
+
+class NovaCausalGraph:
+    """Runtime representation of a causal DAG."""
+    def __init__(self, name, nodes=None, edges=None, confounders=None, invariances=None, mechanisms=None):
+        self.name = name
+        self.nodes = nodes or {}       # {name: node_type}
+        self.edges = edges or []       # [(source, target, annotation)]
+        self.confounders = confounders or []  # [(var, (a, b))]
+        self.invariances = invariances or []  # [(var, indep_of, given)]
+        self.mechanisms = mechanisms or {}    # {name: callable}
+        self._adjacency = {}  # computed lazily
+        self._parents = {}
+        self._build_adjacency()
+
+    def _build_adjacency(self):
+        self._adjacency = {n: [] for n in self.nodes}
+        self._parents = {n: [] for n in self.nodes}
+        for src, tgt, _ in self.edges:
+            if src in self._adjacency:
+                self._adjacency[src].append(tgt)
+            if tgt in self._parents:
+                self._parents[tgt].append(src)
+
+    def children(self, node):
+        return self._adjacency.get(node, [])
+
+    def parents(self, node):
+        return self._parents.get(node, [])
+
+    def ancestors(self, node, visited=None):
+        if visited is None:
+            visited = set()
+        for p in self.parents(node):
+            if p not in visited:
+                visited.add(p)
+                self.ancestors(p, visited)
+        return visited
+
+    def descendants(self, node, visited=None):
+        if visited is None:
+            visited = set()
+        for c in self.children(node):
+            if c not in visited:
+                visited.add(c)
+                self.descendants(c, visited)
+        return visited
+
+    def topological_sort(self):
+        visited = set()
+        order = []
+        def dfs(n):
+            if n in visited:
+                return
+            visited.add(n)
+            for child in self.children(n):
+                dfs(child)
+            order.append(n)
+        for node in self.nodes:
+            dfs(node)
+        return list(reversed(order))
+
+    def is_d_separated(self, x, y, given):
+        """Check if x and y are d-separated given a set of observed variables."""
+        given_set = set(given)
+        # Simple implementation: check if all paths are blocked
+        # A path is blocked if it goes through a non-collider in given
+        # or through a collider NOT in given
+        return not self._has_active_path(x, y, given_set)
+
+    def _has_active_path(self, start, end, given):
+        """BFS to find active (d-connected) path."""
+        from collections import deque
+        # Use the Bayes-Ball algorithm (simplified)
+        visited = set()
+        queue = deque([(start, "up")])  # (node, direction)
+        while queue:
+            node, direction = queue.popleft()
+            if (node, direction) in visited:
+                continue
+            visited.add((node, direction))
+            if node == end:
+                return True
+            if direction == "up":  # going to parents
+                if node not in given:
+                    # Pass through (not observed) — can go to parents and children
+                    for parent in self.parents(node):
+                        queue.append((parent, "up"))
+                    for child in self.children(node):
+                        queue.append((child, "down"))
+            elif direction == "down":  # going to children
+                if node not in given:
+                    for child in self.children(node):
+                        queue.append((child, "down"))
+                if node in given:
+                    # Collider is observed — can go to parents
+                    for parent in self.parents(node):
+                        queue.append((parent, "up"))
+        return False
+
+    def do(self, interventions):
+        """Apply do-calculus: return a mutilated graph with incoming edges removed for intervened variables."""
+        new_edges = [(s, t, a) for s, t, a in self.edges if t not in interventions]
+        return NovaCausalGraph(
+            name=self.name + "_mutilated",
+            nodes=dict(self.nodes),
+            edges=new_edges,
+            confounders=self.confounders,
+            invariances=self.invariances,
+            mechanisms=dict(self.mechanisms),
+        )
+
+    def adjustment_set(self, treatment, outcome):
+        """Find a valid adjustment set (backdoor criterion)."""
+        # Find all backdoor paths: paths from treatment to outcome through parents of treatment
+        # Block them by conditioning on parents of treatment (that aren't descendants of treatment)
+        treatment_descendants = self.descendants(treatment)
+        treatment_parents = set(self.parents(treatment))
+        # Valid adjustment: parents of treatment that aren't descendants of treatment
+        adjust = treatment_parents - treatment_descendants
+        return adjust
+
+    def independent_mechanisms(self):
+        """Find sets of mechanisms that can be trained independently."""
+        # Mechanisms with no shared edges between them
+        roots = [n for n in self.nodes if not self.parents(n)]
+        # Group nodes by their root ancestor
+        groups = []
+        assigned = set()
+        for root in roots:
+            group = {root} | self.descendants(root)
+            group -= assigned
+            if group:
+                groups.append(group)
+                assigned |= group
+        return groups
+
+    def causal_chains(self):
+        """Get all maximal causal chains in the graph."""
+        order = self.topological_sort()
+        chains = []
+        visited = set()
+        for node in order:
+            if node not in visited and not self.parents(node):
+                chain = []
+                current = node
+                while current:
+                    chain.append(current)
+                    visited.add(current)
+                    children = [c for c in self.children(current) if c not in visited]
+                    current = children[0] if children else None
+                if len(chain) > 1:
+                    chains.append(chain)
+        return chains
+
+    def __repr__(self):
+        return f"CausalGraph({self.name}, {len(self.nodes)} nodes, {len(self.edges)} edges)"
+
+
+class NovaWorldModel:
+    """Runtime representation of a world model with causal structure."""
+    def __init__(self, name, graph=None, state=None, mechanisms=None, transitions=None):
+        self.name = name
+        self.graph = graph  # NovaCausalGraph
+        self.state = state or {}  # {var_name: value}
+        self.mechanisms = mechanisms or {}  # {name: callable}
+        self.transitions = transitions or {}  # {var_name: callable}
+        self.history = []
+
+    def step(self, env=None):
+        """Advance one timestep using transition rules."""
+        new_state = dict(self.state)
+        for var, fn in self.transitions.items():
+            new_state[var] = fn(self.state, env)
+        self.history.append(dict(self.state))
+        self.state = new_state
+        return new_state
+
+    def predict(self, steps, env=None):
+        """Predict future states."""
+        states = []
+        saved = dict(self.state)
+        for _ in range(steps):
+            self.step(env)
+            states.append(dict(self.state))
+        self.state = saved
+        return states
+
+    def intervene(self, interventions, steps=1, env=None):
+        """Simulate with interventions (do-calculus)."""
+        saved = dict(self.state)
+        # Apply interventions
+        for var, val in interventions.items():
+            self.state[var] = val
+        # Remove mechanisms for intervened variables
+        saved_mechanisms = dict(self.transitions)
+        for var in interventions:
+            if var in self.transitions:
+                del self.transitions[var]
+        # Simulate
+        states = self.predict(steps, env)
+        # Restore
+        self.state = saved
+        self.transitions = saved_mechanisms
+        return states
+
+    def counterfactual(self, observed, interventions, steps=1, env=None):
+        """Compute counterfactual: given observed, what if interventions?"""
+        # Step 1: Abduction — infer latent state from observations
+        saved = dict(self.state)
+        self.state.update(observed)
+        # Step 2: Intervention — apply graph surgery
+        # Step 3: Prediction — forward simulate
+        result = self.intervene(interventions, steps, env)
+        self.state = saved
+        return result
+
+    def __repr__(self):
+        return f"WorldModel({self.name}, state={list(self.state.keys())})"
+
+
+class NovaObjective:
+    """Runtime representation of a typed objective."""
+    def __init__(self, name, clauses=None):
+        self.name = name
+        self.clauses = clauses or []  # [(kind, check_fn)]
+        self.satisfied = {}
+
+    def check(self, model, data=None):
+        """Check if all objective clauses are satisfied."""
+        results = {}
+        for kind, check_fn in self.clauses:
+            try:
+                results[kind] = check_fn(model, data)
+            except Exception as e:
+                results[kind] = False
+        self.satisfied = results
+        return all(results.values())
+
+    def __repr__(self):
+        return f"Objective({self.name}, {len(self.clauses)} clauses)"
+
+
+class NovaCurriculum:
+    """Runtime representation of a training curriculum."""
+    def __init__(self, name, stages=None):
+        self.name = name
+        self.stages = stages or []  # [(name, depends_on, fn)]
+        self.completed = set()
+
+    def ready_stages(self):
+        """Get stages whose dependencies are all satisfied."""
+        ready = []
+        for name, deps, fn in self.stages:
+            if name not in self.completed and all(d in self.completed for d in deps):
+                ready.append((name, fn))
+        return ready
+
+    def mark_complete(self, stage_name):
+        self.completed.add(stage_name)
+
+    def all_complete(self):
+        return len(self.completed) == len(self.stages)
+
+    def __repr__(self):
+        return f"Curriculum({self.name}, {len(self.completed)}/{len(self.stages)} stages done)"
+
+
+# ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
 

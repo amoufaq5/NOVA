@@ -55,6 +55,28 @@ class TokenType(Enum):
     ACT = auto()
     GRAD = auto()
 
+    # --- Keywords: Causal (v2) ---
+    CAUSAL = auto()
+    GRAPH = auto()
+    NODES = auto()
+    EDGES = auto()
+    MECHANISMS = auto()
+    CONFOUNDERS = auto()
+    INVARIANCE = auto()
+    INTERVENE = auto()
+    COUNTERFACTUAL = auto()
+    WORLD_MODEL = auto()
+    STATE = auto()
+    PREDICT = auto()
+    OBJECTIVE = auto()
+    SATISFIES = auto()
+    TRAIN = auto()
+    CURRICULUM = auto()
+    STAGE = auto()
+    DEPENDS_ON = auto()
+    CONVERGENCE = auto()
+    TRANSITION = auto()
+
     # --- Keywords: Safety ---
     CONSTRAIN = auto()
     SANDBOX = auto()
@@ -170,6 +192,28 @@ KEYWORDS = {
     "plan": TokenType.PLAN,
     "act": TokenType.ACT,
     "grad": TokenType.GRAD,
+
+    # Causal (v2)
+    "causal": TokenType.CAUSAL,
+    "graph": TokenType.GRAPH,
+    "nodes": TokenType.NODES,
+    "edges": TokenType.EDGES,
+    "mechanisms": TokenType.MECHANISMS,
+    "confounders": TokenType.CONFOUNDERS,
+    "invariance": TokenType.INVARIANCE,
+    "intervene": TokenType.INTERVENE,
+    "counterfactual": TokenType.COUNTERFACTUAL,
+    "world_model": TokenType.WORLD_MODEL,
+    "state": TokenType.STATE,
+    "predict": TokenType.PREDICT,
+    "objective": TokenType.OBJECTIVE,
+    "satisfies": TokenType.SATISFIES,
+    "train": TokenType.TRAIN,
+    "curriculum": TokenType.CURRICULUM,
+    "stage": TokenType.STAGE,
+    "depends_on": TokenType.DEPENDS_ON,
+    "convergence": TokenType.CONVERGENCE,
+    "transition": TokenType.TRANSITION,
 
     # Safety
     "constrain": TokenType.CONSTRAIN,

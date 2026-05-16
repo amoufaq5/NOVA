@@ -66,6 +66,16 @@ class Parser:
                 return self._model_decl()
             case TokenType.AGENT:
                 return self._agent_decl()
+            case TokenType.CAUSAL:
+                return self._causal_graph_decl()
+            case TokenType.WORLD_MODEL:
+                return self._world_model_decl()
+            case TokenType.OBJECTIVE:
+                return self._objective_decl()
+            case TokenType.TRAIN:
+                return self._train_decl()
+            case TokenType.CURRICULUM:
+                return self._curriculum_decl()
             case TokenType.IMPORT:
                 return self._import_decl()
             case TokenType.FROM:
@@ -113,7 +123,10 @@ class Parser:
     def _param(self) -> Param:
         is_move = bool(self._match(TokenType.MOVE))
         is_mut = bool(self._match(TokenType.MUT))
-        tok = self._expect(TokenType.IDENT, "Expected parameter name")
+        # Accept keyword tokens as parameter names (contextual keywords)
+        tok = self._advance()
+        if tok.type == TokenType.EOF or not hasattr(tok, 'value') or tok.value is None:
+            raise ParseError("Expected parameter name", tok)
         type_ann = None
         default = None
         if self._match(TokenType.COLON):
@@ -390,7 +403,10 @@ class Parser:
 
     def _let_decl(self, is_owned: bool) -> LetDecl:
         tok = self._advance()  # let or owned
-        name_tok = self._expect(TokenType.IDENT)
+        # Accept keywords as variable names (contextual keywords like nodes, edges, state, etc.)
+        name_tok = self._advance()
+        if name_tok.type == TokenType.EOF:
+            raise self._error("Expected variable name")
         type_ann = None
         if self._match(TokenType.COLON):
             type_ann = self._type_expr()
@@ -886,6 +902,10 @@ class Parser:
                 return self._shared_expr()
             case TokenType.CHANNEL:
                 return self._channel_expr()
+            case TokenType.INTERVENE:
+                return self._intervene_expr()
+            case TokenType.COUNTERFACTUAL:
+                return self._counterfactual_expr()
             case TokenType.LPAREN:
                 self._advance()
                 expr = self._expression()
@@ -900,6 +920,15 @@ class Parser:
             case TokenType.FN:
                 return self._anonymous_fn()
             case _:
+                # Contextual keywords used as identifiers in expression position
+                if tok.value and isinstance(tok.value, str) and tok.type not in (
+                    TokenType.EOF, TokenType.RBRACE, TokenType.RPAREN, TokenType.RBRACKET,
+                    TokenType.COMMA, TokenType.ASSIGN, TokenType.COLON, TokenType.DOT,
+                    TokenType.PLUS, TokenType.MINUS, TokenType.STAR, TokenType.SLASH,
+                    TokenType.FAT_ARROW, TokenType.ARROW, TokenType.PIPE_ARROW,
+                ):
+                    self._advance()
+                    return Identifier(name=tok.value, line=tok.line, col=tok.col)
                 raise self._error(f"Unexpected token: {tok.type.name} ({tok.value!r})")
 
     def _tensor_primary(self) -> ASTNode:
@@ -1031,4 +1060,441 @@ class Parser:
         return FnDecl(
             name="<anon>", params=params, body=body,
             return_type=ret_type, line=tok.line, col=tok.col,
+        )
+
+    # -----------------------------------------------------------------------
+    # Causal Constructs (v2)
+    # -----------------------------------------------------------------------
+
+    def _causal_graph_decl(self) -> CausalGraphDecl:
+        tok = self._advance()  # causal
+        self._expect(TokenType.GRAPH, "Expected 'graph'")
+        name_tok = self._expect(TokenType.IDENT, "Expected graph name")
+        params = []
+        if self._match(TokenType.LPAREN):
+            params = self._param_list()
+            self._expect(TokenType.RPAREN)
+        self._expect(TokenType.LBRACE)
+
+        nodes = []
+        edges = []
+        confounders = []
+        invariances = []
+        mechanisms = []
+
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            if self._check(TokenType.NODES):
+                nodes = self._causal_nodes_block()
+            elif self._check(TokenType.EDGES):
+                edges = self._causal_edges_block()
+            elif self._check(TokenType.CONFOUNDERS):
+                confounders = self._causal_confounders_block()
+            elif self._check(TokenType.INVARIANCE):
+                invariances.append(self._causal_invariance())
+            elif self._check(TokenType.MECHANISMS):
+                mechanisms = self._causal_mechanisms_block()
+            else:
+                raise self._error(
+                    f"Unexpected token in causal graph: {self._peek().type.name}")
+
+        self._expect(TokenType.RBRACE)
+        return CausalGraphDecl(
+            name=name_tok.value, params=params,
+            nodes=nodes, edges=edges, confounders=confounders,
+            invariances=invariances, mechanisms=mechanisms,
+            line=tok.line, col=tok.col,
+        )
+
+    def _causal_nodes_block(self) -> list[CausalNodeDecl]:
+        self._advance()  # nodes
+        self._expect(TokenType.LBRACE)
+        nodes = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            tok = self._peek()
+            name_tok = self._advance()  # node name (could be keyword)
+            node_type = "continuous"
+            default = None
+            if self._match(TokenType.COLON):
+                type_tok = self._advance()
+                node_type = type_tok.value
+                # Handle categorical[N]
+                if self._match(TokenType.LBRACKET):
+                    dim = self._expression()
+                    self._expect(TokenType.RBRACKET)
+                    node_type = f"{node_type}[{dim}]"
+            if self._match(TokenType.ASSIGN):
+                default = self._expression()
+            nodes.append(CausalNodeDecl(
+                name=name_tok.value, node_type=node_type, default=default,
+                line=tok.line, col=tok.col,
+            ))
+            self._match(TokenType.COMMA)
+        self._expect(TokenType.RBRACE)
+        return nodes
+
+    def _causal_edges_block(self) -> list[CausalEdgeDecl]:
+        self._advance()  # edges
+        self._expect(TokenType.LBRACE)
+        edges = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            tok = self._peek()
+            src_tok = self._advance()
+            self._expect(TokenType.ARROW, "Expected '->' in edge declaration")
+            tgt_tok = self._advance()
+            annotation = None
+            if self._match(TokenType.COLON):
+                annotation = self._advance().value
+            edges.append(CausalEdgeDecl(
+                source=src_tok.value, target=tgt_tok.value,
+                annotation=annotation, line=tok.line, col=tok.col,
+            ))
+            self._match(TokenType.COMMA)
+        self._expect(TokenType.RBRACE)
+        return edges
+
+    def _causal_confounders_block(self) -> list[ConfounderDecl]:
+        self._advance()  # confounders
+        self._expect(TokenType.LBRACE)
+        confounders = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            tok = self._peek()
+            var_tok = self._advance()
+            # expect "confounds"
+            conf_tok = self._advance()
+            if conf_tok.value != "confounds":
+                raise self._error("Expected 'confounds'")
+            self._expect(TokenType.LPAREN)
+            a_tok = self._advance()
+            self._expect(TokenType.COMMA)
+            b_tok = self._advance()
+            self._expect(TokenType.RPAREN)
+            confounders.append(ConfounderDecl(
+                variable=var_tok.value, between=(a_tok.value, b_tok.value),
+                line=tok.line, col=tok.col,
+            ))
+        self._expect(TokenType.RBRACE)
+        return confounders
+
+    def _causal_invariance(self) -> InvarianceDecl:
+        tok = self._advance()  # invariance
+        self._expect(TokenType.COLON)
+        var_tok = self._advance()
+        # expect "is_independent_of"
+        kw = self._advance()
+        if kw.value != "is_independent_of":
+            raise self._error("Expected 'is_independent_of'")
+        # Parse the independence targets: single ident or [list]
+        indep_of = []
+        if self._match(TokenType.LBRACKET):
+            indep_of.append(self._advance().value)
+            while self._match(TokenType.COMMA):
+                if self._check(TokenType.RBRACKET):
+                    break
+                indep_of.append(self._advance().value)
+            self._expect(TokenType.RBRACKET)
+        else:
+            indep_of.append(self._advance().value)
+        # Optional "given" clause
+        given = []
+        if self._check(TokenType.IDENT) and self._peek().value == "given":
+            self._advance()
+            if self._match(TokenType.LBRACKET):
+                given.append(self._advance().value)
+                while self._match(TokenType.COMMA):
+                    if self._check(TokenType.RBRACKET):
+                        break
+                    given.append(self._advance().value)
+                self._expect(TokenType.RBRACKET)
+            else:
+                given.append(self._advance().value)
+        return InvarianceDecl(
+            variable=var_tok.value, independent_of=indep_of, given=given,
+            line=tok.line, col=tok.col,
+        )
+
+    def _causal_mechanisms_block(self) -> list[MechanismDecl]:
+        self._advance()  # mechanisms
+        self._expect(TokenType.LBRACE)
+        mechs = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            tok = self._peek()
+            name_tok = self._advance()
+            # mechanism can be: name(params) = expr  or  name(params) { body }
+            params = []
+            if self._match(TokenType.LPAREN):
+                params = self._param_list()
+                self._expect(TokenType.RPAREN)
+            if self._match(TokenType.ASSIGN):
+                equation = self._expression()
+                mechs.append(MechanismDecl(
+                    name=name_tok.value, params=params,
+                    equation=equation, line=tok.line, col=tok.col,
+                ))
+            elif self._check(TokenType.LBRACE):
+                body = self._block()
+                mechs.append(MechanismDecl(
+                    name=name_tok.value, params=params,
+                    body=body, line=tok.line, col=tok.col,
+                ))
+            else:
+                raise self._error("Expected '=' or '{' in mechanism")
+        self._expect(TokenType.RBRACE)
+        return mechs
+
+    def _world_model_decl(self) -> WorldModelDecl:
+        tok = self._advance()  # world_model
+        name_tok = self._expect(TokenType.IDENT, "Expected world model name")
+        params = []
+        graph_ref = None
+        if self._match(TokenType.LPAREN):
+            params = self._param_list()
+            self._expect(TokenType.RPAREN)
+        self._expect(TokenType.LBRACE)
+
+        state_vars = []
+        mechanisms = []
+        transitions = []
+        predict_fn = None
+        what_if_fn = None
+
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            if self._check(TokenType.STATE):
+                state_vars = self._world_state_block()
+            elif self._check(TokenType.MECHANISMS):
+                mechanisms = self._causal_mechanisms_block()
+            elif self._check(TokenType.TRANSITION):
+                transitions = self._transition_block()
+            elif self._check(TokenType.PREDICT):
+                predict_fn = self._predict_decl()
+            elif self._check(TokenType.IDENT) and self._peek().value == "what_if":
+                what_if_fn = self._what_if_decl()
+            elif self._check(TokenType.SATISFIES):
+                self._advance()  # skip satisfies for now
+                self._advance()  # skip the objective name
+            elif self._check(TokenType.FN):
+                # Allow helper functions in world model
+                mechanisms.append(self._fn_decl())
+            else:
+                raise self._error(
+                    f"Unexpected token in world_model: {self._peek().type.name}")
+
+        self._expect(TokenType.RBRACE)
+        return WorldModelDecl(
+            name=name_tok.value, params=params, graph_ref=graph_ref,
+            state_vars=state_vars, mechanisms=mechanisms,
+            transitions=transitions, predict_fn=predict_fn,
+            what_if_fn=what_if_fn, line=tok.line, col=tok.col,
+        )
+
+    def _world_state_block(self) -> list[LetDecl]:
+        self._advance()  # state
+        self._expect(TokenType.LBRACE)
+        vars_ = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            tok = self._peek()
+            name_tok = self._advance()
+            type_ann = None
+            if self._match(TokenType.COLON):
+                type_ann = self._type_expr()
+            default = None
+            if self._match(TokenType.ASSIGN):
+                default = self._expression()
+            vars_.append(LetDecl(
+                name=name_tok.value, type_annotation=type_ann,
+                value=default, line=tok.line, col=tok.col,
+            ))
+            self._match(TokenType.COMMA)
+        self._expect(TokenType.RBRACE)
+        return vars_
+
+    def _transition_block(self) -> list[TransitionRule]:
+        self._advance()  # transition
+        self._expect(TokenType.LBRACE)
+        rules = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            tok = self._peek()
+            var_tok = self._advance()
+            # Parse (t+1) or just = expr
+            time_offset = 1
+            if self._match(TokenType.LPAREN):
+                self._advance()  # t
+                self._advance()  # +
+                offset_tok = self._advance()  # 1
+                time_offset = offset_tok.value if hasattr(offset_tok, 'value') else 1
+                self._expect(TokenType.RPAREN)
+            self._expect(TokenType.ASSIGN)
+            equation = self._expression()
+            rules.append(TransitionRule(
+                variable=var_tok.value, time_offset=time_offset,
+                equation=equation, line=tok.line, col=tok.col,
+            ))
+        self._expect(TokenType.RBRACE)
+        return rules
+
+    def _predict_decl(self) -> FnDecl:
+        tok = self._advance()  # predict
+        self._expect(TokenType.LPAREN)
+        params = self._param_list()
+        self._expect(TokenType.RPAREN)
+        ret_type = None
+        if self._match(TokenType.ARROW):
+            ret_type = self._type_expr()
+        body = self._block()
+        return FnDecl(
+            name="predict", params=params, body=body,
+            return_type=ret_type, line=tok.line, col=tok.col,
+        )
+
+    def _what_if_decl(self) -> FnDecl:
+        tok = self._advance()  # what_if
+        self._expect(TokenType.LPAREN)
+        params = self._param_list()
+        self._expect(TokenType.RPAREN)
+        ret_type = None
+        if self._match(TokenType.ARROW):
+            ret_type = self._type_expr()
+        body = self._block()
+        return FnDecl(
+            name="what_if", params=params, body=body,
+            return_type=ret_type, line=tok.line, col=tok.col,
+        )
+
+    def _objective_decl(self) -> ObjectiveDecl:
+        tok = self._advance()  # objective
+        name_tok = self._expect(TokenType.IDENT, "Expected objective name")
+        params = []
+        if self._match(TokenType.LPAREN):
+            params = self._param_list()
+            self._expect(TokenType.RPAREN)
+        self._expect(TokenType.LBRACE)
+        clauses = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            clauses.append(self._objective_clause())
+        self._expect(TokenType.RBRACE)
+        return ObjectiveDecl(
+            name=name_tok.value, params=params, clauses=clauses,
+            line=tok.line, col=tok.col,
+        )
+
+    def _objective_clause(self) -> ObjectiveClause:
+        tok = self._peek()
+        kind_tok = self._advance()  # invariance, structure, bound, transfer, constraint
+        kind = kind_tok.value
+        self._expect(TokenType.COLON)
+        expr = self._expression()
+        return ObjectiveClause(
+            kind=kind, expr=expr,
+            line=tok.line, col=tok.col,
+        )
+
+    def _train_decl(self) -> TrainDecl:
+        tok = self._advance()  # train
+        model_tok = self._advance()  # model name
+        config = {}
+        if self._check(TokenType.IDENT) and self._peek().value == "with":
+            self._advance()  # with
+            # Parse key=value pairs
+            key_tok = self._advance()
+            self._expect(TokenType.ASSIGN)
+            val = self._expression()
+            config[key_tok.value] = val
+            while self._match(TokenType.COMMA):
+                key_tok = self._advance()
+                self._expect(TokenType.ASSIGN)
+                val = self._expression()
+                config[key_tok.value] = val
+        self._expect(TokenType.LBRACE)
+        body = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            body.append(self._statement())
+        self._expect(TokenType.RBRACE)
+        return TrainDecl(
+            model_name=model_tok.value, config=config, body=body,
+            line=tok.line, col=tok.col,
+        )
+
+    def _curriculum_decl(self) -> CurriculumDecl:
+        tok = self._advance()  # curriculum
+        name_tok = self._expect(TokenType.IDENT, "Expected curriculum name")
+        params = []
+        if self._match(TokenType.LPAREN):
+            params = self._param_list()
+            self._expect(TokenType.RPAREN)
+        self._expect(TokenType.LBRACE)
+        stages = []
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            stages.append(self._stage_decl())
+        self._expect(TokenType.RBRACE)
+        return CurriculumDecl(
+            name=name_tok.value, params=params, stages=stages,
+            line=tok.line, col=tok.col,
+        )
+
+    def _stage_decl(self) -> StageDecl:
+        tok = self._peek()
+        self._expect(TokenType.STAGE, "Expected 'stage'")
+        name_tok = self._expect(TokenType.IDENT, "Expected stage name")
+        self._expect(TokenType.LBRACE)
+        depends_on = []
+        body = []
+        # Check for depends_on at the start
+        if self._check(TokenType.DEPENDS_ON):
+            self._advance()
+            self._expect(TokenType.COLON)
+            if self._match(TokenType.LBRACKET):
+                depends_on.append(self._advance().value)
+                while self._match(TokenType.COMMA):
+                    if self._check(TokenType.RBRACKET):
+                        break
+                    depends_on.append(self._advance().value)
+                self._expect(TokenType.RBRACKET)
+            else:
+                depends_on.append(self._advance().value)
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            body.append(self._statement())
+        self._expect(TokenType.RBRACE)
+        return StageDecl(
+            name=name_tok.value, depends_on=depends_on, body=body,
+            line=tok.line, col=tok.col,
+        )
+
+    def _intervene_expr(self) -> InterveneExpr:
+        tok = self._advance()  # intervene
+        self._expect(TokenType.LPAREN)
+        graph = self._expression()
+        interventions = {}
+        while self._match(TokenType.COMMA):
+            if self._check(TokenType.RPAREN):
+                break
+            key_tok = self._advance()
+            # := for intervention assignment
+            if self._match(TokenType.COLON):
+                self._expect(TokenType.ASSIGN)
+            elif self._check(TokenType.ASSIGN):
+                self._advance()
+            val = self._expression()
+            interventions[key_tok.value] = val
+        self._expect(TokenType.RPAREN)
+        body = self._block()
+        return InterveneExpr(
+            graph=graph, interventions=interventions, body=body,
+            line=tok.line, col=tok.col,
+        )
+
+    def _counterfactual_expr(self) -> CounterfactualExpr:
+        tok = self._advance()  # counterfactual
+        self._expect(TokenType.LPAREN)
+        graph = self._expression()
+        observed = None
+        if self._match(TokenType.COMMA):
+            # observed: expr
+            if self._check(TokenType.IDENT) and self._peek().value == "observed":
+                self._advance()
+                self._expect(TokenType.COLON)
+            observed = self._expression()
+        self._expect(TokenType.RPAREN)
+        body = self._block()
+        return CounterfactualExpr(
+            graph=graph, observed=observed, body=body,
+            line=tok.line, col=tok.col,
         )

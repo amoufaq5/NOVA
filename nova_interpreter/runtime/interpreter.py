@@ -106,6 +106,8 @@ class Interpreter:
             NovaFunction: "fn", NovaBuiltin: "fn",
             NovaModel: "model", NovaAgent: "agent",
             NovaResult: "result", NovaChannel: "channel",
+            NovaCausalGraph: "CausalGraph", NovaWorldModel: "WorldModel",
+            NovaObjective: "Objective", NovaCurriculum: "Curriculum",
         }
         return NovaStr(type_names.get(type(v), "unknown"))
 
@@ -332,6 +334,16 @@ class Interpreter:
                 return self._exec_sandbox(node, env)
             case SelectStmt():
                 return self._exec_select(node, env)
+            case CausalGraphDecl():
+                return self._exec_causal_graph(node, env)
+            case WorldModelDecl():
+                return self._exec_world_model(node, env)
+            case ObjectiveDecl():
+                return self._exec_objective(node, env)
+            case TrainDecl():
+                return self._exec_train(node, env)
+            case CurriculumDecl():
+                return self._exec_curriculum(node, env)
             case BreakStmt():
                 raise BreakSignal()
             case ContinueStmt():
@@ -631,6 +643,10 @@ class Interpreter:
                 return self._eval_tensor_type(node, env)
             case AwaitExpr():
                 return self._eval(node.expr, env)
+            case InterveneExpr():
+                return self._eval_intervene(node, env)
+            case CounterfactualExpr():
+                return self._eval_counterfactual(node, env)
             case _:
                 raise NovaError(f"Cannot evaluate node: {type(node).__name__}")
 
@@ -1213,6 +1229,169 @@ class Interpreter:
                         return NovaTensor(data=flat, dtype=_dtype, shape=shape)
                     return NovaBuiltin("from", _from)
 
+        if isinstance(obj, NovaCausalGraph):
+            match node.attr:
+                case "nodes":
+                    return NovaList([NovaStr(n) for n in obj.nodes.keys()])
+                case "edges":
+                    return NovaList([NovaList([NovaStr(s), NovaStr(t)])
+                                     for s, t, _ in obj.edges])
+                case "parents":
+                    def _parents(a, k):
+                        name = a[0].value if isinstance(a[0], NovaStr) else str(a[0])
+                        return NovaList([NovaStr(p) for p in obj.parents(name)])
+                    return NovaBuiltin("parents", _parents)
+                case "children":
+                    def _children(a, k):
+                        name = a[0].value if isinstance(a[0], NovaStr) else str(a[0])
+                        return NovaList([NovaStr(c) for c in obj.children(name)])
+                    return NovaBuiltin("children", _children)
+                case "ancestors":
+                    def _ancestors(a, k):
+                        name = a[0].value if isinstance(a[0], NovaStr) else str(a[0])
+                        return NovaList([NovaStr(x) for x in obj.ancestors(name)])
+                    return NovaBuiltin("ancestors", _ancestors)
+                case "descendants":
+                    def _descendants(a, k):
+                        name = a[0].value if isinstance(a[0], NovaStr) else str(a[0])
+                        return NovaList([NovaStr(x) for x in obj.descendants(name)])
+                    return NovaBuiltin("descendants", _descendants)
+                case "topological_sort":
+                    return NovaBuiltin("topological_sort",
+                        lambda a, k: NovaList([NovaStr(n) for n in obj.topological_sort()]))
+                case "is_d_separated":
+                    def _d_sep(a, k):
+                        x = a[0].value if isinstance(a[0], NovaStr) else str(a[0])
+                        y = a[1].value if isinstance(a[1], NovaStr) else str(a[1])
+                        given = []
+                        if len(a) > 2:
+                            if isinstance(a[2], NovaList):
+                                given = [e.value for e in a[2].elements]
+                            else:
+                                given = [a[2].value]
+                        return NovaBool(obj.is_d_separated(x, y, given))
+                    return NovaBuiltin("is_d_separated", _d_sep)
+                case "do":
+                    def _do(a, k):
+                        interventions = {}
+                        if a and isinstance(a[0], NovaMap):
+                            for key, val in a[0].entries.items():
+                                interventions[key.value if isinstance(key, NovaStr) else str(key)] = val
+                        else:
+                            interventions.update(
+                                {key: val for key, val in k.items()})
+                        return obj.do(interventions)
+                    return NovaBuiltin("do", _do)
+                case "adjustment_set":
+                    def _adj(a, k):
+                        treatment = a[0].value if isinstance(a[0], NovaStr) else str(a[0])
+                        outcome = a[1].value if isinstance(a[1], NovaStr) else str(a[1])
+                        result = obj.adjustment_set(treatment, outcome)
+                        return NovaList([NovaStr(x) for x in result])
+                    return NovaBuiltin("adjustment_set", _adj)
+                case "independent_mechanisms":
+                    def _indep(a, k):
+                        groups = obj.independent_mechanisms()
+                        return NovaList([NovaList([NovaStr(n) for n in g]) for g in groups])
+                    return NovaBuiltin("independent_mechanisms", _indep)
+                case "causal_chains":
+                    def _chains(a, k):
+                        chains = obj.causal_chains()
+                        return NovaList([NovaList([NovaStr(n) for n in c]) for c in chains])
+                    return NovaBuiltin("causal_chains", _chains)
+                case "invariances":
+                    return NovaList([NovaStr(f"{v} _|_ {i} | {g}")
+                                     for v, i, g in obj.invariances])
+                case "mechanisms":
+                    return NovaMap({NovaStr(k): v for k, v in obj.mechanisms.items()})
+                case "name":
+                    return NovaStr(obj.name)
+
+        if isinstance(obj, NovaWorldModel):
+            match node.attr:
+                case "state":
+                    return NovaMap({NovaStr(k): v for k, v in obj.state.items()})
+                case "name":
+                    return NovaStr(obj.name)
+                case "predict":
+                    def _predict(a, k):
+                        steps = a[0].value if a else 1
+                        states = obj.predict(steps)
+                        return NovaList([NovaMap({NovaStr(sk): sv for sk, sv in s.items()})
+                                         for s in states])
+                    return NovaBuiltin("predict", _predict)
+                case "step":
+                    def _step(a, k):
+                        new_state = obj.step()
+                        return NovaMap({NovaStr(sk): sv for sk, sv in new_state.items()})
+                    return NovaBuiltin("step", _step)
+                case "intervene":
+                    def _intervene(a, k):
+                        interventions = {}
+                        if a and isinstance(a[0], NovaMap):
+                            for key, val in a[0].entries.items():
+                                interventions[key.value if isinstance(key, NovaStr) else str(key)] = val
+                        steps = k.get("steps", NovaInt(1)).value if "steps" in k else 1
+                        states = obj.intervene(interventions, steps)
+                        return NovaList([NovaMap({NovaStr(sk): sv for sk, sv in s.items()})
+                                         for s in states])
+                    return NovaBuiltin("intervene", _intervene)
+                case "counterfactual":
+                    def _cf(a, k):
+                        observed = {}
+                        interventions = {}
+                        if len(a) >= 1 and isinstance(a[0], NovaMap):
+                            observed = {ek.value: ev for ek, ev in a[0].entries.items()}
+                        if len(a) >= 2 and isinstance(a[1], NovaMap):
+                            interventions = {ek.value: ev for ek, ev in a[1].entries.items()}
+                        steps = k.get("steps", NovaInt(1)).value if "steps" in k else 1
+                        states = obj.counterfactual(observed, interventions, steps)
+                        return NovaList([NovaMap({NovaStr(sk): sv for sk, sv in s.items()})
+                                         for s in states])
+                    return NovaBuiltin("counterfactual", _cf)
+                case "history":
+                    return NovaList([NovaMap({NovaStr(k): v for k, v in s.items()})
+                                     for s in obj.history])
+                case "graph":
+                    return obj.graph if obj.graph else NovaNone()
+                case "mechanisms":
+                    return NovaMap({NovaStr(k): v for k, v in obj.mechanisms.items()})
+
+        if isinstance(obj, NovaObjective):
+            match node.attr:
+                case "name":
+                    return NovaStr(obj.name)
+                case "clauses":
+                    return NovaList([NovaStr(f"{k}: {e}") for k, e in obj.clauses])
+                case "check":
+                    return NovaBuiltin("check", lambda a, k: NovaBool(obj.check(a[0] if a else None)))
+                case "satisfied":
+                    return NovaMap({NovaStr(k): NovaBool(v) for k, v in obj.satisfied.items()})
+
+        if isinstance(obj, NovaCurriculum):
+            match node.attr:
+                case "name":
+                    return NovaStr(obj.name)
+                case "stages":
+                    return NovaList([NovaStr(n) for n, _, _ in obj.stages])
+                case "completed":
+                    return NovaList([NovaStr(n) for n in obj.completed])
+                case "ready_stages":
+                    return NovaBuiltin("ready_stages", lambda a, k:
+                        NovaList([NovaStr(n) for n, _ in obj.ready_stages()]))
+                case "run_next":
+                    def _run_next(a, k):
+                        ready = obj.ready_stages()
+                        if not ready:
+                            return NovaBool(False)
+                        name, fn = ready[0]
+                        self._call_value(fn, [], {}, env)
+                        obj.mark_complete(name)
+                        return NovaBool(True)
+                    return NovaBuiltin("run_next", _run_next)
+                case "all_complete":
+                    return NovaBool(obj.all_complete())
+
         raise NovaError(f"Attribute '{node.attr}' not found on {type(obj).__name__}")
 
     # --- Autograd ---
@@ -1405,3 +1584,193 @@ class Interpreter:
         if isinstance(val, NovaMap):
             return list(val.entries.keys())
         raise NovaError(f"Value of type {type(val).__name__} is not iterable")
+
+    # -------------------------------------------------------------------
+    # Causal Constructs (v2)
+    # -------------------------------------------------------------------
+
+    def _exec_causal_graph(self, node: CausalGraphDecl, env: Environment) -> NovaValue:
+        nodes = {}
+        for n in node.nodes:
+            nodes[n.name] = n.node_type
+
+        edges = []
+        for e in node.edges:
+            edges.append((e.source, e.target, e.annotation))
+
+        confounders = []
+        for c in node.confounders:
+            confounders.append((c.variable, c.between))
+
+        invariances = []
+        for inv in node.invariances:
+            invariances.append((inv.variable, inv.independent_of, inv.given))
+
+        mechanisms = {}
+        for m in node.mechanisms:
+            if m.body:
+                fn = NovaFunction(
+                    name=m.name, params=m.params, body=m.body, closure_env=env)
+                mechanisms[m.name] = fn
+            elif m.equation:
+                fn = NovaFunction(
+                    name=m.name, params=m.params,
+                    body=[ReturnStmt(value=m.equation)], closure_env=env)
+                mechanisms[m.name] = fn
+
+        graph = NovaCausalGraph(
+            name=node.name,
+            nodes=nodes,
+            edges=edges,
+            confounders=confounders,
+            invariances=invariances,
+            mechanisms=mechanisms,
+        )
+        env.define(node.name, graph)
+        return graph
+
+    def _exec_world_model(self, node: WorldModelDecl, env: Environment) -> NovaValue:
+        state = {}
+        for sv in node.state_vars:
+            if sv.value:
+                state[sv.name] = self._eval(sv.value, env)
+            else:
+                state[sv.name] = NovaNone()
+
+        mechanisms = {}
+        for m in node.mechanisms:
+            if isinstance(m, FnDecl):
+                fn = NovaFunction(
+                    name=m.name, params=m.params, body=m.body, closure_env=env)
+                mechanisms[m.name] = fn
+            elif isinstance(m, MechanismDecl):
+                if m.body:
+                    fn = NovaFunction(
+                        name=m.name, params=m.params, body=m.body, closure_env=env)
+                elif m.equation:
+                    fn = NovaFunction(
+                        name=m.name, params=m.params,
+                        body=[ReturnStmt(value=m.equation)], closure_env=env)
+                else:
+                    fn = NovaFunction(name=m.name, params=[], body=[], closure_env=env)
+                mechanisms[m.name] = fn
+
+        transitions = {}
+        for t in node.transitions:
+            transitions[t.variable] = NovaFunction(
+                name=f"transition_{t.variable}",
+                params=[Param(name="state"), Param(name="env")],
+                body=[ReturnStmt(value=t.equation)],
+                closure_env=env,
+            )
+
+        graph = None
+        if node.graph_ref:
+            try:
+                graph = env.get(node.graph_ref)
+            except NameError:
+                pass
+
+        wm = NovaWorldModel(
+            name=node.name,
+            graph=graph,
+            state=state,
+            mechanisms=mechanisms,
+            transitions=transitions,
+        )
+
+        if node.predict_fn:
+            predict_fn = NovaFunction(
+                name="predict", params=node.predict_fn.params,
+                body=node.predict_fn.body, closure_env=env)
+            wm.predict_fn = predict_fn
+
+        if node.what_if_fn:
+            what_if_fn = NovaFunction(
+                name="what_if", params=node.what_if_fn.params,
+                body=node.what_if_fn.body, closure_env=env)
+            wm.what_if_fn = what_if_fn
+
+        env.define(node.name, wm)
+        return wm
+
+    def _exec_objective(self, node: ObjectiveDecl, env: Environment) -> NovaValue:
+        clauses = []
+        for clause in node.clauses:
+            clauses.append((clause.kind, clause.expr))
+        obj = NovaObjective(name=node.name, clauses=clauses)
+        env.define(node.name, obj)
+        return obj
+
+    def _exec_train(self, node: TrainDecl, env: Environment) -> NovaValue:
+        config = {}
+        for k, v in node.config.items():
+            config[k] = self._eval(v, env)
+        result = self._exec_block(node.body, env)
+        return result
+
+    def _exec_curriculum(self, node: CurriculumDecl, env: Environment) -> NovaValue:
+        stages = []
+        for stage in node.stages:
+            fn = NovaFunction(
+                name=stage.name, params=[], body=stage.body, closure_env=env)
+            stages.append((stage.name, stage.depends_on, fn))
+        curriculum = NovaCurriculum(name=node.name, stages=stages)
+        env.define(node.name, curriculum)
+        return curriculum
+
+    def _eval_intervene(self, node: InterveneExpr, env: Environment) -> NovaValue:
+        graph = self._eval(node.graph, env)
+        interventions = {}
+        for k, v in node.interventions.items():
+            interventions[k] = self._eval(v, env)
+
+        if isinstance(graph, NovaCausalGraph):
+            mutilated = graph.do(interventions)
+            child_env = env.child()
+            child_env.define("__graph__", mutilated)
+            child_env.define("__interventions__", NovaMap(
+                {NovaStr(k): v for k, v in interventions.items()}))
+            for k, v in interventions.items():
+                child_env.define(k, v)
+            return self._exec_block(node.body, child_env)
+        elif isinstance(graph, NovaWorldModel):
+            int_vals = {k: v for k, v in interventions.items()}
+            child_env = env.child()
+            for k, v in int_vals.items():
+                child_env.define(k, v)
+                graph.state[k] = v
+            result = self._exec_block(node.body, child_env)
+            return result
+        else:
+            child_env = env.child()
+            for k, v in interventions.items():
+                child_env.define(k, v)
+            return self._exec_block(node.body, child_env)
+
+    def _eval_counterfactual(self, node: CounterfactualExpr, env: Environment) -> NovaValue:
+        graph = self._eval(node.graph, env)
+        observed = None
+        if node.observed:
+            observed = self._eval(node.observed, env)
+
+        if isinstance(graph, NovaWorldModel):
+            child_env = env.child()
+            child_env.define("__world__", graph)
+            if observed and isinstance(observed, NovaMap):
+                for k, v in observed.entries.items():
+                    key = k.value if isinstance(k, NovaStr) else str(k)
+                    child_env.define(key, v)
+            return self._exec_block(node.body, child_env)
+        elif isinstance(graph, NovaCausalGraph):
+            child_env = env.child()
+            child_env.define("__graph__", graph)
+            if observed:
+                child_env.define("__observed__", observed)
+                if isinstance(observed, NovaMap):
+                    for k, v in observed.entries.items():
+                        key = k.value if isinstance(k, NovaStr) else str(k)
+                        child_env.define(key, v)
+            return self._exec_block(node.body, child_env)
+        else:
+            return self._exec_block(node.body, env)
