@@ -1,0 +1,64 @@
+// Nova Moment-Signal example
+
+moment Greeting {
+    what_happened: "a person said hello"
+    who: entity Person { name: "Alice", role: "visitor" }
+    felt: warmth 0.7, curiosity 0.4
+    consequence: expectation "conversation will follow"
+}
+
+node Analyst : reasoner {
+    awareness {
+        watches: [question_signal, event_signal]
+        ignores: [command_signal] when salience < 0.2
+    }
+
+    when question_signal arrives as sig {
+        let context <<~ rememberer("related knowledge", sig@who)
+        let answer = reason_by {
+            pattern_match sig@what_happened against context
+            analogize from experiential if confidence < 0.6
+        }
+        respond emit event_signal {
+            carries: moment {
+                what_happened: "analysis complete"
+                consequence: answer
+                felt: confidence answer.certainty
+            }
+        }
+    }
+}
+
+path ForwardEnrichment {
+    signal arrives at perceiver
+        ~> perceiver interprets raw
+        ~> rememberer enriches with context
+            <<~ academic("what do we know?")
+            <<~ experiential("have we seen this before?")
+        ~> reasoner processes enriched_signal
+        ~> actor decides response
+}
+
+mind Nova {
+    nodes {
+        perceiver  SenseGate : perceiver { channels: [text, image] }
+        knower     Store : knower { tracks: [Science, Language] }
+        rememberer Memory : rememberer { capacity: 10000 }
+        reasoner   Think : reasoner { methods: [analogy, deduction] }
+        feeler     Heart : feeler { dimensions: [valence, arousal] }
+        actor      Output : actor { modalities: [text, action] }
+    }
+
+    channels {
+        perception_bus: SenseGate =>> [Store, Memory, Think, Heart]
+        reasoning_out: Think ~> Output
+        emotion_color: Heart ~~> Think
+        memory_feed: Memory <<~ Think
+        bidir_link: Think <=> Heart
+    }
+
+    learning {
+        academic: derives from [axioms, rules]
+        experiential: forms from [moments with felt.intensity > 0.3]
+    }
+}
