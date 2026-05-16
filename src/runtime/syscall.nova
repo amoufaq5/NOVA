@@ -1,0 +1,79 @@
+// Nova Runtime: Linux x86-64 syscall wrappers
+// These are compiled by the Nova compiler into inline syscall instructions.
+// The __intrinsic("syscall", N) annotation tells codegen to emit the syscall
+// instruction with rax=N and args in rdi, rsi, rdx, r10, r8, r9.
+
+fn sys_read(fd, buf, count) {
+    return __intrinsic("syscall", 0, fd, buf, count)
+}
+
+fn sys_write(fd, buf, count) {
+    return __intrinsic("syscall", 1, fd, buf, count)
+}
+
+fn sys_open(path, flags, mode) {
+    return __intrinsic("syscall", 2, path, flags, mode)
+}
+
+fn sys_close(fd) {
+    return __intrinsic("syscall", 3, fd)
+}
+
+fn sys_lseek(fd, offset, whence) {
+    return __intrinsic("syscall", 8, fd, offset, whence)
+}
+
+fn sys_mmap(addr, length, prot, flags, fd, offset) {
+    return __intrinsic("syscall", 9, addr, length, prot, flags, fd, offset)
+}
+
+fn sys_munmap(addr, length) {
+    return __intrinsic("syscall", 11, addr, length)
+}
+
+fn sys_brk(addr) {
+    return __intrinsic("syscall", 12, addr)
+}
+
+fn sys_exit(code) {
+    __intrinsic("syscall", 60, code)
+}
+
+fn sys_getcwd(buf, size) {
+    return __intrinsic("syscall", 79, buf, size)
+}
+
+fn sys_mkdir(path, mode) {
+    return __intrinsic("syscall", 83, path, mode)
+}
+
+fn sys_unlink(path) {
+    return __intrinsic("syscall", 87, path)
+}
+
+fn sys_fstat(fd, statbuf) {
+    return __intrinsic("syscall", 5, fd, statbuf)
+}
+
+// Constants
+let O_RDONLY = 0
+let O_WRONLY = 1
+let O_RDWR = 2
+let O_CREAT = 64
+let O_TRUNC = 512
+let O_APPEND = 1024
+
+let SEEK_SET = 0
+let SEEK_CUR = 1
+let SEEK_END = 2
+
+let PROT_READ = 1
+let PROT_WRITE = 2
+let PROT_EXEC = 4
+
+let MAP_PRIVATE = 2
+let MAP_ANONYMOUS = 32
+
+let STDIN = 0
+let STDOUT = 1
+let STDERR = 2

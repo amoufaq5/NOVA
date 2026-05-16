@@ -1,0 +1,150 @@
+// Nova Runtime: Memory Allocator
+// Arena-based bump allocator for fast cycle allocation,
+// plus a general-purpose allocator for persistent data.
+
+// --- Arena Allocator (per-cycle, ultra-fast) ---
+// One pointer increment to allocate. Reset to free everything.
+
+let arena_base = 0
+let arena_ptr = 0
+let arena_end = 0
+let arena_size = 1048576  // 1MB default arena
+
+fn arena_init() {
+    arena_base = sys_mmap(0, arena_size, PROT_READ + PROT_WRITE, MAP_PRIVATE + MAP_ANONYMOUS, -1, 0)
+    arena_ptr = arena_base
+    arena_end = arena_base + arena_size
+}
+
+fn arena_alloc(size) {
+    // Align to 8 bytes
+    let aligned = (size + 7) & (~7)
+    if arena_ptr + aligned > arena_end {
+        // Grow arena: map another chunk
+        let new_size = arena_size
+        if aligned > new_size {
+            new_size = aligned
+        }
+        let chunk = sys_mmap(0, new_size, PROT_READ + PROT_WRITE, MAP_PRIVATE + MAP_ANONYMOUS, -1, 0)
+        // For simplicity, just use the new chunk as current arena
+        arena_base = chunk
+        arena_ptr = chunk
+        arena_end = chunk + new_size
+    }
+    let ptr = arena_ptr
+    arena_ptr = arena_ptr + aligned
+    return ptr
+}
+
+fn arena_reset() {
+    arena_ptr = arena_base
+}
+
+fn arena_used() {
+    return arena_ptr - arena_base
+}
+
+// --- General Allocator (persistent, longer-lived) ---
+// Simple free-list allocator using brk for small allocs,
+// mmap for large allocs (>= 128KB).
+
+let heap_start = 0
+let heap_end = 0
+let free_list = 0  // linked list of free blocks
+
+// Block header: [size: 8 bytes][next_free: 8 bytes][...payload...]
+let BLOCK_HDR_SIZE = 16
+let MMAP_THRESHOLD = 131072  // 128KB
+
+fn heap_init() {
+    heap_start = sys_brk(0)
+    heap_end = heap_start
+    free_list = 0
+}
+
+fn alloc(size) {
+    if size <= 0 {
+        return 0
+    }
+    let aligned = (size + 7) & (~7)
+
+    // Large allocation: use mmap directly
+    if aligned >= MMAP_THRESHOLD {
+        let total = aligned + BLOCK_HDR_SIZE
+        let ptr = sys_mmap(0, total, PROT_READ + PROT_WRITE, MAP_PRIVATE + MAP_ANONYMOUS, -1, 0)
+        __intrinsic("store64", ptr, total)       // size field (includes header)
+        __intrinsic("store64", ptr + 8, 0)       // next_free = null (not in free list)
+        return ptr + BLOCK_HDR_SIZE
+    }
+
+    // Search free list for first fit
+    let prev = 0
+    let curr = free_list
+    while curr != 0 {
+        let block_size = __intrinsic("load64", curr)
+        if block_size >= aligned + BLOCK_HDR_SIZE {
+            // Remove from free list
+            let next = __intrinsic("load64", curr + 8)
+            if prev == 0 {
+                free_list = next
+            } else {
+                __intrinsic("store64", prev + 8, next)
+            }
+            return curr + BLOCK_HDR_SIZE
+        }
+        prev = curr
+        curr = __intrinsic("load64", curr + 8)
+    }
+
+    // No free block found: extend heap
+    let total = aligned + BLOCK_HDR_SIZE
+    let block = heap_end
+    heap_end = sys_brk(heap_end + total)
+    if heap_end < block + total {
+        // brk failed, fall back to mmap
+        let ptr = sys_mmap(0, total, PROT_READ + PROT_WRITE, MAP_PRIVATE + MAP_ANONYMOUS, -1, 0)
+        __intrinsic("store64", ptr, total)
+        __intrinsic("store64", ptr + 8, 0)
+        return ptr + BLOCK_HDR_SIZE
+    }
+    __intrinsic("store64", block, total)
+    __intrinsic("store64", block + 8, 0)
+    return block + BLOCK_HDR_SIZE
+}
+
+fn free(ptr) {
+    if ptr == 0 {
+        return
+    }
+    let block = ptr - BLOCK_HDR_SIZE
+    let size = __intrinsic("load64", block)
+
+    // Large block: munmap it
+    if size >= MMAP_THRESHOLD + BLOCK_HDR_SIZE {
+        sys_munmap(block, size)
+        return
+    }
+
+    // Add to free list head
+    __intrinsic("store64", block + 8, free_list)
+    free_list = block
+}
+
+fn realloc(ptr, new_size) {
+    if ptr == 0 {
+        return alloc(new_size)
+    }
+    if new_size == 0 {
+        free(ptr)
+        return 0
+    }
+    let block = ptr - BLOCK_HDR_SIZE
+    let old_size = __intrinsic("load64", block) - BLOCK_HDR_SIZE
+    if new_size <= old_size {
+        return ptr
+    }
+    let new_ptr = alloc(new_size)
+    __intrinsic("memcpy", new_ptr, ptr, old_size)
+    free(ptr)
+    return new_ptr
+}

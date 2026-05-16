@@ -1,0 +1,173 @@
+// Nova Runtime: Signal Scheduler
+// Dispatches signals to nodes, manages processing cycles,
+// and implements the arena-per-cycle memory model.
+
+// Signal queue entry: [signal_ptr: 8][dest_node: 8][priority: 8][next: 8]
+let SQ_SIGNAL = 0
+let SQ_DEST = 8
+let SQ_PRIORITY = 16
+let SQ_NEXT = 24
+let SQ_SIZE = 32
+
+// Scheduler state
+let sq_head = 0
+let sq_tail = 0
+let sq_count = 0
+let cycle_number = 0
+let scheduler_running = false
+
+// Node registry: array of [node_ptr, handler_fn]
+let node_registry = 0
+let node_count = 0
+let node_cap = 0
+
+fn scheduler_init() {
+    sq_head = 0
+    sq_tail = 0
+    sq_count = 0
+    cycle_number = 0
+    node_registry = alloc(128 * 16)  // 128 slots * (ptr + handler)
+    node_count = 0
+    node_cap = 128
+    arena_init()
+}
+
+fn register_node(node, handler) {
+    if node_count >= node_cap {
+        node_cap = node_cap * 2
+        node_registry = realloc(node_registry, node_cap * 16)
+    }
+    let offset = node_count * 16
+    __intrinsic("store64", node_registry + offset, node)
+    __intrinsic("store64", node_registry + offset + 8, handler)
+    node_count = node_count + 1
+}
+
+fn emit(signal, dest, priority) {
+    let entry = alloc(SQ_SIZE)
+    __intrinsic("store64", entry + SQ_SIGNAL, signal)
+    __intrinsic("store64", entry + SQ_DEST, dest)
+    __intrinsic("store64", entry + SQ_PRIORITY, priority)
+    __intrinsic("store64", entry + SQ_NEXT, 0)
+
+    // Insert sorted by priority (higher first)
+    if sq_head == 0 {
+        sq_head = entry
+        sq_tail = entry
+    } else {
+        let head_pri = __intrinsic("load64", sq_head + SQ_PRIORITY)
+        if priority > head_pri {
+            // Insert at head
+            __intrinsic("store64", entry + SQ_NEXT, sq_head)
+            sq_head = entry
+        } else {
+            // Find insertion point
+            let prev = sq_head
+            let curr = __intrinsic("load64", sq_head + SQ_NEXT)
+            while curr != 0 {
+                let curr_pri = __intrinsic("load64", curr + SQ_PRIORITY)
+                if priority > curr_pri {
+                    __intrinsic("store64", entry + SQ_NEXT, curr)
+                    __intrinsic("store64", prev + SQ_NEXT, entry)
+                    sq_count = sq_count + 1
+                    return
+                }
+                prev = curr
+                curr = __intrinsic("load64", curr + SQ_NEXT)
+            }
+            // Insert at tail
+            __intrinsic("store64", sq_tail + SQ_NEXT, entry)
+            sq_tail = entry
+        }
+    }
+    sq_count = sq_count + 1
+}
+
+fn broadcast(signal, priority) {
+    let i = 0
+    while i < node_count {
+        let offset = i * 16
+        let node = __intrinsic("load64", node_registry + offset)
+        emit(signal, node, priority)
+        i = i + 1
+    }
+}
+
+fn dequeue() {
+    if sq_head == 0 {
+        return 0
+    }
+    let entry = sq_head
+    sq_head = __intrinsic("load64", entry + SQ_NEXT)
+    if sq_head == 0 {
+        sq_tail = 0
+    }
+    sq_count = sq_count - 1
+    return entry
+}
+
+fn dispatch_one() {
+    let entry = dequeue()
+    if entry == 0 {
+        return false
+    }
+    let signal = __intrinsic("load64", entry + SQ_SIGNAL)
+    let dest = __intrinsic("load64", entry + SQ_DEST)
+
+    // Find handler for destination node
+    let i = 0
+    while i < node_count {
+        let offset = i * 16
+        let node = __intrinsic("load64", node_registry + offset)
+        if node == dest {
+            let handler = __intrinsic("load64", node_registry + offset + 8)
+            __intrinsic("call", handler, node, signal)
+            free(entry)
+            return true
+        }
+        i = i + 1
+    }
+    free(entry)
+    return true
+}
+
+fn run_cycle() {
+    cycle_number = cycle_number + 1
+    arena_reset()
+
+    // Process all signals in current queue
+    let processed = 0
+    while sq_head != 0 {
+        dispatch_one()
+        processed = processed + 1
+        // Safety: limit signals per cycle to prevent runaway
+        if processed > 10000 {
+            eprintln("WARNING: cycle signal limit reached")
+            return processed
+        }
+    }
+    return processed
+}
+
+fn scheduler_run() {
+    scheduler_running = true
+    while scheduler_running {
+        if sq_count == 0 {
+            // No signals to process, idle
+            scheduler_running = false
+        } else {
+            run_cycle()
+        }
+    }
+}
+
+fn scheduler_stop() {
+    scheduler_running = false
+}
+
+fn scheduler_status() {
+    println(str_concat("Cycle: ", int_to_str(cycle_number)))
+    println(str_concat("Queued signals: ", int_to_str(sq_count)))
+    println(str_concat("Registered nodes: ", int_to_str(node_count)))
+    println(str_concat("Arena used: ", int_to_str(arena_used())))
+}

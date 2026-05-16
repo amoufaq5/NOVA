@@ -1,0 +1,233 @@
+// Nova Runtime: Hash Map
+// Open-addressing with linear probing.
+// Structure: [count: 8][capacity: 8][entries_ptr: 8]
+// Entry: [key: 8][value: 8][hash: 8][occupied: 8]
+
+let MAP_COUNT = 0
+let MAP_CAP = 8
+let MAP_ENTRIES = 16
+let MAP_HDR_SIZE = 24
+
+let ENTRY_KEY = 0
+let ENTRY_VAL = 8
+let ENTRY_HASH = 16
+let ENTRY_OCC = 24
+let ENTRY_SIZE = 32
+
+fn hash_int(key) {
+    // FNV-1a style mixing for integer keys
+    let h = key
+    h = h ^ (h >> 33)
+    h = h * 0xff51afd7ed558ccd
+    h = h ^ (h >> 33)
+    h = h * 0xc4ceb9fe1a85ec53
+    h = h ^ (h >> 33)
+    if h < 0 { h = 0 - h }
+    return h
+}
+
+fn hash_str(s) {
+    let length = str_len(s)
+    let h = 2166136261  // FNV offset basis
+    let i = 0
+    while i < length {
+        let c = __intrinsic("load8", str_data(s) + i)
+        h = h ^ c
+        h = h * 16777619  // FNV prime
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    return h
+}
+
+fn map_new() {
+    let cap = 16
+    let m = alloc(MAP_HDR_SIZE)
+    let entries = alloc(cap * ENTRY_SIZE)
+    // Zero out entries (all unoccupied)
+    __intrinsic("memset", entries, 0, cap * ENTRY_SIZE)
+    __intrinsic("store64", m + MAP_COUNT, 0)
+    __intrinsic("store64", m + MAP_CAP, cap)
+    __intrinsic("store64", m + MAP_ENTRIES, entries)
+    return m
+}
+
+fn map_count(m) {
+    return __intrinsic("load64", m + MAP_COUNT)
+}
+
+fn map_grow(m) {
+    let old_cap = __intrinsic("load64", m + MAP_CAP)
+    let old_entries = __intrinsic("load64", m + MAP_ENTRIES)
+    let new_cap = old_cap * 2
+    let new_entries = alloc(new_cap * ENTRY_SIZE)
+    __intrinsic("memset", new_entries, 0, new_cap * ENTRY_SIZE)
+
+    // Rehash all occupied entries
+    let i = 0
+    while i < old_cap {
+        let e = old_entries + i * ENTRY_SIZE
+        let occ = __intrinsic("load64", e + ENTRY_OCC)
+        if occ != 0 {
+            let key = __intrinsic("load64", e + ENTRY_KEY)
+            let val = __intrinsic("load64", e + ENTRY_VAL)
+            let hash = __intrinsic("load64", e + ENTRY_HASH)
+            let slot = hash % new_cap
+            // Linear probe in new table
+            while true {
+                let ne = new_entries + slot * ENTRY_SIZE
+                let ne_occ = __intrinsic("load64", ne + ENTRY_OCC)
+                if ne_occ == 0 {
+                    __intrinsic("store64", ne + ENTRY_KEY, key)
+                    __intrinsic("store64", ne + ENTRY_VAL, val)
+                    __intrinsic("store64", ne + ENTRY_HASH, hash)
+                    __intrinsic("store64", ne + ENTRY_OCC, 1)
+                    slot = new_cap  // break
+                } else {
+                    slot = (slot + 1) % new_cap
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    free(old_entries)
+    __intrinsic("store64", m + MAP_CAP, new_cap)
+    __intrinsic("store64", m + MAP_ENTRIES, new_entries)
+}
+
+fn map_set(m, key, value) {
+    let count = __intrinsic("load64", m + MAP_COUNT)
+    let cap = __intrinsic("load64", m + MAP_CAP)
+
+    // Grow at 70% load factor
+    if count * 10 >= cap * 7 {
+        map_grow(m)
+        cap = __intrinsic("load64", m + MAP_CAP)
+    }
+
+    let hash = hash_int(key)
+    let entries = __intrinsic("load64", m + MAP_ENTRIES)
+    let slot = hash % cap
+
+    while true {
+        let e = entries + slot * ENTRY_SIZE
+        let occ = __intrinsic("load64", e + ENTRY_OCC)
+        if occ == 0 {
+            // Empty slot, insert
+            __intrinsic("store64", e + ENTRY_KEY, key)
+            __intrinsic("store64", e + ENTRY_VAL, value)
+            __intrinsic("store64", e + ENTRY_HASH, hash)
+            __intrinsic("store64", e + ENTRY_OCC, 1)
+            __intrinsic("store64", m + MAP_COUNT, count + 1)
+            return
+        }
+        let e_key = __intrinsic("load64", e + ENTRY_KEY)
+        if e_key == key {
+            // Key exists, update value
+            __intrinsic("store64", e + ENTRY_VAL, value)
+            return
+        }
+        slot = (slot + 1) % cap
+    }
+}
+
+fn map_get(m, key) {
+    let cap = __intrinsic("load64", m + MAP_CAP)
+    let entries = __intrinsic("load64", m + MAP_ENTRIES)
+    let hash = hash_int(key)
+    let slot = hash % cap
+
+    while true {
+        let e = entries + slot * ENTRY_SIZE
+        let occ = __intrinsic("load64", e + ENTRY_OCC)
+        if occ == 0 {
+            return none
+        }
+        let e_key = __intrinsic("load64", e + ENTRY_KEY)
+        if e_key == key {
+            return __intrinsic("load64", e + ENTRY_VAL)
+        }
+        slot = (slot + 1) % cap
+    }
+}
+
+fn map_has(m, key) {
+    let cap = __intrinsic("load64", m + MAP_CAP)
+    let entries = __intrinsic("load64", m + MAP_ENTRIES)
+    let hash = hash_int(key)
+    let slot = hash % cap
+
+    while true {
+        let e = entries + slot * ENTRY_SIZE
+        let occ = __intrinsic("load64", e + ENTRY_OCC)
+        if occ == 0 {
+            return false
+        }
+        let e_key = __intrinsic("load64", e + ENTRY_KEY)
+        if e_key == key {
+            return true
+        }
+        slot = (slot + 1) % cap
+    }
+}
+
+fn map_delete(m, key) {
+    let cap = __intrinsic("load64", m + MAP_CAP)
+    let entries = __intrinsic("load64", m + MAP_ENTRIES)
+    let hash = hash_int(key)
+    let slot = hash % cap
+
+    while true {
+        let e = entries + slot * ENTRY_SIZE
+        let occ = __intrinsic("load64", e + ENTRY_OCC)
+        if occ == 0 {
+            return false
+        }
+        let e_key = __intrinsic("load64", e + ENTRY_KEY)
+        if e_key == key {
+            // Mark as deleted (tombstone = 2)
+            __intrinsic("store64", e + ENTRY_OCC, 0)
+            __intrinsic("store64", m + MAP_COUNT, __intrinsic("load64", m + MAP_COUNT) - 1)
+            // Rehash subsequent entries (linear probing fixup)
+            let next_slot = (slot + 1) % cap
+            while true {
+                let ne = entries + next_slot * ENTRY_SIZE
+                let ne_occ = __intrinsic("load64", ne + ENTRY_OCC)
+                if ne_occ == 0 {
+                    return true
+                }
+                // Remove and re-insert
+                let nk = __intrinsic("load64", ne + ENTRY_KEY)
+                let nv = __intrinsic("load64", ne + ENTRY_VAL)
+                __intrinsic("store64", ne + ENTRY_OCC, 0)
+                __intrinsic("store64", m + MAP_COUNT, __intrinsic("load64", m + MAP_COUNT) - 1)
+                map_set(m, nk, nv)
+                next_slot = (next_slot + 1) % cap
+            }
+        }
+        slot = (slot + 1) % cap
+    }
+}
+
+fn map_keys(m) {
+    let result = list_new()
+    let cap = __intrinsic("load64", m + MAP_CAP)
+    let entries = __intrinsic("load64", m + MAP_ENTRIES)
+    let i = 0
+    while i < cap {
+        let e = entries + i * ENTRY_SIZE
+        let occ = __intrinsic("load64", e + ENTRY_OCC)
+        if occ != 0 {
+            list_push(result, __intrinsic("load64", e + ENTRY_KEY))
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn map_free(m) {
+    let entries = __intrinsic("load64", m + MAP_ENTRIES)
+    free(entries)
+    free(m)
+}

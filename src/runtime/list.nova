@@ -1,0 +1,183 @@
+// Nova Runtime: Dynamic List (growable array)
+// Structure: [length: 8][capacity: 8][data_ptr: 8]
+// Each element is 8 bytes (pointer-sized value).
+
+let LIST_LEN = 0
+let LIST_CAP = 8
+let LIST_DATA = 16
+let LIST_HDR_SIZE = 24
+
+fn list_new() {
+    let cap = 8
+    let lst = alloc(LIST_HDR_SIZE)
+    let data = alloc(cap * 8)
+    __intrinsic("store64", lst + LIST_LEN, 0)
+    __intrinsic("store64", lst + LIST_CAP, cap)
+    __intrinsic("store64", lst + LIST_DATA, data)
+    return lst
+}
+
+fn list_len(lst) {
+    return __intrinsic("load64", lst + LIST_LEN)
+}
+
+fn list_cap(lst) {
+    return __intrinsic("load64", lst + LIST_CAP)
+}
+
+fn list_get(lst, index) {
+    let length = list_len(lst)
+    if index < 0 {
+        index = length + index
+    }
+    if index < 0 | index >= length {
+        return none
+    }
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    return __intrinsic("load64", data + index * 8)
+}
+
+fn list_set(lst, index, value) {
+    let length = list_len(lst)
+    if index < 0 {
+        index = length + index
+    }
+    if index < 0 | index >= length {
+        return false
+    }
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    __intrinsic("store64", data + index * 8, value)
+    return true
+}
+
+fn list_push(lst, value) {
+    let length = list_len(lst)
+    let cap = list_cap(lst)
+    if length >= cap {
+        // Grow
+        let new_cap = cap * 2
+        let old_data = __intrinsic("load64", lst + LIST_DATA)
+        let new_data = alloc(new_cap * 8)
+        __intrinsic("memcpy", new_data, old_data, length * 8)
+        free(old_data)
+        __intrinsic("store64", lst + LIST_CAP, new_cap)
+        __intrinsic("store64", lst + LIST_DATA, new_data)
+    }
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    __intrinsic("store64", data + length * 8, value)
+    __intrinsic("store64", lst + LIST_LEN, length + 1)
+}
+
+fn list_pop(lst) {
+    let length = list_len(lst)
+    if length == 0 {
+        return none
+    }
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    let value = __intrinsic("load64", data + (length - 1) * 8)
+    __intrinsic("store64", lst + LIST_LEN, length - 1)
+    return value
+}
+
+fn list_insert(lst, index, value) {
+    let length = list_len(lst)
+    if index < 0 | index > length {
+        return false
+    }
+    // Ensure capacity
+    list_push(lst, 0)  // grow if needed
+    let new_len = list_len(lst)
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    // Shift elements right
+    let i = new_len - 1
+    while i > index {
+        let prev = __intrinsic("load64", data + (i - 1) * 8)
+        __intrinsic("store64", data + i * 8, prev)
+        i = i - 1
+    }
+    __intrinsic("store64", data + index * 8, value)
+    return true
+}
+
+fn list_remove(lst, index) {
+    let length = list_len(lst)
+    if index < 0 | index >= length {
+        return none
+    }
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    let value = __intrinsic("load64", data + index * 8)
+    // Shift elements left
+    let i = index
+    while i < length - 1 {
+        let next = __intrinsic("load64", data + (i + 1) * 8)
+        __intrinsic("store64", data + i * 8, next)
+        i = i + 1
+    }
+    __intrinsic("store64", lst + LIST_LEN, length - 1)
+    return value
+}
+
+fn list_clear(lst) {
+    __intrinsic("store64", lst + LIST_LEN, 0)
+}
+
+fn list_contains(lst, value) {
+    let length = list_len(lst)
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    let i = 0
+    while i < length {
+        if __intrinsic("load64", data + i * 8) == value {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn list_index_of(lst, value) {
+    let length = list_len(lst)
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    let i = 0
+    while i < length {
+        if __intrinsic("load64", data + i * 8) == value {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn list_reverse(lst) {
+    let length = list_len(lst)
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    let i = 0
+    let j = length - 1
+    while i < j {
+        let tmp = __intrinsic("load64", data + i * 8)
+        __intrinsic("store64", data + i * 8, __intrinsic("load64", data + j * 8))
+        __intrinsic("store64", data + j * 8, tmp)
+        i = i + 1
+        j = j - 1
+    }
+}
+
+fn list_slice(lst, start, end) {
+    let length = list_len(lst)
+    if start < 0 { start = length + start }
+    if end < 0 { end = length + end }
+    if start < 0 { start = 0 }
+    if end > length { end = length }
+    let result = list_new()
+    let i = start
+    while i < end {
+        list_push(result, list_get(lst, i))
+        i = i + 1
+    }
+    return result
+}
+
+fn list_free(lst) {
+    let data = __intrinsic("load64", lst + LIST_DATA)
+    free(data)
+    free(lst)
+}
