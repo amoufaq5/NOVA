@@ -199,6 +199,59 @@
 .equ T_STR_TYPE,        182
 .equ T_BOOL_TYPE,       183
 
+# --- AST Node Tags ---
+.equ AST_PROGRAM,       1
+.equ AST_MOMENT_DECL,   2
+.equ AST_NODE_DECL,     3
+.equ AST_PATH_DECL,     4
+.equ AST_MIND_DECL,     5
+.equ AST_FN_DECL,       6
+.equ AST_LET_STMT,      7
+.equ AST_IF_STMT,       8
+.equ AST_WHILE_STMT,    9
+.equ AST_FOR_STMT,      10
+.equ AST_RETURN_STMT,   11
+.equ AST_BLOCK,         12
+.equ AST_BIN_OP,        13
+.equ AST_UNARY_OP,      14
+.equ AST_CALL,          15
+.equ AST_DOT_ACCESS,    16
+.equ AST_MOMENT_ACCESS, 17
+.equ AST_IDENT,         18
+.equ AST_INT_LIT,       19
+.equ AST_FLOAT_LIT,     20
+.equ AST_STRING_LIT,    21
+.equ AST_BOOL_LIT,      22
+.equ AST_NONE_LIT,      23
+.equ AST_LIST_LIT,      24
+.equ AST_FLOW_EXPR,     25
+.equ AST_EMIT_STMT,     26
+.equ AST_WHEN_BLOCK,    27
+.equ AST_AWARENESS,     28
+.equ AST_STRUCT_DECL,   29
+.equ AST_FIELD_DEF,     30
+.equ AST_ASSIGN_STMT,   31
+.equ AST_RESPOND_STMT,  32
+.equ AST_CHANNEL_DECL,  33
+.equ AST_INDEX_EXPR,    34
+.equ AST_EXPR_STMT,     35
+
+# AST Node layout: 48 bytes each
+# [0]  tag    [8]  f1    [16] f2    [24] f3    [32] f4    [40] f5
+.equ AST_TAG,   0
+.equ AST_F1,    8
+.equ AST_F2,    16
+.equ AST_F3,    24
+.equ AST_F4,    32
+.equ AST_F5,    40
+.equ AST_NODE_SIZE, 48
+
+# Node list layout: [count:8][capacity:8][items*:8]
+.equ NL_COUNT,  0
+.equ NL_CAP,    8
+.equ NL_ITEMS,  16
+.equ NL_HEADER, 24
+
 
 # ======================== DATA SECTION =====================================
 .section .data
@@ -227,6 +280,10 @@ lex_col:        .quad 1     # current column (1-based)
 tok_buf:        .quad 0     # pointer to Token array
 tok_count:      .quad 0     # number of tokens stored
 tok_cap:        .quad 0     # allocated capacity
+
+# --- Parser state ---
+parse_pos:      .quad 0     # current token index
+parse_ast:      .quad 0     # root AST node (Program)
 
 # --- Scratch buffer for print_int ---
 int_buf:        .space 21
@@ -268,8 +325,14 @@ _start:
     # Tokenize entire source
     call lex_all
 
-    # Print token summary
-    call print_tokens
+    # Parse token stream into AST
+    call parse_program
+    mov [rip + parse_ast], rax
+
+    # Print AST summary
+    mov rdi, rax
+    xor esi, esi
+    call print_ast
 
     # Exit 0
     xor edi, edi
@@ -1751,6 +1814,2278 @@ print_tok_type_name:
 
 
 # ============================================================================
+# M3: PARSER — AST Node Allocation
+# ============================================================================
+
+# ast_new(tag: rdi) -> node ptr in rax
+ast_new:
+    push rbx
+    mov rbx, rdi
+    mov rdi, AST_NODE_SIZE
+    call arena_alloc
+    mov qword ptr [rax + AST_TAG], rbx
+    mov qword ptr [rax + AST_F1], 0
+    mov qword ptr [rax + AST_F2], 0
+    mov qword ptr [rax + AST_F3], 0
+    mov qword ptr [rax + AST_F4], 0
+    mov qword ptr [rax + AST_F5], 0
+    pop rbx
+    ret
+
+# node_list_new() -> list ptr in rax
+# Creates a growable list of AST node pointers.
+node_list_new:
+    push rbx
+    mov rdi, NL_HEADER
+    call arena_alloc
+    mov rbx, rax
+    mov qword ptr [rbx + NL_COUNT], 0
+    mov qword ptr [rbx + NL_CAP], 16
+    # Allocate initial items array (16 pointers)
+    mov rdi, 128                    # 16 * 8
+    call arena_alloc
+    mov [rbx + NL_ITEMS], rax
+    mov rax, rbx
+    pop rbx
+    ret
+
+# node_list_push(list: rdi, node: rsi)
+node_list_push:
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+
+    mov rax, [rbx + NL_COUNT]
+    cmp rax, [rbx + NL_CAP]
+    jl .nlp_write
+
+    # Grow: double capacity
+    mov rdi, [rbx + NL_CAP]
+    shl rdi, 1
+    mov [rbx + NL_CAP], rdi
+    shl rdi, 3                      # * 8 bytes per pointer
+    call arena_alloc
+    # Copy old items
+    push rax
+    mov rdi, rax
+    mov rsi, [rbx + NL_ITEMS]
+    mov rdx, [rbx + NL_COUNT]
+    shl rdx, 3
+    call mem_copy
+    pop rax
+    mov [rbx + NL_ITEMS], rax
+
+.nlp_write:
+    mov rax, [rbx + NL_COUNT]
+    mov rcx, [rbx + NL_ITEMS]
+    mov [rcx + rax*8], r12
+    inc qword ptr [rbx + NL_COUNT]
+
+    pop r12
+    pop rbx
+    ret
+
+
+# ============================================================================
+# M3: PARSER — Token Stream Access
+# ============================================================================
+
+# par_current() -> pointer to current token in rax
+par_current:
+    mov rax, [rip + parse_pos]
+    imul rax, TOK_SIZE
+    add rax, [rip + tok_buf]
+    ret
+
+# par_peek_type() -> current token type in rax
+par_peek_type:
+    call par_current
+    mov rax, [rax + TOK_TYPE]
+    ret
+
+# par_advance() -> pointer to consumed token in rax
+par_advance:
+    call par_current
+    mov rcx, [rip + parse_pos]
+    inc rcx
+    # Don't advance past end
+    cmp rcx, [rip + tok_count]
+    jg .padv_ret
+    mov [rip + parse_pos], rcx
+.padv_ret:
+    ret
+
+# par_expect(type: rdi) -> pointer to consumed token in rax (or error)
+par_expect:
+    push rbx
+    mov rbx, rdi
+    call par_peek_type
+    cmp rax, rbx
+    jne .pexp_err
+    call par_advance
+    pop rbx
+    ret
+
+.pexp_err:
+    # Print error: "Parse error at line:col: expected X, got Y"
+    push rdi
+    lea rdi, [rip + msg_parse_err]
+    call print_str
+    call par_current
+    mov rdi, [rax + TOK_LINE]
+    call print_int
+    mov dil, ':'
+    call print_char
+    call par_current
+    mov rdi, [rax + TOK_COL]
+    call print_int
+    lea rdi, [rip + msg_expected]
+    call print_str
+    pop rdi
+    call print_int
+    lea rdi, [rip + msg_got]
+    call print_str
+    call par_peek_type
+    mov rdi, rax
+    call print_int
+    call print_newline
+
+    mov edi, 1
+    call sys_exit
+
+# par_match(type: rdi) -> 1 if matched (and advanced), 0 if not
+par_match:
+    push rbx
+    mov rbx, rdi
+    call par_peek_type
+    cmp rax, rbx
+    jne .pmatch_no
+    call par_advance
+    mov eax, 1
+    pop rbx
+    ret
+.pmatch_no:
+    xor eax, eax
+    pop rbx
+    ret
+
+# par_at(type: rdi) -> 1 if current token is type, 0 otherwise
+par_at:
+    push rbx
+    mov rbx, rdi
+    call par_peek_type
+    cmp rax, rbx
+    sete al
+    movzx eax, al
+    pop rbx
+    ret
+
+
+# ============================================================================
+# M3: PARSER — Top Level
+# ============================================================================
+
+# parse_program() -> AST_PROGRAM node
+parse_program:
+    push r12
+    push r13
+
+    mov qword ptr [rip + parse_pos], 0
+
+    # Create program node
+    mov rdi, AST_PROGRAM
+    call ast_new
+    mov r12, rax                    # program node
+
+    # Create declarations list
+    call node_list_new
+    mov r13, rax                    # decls list
+    mov [r12 + AST_F1], r13
+
+.pp_loop:
+    call par_peek_type
+    cmp rax, T_EOF
+    je .pp_done
+
+    call parse_declaration
+    test rax, rax
+    jz .pp_done
+
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pp_loop
+
+.pp_done:
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_declaration() -> AST node or 0
+parse_declaration:
+    call par_peek_type
+
+    cmp rax, T_MOMENT
+    je .pd_moment
+    cmp rax, T_NODE
+    je .pd_node
+    cmp rax, T_PATH
+    je .pd_path
+    cmp rax, T_MIND
+    je .pd_mind
+    cmp rax, T_FN
+    je .pd_fn
+    cmp rax, T_LET
+    je .pd_let
+    cmp rax, T_STRUCT
+    je .pd_struct
+
+    # Try parsing as expression statement
+    call parse_expr_stmt
+    ret
+
+.pd_moment:
+    call parse_moment_decl
+    ret
+.pd_node:
+    call parse_node_decl
+    ret
+.pd_path:
+    call parse_path_decl
+    ret
+.pd_mind:
+    call parse_mind_decl
+    ret
+.pd_fn:
+    call parse_fn_decl
+    ret
+.pd_let:
+    call parse_let_stmt
+    ret
+.pd_struct:
+    call parse_struct_decl
+    ret
+
+
+# ============================================================================
+# M3: PARSER — Declarations
+# ============================================================================
+
+# parse_moment_decl() -> AST_MOMENT_DECL
+# moment Name { field: value, ... }
+parse_moment_decl:
+    push r12
+    push r13
+
+    mov rdi, AST_MOMENT_DECL
+    call ast_new
+    mov r12, rax
+
+    # consume "moment"
+    call par_advance
+
+    # expect identifier (name)
+    mov rdi, T_IDENT
+    call par_expect
+    mov [r12 + AST_F1], rax         # name token
+
+    # expect {
+    mov rdi, T_LBRACE
+    call par_expect
+
+    # Parse fields until }
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F2], r13
+
+.pmd_field_loop:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pmd_close
+    cmp rax, T_EOF
+    je .pmd_close
+
+    # Parse field: name: expr
+    call parse_field_def
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pmd_field_loop
+
+.pmd_close:
+    mov rdi, T_RBRACE
+    call par_expect
+
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_field_def() -> AST_FIELD_DEF { f1=name_tok, f2=value (expr or list) }
+parse_field_def:
+    push r12
+    push r13
+
+    mov rdi, AST_FIELD_DEF
+    call ast_new
+    mov r12, rax
+
+    # name (identifier or keyword used as field name)
+    call par_advance
+    mov [r12 + AST_F1], rax
+
+    # expect :
+    mov rdi, T_COLON
+    call par_expect
+
+    # Parse first value expression
+    call parse_expr
+    mov [r12 + AST_F2], rax
+
+    # Check for comma — but only if it's NOT a field separator
+    # (field separator: comma followed by ident/kw + colon = new field)
+    call .pfd_comma_is_value_sep
+    test eax, eax
+    jz .pfd_done
+
+    # Consume the comma
+    call par_advance
+
+    # Multiple values — wrap in list
+    mov r13, [r12 + AST_F2]        # first value
+
+    mov rdi, AST_LIST_LIT
+    call ast_new
+    mov [r12 + AST_F2], rax
+    push rax
+
+    call node_list_new
+    pop rcx
+    mov [rcx + AST_F1], rax
+    mov rcx, rax                    # list ptr
+
+    # Push first value
+    mov rdi, rcx
+    mov rsi, r13
+    push rcx
+    call node_list_push
+    pop rcx
+
+.pfd_more:
+    # Parse next value
+    push rcx
+    call parse_expr
+    pop rcx
+    mov rdi, rcx
+    mov rsi, rax
+    push rcx
+    call node_list_push
+    pop rcx
+
+    # More commas (with same lookahead check)?
+    push rcx
+    call .pfd_comma_is_value_sep
+    pop rcx
+    test eax, eax
+    jz .pfd_done
+    push rcx
+    call par_advance                # consume comma
+    pop rcx
+    jmp .pfd_more
+
+.pfd_done:
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# .pfd_comma_is_value_sep() -> 1 if comma is a value separator, 0 if field separator
+# Checks: current=COMMA, and token at pos+2 is NOT COLON (meaning it's not "ident:")
+.pfd_comma_is_value_sep:
+    # First check: is current token a comma?
+    call par_peek_type
+    cmp rax, T_COMMA
+    jne .pfd_csv_no
+
+    # Look ahead: token at pos+2 (after comma + one token)
+    mov rax, [rip + parse_pos]
+    add rax, 2
+    cmp rax, [rip + tok_count]
+    jge .pfd_csv_yes                # can't lookahead → treat as value sep
+
+    imul rax, TOK_SIZE
+    add rax, [rip + tok_buf]
+    mov rax, [rax + TOK_TYPE]
+    cmp rax, T_COLON
+    je .pfd_csv_no                  # ident: pattern → field separator
+
+.pfd_csv_yes:
+    mov eax, 1
+    ret
+.pfd_csv_no:
+    xor eax, eax
+    ret
+
+# parse_node_decl() -> AST_NODE_DECL { f1=name, f2=type_tok, f3=body_list }
+parse_node_decl:
+    push r12
+    push r13
+
+    mov rdi, AST_NODE_DECL
+    call ast_new
+    mov r12, rax
+
+    # consume "node"
+    call par_advance
+
+    # name
+    mov rdi, T_IDENT
+    call par_expect
+    mov [r12 + AST_F1], rax
+
+    # expect :
+    mov rdi, T_COLON
+    call par_expect
+
+    # type (perceiver, knower, rememberer, reasoner, feeler, actor)
+    call par_advance
+    mov [r12 + AST_F2], rax
+
+    # expect {
+    mov rdi, T_LBRACE
+    call par_expect
+
+    # Parse body statements
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F3], r13
+
+.pnd_body:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pnd_close
+    cmp rax, T_EOF
+    je .pnd_close
+
+    call parse_stmt
+    test rax, rax
+    jz .pnd_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pnd_body
+
+.pnd_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_path_decl() -> AST_PATH_DECL { f1=name, f2=body_list }
+parse_path_decl:
+    push r12
+    push r13
+
+    mov rdi, AST_PATH_DECL
+    call ast_new
+    mov r12, rax
+
+    # consume "path"
+    call par_advance
+
+    # name
+    mov rdi, T_IDENT
+    call par_expect
+    mov [r12 + AST_F1], rax
+
+    # expect {
+    mov rdi, T_LBRACE
+    call par_expect
+
+    # Parse body (sequence of statements/expressions with flow ops)
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F2], r13
+
+.ppd_body:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .ppd_close
+    cmp rax, T_EOF
+    je .ppd_close
+
+    call parse_stmt
+    test rax, rax
+    jz .ppd_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .ppd_body
+
+.ppd_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_mind_decl() -> AST_MIND_DECL { f1=name, f2=body_list }
+parse_mind_decl:
+    push r12
+    push r13
+
+    mov rdi, AST_MIND_DECL
+    call ast_new
+    mov r12, rax
+
+    # consume "mind"
+    call par_advance
+
+    # name
+    mov rdi, T_IDENT
+    call par_expect
+    mov [r12 + AST_F1], rax
+
+    # expect {
+    mov rdi, T_LBRACE
+    call par_expect
+
+    # Parse body
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F2], r13
+
+.pmnd_body:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pmnd_close
+    cmp rax, T_EOF
+    je .pmnd_close
+
+    call parse_stmt
+    test rax, rax
+    jz .pmnd_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pmnd_body
+
+.pmnd_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_fn_decl() -> AST_FN_DECL { f1=name, f2=params_list, f3=body_list }
+parse_fn_decl:
+    push r12
+    push r13
+    push r14
+
+    mov rdi, AST_FN_DECL
+    call ast_new
+    mov r12, rax
+
+    # consume "fn"
+    call par_advance
+
+    # name
+    mov rdi, T_IDENT
+    call par_expect
+    mov [r12 + AST_F1], rax
+
+    # expect (
+    mov rdi, T_LPAREN
+    call par_expect
+
+    # Parse parameters
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F2], r13
+
+    call par_peek_type
+    cmp rax, T_RPAREN
+    je .pfd_close_params
+
+.pfd_param:
+    call par_advance                # param name token
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+
+    # Check for comma
+    mov rdi, T_COMMA
+    call par_match
+    test eax, eax
+    jnz .pfd_param
+
+.pfd_close_params:
+    mov rdi, T_RPAREN
+    call par_expect
+
+    # expect {
+    mov rdi, T_LBRACE
+    call par_expect
+
+    # Parse body
+    call node_list_new
+    mov r14, rax
+    mov [r12 + AST_F3], r14
+
+.pfd_body:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pfd_close
+    cmp rax, T_EOF
+    je .pfd_close
+
+    call parse_stmt
+    test rax, rax
+    jz .pfd_close
+    mov rdi, r14
+    mov rsi, rax
+    call node_list_push
+    jmp .pfd_body
+
+.pfd_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+# parse_struct_decl() -> AST_STRUCT_DECL { f1=name, f2=fields_list }
+parse_struct_decl:
+    push r12
+    push r13
+
+    mov rdi, AST_STRUCT_DECL
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "struct"
+
+    mov rdi, T_IDENT
+    call par_expect
+    mov [r12 + AST_F1], rax
+
+    mov rdi, T_LBRACE
+    call par_expect
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F2], r13
+
+.psd_field:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .psd_close
+    cmp rax, T_EOF
+    je .psd_close
+
+    call parse_field_def
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .psd_field
+
+.psd_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+
+# ============================================================================
+# M3: PARSER — Statements
+# ============================================================================
+
+# parse_stmt() -> AST node
+parse_stmt:
+    call par_peek_type
+
+    cmp rax, T_LET
+    je .ps_let
+    cmp rax, T_IF
+    je .ps_if
+    cmp rax, T_WHILE
+    je .ps_while
+    cmp rax, T_FOR
+    je .ps_for
+    cmp rax, T_RETURN
+    je .ps_return
+    cmp rax, T_WHEN
+    je .ps_when
+    cmp rax, T_EMIT
+    je .ps_emit
+    cmp rax, T_RESPOND
+    je .ps_respond
+    cmp rax, T_AWARENESS
+    je .ps_awareness
+
+    # Keyword-started block-like declarations within bodies
+    cmp rax, T_MOMENT
+    je .ps_moment_inner
+    cmp rax, T_NODE
+    je .ps_node_inner
+    cmp rax, T_PATH
+    je .ps_path_inner
+    cmp rax, T_FN
+    je .ps_fn_inner
+
+    # Default: expression statement
+    call parse_expr_stmt
+    ret
+
+.ps_let:
+    call parse_let_stmt
+    ret
+.ps_if:
+    call parse_if_stmt
+    ret
+.ps_while:
+    call parse_while_stmt
+    ret
+.ps_for:
+    call parse_for_stmt
+    ret
+.ps_return:
+    call parse_return_stmt
+    ret
+.ps_when:
+    call parse_when_block
+    ret
+.ps_emit:
+    call parse_emit_stmt
+    ret
+.ps_respond:
+    call parse_respond_stmt
+    ret
+.ps_awareness:
+    call parse_awareness_block
+    ret
+.ps_moment_inner:
+    call parse_moment_decl
+    ret
+.ps_node_inner:
+    call parse_node_decl
+    ret
+.ps_path_inner:
+    call parse_path_decl
+    ret
+.ps_fn_inner:
+    call parse_fn_decl
+    ret
+
+# parse_let_stmt() -> AST_LET_STMT { f1=name_tok, f2=value_expr }
+parse_let_stmt:
+    push r12
+
+    mov rdi, AST_LET_STMT
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "let"
+
+    # name
+    mov rdi, T_IDENT
+    call par_expect
+    mov [r12 + AST_F1], rax
+
+    # expect = or flow operator (<<~ is common in let)
+    call par_peek_type
+    cmp rax, T_EQ
+    je .pls_eq
+    # For flow operators, the expr parser handles them
+    jmp .pls_value
+
+.pls_eq:
+    call par_advance                # consume =
+
+.pls_value:
+    call parse_expr
+    mov [r12 + AST_F2], rax
+
+    mov rax, r12
+    pop r12
+    ret
+
+# parse_if_stmt() -> AST_IF_STMT { f1=cond, f2=then_list, f3=else_list }
+parse_if_stmt:
+    push r12
+    push r13
+
+    mov rdi, AST_IF_STMT
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "if"
+
+    # condition expression
+    call parse_expr
+    mov [r12 + AST_F1], rax
+
+    # expect {
+    mov rdi, T_LBRACE
+    call par_expect
+
+    # then body
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F2], r13
+
+.pif_then:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pif_then_close
+    cmp rax, T_EOF
+    je .pif_then_close
+    call parse_stmt
+    test rax, rax
+    jz .pif_then_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pif_then
+
+.pif_then_close:
+    mov rdi, T_RBRACE
+    call par_expect
+
+    # Check for else
+    mov rdi, T_ELSE
+    call par_match
+    test eax, eax
+    jz .pif_done
+
+    # else { ... }
+    mov rdi, T_LBRACE
+    call par_expect
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F3], r13
+
+.pif_else:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pif_else_close
+    cmp rax, T_EOF
+    je .pif_else_close
+    call parse_stmt
+    test rax, rax
+    jz .pif_else_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pif_else
+
+.pif_else_close:
+    mov rdi, T_RBRACE
+    call par_expect
+
+.pif_done:
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_while_stmt() -> AST_WHILE_STMT { f1=cond, f2=body_list }
+parse_while_stmt:
+    push r12
+    push r13
+
+    mov rdi, AST_WHILE_STMT
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "while"
+
+    call parse_expr
+    mov [r12 + AST_F1], rax
+
+    mov rdi, T_LBRACE
+    call par_expect
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F2], r13
+
+.pwh_body:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pwh_close
+    cmp rax, T_EOF
+    je .pwh_close
+    call parse_stmt
+    test rax, rax
+    jz .pwh_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pwh_body
+
+.pwh_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_for_stmt() -> AST_FOR_STMT { f1=var_tok, f2=iter_expr, f3=body_list }
+parse_for_stmt:
+    push r12
+    push r13
+
+    mov rdi, AST_FOR_STMT
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "for"
+
+    mov rdi, T_IDENT
+    call par_expect
+    mov [r12 + AST_F1], rax
+
+    mov rdi, T_IN
+    call par_expect
+
+    call parse_expr
+    mov [r12 + AST_F2], rax
+
+    mov rdi, T_LBRACE
+    call par_expect
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F3], r13
+
+.pfor_body:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pfor_close
+    cmp rax, T_EOF
+    je .pfor_close
+    call parse_stmt
+    test rax, rax
+    jz .pfor_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pfor_body
+
+.pfor_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_return_stmt() -> AST_RETURN_STMT { f1=expr }
+parse_return_stmt:
+    push r12
+
+    mov rdi, AST_RETURN_STMT
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "return"
+
+    # Check if there's an expression to return
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pret_done
+    cmp rax, T_EOF
+    je .pret_done
+
+    call parse_expr
+    mov [r12 + AST_F1], rax
+
+.pret_done:
+    mov rax, r12
+    pop r12
+    ret
+
+# parse_when_block() -> AST_WHEN_BLOCK { f1=signal_type_tok, f2=var_tok, f3=body }
+parse_when_block:
+    push r12
+    push r13
+
+    mov rdi, AST_WHEN_BLOCK
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "when"
+
+    # Signal type (identifier or keyword)
+    call par_advance
+    mov [r12 + AST_F1], rax
+
+    # "arrives" keyword
+    mov rdi, T_ARRIVES
+    call par_match
+
+    # "as" var_name (optional)
+    mov rdi, T_AS
+    call par_match
+    test eax, eax
+    jz .pwb_body
+
+    call par_advance                # var name
+    mov [r12 + AST_F2], rax
+
+.pwb_body:
+    mov rdi, T_LBRACE
+    call par_expect
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F3], r13
+
+.pwb_stmts:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pwb_close
+    cmp rax, T_EOF
+    je .pwb_close
+    call parse_stmt
+    test rax, rax
+    jz .pwb_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pwb_stmts
+
+.pwb_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_emit_stmt() -> AST_EMIT_STMT { f1=signal_expr }
+parse_emit_stmt:
+    push r12
+
+    mov rdi, AST_EMIT_STMT
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "emit"
+
+    call parse_expr
+    mov [r12 + AST_F1], rax
+
+    mov rax, r12
+    pop r12
+    ret
+
+# parse_respond_stmt() -> AST_RESPOND_STMT { f1=body_expr }
+parse_respond_stmt:
+    push r12
+
+    mov rdi, AST_RESPOND_STMT
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "respond"
+    call parse_expr
+    mov [r12 + AST_F1], rax
+
+    mov rax, r12
+    pop r12
+    ret
+
+# parse_awareness_block() -> AST_AWARENESS { f1=body_list }
+parse_awareness_block:
+    push r12
+    push r13
+
+    mov rdi, AST_AWARENESS
+    call ast_new
+    mov r12, rax
+
+    call par_advance                # consume "awareness"
+    mov rdi, T_LBRACE
+    call par_expect
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F1], r13
+
+.pab_body:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .pab_close
+    cmp rax, T_EOF
+    je .pab_close
+    call parse_field_def
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .pab_body
+
+.pab_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# parse_expr_stmt() -> AST_EXPR_STMT { f1=expr }
+parse_expr_stmt:
+    push r12
+
+    mov rdi, AST_EXPR_STMT
+    call ast_new
+    mov r12, rax
+
+    call parse_expr
+    mov [r12 + AST_F1], rax
+
+    mov rax, r12
+    pop r12
+    ret
+
+
+# ============================================================================
+# M3: PARSER — Expressions (Precedence Climbing)
+# ============================================================================
+
+# parse_expr() -> AST node
+# Entry point: handles flow operators (lowest precedence)
+parse_expr:
+    push r12
+
+    call parse_comparison
+    mov r12, rax
+
+.pe_flow:
+    call par_peek_type
+
+    # Check for flow operators
+    cmp rax, T_FLOW_FWD
+    je .pe_flow_op
+    cmp rax, T_FLOW_BWD
+    je .pe_flow_op
+    cmp rax, T_BROADCAST
+    je .pe_flow_op
+    cmp rax, T_ENRICH_OP
+    je .pe_flow_op
+    cmp rax, T_TENTATIVE
+    je .pe_flow_op
+    cmp rax, T_BIDIR
+    je .pe_flow_op
+    cmp rax, T_FILTERED
+    je .pe_flow_op
+
+    mov rax, r12
+    pop r12
+    ret
+
+.pe_flow_op:
+    push r13
+    call par_advance                # consume flow op
+    mov r13, rax                    # save operator token
+
+    mov rdi, AST_FLOW_EXPR
+    call ast_new
+    mov [rax + AST_F1], r12         # left
+    mov [rax + AST_F3], r13         # operator token
+
+    push rax
+    call parse_comparison
+    pop rcx
+    mov [rcx + AST_F2], rax         # right
+    mov r12, rcx
+
+    pop r13
+    jmp .pe_flow
+
+# parse_comparison() -> handles ==, !=, <, >, <=, >=
+parse_comparison:
+    push r12
+
+    call parse_addition
+    mov r12, rax
+
+.pcmp_loop:
+    call par_peek_type
+    cmp rax, T_EQEQ
+    je .pcmp_op
+    cmp rax, T_BANGEQ
+    je .pcmp_op
+    cmp rax, T_LT
+    je .pcmp_op
+    cmp rax, T_GT
+    je .pcmp_op
+    cmp rax, T_LTEQ
+    je .pcmp_op
+    cmp rax, T_GTEQ
+    je .pcmp_op
+    # Nova keyword-operators used as binary modifiers
+    cmp rax, T_WHEN
+    je .pcmp_op
+    cmp rax, T_WITH
+    je .pcmp_op
+    cmp rax, T_AGAINST
+    je .pcmp_op
+    cmp rax, T_FROM
+    je .pcmp_op
+    cmp rax, T_IF
+    je .pcmp_op
+    cmp rax, T_WHERE
+    je .pcmp_op
+
+    mov rax, r12
+    pop r12
+    ret
+
+.pcmp_op:
+    push r13
+    call par_advance
+    mov r13, rax                    # operator token
+
+    mov rdi, AST_BIN_OP
+    call ast_new
+    mov [rax + AST_F1], r12         # left
+    mov [rax + AST_F3], r13         # op
+
+    push rax
+    call parse_addition
+    pop rcx
+    mov [rcx + AST_F2], rax         # right
+    mov r12, rcx
+
+    pop r13
+    jmp .pcmp_loop
+
+# parse_addition() -> handles + -
+parse_addition:
+    push r12
+
+    call parse_multiplication
+    mov r12, rax
+
+.padd_loop:
+    call par_peek_type
+    cmp rax, T_PLUS
+    je .padd_op
+    cmp rax, T_MINUS
+    je .padd_op
+
+    mov rax, r12
+    pop r12
+    ret
+
+.padd_op:
+    push r13
+    call par_advance
+    mov r13, rax
+
+    mov rdi, AST_BIN_OP
+    call ast_new
+    mov [rax + AST_F1], r12
+    mov [rax + AST_F3], r13
+
+    push rax
+    call parse_multiplication
+    pop rcx
+    mov [rcx + AST_F2], rax
+    mov r12, rcx
+
+    pop r13
+    jmp .padd_loop
+
+# parse_multiplication() -> handles * /
+parse_multiplication:
+    push r12
+
+    call parse_unary
+    mov r12, rax
+
+.pmul_loop:
+    call par_peek_type
+    cmp rax, T_STAR
+    je .pmul_op
+    cmp rax, T_SLASH
+    je .pmul_op
+
+    mov rax, r12
+    pop r12
+    ret
+
+.pmul_op:
+    push r13
+    call par_advance
+    mov r13, rax
+
+    mov rdi, AST_BIN_OP
+    call ast_new
+    mov [rax + AST_F1], r12
+    mov [rax + AST_F3], r13
+
+    push rax
+    call parse_unary
+    pop rcx
+    mov [rcx + AST_F2], rax
+    mov r12, rcx
+
+    pop r13
+    jmp .pmul_loop
+
+# parse_unary() -> handles ! -
+parse_unary:
+    call par_peek_type
+    cmp rax, T_BANG
+    je .pu_op
+    cmp rax, T_MINUS
+    je .pu_op
+
+    call parse_postfix
+    ret
+
+.pu_op:
+    push r12
+    call par_advance
+    mov r12, rax                    # operator token
+
+    mov rdi, AST_UNARY_OP
+    call ast_new
+    mov [rax + AST_F2], r12         # op token
+    push rax
+
+    call parse_unary                # recursive
+    pop rcx
+    mov [rcx + AST_F1], rax         # operand
+    mov rax, rcx
+    pop r12
+    ret
+
+# parse_postfix() -> handles .field, @field, (args), [index]
+parse_postfix:
+    push r12
+
+    call parse_primary
+    mov r12, rax
+
+.ppf_loop:
+    call par_peek_type
+
+    cmp rax, T_DOT
+    je .ppf_dot
+    cmp rax, T_AT
+    je .ppf_at
+    cmp rax, T_LPAREN
+    je .ppf_call
+    cmp rax, T_LBRACKET
+    je .ppf_index
+
+    # Juxtaposition: only when LHS is a bare identifier
+    # (not literals, not already-constructed calls — prevents runaway)
+    mov rcx, [r12 + AST_TAG]
+    cmp rcx, AST_IDENT
+    je .ppf_check_juxt
+    jmp .ppf_done
+
+.ppf_check_juxt:
+    # Adjacent primary tokens are implicit call arguments
+    # e.g. "entity Person { ... }", "warmth 0.7", "expectation "text""
+    # But NOT if the adjacent token is followed by ":" (it's a field name then)
+    cmp rax, T_IDENT
+    je .ppf_juxt_guard
+    cmp rax, T_INT_LIT
+    je .ppf_juxt
+    cmp rax, T_FLOAT_LIT
+    je .ppf_juxt
+    cmp rax, T_STRING_LIT
+    je .ppf_juxt
+    cmp rax, T_LBRACE
+    je .ppf_juxt_block_only
+    # Cognitive keywords as adjacent values (also need colon guard)
+    cmp rax, T_MOMENT
+    jl .ppf_done
+    cmp rax, T_BOOL_TYPE
+    jle .ppf_juxt_guard
+    jmp .ppf_done
+
+.ppf_juxt_guard:
+    # First: exclude keyword-operators from juxtaposition
+    # These are binary ops parsed at comparison level, not arguments
+    call par_peek_type
+    cmp rax, T_WHEN
+    je .ppf_done
+    cmp rax, T_WITH
+    je .ppf_done
+    cmp rax, T_AGAINST
+    je .ppf_done
+    cmp rax, T_FROM
+    je .ppf_done
+    cmp rax, T_IF
+    je .ppf_done
+    cmp rax, T_WHERE
+    je .ppf_done
+    cmp rax, T_UNLESS
+    je .ppf_done
+    cmp rax, T_AS
+    je .ppf_done
+    cmp rax, T_IN
+    je .ppf_done
+
+    # Don't juxtapose if next token is followed by ':' (field separator)
+    mov rax, [rip + parse_pos]
+    inc rax
+    cmp rax, [rip + tok_count]
+    jge .ppf_juxt                   # can't lookahead, allow juxt
+    imul rax, TOK_SIZE
+    add rax, [rip + tok_buf]
+    mov rax, [rax + TOK_TYPE]
+    cmp rax, T_COLON
+    je .ppf_done                    # followed by : → field name, not argument
+    jmp .ppf_juxt                   # not a field name → proceed with juxtaposition
+
+.ppf_done:
+    mov rax, r12
+    pop r12
+    ret
+
+.ppf_juxt_block_only:
+    # Just { follows an ident — parse block as single arg
+    mov rdi, AST_CALL
+    call ast_new
+    mov [rax + AST_F1], r12
+    push rax
+
+    call node_list_new
+    mov rbx, rax
+    pop rcx
+    push rcx
+    mov [rcx + AST_F2], rbx
+
+    push rbx
+    call parse_primary              # parse { ... } block
+    pop rbx
+    mov rdi, rbx
+    mov rsi, rax
+    call node_list_push
+
+    pop r12
+    jmp .ppf_loop
+
+.ppf_juxt:
+    # Wrap in implicit CALL: callee=r12, arg=next primary
+    mov rdi, AST_CALL
+    call ast_new
+    mov [rax + AST_F1], r12
+    push rax
+
+    call node_list_new
+    mov rbx, rax
+    pop rcx
+    push rcx
+    mov [rcx + AST_F2], rbx
+
+    # Parse one argument (primary only, not full expr to avoid greediness)
+    call parse_primary
+    mov rdi, rbx
+    mov rsi, rax
+    call node_list_push
+
+    # Check if followed by { or [ — if so, parse as additional arg
+    call par_peek_type
+    cmp rax, T_LBRACE
+    je .ppf_juxt_extra
+    cmp rax, T_LBRACKET
+    je .ppf_juxt_extra
+    jmp .ppf_juxt_done
+
+.ppf_juxt_extra:
+    push rbx
+    call parse_primary              # parses { ... } block or [ ... ] list
+    pop rbx
+    mov rdi, rbx
+    mov rsi, rax
+    call node_list_push
+
+.ppf_juxt_done:
+    pop r12                         # the CALL node
+    jmp .ppf_loop
+
+.ppf_dot:
+    call par_advance                # consume .
+    mov rdi, AST_DOT_ACCESS
+    call ast_new
+    mov [rax + AST_F1], r12         # object
+
+    push rax
+    call par_advance                # field name token
+    pop rcx
+    mov [rcx + AST_F2], rax         # field
+    mov r12, rcx
+    jmp .ppf_loop
+
+.ppf_at:
+    call par_advance                # consume @
+    mov rdi, AST_MOMENT_ACCESS
+    call ast_new
+    mov [rax + AST_F1], r12
+
+    push rax
+    call par_advance                # field name
+    pop rcx
+    mov [rcx + AST_F2], rax
+    mov r12, rcx
+    jmp .ppf_loop
+
+.ppf_call:
+    call par_advance                # consume (
+    mov rdi, AST_CALL
+    call ast_new
+    mov [rax + AST_F1], r12         # callee
+    push rax
+
+    # Parse arguments
+    call node_list_new
+    mov rbx, rax
+    pop rcx
+    push rcx
+    mov [rcx + AST_F2], rbx         # args list
+
+    call par_peek_type
+    cmp rax, T_RPAREN
+    je .ppf_call_close
+
+.ppf_call_arg:
+    call parse_expr
+    mov rdi, rbx
+    mov rsi, rax
+    call node_list_push
+
+    mov rdi, T_COMMA
+    call par_match
+    test eax, eax
+    jnz .ppf_call_arg
+
+.ppf_call_close:
+    mov rdi, T_RPAREN
+    call par_expect
+    pop r12                         # the CALL node
+    jmp .ppf_loop
+
+.ppf_index:
+    call par_advance                # consume [
+    mov rdi, AST_INDEX_EXPR
+    call ast_new
+    mov [rax + AST_F1], r12
+    push rax
+
+    call parse_expr
+    pop rcx
+    mov [rcx + AST_F2], rax
+
+    mov rdi, T_RBRACKET
+    call par_expect
+    mov r12, rcx
+    jmp .ppf_loop
+
+
+# ============================================================================
+# M3: PARSER — Primary Expressions
+# ============================================================================
+
+# parse_primary() -> AST node (literal, ident, parenthesized, list, block)
+parse_primary:
+    call par_peek_type
+
+    cmp rax, T_INT_LIT
+    je .ppr_int
+    cmp rax, T_FLOAT_LIT
+    je .ppr_float
+    cmp rax, T_STRING_LIT
+    je .ppr_string
+    cmp rax, T_TRUE
+    je .ppr_true
+    cmp rax, T_FALSE
+    je .ppr_false
+    cmp rax, T_NONE
+    je .ppr_none
+    cmp rax, T_IDENT
+    je .ppr_ident
+    cmp rax, T_LPAREN
+    je .ppr_paren
+    cmp rax, T_LBRACKET
+    je .ppr_list
+    cmp rax, T_LBRACE
+    je .ppr_block
+
+    # Any cognitive/standard keyword can appear as identifier in expressions
+    cmp rax, T_MOMENT
+    jl .ppr_error
+    cmp rax, T_BOOL_TYPE
+    jle .ppr_ident_like
+
+.ppr_error:
+    # Unknown primary — emit identifier-like node from current token
+    mov rdi, AST_IDENT
+    call ast_new
+    push rax
+    call par_advance
+    pop rcx
+    mov [rcx + AST_F1], rax
+    mov rax, rcx
+    ret
+
+.ppr_ident_like:
+.ppr_ident:
+    mov rdi, AST_IDENT
+    call ast_new
+    push rax
+    call par_advance
+    pop rcx
+    mov [rcx + AST_F1], rax         # token
+    mov rax, rcx
+    ret
+
+.ppr_int:
+    mov rdi, AST_INT_LIT
+    call ast_new
+    push rax
+    call par_advance
+    pop rcx
+    mov [rcx + AST_F1], rax
+    mov rax, rcx
+    ret
+
+.ppr_float:
+    mov rdi, AST_FLOAT_LIT
+    call ast_new
+    push rax
+    call par_advance
+    pop rcx
+    mov [rcx + AST_F1], rax
+    mov rax, rcx
+    ret
+
+.ppr_string:
+    mov rdi, AST_STRING_LIT
+    call ast_new
+    push rax
+    call par_advance
+    pop rcx
+    mov [rcx + AST_F1], rax
+    mov rax, rcx
+    ret
+
+.ppr_true:
+    mov rdi, AST_BOOL_LIT
+    call ast_new
+    mov qword ptr [rax + AST_F1], 1
+    push rax
+    call par_advance
+    pop rax
+    ret
+
+.ppr_false:
+    mov rdi, AST_BOOL_LIT
+    call ast_new
+    mov qword ptr [rax + AST_F1], 0
+    push rax
+    call par_advance
+    pop rax
+    ret
+
+.ppr_none:
+    mov rdi, AST_NONE_LIT
+    call ast_new
+    push rax
+    call par_advance
+    pop rax
+    ret
+
+.ppr_paren:
+    call par_advance                # consume (
+    call parse_expr
+    push rax
+    mov rdi, T_RPAREN
+    call par_expect
+    pop rax
+    ret
+
+.ppr_list:
+    push r12
+    push r13
+
+    call par_advance                # consume [
+    mov rdi, AST_LIST_LIT
+    call ast_new
+    mov r12, rax
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F1], r13
+
+    call par_peek_type
+    cmp rax, T_RBRACKET
+    je .ppr_list_close
+
+.ppr_list_elem:
+    call parse_expr
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+
+    mov rdi, T_COMMA
+    call par_match
+    test eax, eax
+    jnz .ppr_list_elem
+
+.ppr_list_close:
+    mov rdi, T_RBRACKET
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+.ppr_block:
+    push r12
+    push r13
+
+    call par_advance                # consume {
+
+    # Lookahead: if first content is "ident/kw :" → parse as field block
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .ppr_block_stmt              # empty block
+
+    # Check if token after current could be ':'
+    push rax
+    mov rdi, 1
+    # Peek at next token (pos+1)
+    mov rax, [rip + parse_pos]
+    inc rax
+    cmp rax, [rip + tok_count]
+    jge .ppr_block_no_lookahead
+    imul rax, TOK_SIZE
+    add rax, [rip + tok_buf]
+    mov rax, [rax + TOK_TYPE]
+    cmp rax, T_COLON
+    pop rax
+    je .ppr_block_fields
+    jmp .ppr_block_stmt
+
+.ppr_block_no_lookahead:
+    pop rax
+
+.ppr_block_stmt:
+    mov rdi, AST_BLOCK
+    call ast_new
+    mov r12, rax
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F1], r13
+
+.ppr_block_loop:
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .ppr_block_close
+    cmp rax, T_EOF
+    je .ppr_block_close
+
+    call parse_stmt
+    test rax, rax
+    jz .ppr_block_close
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .ppr_block_loop
+
+.ppr_block_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+# Block with field definitions (ident: value)
+.ppr_block_fields:
+    mov rdi, AST_BLOCK
+    call ast_new
+    mov r12, rax
+
+    call node_list_new
+    mov r13, rax
+    mov [r12 + AST_F1], r13
+
+.ppr_bf_loop:
+    # Skip optional comma between fields
+    mov rdi, T_COMMA
+    call par_match
+
+    call par_peek_type
+    cmp rax, T_RBRACE
+    je .ppr_bf_close
+    cmp rax, T_EOF
+    je .ppr_bf_close
+
+    call parse_field_def
+    mov rdi, r13
+    mov rsi, rax
+    call node_list_push
+    jmp .ppr_bf_loop
+
+.ppr_bf_close:
+    mov rdi, T_RBRACE
+    call par_expect
+    mov rax, r12
+    pop r13
+    pop r12
+    ret
+
+
+# ============================================================================
+# M3: PARSER — AST Printer (Debug)
+# ============================================================================
+
+# print_ast(node: rdi, indent: esi) — recursively print AST tree
+print_ast:
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov r12, rdi                    # node
+    mov r13d, esi                   # indent level
+
+    test r12, r12
+    jz .pa_null
+
+    # Print indentation
+    mov ecx, r13d
+.pa_indent:
+    test ecx, ecx
+    jz .pa_tag
+    mov dil, ' '
+    push rcx
+    call print_char
+    call print_char
+    pop rcx
+    dec ecx
+    jmp .pa_indent
+
+.pa_tag:
+    # Print node tag name
+    mov rdi, [r12 + AST_TAG]
+    call print_ast_tag_name
+
+    # Dispatch based on tag for details
+    mov rax, [r12 + AST_TAG]
+
+    cmp rax, AST_PROGRAM
+    je .pa_program
+    cmp rax, AST_MOMENT_DECL
+    je .pa_named_block
+    cmp rax, AST_NODE_DECL
+    je .pa_node_decl
+    cmp rax, AST_PATH_DECL
+    je .pa_named_block
+    cmp rax, AST_MIND_DECL
+    je .pa_named_block
+    cmp rax, AST_FN_DECL
+    je .pa_fn_decl
+    cmp rax, AST_LET_STMT
+    je .pa_let
+    cmp rax, AST_IF_STMT
+    je .pa_if
+    cmp rax, AST_WHILE_STMT
+    je .pa_while_for
+    cmp rax, AST_FOR_STMT
+    je .pa_while_for
+    cmp rax, AST_RETURN_STMT
+    je .pa_unary_node
+    cmp rax, AST_EMIT_STMT
+    je .pa_unary_node
+    cmp rax, AST_RESPOND_STMT
+    je .pa_unary_node
+    cmp rax, AST_EXPR_STMT
+    je .pa_unary_node
+    cmp rax, AST_WHEN_BLOCK
+    je .pa_when
+    cmp rax, AST_AWARENESS
+    je .pa_list_node
+    cmp rax, AST_BLOCK
+    je .pa_list_node
+    cmp rax, AST_LIST_LIT
+    je .pa_list_node
+    cmp rax, AST_BIN_OP
+    je .pa_binop
+    cmp rax, AST_FLOW_EXPR
+    je .pa_binop
+    cmp rax, AST_UNARY_OP
+    je .pa_unary_node
+    cmp rax, AST_CALL
+    je .pa_call
+    cmp rax, AST_DOT_ACCESS
+    je .pa_dot
+    cmp rax, AST_MOMENT_ACCESS
+    je .pa_dot
+    cmp rax, AST_INDEX_EXPR
+    je .pa_dot
+    cmp rax, AST_IDENT
+    je .pa_ident
+    cmp rax, AST_INT_LIT
+    je .pa_token_val
+    cmp rax, AST_FLOAT_LIT
+    je .pa_token_val
+    cmp rax, AST_STRING_LIT
+    je .pa_token_val
+    cmp rax, AST_BOOL_LIT
+    je .pa_bool_val
+    cmp rax, AST_FIELD_DEF
+    je .pa_field_def
+    cmp rax, AST_STRUCT_DECL
+    je .pa_named_block
+
+    # Default: just print tag and newline
+    call print_newline
+    jmp .pa_ret
+
+# --- Program: print all children ---
+.pa_program:
+    call print_newline
+    mov r14, [r12 + AST_F1]         # decls list
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- Named block (moment, path, mind, struct): print name + children ---
+.pa_named_block:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]         # name token
+    test rax, rax
+    jz .pa_nb_nl
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+.pa_nb_nl:
+    call print_newline
+    mov r14, [r12 + AST_F2]
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- Node decl: name : type ---
+.pa_node_decl:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+    mov dil, ':'
+    call print_char
+    mov rax, [r12 + AST_F2]
+    test rax, rax
+    jz .pa_nd_nl
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+.pa_nd_nl:
+    call print_newline
+    mov r14, [r12 + AST_F3]
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- Fn decl ---
+.pa_fn_decl:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+    call print_newline
+    mov r14, [r12 + AST_F3]
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- Let statement ---
+.pa_let:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+    call print_newline
+    # Print value expression
+    mov rdi, [r12 + AST_F2]
+    lea esi, [r13d + 1]
+    call print_ast
+    jmp .pa_ret
+
+# --- If statement ---
+.pa_if:
+    call print_newline
+    # condition
+    mov rdi, [r12 + AST_F1]
+    lea esi, [r13d + 1]
+    call print_ast
+    # then
+    mov r14, [r12 + AST_F2]
+    test r14, r14
+    jz .pa_if_else
+    call .pa_print_list
+.pa_if_else:
+    mov r14, [r12 + AST_F3]
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- While/For ---
+.pa_while_for:
+    call print_newline
+    mov rdi, [r12 + AST_F1]
+    lea esi, [r13d + 1]
+    call print_ast
+    mov r14, [r12 + AST_F2]
+    test r14, r14
+    jz .pa_wf_f3
+    call .pa_print_list
+.pa_wf_f3:
+    mov r14, [r12 + AST_F3]
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- When block ---
+.pa_when:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]
+    test rax, rax
+    jz .pa_when_nl
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+.pa_when_nl:
+    call print_newline
+    mov r14, [r12 + AST_F3]
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- Unary node (return, emit, respond, expr_stmt, unary_op): one child ---
+.pa_unary_node:
+    call print_newline
+    mov rdi, [r12 + AST_F1]
+    test rdi, rdi
+    jz .pa_ret
+    lea esi, [r13d + 1]
+    call print_ast
+    jmp .pa_ret
+
+# --- List node (awareness, block, list_lit): f1 is a list ---
+.pa_list_node:
+    call print_newline
+    mov r14, [r12 + AST_F1]
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- BinOp / FlowExpr ---
+.pa_binop:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F3]        # op token
+    test rax, rax
+    jz .pa_bo_nl
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+.pa_bo_nl:
+    call print_newline
+    mov rdi, [r12 + AST_F1]
+    lea esi, [r13d + 1]
+    call print_ast
+    mov rdi, [r12 + AST_F2]
+    lea esi, [r13d + 1]
+    call print_ast
+    jmp .pa_ret
+
+# --- Call ---
+.pa_call:
+    call print_newline
+    mov rdi, [r12 + AST_F1]         # callee
+    lea esi, [r13d + 1]
+    call print_ast
+    mov r14, [r12 + AST_F2]         # args list
+    test r14, r14
+    jz .pa_ret
+    call .pa_print_list
+    jmp .pa_ret
+
+# --- Dot/Moment/Index access ---
+.pa_dot:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F2]
+    test rax, rax
+    jz .pa_dot_nl
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+.pa_dot_nl:
+    call print_newline
+    mov rdi, [r12 + AST_F1]
+    lea esi, [r13d + 1]
+    call print_ast
+    jmp .pa_ret
+
+# --- Ident ---
+.pa_ident:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]
+    test rax, rax
+    jz .pa_id_nl
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+.pa_id_nl:
+    call print_newline
+    jmp .pa_ret
+
+# --- Token-valued literal (int, float, string) ---
+.pa_token_val:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]
+    test rax, rax
+    jz .pa_tv_nl
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+.pa_tv_nl:
+    call print_newline
+    jmp .pa_ret
+
+# --- Bool literal ---
+.pa_bool_val:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]
+    test rax, rax
+    jz .pa_bv_f
+    lea rdi, [rip + str_true]
+    jmp .pa_bv_print
+.pa_bv_f:
+    lea rdi, [rip + str_false]
+.pa_bv_print:
+    call print_str
+    call print_newline
+    jmp .pa_ret
+
+# --- Field def ---
+.pa_field_def:
+    mov dil, ' '
+    call print_char
+    mov rax, [r12 + AST_F1]
+    test rax, rax
+    jz .pa_fd_nl
+    mov rdi, [rax + TOK_START]
+    mov rsi, [rax + TOK_LEN]
+    call print_bytes
+.pa_fd_nl:
+    call print_newline
+    mov rdi, [r12 + AST_F2]
+    test rdi, rdi
+    jz .pa_ret
+    lea esi, [r13d + 1]
+    call print_ast
+    jmp .pa_ret
+
+.pa_null:
+.pa_ret:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# --- Helper: print all nodes in list r14 at indent r13+1 ---
+.pa_print_list:
+    push r15
+    push rbx
+
+    mov rbx, [r14 + NL_ITEMS]
+    xor r15d, r15d
+.pa_pl_loop:
+    cmp r15, [r14 + NL_COUNT]
+    jge .pa_pl_done
+    mov rdi, [rbx + r15*8]
+    lea esi, [r13d + 1]
+    call print_ast
+    inc r15
+    jmp .pa_pl_loop
+.pa_pl_done:
+    pop rbx
+    pop r15
+    ret
+
+# print_ast_tag_name(tag: rdi)
+print_ast_tag_name:
+    push rbx
+    lea rbx, [rip + ast_tag_names]
+.patn_loop:
+    mov rax, [rbx]
+    cmp rax, -1
+    je .patn_unknown
+    cmp rax, rdi
+    je .patn_found
+    add rbx, 16
+    jmp .patn_loop
+.patn_found:
+    mov rdi, [rbx + 8]
+    call print_str
+    pop rbx
+    ret
+.patn_unknown:
+    lea rdi, [rip + msg_unknown_ast]
+    call print_str
+    pop rbx
+    ret
+
+
+# ============================================================================
 # READ-ONLY DATA
 # ============================================================================
 .section .rodata
@@ -1763,6 +4098,87 @@ msg_unterm_str:  .asciz "Error: unterminated string at line "
 msg_total:       .asciz "Total: "
 msg_tokens:      .asciz " tokens"
 msg_unknown_tok: .asciz "???"
+msg_parse_err:   .asciz "Parse error at "
+msg_expected:    .asciz " expected type "
+msg_got:         .asciz " got "
+msg_unknown_ast: .asciz "AST:?"
+str_true:        .asciz "true"
+str_false:       .asciz "false"
+
+# --- AST tag name table ---
+ast_tag_names:
+    .quad AST_PROGRAM,       atn_program
+    .quad AST_MOMENT_DECL,   atn_moment
+    .quad AST_NODE_DECL,     atn_node
+    .quad AST_PATH_DECL,     atn_path
+    .quad AST_MIND_DECL,     atn_mind
+    .quad AST_FN_DECL,       atn_fn
+    .quad AST_LET_STMT,      atn_let
+    .quad AST_IF_STMT,       atn_if
+    .quad AST_WHILE_STMT,    atn_while
+    .quad AST_FOR_STMT,      atn_for
+    .quad AST_RETURN_STMT,   atn_return
+    .quad AST_BLOCK,         atn_block
+    .quad AST_BIN_OP,        atn_binop
+    .quad AST_UNARY_OP,      atn_unary
+    .quad AST_CALL,          atn_call
+    .quad AST_DOT_ACCESS,    atn_dot
+    .quad AST_MOMENT_ACCESS, atn_moment_acc
+    .quad AST_IDENT,         atn_ident
+    .quad AST_INT_LIT,       atn_int
+    .quad AST_FLOAT_LIT,     atn_float
+    .quad AST_STRING_LIT,    atn_string
+    .quad AST_BOOL_LIT,      atn_bool
+    .quad AST_NONE_LIT,      atn_none
+    .quad AST_LIST_LIT,      atn_list
+    .quad AST_FLOW_EXPR,     atn_flow
+    .quad AST_EMIT_STMT,     atn_emit
+    .quad AST_WHEN_BLOCK,    atn_when
+    .quad AST_AWARENESS,     atn_awareness
+    .quad AST_STRUCT_DECL,   atn_struct
+    .quad AST_FIELD_DEF,     atn_field
+    .quad AST_ASSIGN_STMT,   atn_assign
+    .quad AST_RESPOND_STMT,  atn_respond
+    .quad AST_CHANNEL_DECL,  atn_channel
+    .quad AST_INDEX_EXPR,    atn_index
+    .quad AST_EXPR_STMT,     atn_expr_stmt
+    .quad -1, 0
+
+atn_program:     .asciz "Program"
+atn_moment:      .asciz "Moment"
+atn_node:        .asciz "Node"
+atn_path:        .asciz "Path"
+atn_mind:        .asciz "Mind"
+atn_fn:          .asciz "Fn"
+atn_let:         .asciz "Let"
+atn_if:          .asciz "If"
+atn_while:       .asciz "While"
+atn_for:         .asciz "For"
+atn_return:      .asciz "Return"
+atn_block:       .asciz "Block"
+atn_binop:       .asciz "BinOp"
+atn_unary:       .asciz "Unary"
+atn_call:        .asciz "Call"
+atn_dot:         .asciz "Dot"
+atn_moment_acc:  .asciz "MomentAcc"
+atn_ident:       .asciz "Ident"
+atn_int:         .asciz "Int"
+atn_float:       .asciz "Float"
+atn_string:      .asciz "Str"
+atn_bool:        .asciz "Bool"
+atn_none:        .asciz "None"
+atn_list:        .asciz "List"
+atn_flow:        .asciz "Flow"
+atn_emit:        .asciz "Emit"
+atn_when:        .asciz "When"
+atn_awareness:   .asciz "Awareness"
+atn_struct:      .asciz "Struct"
+atn_field:       .asciz "Field"
+atn_assign:      .asciz "Assign"
+atn_respond:     .asciz "Respond"
+atn_channel:     .asciz "Channel"
+atn_index:       .asciz "Index"
+atn_expr_stmt:   .asciz "ExprStmt"
 
 # --- Keyword table: [ptr, len, type] triples, terminated by null ---
 kw_table:
