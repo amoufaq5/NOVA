@@ -1,0 +1,63 @@
+// Nova Compiler: Main Entry Point
+// Reads a .nova source file, compiles it to x86-64 assembly,
+// and writes the output to a .s file.
+//
+// Usage: nova_boot src/compiler/compiler.nova <input.nova> -o <output.s>
+// Or when self-compiled: ./nova <input.nova> -o <output.s>
+
+fn compile(source) {
+    let tokens = tokenize(source)
+    let ast = parse_program(tokens)
+    cg_init()
+    let asm_code = gen_program(ast)
+    return asm_code
+}
+
+fn main() {
+    // For bootstrap: source is passed as first argument
+    // The bootstrap interpreter receives the file to compile
+    // via a special __args builtin or we read it from a known path.
+    //
+    // For now, read from the file specified on command line.
+    // The bootstrap passes argv[2] as the target file (argv[1] is this compiler).
+
+    let input_file = __arg(0)
+    let output_file = ""
+
+    if input_file == "" {
+        println("Usage: nova <input.nova> [-o output.s]")
+        exit(1)
+    }
+
+    // Check for -o flag
+    let arg1 = __arg(1)
+    if arg1 == "-o" {
+        output_file = __arg(2)
+    } else {
+        // Default output name
+        output_file = "output.s"
+    }
+
+    // Read source
+    let source = read_file(input_file)
+    if source == 0 {
+        println(concat("Error: cannot read file: ", input_file))
+        exit(1)
+    }
+
+    // Compile
+    let asm_code = compile(source)
+
+    // Write output
+    let ok = write_file(output_file, asm_code)
+    if ok == 0 {
+        println(concat("Error: cannot write file: ", output_file))
+        exit(1)
+    }
+
+    println(concat("Compiled: ", concat(input_file, concat(" -> ", output_file))))
+}
+
+// Run main
+println("=== Nova Compiler Starting ===")
+main()

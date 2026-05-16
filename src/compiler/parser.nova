@@ -1,0 +1,361 @@
+// Nova Compiler: Parser
+// Transforms a token list into an AST.
+// Uses recursive descent with precedence climbing.
+
+let par_tokens = 0
+let par_pos = 0
+let par_count = 0
+
+fn par_init(tokens) {
+    par_tokens = tokens
+    par_pos = 0
+    par_count = len(tokens)
+}
+
+fn par_peek() {
+    if par_pos >= par_count {
+        return 0
+    }
+    return par_tokens[par_pos]
+}
+
+fn par_peek_type() {
+    let tok = par_peek()
+    if tok == 0 { return TOK_EOF }
+    return tok[0]
+}
+
+fn par_peek_val() {
+    let tok = par_peek()
+    if tok == 0 { return 0 }
+    return tok[1]
+}
+
+fn par_advance() {
+    let tok = par_peek()
+    par_pos = par_pos + 1
+    return tok
+}
+
+fn par_expect(typ) {
+    let t = par_peek_type()
+    if t != typ {
+        println(concat("Parse error: expected token type ", concat(int_to_str(typ), concat(" got ", int_to_str(t)))))
+        exit(1)
+    }
+    return par_advance()
+}
+
+fn par_match(typ) {
+    if par_peek_type() == typ {
+        par_advance()
+        return 1
+    }
+    return 0
+}
+
+// --- Expression Parsing (precedence climbing) ---
+
+fn parse_primary() {
+    let t = par_peek_type()
+
+    if t == TOK_INT {
+        let tok = par_advance()
+        return ast_int(tok[1])
+    }
+    if t == TOK_STRING {
+        let tok = par_advance()
+        return ast_str(tok[1])
+    }
+    if t == TOK_TRUE {
+        par_advance()
+        return ast_bool(1)
+    }
+    if t == TOK_FALSE {
+        par_advance()
+        return ast_bool(0)
+    }
+    if t == TOK_NONE {
+        par_advance()
+        return ast_none()
+    }
+    if t == TOK_IDENT {
+        let tok = par_advance()
+        return ast_ident(tok[1])
+    }
+    if t == TOK_LPAREN {
+        par_advance()
+        let expr = parse_expr()
+        par_expect(TOK_RPAREN)
+        return expr
+    }
+    if t == TOK_LBRACKET {
+        par_advance()
+        let elems = list_new()
+        if par_peek_type() != TOK_RBRACKET {
+            push(elems, parse_expr())
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                push(elems, parse_expr())
+            }
+        }
+        par_expect(TOK_RBRACKET)
+        return ast_list(elems)
+    }
+    if t == TOK_MINUS {
+        par_advance()
+        let operand = parse_unary()
+        return ast_unary("-", operand)
+    }
+    if t == TOK_BANG {
+        par_advance()
+        let operand = parse_unary()
+        return ast_unary("!", operand)
+    }
+    // Unexpected token
+    println(concat("Parse error: unexpected token type ", int_to_str(t)))
+    exit(1)
+    return ast_none()
+}
+
+fn parse_unary() {
+    return parse_primary()
+}
+
+fn parse_postfix() {
+    let expr = parse_unary()
+    while 1 == 1 {
+        let t = par_peek_type()
+        if t == TOK_LPAREN {
+            // Function call
+            par_advance()
+            let args = list_new()
+            if par_peek_type() != TOK_RPAREN {
+                push(args, parse_expr())
+                while par_peek_type() == TOK_COMMA {
+                    par_advance()
+                    push(args, parse_expr())
+                }
+            }
+            par_expect(TOK_RPAREN)
+            expr = ast_call(expr, args)
+        } else {
+            if t == TOK_LBRACKET {
+                par_advance()
+                let idx = parse_expr()
+                par_expect(TOK_RBRACKET)
+                expr = ast_index(expr, idx)
+            } else {
+                return expr
+            }
+        }
+    }
+    return expr
+}
+
+fn parse_mul() {
+    let left = parse_postfix()
+    while 1 == 1 {
+        let t = par_peek_type()
+        if t == TOK_STAR {
+            par_advance()
+            let right = parse_postfix()
+            left = ast_binop("*", left, right)
+        } else {
+            if t == TOK_SLASH {
+                par_advance()
+                let right = parse_postfix()
+                left = ast_binop("/", left, right)
+            } else {
+                if t == TOK_PERCENT {
+                    par_advance()
+                    let right = parse_postfix()
+                    left = ast_binop("%", left, right)
+                } else {
+                    return left
+                }
+            }
+        }
+    }
+    return left
+}
+
+fn parse_add() {
+    let left = parse_mul()
+    while 1 == 1 {
+        let t = par_peek_type()
+        if t == TOK_PLUS {
+            par_advance()
+            let right = parse_mul()
+            left = ast_binop("+", left, right)
+        } else {
+            if t == TOK_MINUS {
+                par_advance()
+                let right = parse_mul()
+                left = ast_binop("-", left, right)
+            } else {
+                return left
+            }
+        }
+    }
+    return left
+}
+
+fn parse_cmp() {
+    let left = parse_add()
+    while 1 == 1 {
+        let t = par_peek_type()
+        if t == TOK_LT {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop("<", left, right)
+        } else { if t == TOK_GT {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop(">", left, right)
+        } else { if t == TOK_LTEQ {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop("<=", left, right)
+        } else { if t == TOK_GTEQ {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop(">=", left, right)
+        } else { if t == TOK_EQEQ {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop("==", left, right)
+        } else { if t == TOK_BANGEQ {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop("!=", left, right)
+        } else {
+            return left
+        } } } } } }
+    }
+    return left
+}
+
+fn parse_expr() {
+    return parse_cmp()
+}
+
+// --- Statement Parsing ---
+
+fn parse_block() {
+    par_expect(TOK_LBRACE)
+    let stmts = list_new()
+    while par_peek_type() != TOK_RBRACE {
+        if par_peek_type() == TOK_EOF {
+            println("Parse error: unexpected EOF in block")
+            exit(1)
+        }
+        push(stmts, parse_stmt())
+    }
+    par_expect(TOK_RBRACE)
+    return ast_block(stmts)
+}
+
+fn parse_if() {
+    par_expect(TOK_IF)
+    let cond = parse_expr()
+    let then_body = parse_block()
+    let else_body = 0
+    if par_peek_type() == TOK_ELSE {
+        par_advance()
+        if par_peek_type() == TOK_IF {
+            else_body = parse_if()
+        } else {
+            else_body = parse_block()
+        }
+    }
+    return ast_if(cond, then_body, else_body)
+}
+
+fn parse_while() {
+    par_expect(TOK_WHILE)
+    let cond = parse_expr()
+    let body = parse_block()
+    return ast_while(cond, body)
+}
+
+fn parse_for() {
+    par_expect(TOK_FOR)
+    let var_tok = par_expect(TOK_IDENT)
+    let var_name = var_tok[1]
+    par_expect(TOK_IN)
+    let iter = parse_expr()
+    let body = parse_block()
+    return ast_for(var_name, iter, body)
+}
+
+fn parse_let() {
+    par_expect(TOK_LET)
+    let name_tok = par_expect(TOK_IDENT)
+    let name = name_tok[1]
+    par_expect(TOK_EQ)
+    let value = parse_expr()
+    return ast_let(name, value)
+}
+
+fn parse_fn() {
+    par_expect(TOK_FN)
+    let name_tok = par_expect(TOK_IDENT)
+    let name = name_tok[1]
+    par_expect(TOK_LPAREN)
+    let params = list_new()
+    if par_peek_type() != TOK_RPAREN {
+        let p = par_expect(TOK_IDENT)
+        push(params, p[1])
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            let p2 = par_expect(TOK_IDENT)
+            push(params, p2[1])
+        }
+    }
+    par_expect(TOK_RPAREN)
+    let body = parse_block()
+    return ast_fn_decl(name, params, body)
+}
+
+fn parse_return() {
+    par_expect(TOK_RETURN)
+    let value = 0
+    let t = par_peek_type()
+    if t != TOK_RBRACE {
+        if t != TOK_EOF {
+            value = parse_expr()
+        }
+    }
+    return ast_return(value)
+}
+
+fn parse_stmt() {
+    let t = par_peek_type()
+    if t == TOK_LET { return parse_let() }
+    if t == TOK_FN { return parse_fn() }
+    if t == TOK_IF { return parse_if() }
+    if t == TOK_WHILE { return parse_while() }
+    if t == TOK_FOR { return parse_for() }
+    if t == TOK_RETURN { return parse_return() }
+
+    // Assignment or expression statement
+    let expr = parse_expr()
+    if par_peek_type() == TOK_EQ {
+        par_advance()
+        let value = parse_expr()
+        // expr should be an identifier
+        let name = expr[1]
+        return ast_assign(name, value)
+    }
+    return ast_expr_stmt(expr)
+}
+
+fn parse_program(tokens) {
+    par_init(tokens)
+    let decls = list_new()
+    while par_peek_type() != TOK_EOF {
+        push(decls, parse_stmt())
+    }
+    return ast_program(decls)
+}

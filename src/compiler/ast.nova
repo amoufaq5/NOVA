@@ -1,0 +1,186 @@
+// Nova Compiler: AST Node Types
+// AST nodes are represented as lists: [tag, field1, field2, ...]
+// This keeps the bootstrap interpreter happy (no struct support needed).
+
+// --- AST Node Tags ---
+let AST_PROGRAM = 1
+let AST_FN_DECL = 2
+let AST_LET_STMT = 3
+let AST_IF_STMT = 4
+let AST_WHILE_STMT = 5
+let AST_FOR_STMT = 6
+let AST_RETURN_STMT = 7
+let AST_BLOCK = 8
+let AST_BIN_OP = 9
+let AST_UNARY_OP = 10
+let AST_CALL = 11
+let AST_IDENT = 12
+let AST_INT_LIT = 13
+let AST_STR_LIT = 14
+let AST_BOOL_LIT = 15
+let AST_NONE_LIT = 16
+let AST_LIST_LIT = 17
+let AST_INDEX_EXPR = 18
+let AST_ASSIGN_STMT = 19
+let AST_EXPR_STMT = 20
+
+// --- AST Constructors ---
+// Each returns a list: [tag, ...fields]
+
+fn ast_program(decls) {
+    let n = list_new()
+    push(n, AST_PROGRAM)
+    push(n, decls)
+    return n
+}
+
+fn ast_fn_decl(name, params, body) {
+    let n = list_new()
+    push(n, AST_FN_DECL)
+    push(n, name)
+    push(n, params)
+    push(n, body)
+    return n
+}
+
+fn ast_let(name, value) {
+    let n = list_new()
+    push(n, AST_LET_STMT)
+    push(n, name)
+    push(n, value)
+    return n
+}
+
+fn ast_if(cond, then_body, else_body) {
+    let n = list_new()
+    push(n, AST_IF_STMT)
+    push(n, cond)
+    push(n, then_body)
+    push(n, else_body)
+    return n
+}
+
+fn ast_while(cond, body) {
+    let n = list_new()
+    push(n, AST_WHILE_STMT)
+    push(n, cond)
+    push(n, body)
+    return n
+}
+
+fn ast_for(var_name, iter, body) {
+    let n = list_new()
+    push(n, AST_FOR_STMT)
+    push(n, var_name)
+    push(n, iter)
+    push(n, body)
+    return n
+}
+
+fn ast_return(value) {
+    let n = list_new()
+    push(n, AST_RETURN_STMT)
+    push(n, value)
+    return n
+}
+
+fn ast_block(stmts) {
+    let n = list_new()
+    push(n, AST_BLOCK)
+    push(n, stmts)
+    return n
+}
+
+fn ast_binop(op, left, right) {
+    let n = list_new()
+    push(n, AST_BIN_OP)
+    push(n, op)
+    push(n, left)
+    push(n, right)
+    return n
+}
+
+fn ast_unary(op, operand) {
+    let n = list_new()
+    push(n, AST_UNARY_OP)
+    push(n, op)
+    push(n, operand)
+    return n
+}
+
+fn ast_call(callee, args) {
+    let n = list_new()
+    push(n, AST_CALL)
+    push(n, callee)
+    push(n, args)
+    return n
+}
+
+fn ast_ident(name) {
+    let n = list_new()
+    push(n, AST_IDENT)
+    push(n, name)
+    return n
+}
+
+fn ast_int(value) {
+    let n = list_new()
+    push(n, AST_INT_LIT)
+    push(n, value)
+    return n
+}
+
+fn ast_str(value) {
+    let n = list_new()
+    push(n, AST_STR_LIT)
+    push(n, value)
+    return n
+}
+
+fn ast_bool(value) {
+    let n = list_new()
+    push(n, AST_BOOL_LIT)
+    push(n, value)
+    return n
+}
+
+fn ast_none() {
+    let n = list_new()
+    push(n, AST_NONE_LIT)
+    return n
+}
+
+fn ast_list(elements) {
+    let n = list_new()
+    push(n, AST_LIST_LIT)
+    push(n, elements)
+    return n
+}
+
+fn ast_index(base, idx) {
+    let n = list_new()
+    push(n, AST_INDEX_EXPR)
+    push(n, base)
+    push(n, idx)
+    return n
+}
+
+fn ast_assign(name, value) {
+    let n = list_new()
+    push(n, AST_ASSIGN_STMT)
+    push(n, name)
+    push(n, value)
+    return n
+}
+
+fn ast_expr_stmt(expr) {
+    let n = list_new()
+    push(n, AST_EXPR_STMT)
+    push(n, expr)
+    return n
+}
+
+// --- Accessor helpers ---
+fn ast_tag(nd) {
+    return nd[0]
+}

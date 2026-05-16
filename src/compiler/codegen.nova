@@ -1,0 +1,596 @@
+// Nova Compiler: x86-64 Code Generator
+// Emits GAS Intel syntax assembly.
+// Strategy: stack-based evaluation, variables on stack frame.
+
+let NL = chr(10)
+let DQ = chr(34)
+let cg_output = ""
+let cg_label_count = 0
+let cg_strings = 0       // list of string literals
+let cg_str_count = 0
+let cg_locals = 0        // current function's local variables list
+let cg_local_count = 0
+let cg_params = 0        // current function's parameters
+let cg_param_count = 0
+let cg_fns = 0           // list of all function names (for forward decls)
+
+fn cg_init() {
+    cg_output = ""
+    cg_label_count = 0
+    cg_strings = list_new()
+    cg_str_count = 0
+    cg_fns = list_new()
+}
+
+fn out(s) {
+    cg_output = cg_output + s + NL
+}
+
+fn out_label(name) {
+    cg_output = cg_output + name + ":" + NL
+}
+
+fn new_label() {
+    cg_label_count = cg_label_count + 1
+    return ".L" + int_to_str(cg_label_count)
+}
+
+fn add_string(s) {
+    let idx = cg_str_count
+    push(cg_strings, s)
+    cg_str_count = cg_str_count + 1
+    return idx
+}
+
+fn local_offset(name) {
+    let i = 0
+    while i < cg_local_count {
+        if cg_locals[i] == name {
+            return (i + 1) * 8
+        }
+        i = i + 1
+    }
+    // Check params
+    let j = 0
+    while j < cg_param_count {
+        if cg_params[j] == name {
+            // Params are at positive offsets from rbp (pushed before locals)
+            // param 0 is at [rbp+16], param 1 at [rbp+24], etc.
+            // Actually using registers for first 6 params, stored in frame
+            return (cg_local_count + j + 1) * 8
+        }
+        j = j + 1
+    }
+    // Not found - add as local
+    push(cg_locals, name)
+    cg_local_count = cg_local_count + 1
+    return cg_local_count * 8
+}
+
+fn collect_locals(nd) {
+    // Pre-scan function body for let declarations to pre-allocate stack space
+    let tag = ast_tag(nd)
+    if tag == AST_LET_STMT {
+        let name = nd[1]
+        push(cg_locals, name)
+        cg_local_count = cg_local_count + 1
+    }
+    if tag == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            collect_locals(stmts[i])
+            i = i + 1
+        }
+    }
+    if tag == AST_IF_STMT {
+        collect_locals(nd[2])
+        if nd[3] != 0 {
+            collect_locals(nd[3])
+        }
+    }
+    if tag == AST_WHILE_STMT {
+        collect_locals(nd[2])
+    }
+    if tag == AST_FOR_STMT {
+        let var_name = nd[1]
+        push(cg_locals, var_name)
+        cg_local_count = cg_local_count + 1
+        collect_locals(nd[3])
+    }
+}
+
+// --- Code Generation ---
+
+fn gen_expr(nd) {
+    let tag = ast_tag(nd)
+
+    if tag == AST_INT_LIT {
+        out("    mov rax, " + int_to_str(nd[1]))
+        return 0
+    }
+
+    if tag == AST_BOOL_LIT {
+        out("    mov rax, " + int_to_str(nd[1]))
+        return 0
+    }
+
+    if tag == AST_NONE_LIT {
+        out("    xor eax, eax")
+        return 0
+    }
+
+    if tag == AST_STR_LIT {
+        let idx = add_string(nd[1])
+        out("    lea rax, [rip + _str_" + int_to_str(idx) + "]")
+        return 0
+    }
+
+    if tag == AST_IDENT {
+        let name = nd[1]
+        let off = local_offset(name)
+        out("    mov rax, [rbp - " + int_to_str(off) + "]")
+        return 0
+    }
+
+    if tag == AST_BIN_OP {
+        let op = nd[1]
+        gen_expr(nd[3])       // right
+        out("    push rax")
+        gen_expr(nd[2])       // left
+        out("    pop rcx")
+        if op == "+" { out("    add rax, rcx") }
+        else { if op == "-" { out("    sub rax, rcx") }
+        else { if op == "*" { out("    imul rax, rcx") }
+        else { if op == "/" {
+            out("    cqo")
+            out("    idiv rcx")
+        }
+        else { if op == "%" {
+            out("    cqo")
+            out("    idiv rcx")
+            out("    mov rax, rdx")
+        }
+        else { if op == "==" {
+            out("    cmp rax, rcx")
+            out("    sete al")
+            out("    movzx rax, al")
+        }
+        else { if op == "!=" {
+            out("    cmp rax, rcx")
+            out("    setne al")
+            out("    movzx rax, al")
+        }
+        else { if op == "<" {
+            out("    cmp rax, rcx")
+            out("    setl al")
+            out("    movzx rax, al")
+        }
+        else { if op == ">" {
+            out("    cmp rax, rcx")
+            out("    setg al")
+            out("    movzx rax, al")
+        }
+        else { if op == "<=" {
+            out("    cmp rax, rcx")
+            out("    setle al")
+            out("    movzx rax, al")
+        }
+        else { if op == ">=" {
+            out("    cmp rax, rcx")
+            out("    setge al")
+            out("    movzx rax, al")
+        }
+        else {
+            out("    # unknown op: " + op)
+        } } } } } } } } } } }
+        return 0
+    }
+
+    if tag == AST_UNARY_OP {
+        let op = nd[1]
+        gen_expr(nd[2])
+        if op == "-" {
+            out("    neg rax")
+        }
+        if op == "!" {
+            out("    test rax, rax")
+            out("    sete al")
+            out("    movzx rax, al")
+        }
+        return 0
+    }
+
+    if tag == AST_CALL {
+        let callee = nd[1]
+        let args = nd[2]
+        let argc = len(args)
+        // Push args right to left
+        let i = argc - 1
+        while i >= 0 {
+            gen_expr(args[i])
+            out("    push rax")
+            i = i - 1
+        }
+        // Move args to registers (System V ABI)
+        if argc > 0 { out("    pop rdi") }
+        if argc > 1 { out("    pop rsi") }
+        if argc > 2 { out("    pop rdx") }
+        if argc > 3 { out("    pop rcx") }
+        if argc > 4 { out("    pop r8") }
+        if argc > 5 { out("    pop r9") }
+        // Align stack if needed
+        out("    call " + callee[1])
+        return 0
+    }
+
+    if tag == AST_INDEX_EXPR {
+        gen_expr(nd[2])       // index
+        out("    push rax")
+        gen_expr(nd[1])       // base (pointer to array)
+        out("    pop rcx")
+        out("    mov rax, [rax + rcx*8]")
+        return 0
+    }
+
+    out("    # unknown expr tag " + int_to_str(tag))
+}
+
+fn gen_stmt(nd) {
+    let tag = ast_tag(nd)
+
+    if tag == AST_LET_STMT {
+        let name = nd[1]
+        let value = nd[2]
+        gen_expr(value)
+        let off = local_offset(name)
+        out("    mov [rbp - " + int_to_str(off) + "], rax")
+        return 0
+    }
+
+    if tag == AST_ASSIGN_STMT {
+        let name = nd[1]
+        let value = nd[2]
+        gen_expr(value)
+        let off = local_offset(name)
+        out("    mov [rbp - " + int_to_str(off) + "], rax")
+        return 0
+    }
+
+    if tag == AST_RETURN_STMT {
+        let value = nd[1]
+        if value != 0 {
+            gen_expr(value)
+        } else {
+            out("    xor eax, eax")
+        }
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+        return 0
+    }
+
+    if tag == AST_IF_STMT {
+        let cond = nd[1]
+        let then_body = nd[2]
+        let else_body = nd[3]
+        let else_lbl = new_label()
+        let end_lbl = new_label()
+        gen_expr(cond)
+        out("    test rax, rax")
+        out("    jz " + else_lbl)
+        gen_block(then_body)
+        out("    jmp " + end_lbl)
+        out_label(else_lbl)
+        if else_body != 0 {
+            if ast_tag(else_body) == AST_IF_STMT {
+                gen_stmt(else_body)
+            } else {
+                gen_block(else_body)
+            }
+        }
+        out_label(end_lbl)
+        return 0
+    }
+
+    if tag == AST_WHILE_STMT {
+        let cond = nd[1]
+        let body = nd[2]
+        let loop_lbl = new_label()
+        let end_lbl = new_label()
+        out_label(loop_lbl)
+        gen_expr(cond)
+        out("    test rax, rax")
+        out("    jz " + end_lbl)
+        gen_block(body)
+        out("    jmp " + loop_lbl)
+        out_label(end_lbl)
+        return 0
+    }
+
+    if tag == AST_FOR_STMT {
+        let var_name = nd[1]
+        let iter_expr = nd[2]
+        let body = nd[3]
+        let var_off = local_offset(var_name)
+        // Emit iterator: assume it returns list ptr in rax
+        gen_expr(iter_expr)
+        out("    push rax")            // save list ptr
+        out("    push 0")              // counter = 0
+        let loop_lbl = new_label()
+        let end_lbl = new_label()
+        out_label(loop_lbl)
+        out("    mov rcx, [rsp]")      // counter
+        out("    mov rdi, [rsp+8]")    // list ptr
+        out("    cmp rcx, [rdi]")      // compare with list length
+        out("    jge " + end_lbl)
+        // Load element
+        out("    mov rdi, [rdi+16]")   // items ptr
+        out("    mov rax, [rdi+rcx*8]")
+        out("    mov [rbp - " + int_to_str(var_off) + "], rax")
+        gen_block(body)
+        out("    inc qword ptr [rsp]") // counter++
+        out("    jmp " + loop_lbl)
+        out_label(end_lbl)
+        out("    add rsp, 16")         // pop counter + list ptr
+        return 0
+    }
+
+    if tag == AST_EXPR_STMT {
+        gen_expr(nd[1])
+        return 0
+    }
+
+    if tag == AST_BLOCK {
+        gen_block(nd)
+        return 0
+    }
+
+    out("    # unknown stmt tag " + int_to_str(tag))
+}
+
+fn gen_block(nd) {
+    let stmts = nd[1]
+    let i = 0
+    while i < len(stmts) {
+        gen_stmt(stmts[i])
+        i = i + 1
+    }
+}
+
+fn gen_function(nd) {
+    let name = nd[1]
+    let params = nd[2]
+    let body = nd[3]
+
+    // Reset locals
+    cg_locals = list_new()
+    cg_local_count = 0
+    cg_params = params
+    cg_param_count = len(params)
+
+    // Store params as locals first
+    let pi = 0
+    while pi < cg_param_count {
+        push(cg_locals, params[pi])
+        cg_local_count = cg_local_count + 1
+        pi = pi + 1
+    }
+
+    // Pre-scan for let declarations
+    collect_locals(body)
+
+    // Emit function prologue
+    out("")
+    out(".globl " + name)
+    out_label(name)
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    let frame_size = cg_local_count * 8
+    // Align to 16 bytes
+    if frame_size % 16 != 0 {
+        frame_size = frame_size + (16 - (frame_size % 16))
+    }
+    if frame_size > 0 {
+        out("    sub rsp, " + int_to_str(frame_size))
+    }
+
+    // Store register params into local slots
+    if cg_param_count > 0 { out("    mov [rbp - 8], rdi") }
+    if cg_param_count > 1 { out("    mov [rbp - 16], rsi") }
+    if cg_param_count > 2 { out("    mov [rbp - 24], rdx") }
+    if cg_param_count > 3 { out("    mov [rbp - 32], rcx") }
+    if cg_param_count > 4 { out("    mov [rbp - 40], r8") }
+    if cg_param_count > 5 { out("    mov [rbp - 48], r9") }
+
+    // Generate body
+    gen_block(body)
+
+    // Epilogue (implicit return 0)
+    out("    xor eax, eax")
+    out("    mov rsp, rbp")
+    out("    pop rbp")
+    out("    ret")
+}
+
+fn gen_toplevel(nd) {
+    let tag = ast_tag(nd)
+    if tag == AST_FN_DECL {
+        gen_function(nd)
+        return 0
+    }
+    // Top-level statements go into _nova_main
+    gen_stmt(nd)
+}
+
+fn gen_program(program) {
+    let decls = program[1]
+
+    // Emit header
+    out(".intel_syntax noprefix")
+    out(".text")
+
+    // First pass: collect function names
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            push(cg_fns, d[1])
+        }
+        i = i + 1
+    }
+
+    // Generate functions
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            gen_function(d)
+        }
+        i = i + 1
+    }
+
+    // Generate _nova_main for top-level code
+    cg_locals = list_new()
+    cg_local_count = 0
+    cg_params = list_new()
+    cg_param_count = 0
+
+    // Collect top-level locals
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) != AST_FN_DECL {
+            collect_locals(d)
+        }
+        i = i + 1
+    }
+
+    out("")
+    out(".globl _start")
+    out_label("_start")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    let frame_size = cg_local_count * 8
+    if frame_size % 16 != 0 {
+        frame_size = frame_size + (16 - (frame_size % 16))
+    }
+    if frame_size > 0 {
+        out("    sub rsp, " + int_to_str(frame_size))
+    }
+
+    // Generate top-level statements
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) != AST_FN_DECL {
+            gen_stmt(d)
+        }
+        i = i + 1
+    }
+
+    // Exit
+    out("    mov rdi, 0")
+    out("    mov rax, 60")
+    out("    syscall")
+
+    // Emit string data section
+    out("")
+    out(".section .rodata")
+    i = 0
+    while i < cg_str_count {
+        out_label("_str_" + int_to_str(i))
+        out("    .asciz " + DQ + cg_strings[i] + DQ)
+        i = i + 1
+    }
+
+    // Emit runtime helpers
+    out("")
+    out(".text")
+    out_label("_nova_print_int")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    sub rsp, 32")
+    out("    mov rsi, rdi")
+    out("    test rsi, rsi")
+    out("    jnz .pi_nonzero")
+    out("    mov byte ptr [rbp-1], 48")
+    out("    lea rsi, [rbp-1]")
+    out("    mov rdx, 1")
+    out("    jmp .pi_write")
+    out(".pi_nonzero:")
+    out("    lea rdi, [rbp-1]")
+    out("    xor ecx, ecx")
+    out("    mov rax, rsi")
+    out("    test rax, rax")
+    out("    jns .pi_pos")
+    out("    neg rax")
+    out("    mov cl, 1")
+    out(".pi_pos:")
+    out(".pi_loop:")
+    out("    test rax, rax")
+    out("    jz .pi_done_digits")
+    out("    xor edx, edx")
+    out("    mov r8, 10")
+    out("    div r8")
+    out("    add dl, 48")
+    out("    mov [rdi], dl")
+    out("    dec rdi")
+    out("    jmp .pi_loop")
+    out(".pi_done_digits:")
+    out("    test cl, cl")
+    out("    jz .pi_no_sign")
+    out("    mov byte ptr [rdi], 45")
+    out("    dec rdi")
+    out(".pi_no_sign:")
+    out("    inc rdi")
+    out("    lea rdx, [rbp-1]")
+    out("    sub rdx, rdi")
+    out("    inc rdx")
+    out("    mov rsi, rdi")
+    out(".pi_write:")
+    out("    mov rdi, 1")
+    out("    mov rax, 1")
+    out("    syscall")
+    out("    mov rsp, rbp")
+    out("    pop rbp")
+    out("    ret")
+    out("")
+    out_label("_nova_print_str")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    mov rsi, rdi")
+    out("    xor edx, edx")
+    out(".ps_len:")
+    out("    cmp byte ptr [rsi + rdx], 0")
+    out("    je .ps_write")
+    out("    inc edx")
+    out("    jmp .ps_len")
+    out(".ps_write:")
+    out("    mov rdi, 1")
+    out("    mov rax, 1")
+    out("    syscall")
+    out("    mov rsp, rbp")
+    out("    pop rbp")
+    out("    ret")
+    out("")
+    out_label("_nova_println")
+    out("    call _nova_print_str")
+    out("    mov rsi, rsp")
+    out("    mov byte ptr [rsp-1], 10")
+    out("    lea rsi, [rsp-1]")
+    out("    mov rdx, 1")
+    out("    mov rdi, 1")
+    out("    mov rax, 1")
+    out("    syscall")
+    out("    ret")
+    out("")
+    out_label("println")
+    out("    jmp _nova_println")
+    out_label("print")
+    out("    jmp _nova_print_str")
+    out_label("print_int")
+    out("    jmp _nova_print_int")
+
+    return cg_output
+}

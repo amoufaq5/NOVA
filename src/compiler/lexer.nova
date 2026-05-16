@@ -1,0 +1,341 @@
+// Nova Compiler: Lexer
+// Tokenizes Nova source into a list of tokens.
+// Each token is [type, value, line, col]
+
+// --- Token Types ---
+let TOK_EOF = 0
+let TOK_INT = 1
+let TOK_FLOAT = 2
+let TOK_STRING = 3
+let TOK_IDENT = 4
+let TOK_PLUS = 10
+let TOK_MINUS = 11
+let TOK_STAR = 12
+let TOK_SLASH = 13
+let TOK_PERCENT = 14
+let TOK_EQ = 15
+let TOK_BANG = 16
+let TOK_LT = 17
+let TOK_GT = 18
+let TOK_DOT = 19
+let TOK_EQEQ = 20
+let TOK_BANGEQ = 21
+let TOK_LTEQ = 22
+let TOK_GTEQ = 23
+let TOK_LPAREN = 30
+let TOK_RPAREN = 31
+let TOK_LBRACE = 32
+let TOK_RBRACE = 33
+let TOK_LBRACKET = 34
+let TOK_RBRACKET = 35
+let TOK_COMMA = 36
+let TOK_COLON = 37
+let TOK_SEMI = 38
+let TOK_AMP = 39
+let TOK_PIPE = 40
+let TOK_TILDE = 41
+let TOK_AT = 42
+let TOK_HASH = 43
+// Keywords
+let TOK_LET = 50
+let TOK_FN = 51
+let TOK_IF = 52
+let TOK_ELSE = 53
+let TOK_WHILE = 54
+let TOK_FOR = 55
+let TOK_IN = 56
+let TOK_RETURN = 57
+let TOK_TRUE = 58
+let TOK_FALSE = 59
+let TOK_NONE = 60
+let TOK_STRUCT = 61
+// Flow operators
+let TOK_FLOW_FWD = 70
+let TOK_FLOW_BWD = 71
+let TOK_BROADCAST = 72
+let TOK_ENRICH = 73
+
+// --- Lexer State ---
+let lex_src = ""
+let lex_pos = 0
+let lex_len = 0
+let lex_line = 1
+let lex_col = 1
+let lex_tokens = 0
+
+fn lex_init(source) {
+    lex_src = source
+    lex_pos = 0
+    lex_len = len(source)
+    lex_line = 1
+    lex_col = 1
+    lex_tokens = list_new()
+}
+
+fn lex_peek() {
+    if lex_pos >= lex_len {
+        return 0
+    }
+    return char_at(lex_src, lex_pos)
+}
+
+fn lex_advance() {
+    let ch = lex_peek()
+    lex_pos = lex_pos + 1
+    if ch == 10 {
+        lex_line = lex_line + 1
+        lex_col = 1
+    } else {
+        lex_col = lex_col + 1
+    }
+    return ch
+}
+
+fn lex_peek_at(offset) {
+    let p = lex_pos + offset
+    if p >= lex_len {
+        return 0
+    }
+    return char_at(lex_src, p)
+}
+
+fn is_alpha(c) {
+    if c >= 65 {
+        if c <= 90 { return 1 }
+    }
+    if c >= 97 {
+        if c <= 122 { return 1 }
+    }
+    if c == 95 { return 1 }
+    return 0
+}
+
+fn is_digit(c) {
+    if c >= 48 {
+        if c <= 57 { return 1 }
+    }
+    return 0
+}
+
+fn is_alnum(c) {
+    if is_alpha(c) == 1 { return 1 }
+    if is_digit(c) == 1 { return 1 }
+    return 0
+}
+
+fn is_whitespace(c) {
+    if c == 32 { return 1 }
+    if c == 9 { return 1 }
+    if c == 10 { return 1 }
+    if c == 13 { return 1 }
+    return 0
+}
+
+fn emit_tok(typ, val) {
+    let tok = list_new()
+    push(tok, typ)
+    push(tok, val)
+    push(tok, lex_line)
+    push(tok, lex_col)
+    push(lex_tokens, tok)
+}
+
+fn skip_whitespace() {
+    while lex_pos < lex_len {
+        let c = lex_peek()
+        if is_whitespace(c) == 1 {
+            lex_advance()
+        } else {
+            if c == 47 {
+                if lex_peek_at(1) == 47 {
+                    // Line comment
+                    while lex_pos < lex_len {
+                        let ch = lex_advance()
+                        if ch == 10 {
+                            return skip_whitespace()
+                        }
+                    }
+                } else {
+                    return 0
+                }
+            } else {
+                return 0
+            }
+        }
+    }
+}
+
+fn lex_number() {
+    let start = lex_pos
+    while lex_pos < lex_len {
+        let c = lex_peek()
+        if is_digit(c) == 0 {
+            let val = substr(lex_src, start, lex_pos - start)
+            emit_tok(TOK_INT, str_to_int(val))
+            return 0
+        }
+        lex_advance()
+    }
+    let val = substr(lex_src, start, lex_pos - start)
+    emit_tok(TOK_INT, str_to_int(val))
+}
+
+fn lex_string() {
+    lex_advance()  // consume opening quote
+    let start = lex_pos
+    while lex_pos < lex_len {
+        let c = lex_peek()
+        if c == 34 {
+            let val = substr(lex_src, start, lex_pos - start)
+            lex_advance()  // consume closing quote
+            emit_tok(TOK_STRING, val)
+            return 0
+        }
+        if c == 92 {
+            lex_advance()  // skip backslash
+        }
+        lex_advance()
+    }
+    // Unterminated string
+    let val = substr(lex_src, start, lex_pos - start)
+    emit_tok(TOK_STRING, val)
+}
+
+fn keyword_type(word) {
+    if word == "let" { return TOK_LET }
+    if word == "fn" { return TOK_FN }
+    if word == "if" { return TOK_IF }
+    if word == "else" { return TOK_ELSE }
+    if word == "while" { return TOK_WHILE }
+    if word == "for" { return TOK_FOR }
+    if word == "in" { return TOK_IN }
+    if word == "return" { return TOK_RETURN }
+    if word == "true" { return TOK_TRUE }
+    if word == "false" { return TOK_FALSE }
+    if word == "none" { return TOK_NONE }
+    if word == "struct" { return TOK_STRUCT }
+    return 0
+}
+
+fn lex_ident() {
+    let start = lex_pos
+    while lex_pos < lex_len {
+        let c = lex_peek()
+        if is_alnum(c) == 0 {
+            let word = substr(lex_src, start, lex_pos - start)
+            let kw = keyword_type(word)
+            if kw != 0 {
+                if kw == TOK_TRUE {
+                    emit_tok(TOK_TRUE, 1)
+                } else {
+                    if kw == TOK_FALSE {
+                        emit_tok(TOK_FALSE, 0)
+                    } else {
+                        emit_tok(kw, word)
+                    }
+                }
+            } else {
+                emit_tok(TOK_IDENT, word)
+            }
+            return 0
+        }
+        lex_advance()
+    }
+    let word = substr(lex_src, start, lex_pos - start)
+    let kw = keyword_type(word)
+    if kw != 0 {
+        emit_tok(kw, word)
+    } else {
+        emit_tok(TOK_IDENT, word)
+    }
+}
+
+fn lex_all() {
+    while lex_pos < lex_len {
+        skip_whitespace()
+        if lex_pos >= lex_len {
+            emit_tok(TOK_EOF, 0)
+            return lex_tokens
+        }
+        let c = lex_peek()
+
+        if is_digit(c) == 1 {
+            lex_number()
+        } else {
+            if is_alpha(c) == 1 {
+                lex_ident()
+            } else {
+                if c == 34 {
+                    lex_string()
+                } else {
+                    if c == 43 { lex_advance(); emit_tok(TOK_PLUS, "+") }
+                    else { if c == 45 { lex_advance(); emit_tok(TOK_MINUS, "-") }
+                    else { if c == 42 { lex_advance(); emit_tok(TOK_STAR, "*") }
+                    else { if c == 47 { lex_advance(); emit_tok(TOK_SLASH, "/") }
+                    else { if c == 37 { lex_advance(); emit_tok(TOK_PERCENT, "%") }
+                    else { if c == 40 { lex_advance(); emit_tok(TOK_LPAREN, "(") }
+                    else { if c == 41 { lex_advance(); emit_tok(TOK_RPAREN, ")") }
+                    else { if c == 123 { lex_advance(); emit_tok(TOK_LBRACE, "{") }
+                    else { if c == 125 { lex_advance(); emit_tok(TOK_RBRACE, "}") }
+                    else { if c == 91 { lex_advance(); emit_tok(TOK_LBRACKET, "[") }
+                    else { if c == 93 { lex_advance(); emit_tok(TOK_RBRACKET, "]") }
+                    else { if c == 44 { lex_advance(); emit_tok(TOK_COMMA, ",") }
+                    else { if c == 58 { lex_advance(); emit_tok(TOK_COLON, ":") }
+                    else { if c == 59 { lex_advance(); emit_tok(TOK_SEMI, ";") }
+                    else { if c == 38 { lex_advance(); emit_tok(TOK_AMP, "&") }
+                    else { if c == 124 { lex_advance(); emit_tok(TOK_PIPE, "|") }
+                    else { if c == 64 { lex_advance(); emit_tok(TOK_AT, "@") }
+                    else { if c == 35 { lex_advance(); emit_tok(TOK_HASH, "#") }
+                    else { if c == 61 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_EQEQ, "==")
+                        } else {
+                            emit_tok(TOK_EQ, "=")
+                        }
+                    }
+                    else { if c == 33 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_BANGEQ, "!=")
+                        } else {
+                            emit_tok(TOK_BANG, "!")
+                        }
+                    }
+                    else { if c == 60 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_LTEQ, "<=")
+                        } else {
+                            emit_tok(TOK_LT, "<")
+                        }
+                    }
+                    else { if c == 62 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_GTEQ, ">=")
+                        } else {
+                            emit_tok(TOK_GT, ">")
+                        }
+                    }
+                    else {
+                        // Unknown character, skip
+                        lex_advance()
+                    }
+                    } } } } } } } } } } } } } } } } } } } } }
+                }
+            }
+        }
+    }
+    emit_tok(TOK_EOF, 0)
+    return lex_tokens
+}
+
+fn tokenize(source) {
+    lex_init(source)
+    return lex_all()
+}

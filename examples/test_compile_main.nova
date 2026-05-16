@@ -1,0 +1,25 @@
+fn main() {
+    let input_file = __arg(0)
+    println("input: " + input_file)
+
+    let output_file = ""
+    let arg1 = __arg(1)
+    println("arg1: " + arg1)
+
+    if arg1 == "-o" {
+        output_file = __arg(2)
+    } else {
+        output_file = "output.s"
+    }
+
+    println("output: " + output_file)
+
+    let source = read_file(input_file)
+    if source == 0 {
+        println("Error: cannot read file")
+        exit(1)
+    }
+    println("Read " + int_to_str(len(source)) + " bytes")
+}
+
+main()

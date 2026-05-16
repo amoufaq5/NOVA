@@ -1,0 +1,51 @@
+// Test new builtins needed for the compiler
+println("=== Testing M6 builtins ===")
+
+// String concatenation with +
+let a = "hello"
+let b = " world"
+let c = a + b
+println(c)
+
+// list_new and push
+let lst = list_new()
+push(lst, 10)
+push(lst, 20)
+push(lst, 30)
+println(len(lst))
+println(lst[0])
+println(lst[1])
+println(lst[2])
+
+// list_set
+list_set(lst, 1, 99)
+println(lst[1])
+
+// char_at
+let s = "ABCDE"
+println(char_at(s, 0))
+println(char_at(s, 4))
+
+// substr
+let sub = substr("hello world", 6, 5)
+println(sub)
+
+// concat builtin
+let cat = concat("foo", "bar")
+println(cat)
+
+// int_to_str
+let ns = int_to_str(42)
+println(ns)
+let ns2 = int_to_str(-7)
+println(ns2)
+
+// str_to_int
+let n = str_to_int("123")
+println(n)
+
+// modulo
+println(17 % 5)
+println(10 % 3)
+
+println("=== All M6 prep tests passed ===")

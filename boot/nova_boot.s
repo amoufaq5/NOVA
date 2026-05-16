@@ -86,6 +86,7 @@
 .equ T_PIPE,            31
 .equ T_TILDE,           32
 .equ T_DOT,             33
+.equ T_PERCENT,         34
 
 # Two-char operators
 .equ T_EQEQ,            40
@@ -322,6 +323,10 @@ return_flag:    .quad 0     # 1 if return was triggered
 ret_val_type:   .quad 0     # return value type
 ret_val_data:   .quad 0     # return value data
 
+# --- Command-line arguments ---
+saved_argc:     .quad 0
+saved_argv:     .quad 0
+
 # --- Scratch buffer for print_int ---
 int_buf:        .space 21
 newline_ch:     .byte 10
@@ -340,6 +345,12 @@ newline_ch:     .byte 10
 
 _start:
     # Stack layout: [rsp]=argc, [rsp+8]=argv[0], [rsp+16]=argv[1], ...
+    # Save argc/argv for __arg builtin
+    mov rax, [rsp]
+    mov [rip + saved_argc], rax
+    lea rax, [rsp + 8]
+    mov [rip + saved_argv], rax
+
     call heap_init
     call arena_init
 
@@ -1371,6 +1382,9 @@ scan_operator:
     mov edi, T_DOT
     cmp bl, '.'
     je .so_single
+    mov edi, T_PERCENT
+    cmp bl, '%'
+    je .so_single
     mov edi, T_LPAREN
     cmp bl, '('
     je .so_single
@@ -2042,7 +2056,11 @@ parse_program:
     call par_peek_type
     cmp rax, T_EOF
     je .pp_done
-
+    cmp rax, T_SEMI
+    jne .pp_decl
+    call par_advance
+    jmp .pp_loop
+.pp_decl:
     call parse_declaration
     test rax, rax
     jz .pp_done
@@ -2518,7 +2536,11 @@ parse_fn_decl:
     je .pfd_close
     cmp rax, T_EOF
     je .pfd_close
-
+    cmp rax, T_SEMI
+    jne .pfd_stmt
+    call par_advance
+    jmp .pfd_body
+.pfd_stmt:
     call parse_stmt
     test rax, rax
     jz .pfd_close
@@ -2765,6 +2787,11 @@ parse_if_stmt:
     je .pif_then_close
     cmp rax, T_EOF
     je .pif_then_close
+    cmp rax, T_SEMI
+    jne .pif_then_stmt
+    call par_advance
+    jmp .pif_then
+.pif_then_stmt:
     call parse_stmt
     test rax, rax
     jz .pif_then_close
@@ -2797,6 +2824,11 @@ parse_if_stmt:
     je .pif_else_close
     cmp rax, T_EOF
     je .pif_else_close
+    cmp rax, T_SEMI
+    jne .pif_else_stmt
+    call par_advance
+    jmp .pif_else
+.pif_else_stmt:
     call parse_stmt
     test rax, rax
     jz .pif_else_close
@@ -2842,6 +2874,11 @@ parse_while_stmt:
     je .pwh_close
     cmp rax, T_EOF
     je .pwh_close
+    cmp rax, T_SEMI
+    jne .pwh_stmt
+    call par_advance
+    jmp .pwh_body
+.pwh_stmt:
     call parse_stmt
     test rax, rax
     jz .pwh_close
@@ -2892,6 +2929,11 @@ parse_for_stmt:
     je .pfor_close
     cmp rax, T_EOF
     je .pfor_close
+    cmp rax, T_SEMI
+    jne .pfor_stmt
+    call par_advance
+    jmp .pfor_body
+.pfor_stmt:
     call parse_stmt
     test rax, rax
     jz .pfor_close
@@ -3161,8 +3203,6 @@ parse_comparison:
     je .pcmp_op
     cmp rax, T_FROM
     je .pcmp_op
-    cmp rax, T_IF
-    je .pcmp_op
     cmp rax, T_WHERE
     je .pcmp_op
 
@@ -3238,6 +3278,8 @@ parse_multiplication:
     cmp rax, T_STAR
     je .pmul_op
     cmp rax, T_SLASH
+    je .pmul_op
+    cmp rax, T_PERCENT
     je .pmul_op
 
     mov rax, r12
@@ -3329,12 +3371,13 @@ parse_postfix:
     je .ppf_juxt
     cmp rax, T_STRING_LIT
     je .ppf_juxt
-    cmp rax, T_LBRACE
-    je .ppf_juxt_block_only
+    # T_LBRACE NOT used as juxtaposition trigger (too greedy in expressions)
     # Cognitive keywords as adjacent values (also need colon guard)
+    # Only allow range 80-145 (cognitive/domain keywords)
+    # NOT 150+ (control-flow: let, if, while, for, fn, return, etc.)
     cmp rax, T_MOMENT
     jl .ppf_done
-    cmp rax, T_BOOL_TYPE
+    cmp rax, 145
     jle .ppf_juxt_guard
     jmp .ppf_done
 
@@ -3361,7 +3404,7 @@ parse_postfix:
     cmp rax, T_IN
     je .ppf_done
 
-    # Don't juxtapose if next token is followed by ':' or '=' (field/assignment)
+    # Don't juxtapose if next token is followed by ':' or '=' or '('
     mov rax, [rip + parse_pos]
     inc rax
     cmp rax, [rip + tok_count]
@@ -3373,6 +3416,8 @@ parse_postfix:
     je .ppf_done                    # followed by : → field name, not argument
     cmp rax, T_EQ
     je .ppf_done                    # followed by = → assignment target, not argument
+    cmp rax, T_LPAREN
+    je .ppf_done                    # followed by ( → function call, not argument
     jmp .ppf_juxt                   # not a field/assign → proceed with juxtaposition
 
 .ppf_done:
@@ -3515,10 +3560,11 @@ parse_postfix:
     call parse_expr
     pop rcx
     mov [rcx + AST_F2], rax
+    push rcx                        # save index_expr node
 
     mov rdi, T_RBRACKET
     call par_expect
-    mov r12, rcx
+    pop r12                         # restore index_expr node as current result
     jmp .ppf_loop
 
 
@@ -4408,6 +4454,92 @@ env_get:
     pop rbx
     ret
 
+# env_update(env: rdi, key: rsi, key_len: rdx, val_type: rcx, val_data: r8)
+# Like env_set but walks parent chain to find existing binding first.
+# If found, updates in place. If not found, sets in the given env.
+env_update:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rbx, rdi            # starting env (for fallback)
+    mov r12, rsi            # key
+    mov r13, rdx            # key_len
+    mov r14, rcx            # val_type
+    mov r15, r8             # val_data
+
+    # Walk chain looking for existing binding
+    mov rdi, rbx
+.eu_scope:
+    test rdi, rdi
+    jz .eu_not_found
+    push rdi                # save current env in chain
+
+    mov rcx, [rdi + ENV_COUNT]
+    xor eax, eax
+.eu_search:
+    cmp rax, rcx
+    jge .eu_parent
+
+    push rax
+    push rcx
+    push rdi
+    mov rcx, rax
+    imul rcx, ENV_ENTRY_SIZE
+    add rcx, [rdi + ENV_ENTRIES]
+    cmp r13, [rcx + ENV_KEYLEN]
+    jne .eu_next
+
+    # Compare strings
+    push rcx
+    mov rdi, r12
+    mov rsi, [rcx + ENV_KEY]
+    mov rdx, r13
+    call str_ncmp
+    pop rcx
+    test eax, eax
+    jnz .eu_next
+
+    # Found! Update in place
+    mov [rcx + ENV_VALTYPE], r14
+    mov [rcx + ENV_VALDATA], r15
+    pop rdi
+    pop rcx
+    pop rax
+    pop rdi                 # pop saved env
+    jmp .eu_done
+
+.eu_next:
+    pop rdi
+    pop rcx
+    pop rax
+    inc rax
+    jmp .eu_search
+
+.eu_parent:
+    pop rdi                 # pop saved env
+    mov rdi, [rdi + ENV_PARENT]
+    jmp .eu_scope
+
+.eu_not_found:
+    # Not found anywhere — set in the starting env
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    mov rcx, r14
+    mov r8, r15
+    call env_set
+
+.eu_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 
 # ============================================================================
 # M4: INTERPRETER — Token Value Extraction
@@ -4875,6 +5007,8 @@ eval:
     je .ev_mul
     cmp rax, T_SLASH
     je .ev_div
+    cmp rax, T_PERCENT
+    je .ev_mod
     cmp rax, T_EQEQ
     je .ev_eq
     cmp rax, T_BANGEQ
@@ -4910,6 +5044,15 @@ eval:
     cqo
     idiv rcx
     mov rdx, rax
+    mov eax, VAL_INT
+    jmp .ev_ret
+.ev_mod:
+    test rcx, rcx
+    jz .ev_none
+    mov rax, r15
+    cqo
+    idiv rcx
+    # rdx already has remainder from idiv
     mov eax, VAL_INT
     jmp .ev_ret
 .ev_eq:
@@ -4956,11 +5099,59 @@ eval:
     jmp .ev_ret
 
 .ev_binop_other:
-    # String equality
+    # String operations
     cmp r14, VAL_STR
     jne .ev_binop_kw
     cmp rbx, VAL_STR
     jne .ev_binop_kw
+
+    # String + (concatenation)
+    cmp rax, T_PLUS
+    jne .ev_binop_str_eq_check
+    # r15 = str a, rcx = str b
+    push rcx
+    mov rdi, r15
+    call str_len
+    mov r14, rax                    # len a
+    pop rcx
+    push rcx
+    push r14
+    mov rdi, rcx
+    call str_len
+    mov rbx, rax                    # len b
+    pop r14
+    pop rcx
+    # Allocate result
+    lea rdi, [r14 + rbx + 1]
+    push r14
+    push rbx
+    push r15
+    push rcx
+    call arena_alloc
+    pop rcx
+    pop r15
+    pop rbx
+    pop r14
+    push rax
+    mov rdi, rax
+    mov rsi, r15
+    mov rdx, r14
+    call mem_copy
+    pop rax
+    push rax
+    lea rdi, [rax + r14]
+    mov rsi, rcx
+    mov rdx, rbx
+    call mem_copy
+    pop rax
+    mov rcx, r14
+    add rcx, rbx
+    mov byte ptr [rax + rcx], 0
+    mov rdx, rax
+    mov eax, VAL_STR
+    jmp .ev_ret
+
+.ev_binop_str_eq_check:
     cmp rax, T_EQEQ
     jne .ev_binop_streq_neq
 
@@ -5127,11 +5318,73 @@ eval:
     call eval
     jmp .ev_ret
 
-# --- Index expression ---
+# --- Index expression: base[index] ---
 .ev_index:
+    push r14
+    push r15
+    # Evaluate base
     mov rdi, [r12 + AST_F1]
     mov rsi, r13
     call eval
+    mov r14, rax                    # base type
+    mov r15, rdx                    # base data
+
+    # Evaluate index
+    mov rdi, [r12 + AST_F2]
+    mov rsi, r13
+    call eval
+    # rax=type, rdx=index value
+    mov rcx, rdx                    # index (int)
+
+    cmp r14d, VAL_LIST
+    je .ev_idx_list
+    cmp r14d, VAL_STR
+    je .ev_idx_str
+    # Unknown type: return none
+    pop r15
+    pop r14
+    xor eax, eax
+    xor edx, edx
+    jmp .ev_ret
+
+.ev_idx_list:
+    # r15 = list ptr (NL_COUNT, NL_CAP, NL_ITEMS)
+    # rcx = index
+    cmp rcx, [r15 + NL_COUNT]
+    jge .ev_idx_none
+    cmp rcx, 0
+    jl .ev_idx_none
+    mov rdi, [r15 + NL_ITEMS]
+    imul rcx, VAL_SIZE
+    add rdi, rcx
+    mov rax, [rdi + VAL_TYPE]
+    mov rdx, [rdi + VAL_DATA]
+    pop r15
+    pop r14
+    jmp .ev_ret
+
+.ev_idx_str:
+    # r15 = string ptr, rcx = index
+    push rcx
+    mov rdi, r15
+    call str_len
+    pop rcx
+    cmp rcx, rax
+    jge .ev_idx_none
+    cmp rcx, 0
+    jl .ev_idx_none
+    # Return single character as int (char code)
+    movzx edx, byte ptr [r15 + rcx]
+    mov eax, VAL_INT
+    pop r15
+    pop r14
+    jmp .ev_ret
+
+.ev_idx_none:
+    pop r15
+    pop r14
+    xor eax, eax
+    xor edx, edx
     jmp .ev_ret
 
 # --- Identifier lookup ---
@@ -5260,14 +5513,14 @@ eval:
     mov r14, rax                    # val_type
     mov r15, rdx                    # val_data
 
-    # Bind name in env (same as let)
+    # Update existing binding (walks parent chain)
     mov rax, [r12 + AST_F1]         # name token
     mov rsi, [rax + TOK_START]
     mov rdx, [rax + TOK_LEN]
     mov rdi, r13
     mov rcx, r14
     mov r8, r15
-    call env_set
+    call env_update
     mov rax, r14
     mov rdx, r15
     jmp .ev_ret
@@ -5477,6 +5730,110 @@ register_builtins:
     mov rdx, 7
     mov rcx, VAL_BUILTIN
     lea r8, [rip + builtin_typeof]
+    mov rdi, rbx
+    call env_set
+
+    # list_new
+    lea rsi, [rip + bi_list_new_name]
+    mov rdx, 8
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_list_new]
+    mov rdi, rbx
+    call env_set
+
+    # push
+    lea rsi, [rip + bi_push_name]
+    mov rdx, 4
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_push]
+    mov rdi, rbx
+    call env_set
+
+    # char_at
+    lea rsi, [rip + bi_char_at_name]
+    mov rdx, 7
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_char_at]
+    mov rdi, rbx
+    call env_set
+
+    # substr
+    lea rsi, [rip + bi_substr_name]
+    mov rdx, 6
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_substr]
+    mov rdi, rbx
+    call env_set
+
+    # concat
+    lea rsi, [rip + bi_concat_name]
+    mov rdx, 6
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_concat]
+    mov rdi, rbx
+    call env_set
+
+    # int_to_str
+    lea rsi, [rip + bi_int_to_str_name]
+    mov rdx, 10
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_int_to_str]
+    mov rdi, rbx
+    call env_set
+
+    # str_to_int
+    lea rsi, [rip + bi_str_to_int_name]
+    mov rdx, 10
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_str_to_int]
+    mov rdi, rbx
+    call env_set
+
+    # exit
+    lea rsi, [rip + bi_exit_name]
+    mov rdx, 4
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_exit]
+    mov rdi, rbx
+    call env_set
+
+    # read_file
+    lea rsi, [rip + bi_read_file_name]
+    mov rdx, 9
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_read_file]
+    mov rdi, rbx
+    call env_set
+
+    # write_file
+    lea rsi, [rip + bi_write_file_name]
+    mov rdx, 10
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_write_file]
+    mov rdi, rbx
+    call env_set
+
+    # list_set
+    lea rsi, [rip + bi_list_set_name]
+    mov rdx, 8
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_list_set]
+    mov rdi, rbx
+    call env_set
+
+    # __arg
+    lea rsi, [rip + bi_arg_name]
+    mov rdx, 5
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_arg]
+    mov rdi, rbx
+    call env_set
+
+    # chr
+    lea rsi, [rip + bi_chr_name]
+    mov rdx, 3
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_chr]
     mov rdi, rbx
     call env_set
 
@@ -5747,6 +6104,571 @@ builtin_typeof:
     ret
 
 
+# builtin_list_new() -> VAL_LIST (empty list)
+builtin_list_new:
+    push rbx
+    # Allocate list header: [count:8][cap:8][items_ptr:8]
+    mov rdi, NL_HEADER
+    call heap_alloc
+    mov rbx, rax
+    mov qword ptr [rbx + NL_COUNT], 0
+    mov qword ptr [rbx + NL_CAP], 16
+    # Allocate items array (16 slots * VAL_SIZE)
+    mov rdi, 256                    # 16 * 16
+    call heap_alloc
+    mov [rbx + NL_ITEMS], rax
+    mov eax, VAL_LIST
+    mov rdx, rbx
+    pop rbx
+    ret
+
+# builtin_push(list, value) -> VAL_NONE
+# Appends value to end of list (mutates in place)
+builtin_push:
+    cmp rsi, 2
+    jl .bpush_done
+    # arg0 = list
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_LIST
+    jne .bpush_done
+    mov rcx, [rdi + VAL_DATA]       # list ptr
+    # arg1 = value (type + data at offset VAL_SIZE)
+    mov r8, [rdi + VAL_SIZE + VAL_TYPE]   # value type
+    mov r9, [rdi + VAL_SIZE + VAL_DATA]   # value data
+    # Check capacity
+    push rcx
+    push r8
+    push r9
+    mov rax, [rcx + NL_COUNT]
+    cmp rax, [rcx + NL_CAP]
+    jl .bpush_write
+    # Grow: double capacity
+    mov rdi, [rcx + NL_CAP]
+    shl rdi, 1
+    mov [rcx + NL_CAP], rdi
+    imul rdi, VAL_SIZE
+    push rcx
+    call heap_alloc
+    pop rcx
+    # Copy old items
+    push rax
+    mov rdi, rax
+    mov rsi, [rcx + NL_ITEMS]
+    mov rdx, [rcx + NL_COUNT]
+    imul rdx, VAL_SIZE
+    call mem_copy
+    pop rax
+    mov [rcx + NL_ITEMS], rax
+.bpush_write:
+    pop r9
+    pop r8
+    pop rcx
+    mov rax, [rcx + NL_COUNT]
+    mov rdi, [rcx + NL_ITEMS]
+    imul rax, VAL_SIZE
+    add rdi, rax
+    mov [rdi + VAL_TYPE], r8
+    mov [rdi + VAL_DATA], r9
+    inc qword ptr [rcx + NL_COUNT]
+.bpush_done:
+    xor eax, eax
+    xor edx, edx
+    ret
+
+# builtin_list_set(list, index, value) -> VAL_NONE
+builtin_list_set:
+    cmp rsi, 3
+    jl .bls_done
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_LIST
+    jne .bls_done
+    mov rcx, [rdi + VAL_DATA]               # list ptr
+    mov r8, [rdi + VAL_SIZE + VAL_DATA]     # index (int)
+    # Check bounds
+    cmp r8, [rcx + NL_COUNT]
+    jge .bls_done
+    cmp r8, 0
+    jl .bls_done
+    # value is arg2
+    mov r9, [rdi + VAL_SIZE*2 + VAL_TYPE]
+    mov r10, [rdi + VAL_SIZE*2 + VAL_DATA]
+    mov rdi, [rcx + NL_ITEMS]
+    imul r8, VAL_SIZE
+    add rdi, r8
+    mov [rdi + VAL_TYPE], r9
+    mov [rdi + VAL_DATA], r10
+.bls_done:
+    xor eax, eax
+    xor edx, edx
+    ret
+
+# builtin_char_at(str, index) -> VAL_INT (char code)
+builtin_char_at:
+    cmp rsi, 2
+    jl .bca_none
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .bca_none
+    mov rcx, [rdi + VAL_DATA]       # string ptr
+    mov r8, [rdi + VAL_SIZE + VAL_DATA]  # index
+    # Get string length
+    push rcx
+    push r8
+    mov rdi, rcx
+    call str_len
+    pop r8
+    pop rcx
+    cmp r8, rax
+    jge .bca_none
+    cmp r8, 0
+    jl .bca_none
+    movzx edx, byte ptr [rcx + r8]
+    mov eax, VAL_INT
+    ret
+.bca_none:
+    xor eax, eax
+    xor edx, edx
+    ret
+
+# builtin_chr(code) -> VAL_STR (single character string)
+builtin_chr:
+    cmp rsi, 1
+    jl .bchr_none
+    mov rdx, [rdi + VAL_DATA]       # char code (int)
+    # Allocate 2 bytes (char + null terminator)
+    push rdx
+    mov rdi, 2
+    call heap_alloc
+    pop rdx
+    mov byte ptr [rax], dl
+    mov byte ptr [rax + 1], 0
+    mov rdx, rax
+    mov eax, VAL_STR
+    ret
+.bchr_none:
+    xor eax, eax
+    xor edx, edx
+    ret
+
+# builtin_substr(str, start, len) -> VAL_STR
+builtin_substr:
+    push rbx
+    push r12
+    push r13
+    cmp rsi, 3
+    jl .bss_empty
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .bss_empty
+    mov rbx, [rdi + VAL_DATA]                   # src string
+    mov r12, [rdi + VAL_SIZE + VAL_DATA]        # start
+    mov r13, [rdi + VAL_SIZE*2 + VAL_DATA]      # length
+
+    # Validate
+    push rbx
+    push r12
+    push r13
+    mov rdi, rbx
+    call str_len
+    pop r13
+    pop r12
+    pop rbx
+    # rax = str len
+    cmp r12, rax
+    jge .bss_empty
+    cmp r12, 0
+    jl .bss_empty
+    # Clamp length
+    mov rcx, rax
+    sub rcx, r12
+    cmp r13, rcx
+    jle .bss_len_ok
+    mov r13, rcx
+.bss_len_ok:
+    # Allocate and copy
+    lea rdi, [r13 + 1]
+    call arena_alloc
+    mov rdi, rax
+    push rax
+    lea rsi, [rbx + r12]
+    mov rdx, r13
+    call mem_copy
+    pop rax
+    mov byte ptr [rax + r13], 0     # null term
+    mov rdx, rax
+    mov eax, VAL_STR
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.bss_empty:
+    lea rdx, [rip + bi_empty_str]
+    mov eax, VAL_STR
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# builtin_concat(a, b) -> VAL_STR
+builtin_concat:
+    push rbx
+    push r12
+    push r13
+    push r14
+    cmp rsi, 2
+    jl .bconc_empty
+    # Get string a
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .bconc_empty
+    mov rbx, [rdi + VAL_DATA]           # str a
+    # Get string b
+    mov rax, [rdi + VAL_SIZE + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .bconc_empty
+    mov r12, [rdi + VAL_SIZE + VAL_DATA] # str b
+
+    # Get lengths
+    mov rdi, rbx
+    call str_len
+    mov r13, rax                        # len a
+    mov rdi, r12
+    call str_len
+    mov r14, rax                        # len b
+
+    # Allocate result
+    lea rdi, [r13 + r14 + 1]
+    call arena_alloc
+    mov rdi, rax
+    push rax
+    # Copy a
+    mov rsi, rbx
+    mov rdx, r13
+    call mem_copy
+    pop rax
+    push rax
+    # Copy b
+    lea rdi, [rax + r13]
+    mov rsi, r12
+    mov rdx, r14
+    call mem_copy
+    pop rax
+    mov rcx, r13
+    add rcx, r14
+    mov byte ptr [rax + rcx], 0         # null term
+    mov rdx, rax
+    mov eax, VAL_STR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.bconc_empty:
+    lea rdx, [rip + bi_empty_str]
+    mov eax, VAL_STR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# builtin_int_to_str(n) -> VAL_STR
+builtin_int_to_str:
+    cmp rsi, 1
+    jl .bits_zero
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_INT
+    jne .bits_zero
+    mov rdi, [rdi + VAL_DATA]
+    call int_to_str_alloc
+    mov rdx, rax
+    mov eax, VAL_STR
+    ret
+.bits_zero:
+    lea rdx, [rip + bi_zero_str]
+    mov eax, VAL_STR
+    ret
+
+# int_to_str_alloc(value: rdi) -> str ptr in rax
+int_to_str_alloc:
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi                    # value
+    sub rsp, 32                     # local buffer
+    xor r13d, r13d                  # negative flag
+
+    lea r12, [rsp + 30]             # end of buffer
+    mov byte ptr [r12], 0           # null terminator
+    dec r12
+
+    test rbx, rbx
+    jz .itsa_zero
+    jns .itsa_loop
+    # Negative
+    mov r13d, 1
+    neg rbx
+    jmp .itsa_loop
+.itsa_zero:
+    mov byte ptr [r12], '0'
+    dec r12
+    jmp .itsa_make
+.itsa_loop:
+    test rbx, rbx
+    jz .itsa_sign
+    mov rax, rbx
+    xor edx, edx
+    mov rcx, 10
+    div rcx
+    add dl, '0'
+    mov [r12], dl
+    dec r12
+    mov rbx, rax
+    jmp .itsa_loop
+.itsa_sign:
+    test r13d, r13d
+    jz .itsa_make
+    mov byte ptr [r12], '-'
+    dec r12
+.itsa_make:
+    inc r12                         # point to first char
+    # Calculate length
+    lea rcx, [rsp + 30]
+    sub rcx, r12                    # length
+    # Allocate and copy
+    lea rdi, [rcx + 1]
+    push rcx
+    push r12
+    call arena_alloc
+    pop r12
+    pop rcx
+    mov rdi, rax
+    push rax
+    push rcx
+    mov rsi, r12
+    mov rdx, rcx
+    call mem_copy
+    pop rcx
+    pop rax
+    mov byte ptr [rax + rcx], 0     # null terminate
+    add rsp, 32
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# builtin_str_to_int(s) -> VAL_INT
+builtin_str_to_int:
+    cmp rsi, 1
+    jl .bsti_zero
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .bsti_zero
+    mov rdi, [rdi + VAL_DATA]       # string ptr
+    # Parse integer from string
+    xor rax, rax                    # result
+    xor ecx, ecx                    # negative flag
+    movzx edx, byte ptr [rdi]
+    cmp dl, '-'
+    jne .bsti_loop
+    mov ecx, 1
+    inc rdi
+.bsti_loop:
+    movzx edx, byte ptr [rdi]
+    test dl, dl
+    jz .bsti_done
+    cmp dl, '0'
+    jl .bsti_done
+    cmp dl, '9'
+    jg .bsti_done
+    imul rax, 10
+    sub dl, '0'
+    movzx edx, dl
+    add rax, rdx
+    inc rdi
+    jmp .bsti_loop
+.bsti_done:
+    test ecx, ecx
+    jz .bsti_pos
+    neg rax
+.bsti_pos:
+    mov rdx, rax
+    mov eax, VAL_INT
+    ret
+.bsti_zero:
+    mov eax, VAL_INT
+    xor edx, edx
+    ret
+
+# builtin_exit(code) -> does not return
+builtin_exit:
+    cmp rsi, 1
+    jl .bexit_zero
+    mov rdi, [rdi + VAL_DATA]       # exit code
+    jmp .bexit_go
+.bexit_zero:
+    xor edi, edi
+.bexit_go:
+    mov eax, 60
+    syscall
+
+# builtin_read_file(path) -> VAL_STR (file contents)
+builtin_read_file:
+    push rbx
+    push r12
+    push r13
+    cmp rsi, 1
+    jl .brf_none
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .brf_none
+    mov rbx, [rdi + VAL_DATA]       # path string
+
+    # Open file
+    mov rdi, rbx                    # path (null terminated)
+    xor esi, esi                    # O_RDONLY
+    xor edx, edx                    # mode
+    mov eax, 2                      # sys_open
+    syscall
+    cmp rax, 0
+    jl .brf_none
+    mov r12, rax                    # fd
+
+    # Read in chunks
+    mov rdi, 65536
+    call heap_alloc
+    mov r13, rax                    # buffer
+    xor ebx, ebx                    # total bytes read
+.brf_read_loop:
+    mov rdi, r12                    # fd
+    lea rsi, [r13 + rbx]           # buf + offset
+    mov rdx, 4096                   # count
+    xor eax, eax                    # sys_read
+    syscall
+    cmp rax, 0
+    jle .brf_read_done
+    add rbx, rax
+    # Check if we need more space
+    lea rcx, [rbx + 4096]
+    cmp rcx, 65536
+    jl .brf_read_loop
+    # For now, cap at 64KB
+    jmp .brf_read_done
+.brf_read_done:
+    # Close file
+    mov rdi, r12
+    mov eax, 3                      # sys_close
+    syscall
+    # Null-terminate and create string
+    mov byte ptr [r13 + rbx], 0
+    # Copy to arena
+    lea rdi, [rbx + 1]
+    push rbx
+    call arena_alloc
+    pop rbx
+    mov rdi, rax
+    push rax
+    mov rsi, r13
+    mov rdx, rbx
+    call mem_copy
+    pop rax
+    mov byte ptr [rax + rbx], 0
+    mov rdx, rax
+    mov eax, VAL_STR
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.brf_none:
+    xor eax, eax
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# builtin_write_file(path, content) -> VAL_BOOL
+builtin_write_file:
+    push rbx
+    push r12
+    push r13
+    cmp rsi, 2
+    jl .bwf_false
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .bwf_false
+    mov rbx, [rdi + VAL_DATA]               # path
+    mov rax, [rdi + VAL_SIZE + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .bwf_false
+    mov r12, [rdi + VAL_SIZE + VAL_DATA]    # content
+
+    # Get content length
+    mov rdi, r12
+    call str_len
+    mov r13, rax                            # content len
+
+    # Open file for writing (O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577)
+    mov rdi, rbx
+    mov esi, 577
+    mov edx, 438                            # 0o666
+    mov eax, 2                              # sys_open
+    syscall
+    cmp rax, 0
+    jl .bwf_false
+    mov rbx, rax                            # fd
+
+    # Write content
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    mov eax, 1                              # sys_write
+    syscall
+
+    # Close
+    mov rdi, rbx
+    mov eax, 3                              # sys_close
+    syscall
+
+    mov eax, VAL_BOOL
+    mov edx, 1
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.bwf_false:
+    mov eax, VAL_BOOL
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# builtin___arg(index) -> VAL_STR (argv[index+2], or "" if out of bounds)
+# __arg(0) = argv[2] (first arg after the .nova file)
+# __arg(1) = argv[3], etc.
+builtin_arg:
+    cmp rsi, 1
+    jl .barg_empty
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_INT
+    jne .barg_empty
+    mov rcx, [rdi + VAL_DATA]       # requested index
+    add rcx, 2                      # skip argv[0] (bootstrap) and argv[1] (.nova file)
+    mov rax, [rip + saved_argc]
+    cmp rcx, rax
+    jge .barg_empty
+    # Get argv[rcx]
+    mov rdi, [rip + saved_argv]
+    mov rdx, [rdi + rcx*8]          # char* ptr
+    mov eax, VAL_STR
+    ret
+.barg_empty:
+    lea rdx, [rip + bi_empty_str]
+    mov eax, VAL_STR
+    ret
+
+
 # ============================================================================
 # READ-ONLY DATA
 # ============================================================================
@@ -5782,6 +6704,20 @@ bi_str_str:      .asciz "str"
 bi_bool_str:     .asciz "bool"
 bi_list_str:     .asciz "list"
 bi_fn_str:       .asciz "fn"
+bi_zero_str:     .asciz "0"
+bi_list_new_name:   .asciz "list_new"
+bi_push_name:       .asciz "push"
+bi_char_at_name:    .asciz "char_at"
+bi_substr_name:     .asciz "substr"
+bi_concat_name:     .asciz "concat"
+bi_int_to_str_name: .asciz "int_to_str"
+bi_str_to_int_name: .asciz "str_to_int"
+bi_exit_name:       .asciz "exit"
+bi_read_file_name:  .asciz "read_file"
+bi_write_file_name: .asciz "write_file"
+bi_list_set_name:   .asciz "list_set"
+bi_arg_name:        .asciz "__arg"
+bi_chr_name:        .asciz "chr"
 
 # --- AST tag name table ---
 ast_tag_names:
