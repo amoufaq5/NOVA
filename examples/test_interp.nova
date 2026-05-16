@@ -1,0 +1,69 @@
+// Interpreter test
+
+fn add(a, b) {
+    return a + b
+}
+
+fn factorial(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn fib(n) {
+    if n <= 0 {
+        return 0
+    }
+    if n == 1 {
+        return 1
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+println("=== Nova Bootstrap Interpreter ===")
+println("Testing arithmetic:")
+println(add(3, 4))
+println(10 - 3)
+println(6 * 7)
+
+println("Testing factorial:")
+println(factorial(5))
+println(factorial(10))
+
+println("Testing fibonacci:")
+println(fib(0))
+println(fib(1))
+println(fib(5))
+println(fib(10))
+
+println("Testing let and comparison:")
+let x = 42
+if x == 42 {
+    println("x is 42")
+}
+
+println("Testing while loop:")
+let i = 0
+let sum = 0
+while i < 10 {
+    sum = sum + i
+    i = i + 1
+}
+println(sum)
+
+println("Testing for loop:")
+let total = 0
+for item in range(5) {
+    total = total + item
+}
+println(total)
+
+println("Testing strings:")
+let name = "Nova"
+println(name)
+println(len(name))
+println(type_of(name))
+println(type_of(42))
+
+println("=== All tests passed ===")

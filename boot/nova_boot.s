@@ -252,6 +252,37 @@
 .equ NL_ITEMS,  16
 .equ NL_HEADER, 24
 
+# --- Value type tags ---
+.equ VAL_NONE,      0
+.equ VAL_INT,       1
+.equ VAL_FLOAT,     2
+.equ VAL_STR,       3
+.equ VAL_BOOL,      4
+.equ VAL_LIST,      5
+.equ VAL_FN,        6
+.equ VAL_BUILTIN,   7
+.equ VAL_MOMENT,    8
+
+# Value: 16 bytes [type:8, data:8]
+.equ VAL_TYPE,  0
+.equ VAL_DATA,  8
+.equ VAL_SIZE,  16
+
+# Environment entry: 32 bytes [key_ptr:8, key_len:8, val_type:8, val_data:8]
+.equ ENV_KEY,       0
+.equ ENV_KEYLEN,    8
+.equ ENV_VALTYPE,   16
+.equ ENV_VALDATA,   24
+.equ ENV_ENTRY_SIZE, 32
+
+# Environment: [parent:8, count:8, capacity:8, entries_ptr:8]
+.equ ENV_PARENT,    0
+.equ ENV_COUNT,     8
+.equ ENV_CAP,       16
+.equ ENV_ENTRIES,   24
+.equ ENV_SIZE,      32
+.equ ENV_INIT_CAP,  32
+
 
 # ======================== DATA SECTION =====================================
 .section .data
@@ -284,6 +315,12 @@ tok_cap:        .quad 0     # allocated capacity
 # --- Parser state ---
 parse_pos:      .quad 0     # current token index
 parse_ast:      .quad 0     # root AST node (Program)
+
+# --- Interpreter state ---
+global_env:     .quad 0     # global environment
+return_flag:    .quad 0     # 1 if return was triggered
+ret_val_type:   .quad 0     # return value type
+ret_val_data:   .quad 0     # return value data
 
 # --- Scratch buffer for print_int ---
 int_buf:        .space 21
@@ -329,10 +366,8 @@ _start:
     call parse_program
     mov [rip + parse_ast], rax
 
-    # Print AST summary
     mov rdi, rax
-    xor esi, esi
-    call print_ast
+    call interpret
 
     # Exit 0
     xor edi, edi
@@ -2041,9 +2076,35 @@ parse_declaration:
     je .pd_let
     cmp rax, T_STRUCT
     je .pd_struct
+    cmp rax, T_IF
+    je .pd_if
+    cmp rax, T_WHILE
+    je .pd_while
+    cmp rax, T_FOR
+    je .pd_for
+    cmp rax, T_RETURN
+    je .pd_return
 
+    # Check for assignment: ident = expr
+    cmp rax, T_IDENT
+    jne .pd_expr
+    # Peek ahead: is next token '='?
+    mov rax, [rip + parse_pos]
+    inc rax
+    cmp rax, [rip + tok_count]
+    jge .pd_expr
+    imul rax, TOK_SIZE
+    add rax, [rip + tok_buf]
+    cmp qword ptr [rax + TOK_TYPE], T_EQ
+    je .pd_assign
+
+.pd_expr:
     # Try parsing as expression statement
     call parse_expr_stmt
+    ret
+
+.pd_assign:
+    call parse_assign_stmt
     ret
 
 .pd_moment:
@@ -2066,6 +2127,18 @@ parse_declaration:
     ret
 .pd_struct:
     call parse_struct_decl
+    ret
+.pd_if:
+    call parse_if_stmt
+    ret
+.pd_while:
+    call parse_while_stmt
+    ret
+.pd_for:
+    call parse_for_stmt
+    ret
+.pd_return:
+    call parse_return_stmt
     ret
 
 
@@ -2544,8 +2617,25 @@ parse_stmt:
     cmp rax, T_FN
     je .ps_fn_inner
 
+    # Check for assignment: ident = expr
+    cmp rax, T_IDENT
+    jne .ps_expr
+    mov rax, [rip + parse_pos]
+    inc rax
+    cmp rax, [rip + tok_count]
+    jge .ps_expr
+    imul rax, TOK_SIZE
+    add rax, [rip + tok_buf]
+    cmp qword ptr [rax + TOK_TYPE], T_EQ
+    je .ps_assign
+
+.ps_expr:
     # Default: expression statement
     call parse_expr_stmt
+    ret
+
+.ps_assign:
+    call parse_assign_stmt
     ret
 
 .ps_let:
@@ -2589,6 +2679,30 @@ parse_stmt:
     ret
 
 # parse_let_stmt() -> AST_LET_STMT { f1=name_tok, f2=value_expr }
+# parse_assign_stmt() -> AST_ASSIGN_STMT { f1=name_token, f2=value_expr }
+parse_assign_stmt:
+    push r12
+
+    mov rdi, AST_ASSIGN_STMT
+    call ast_new
+    mov r12, rax
+
+    # name
+    call par_advance                # consume ident
+    mov [r12 + AST_F1], rax
+
+    # consume =
+    call par_advance
+
+    # value
+    call parse_expr
+    mov [r12 + AST_F2], rax
+
+    mov rax, r12
+    pop r12
+    ret
+
+
 parse_let_stmt:
     push r12
 
@@ -3247,7 +3361,7 @@ parse_postfix:
     cmp rax, T_IN
     je .ppf_done
 
-    # Don't juxtapose if next token is followed by ':' (field separator)
+    # Don't juxtapose if next token is followed by ':' or '=' (field/assignment)
     mov rax, [rip + parse_pos]
     inc rax
     cmp rax, [rip + tok_count]
@@ -3257,7 +3371,9 @@ parse_postfix:
     mov rax, [rax + TOK_TYPE]
     cmp rax, T_COLON
     je .ppf_done                    # followed by : → field name, not argument
-    jmp .ppf_juxt                   # not a field name → proceed with juxtaposition
+    cmp rax, T_EQ
+    je .ppf_done                    # followed by = → assignment target, not argument
+    jmp .ppf_juxt                   # not a field/assign → proceed with juxtaposition
 
 .ppf_done:
     mov rax, r12
@@ -3371,7 +3487,9 @@ parse_postfix:
     je .ppf_call_close
 
 .ppf_call_arg:
+    push rbx
     call parse_expr
+    pop rbx
     mov rdi, rbx
     mov rsi, rax
     call node_list_push
@@ -4086,6 +4204,1550 @@ print_ast_tag_name:
 
 
 # ============================================================================
+# M4: INTERPRETER — Environment
+# ============================================================================
+
+# env_new(parent: rdi) -> env ptr in rax
+env_new:
+    push rbx
+    push r12
+    mov r12, rdi                    # parent
+
+    mov rdi, ENV_SIZE
+    call heap_alloc
+    mov rbx, rax
+
+    mov [rbx + ENV_PARENT], r12
+    mov qword ptr [rbx + ENV_COUNT], 0
+    mov qword ptr [rbx + ENV_CAP], ENV_INIT_CAP
+
+    mov rdi, ENV_INIT_CAP
+    imul rdi, ENV_ENTRY_SIZE
+    call heap_alloc
+    mov [rbx + ENV_ENTRIES], rax
+
+    mov rax, rbx
+    pop r12
+    pop rbx
+    ret
+
+# env_set(env: rdi, key: rsi, key_len: rdx, val_type: rcx, val_data: r8)
+env_set:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rbx, rdi            # env
+    mov r12, rsi            # key
+    mov r13, rdx            # key_len
+    mov r14, rcx            # val_type
+    mov r15, r8             # val_data
+
+    # Check if key already exists (update in place)
+    mov rcx, [rbx + ENV_COUNT]
+    mov rdi, [rbx + ENV_ENTRIES]
+    xor eax, eax
+.es_find:
+    cmp rax, rcx
+    jge .es_append
+    # Compare key
+    push rax
+    push rcx
+    push rdi
+    lea rsi, [rdi + rax * 1]        # current entry offset
+    # Actually compute entry address properly
+    pop rdi
+    pop rcx
+    pop rax
+
+    push rax
+    push rcx
+    mov rcx, rax
+    imul rcx, ENV_ENTRY_SIZE
+    add rcx, [rbx + ENV_ENTRIES]    # entry ptr
+    # Compare lengths first
+    cmp r13, [rcx + ENV_KEYLEN]
+    jne .es_find_next
+
+    # Compare strings
+    push rcx
+    mov rdi, r12
+    mov rsi, [rcx + ENV_KEY]
+    mov rdx, r13
+    call str_ncmp
+    pop rcx
+    test eax, eax
+    jnz .es_find_next2
+
+    # Found — update value
+    mov [rcx + ENV_VALTYPE], r14
+    mov [rcx + ENV_VALDATA], r15
+    pop rcx
+    pop rax
+    jmp .es_done
+
+.es_find_next2:
+    pop rcx
+    pop rax
+    inc rax
+    jmp .es_find
+
+.es_find_next:
+    pop rcx
+    pop rax
+    inc rax
+    jmp .es_find
+
+.es_append:
+    # Grow if needed
+    mov rax, [rbx + ENV_COUNT]
+    cmp rax, [rbx + ENV_CAP]
+    jl .es_write
+
+    # Double capacity
+    mov rdi, [rbx + ENV_CAP]
+    shl rdi, 1
+    mov [rbx + ENV_CAP], rdi
+    imul rdi, ENV_ENTRY_SIZE
+    call heap_alloc
+    push rax
+    mov rdi, rax
+    mov rsi, [rbx + ENV_ENTRIES]
+    mov rdx, [rbx + ENV_COUNT]
+    imul rdx, ENV_ENTRY_SIZE
+    call mem_copy
+    pop rax
+    mov [rbx + ENV_ENTRIES], rax
+
+.es_write:
+    mov rax, [rbx + ENV_COUNT]
+    imul rax, ENV_ENTRY_SIZE
+    add rax, [rbx + ENV_ENTRIES]
+    mov [rax + ENV_KEY], r12
+    mov [rax + ENV_KEYLEN], r13
+    mov [rax + ENV_VALTYPE], r14
+    mov [rax + ENV_VALDATA], r15
+    inc qword ptr [rbx + ENV_COUNT]
+
+.es_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# env_get(env: rdi, key: rsi, key_len: rdx) -> val_type in rax, val_data in rdx
+# Searches current env then parent chain. Returns VAL_NONE if not found.
+env_get:
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi            # env
+    mov r12, rsi            # key
+    mov r13, rdx            # key_len
+
+.eg_scope:
+    test rbx, rbx
+    jz .eg_not_found
+
+    mov rcx, [rbx + ENV_COUNT]
+    xor r14d, r14d          # index
+
+.eg_search:
+    cmp r14, rcx
+    jge .eg_parent
+
+    mov rax, r14
+    imul rax, ENV_ENTRY_SIZE
+    add rax, [rbx + ENV_ENTRIES]
+
+    # Compare length
+    cmp r13, [rax + ENV_KEYLEN]
+    jne .eg_next
+
+    # Compare key
+    push rax
+    push rcx
+    mov rdi, r12
+    mov rsi, [rax + ENV_KEY]
+    mov rdx, r13
+    call str_ncmp
+    test eax, eax
+    pop rcx
+    pop rax
+    jnz .eg_next
+
+    # Found
+    mov rdx, [rax + ENV_VALDATA]
+    mov rax, [rax + ENV_VALTYPE]
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.eg_next:
+    inc r14
+    jmp .eg_search
+
+.eg_parent:
+    mov rbx, [rbx + ENV_PARENT]
+    jmp .eg_scope
+
+.eg_not_found:
+    xor eax, eax           # VAL_NONE
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+
+# ============================================================================
+# M4: INTERPRETER — Token Value Extraction
+# ============================================================================
+
+# tok_to_int(tok: rdi) -> integer value in rax
+tok_to_int:
+    push rbx
+    mov rsi, [rdi + TOK_LEN]
+    mov rdi, [rdi + TOK_START]
+    # Parse decimal integer from string
+    xor eax, eax
+    xor ecx, ecx                   # negative flag
+    cmp byte ptr [rdi], '-'
+    jne .tti_loop
+    mov ecx, 1
+    inc rdi
+    dec rsi
+.tti_loop:
+    test rsi, rsi
+    jz .tti_done
+    imul rax, 10
+    movzx ebx, byte ptr [rdi]
+    sub ebx, '0'
+    add rax, rbx
+    inc rdi
+    dec rsi
+    jmp .tti_loop
+.tti_done:
+    test ecx, ecx
+    jz .tti_ret
+    neg rax
+.tti_ret:
+    pop rbx
+    ret
+
+# tok_to_str(tok: rdi) -> (ptr in rax, len in rdx)
+# Strips surrounding quotes from string literal tokens.
+tok_to_str:
+    mov rax, [rdi + TOK_START]
+    mov rdx, [rdi + TOK_LEN]
+    # Check if quoted
+    cmp byte ptr [rax], '"'
+    jne .tts_ret
+    inc rax
+    sub rdx, 2
+.tts_ret:
+    ret
+
+
+# ============================================================================
+# M4: INTERPRETER — Main Eval
+# ============================================================================
+
+# interpret(program: rdi) — entry point
+interpret:
+    push r12
+    push rbx
+
+    mov rbx, rdi                    # save program node
+
+    # Create global environment
+    xor edi, edi
+    call env_new
+    mov [rip + global_env], rax
+    mov r12, rax
+
+    # Register built-in functions
+    mov rdi, r12
+    call register_builtins
+
+    # Evaluate program
+    mov rdi, rbx
+    mov rsi, r12
+    call eval
+
+    pop rbx
+    pop r12
+    ret
+
+# eval(node: rdi, env: rsi) -> val_type in rax, val_data in rdx
+eval:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rdi                    # node
+    mov r13, rsi                    # env
+
+    test r12, r12
+    jz .ev_none
+
+    mov rax, [r12 + AST_TAG]
+
+    cmp rax, AST_PROGRAM
+    je .ev_program
+    cmp rax, AST_FN_DECL
+    je .ev_fn_decl
+    cmp rax, AST_LET_STMT
+    je .ev_let
+    cmp rax, AST_IF_STMT
+    je .ev_if
+    cmp rax, AST_WHILE_STMT
+    je .ev_while
+    cmp rax, AST_FOR_STMT
+    je .ev_for
+    cmp rax, AST_RETURN_STMT
+    je .ev_return
+    cmp rax, AST_BLOCK
+    je .ev_block
+    cmp rax, AST_EXPR_STMT
+    je .ev_expr_stmt
+    cmp rax, AST_BIN_OP
+    je .ev_binop
+    cmp rax, AST_FLOW_EXPR
+    je .ev_binop
+    cmp rax, AST_UNARY_OP
+    je .ev_unary
+    cmp rax, AST_CALL
+    je .ev_call
+    cmp rax, AST_DOT_ACCESS
+    je .ev_dot
+    cmp rax, AST_IDENT
+    je .ev_ident
+    cmp rax, AST_INT_LIT
+    je .ev_int
+    cmp rax, AST_FLOAT_LIT
+    je .ev_int              # treat float as int for bootstrap
+    cmp rax, AST_STRING_LIT
+    je .ev_string
+    cmp rax, AST_BOOL_LIT
+    je .ev_bool
+    cmp rax, AST_NONE_LIT
+    je .ev_none
+    cmp rax, AST_LIST_LIT
+    je .ev_list
+    cmp rax, AST_MOMENT_DECL
+    je .ev_moment_decl
+    cmp rax, AST_NODE_DECL
+    je .ev_node_decl
+    cmp rax, AST_PATH_DECL
+    je .ev_skip_decl
+    cmp rax, AST_MIND_DECL
+    je .ev_mind_decl
+    cmp rax, AST_STRUCT_DECL
+    je .ev_skip_decl
+    cmp rax, AST_FIELD_DEF
+    je .ev_field_def
+    cmp rax, AST_WHEN_BLOCK
+    je .ev_skip_decl
+    cmp rax, AST_AWARENESS
+    je .ev_skip_decl
+    cmp rax, AST_EMIT_STMT
+    je .ev_expr_stmt
+    cmp rax, AST_RESPOND_STMT
+    je .ev_expr_stmt
+    cmp rax, AST_MOMENT_ACCESS
+    je .ev_dot
+    cmp rax, AST_INDEX_EXPR
+    je .ev_index
+    cmp rax, AST_ASSIGN_STMT
+    je .ev_assign
+    cmp rax, AST_CHANNEL_DECL
+    je .ev_skip_decl
+
+    # Unknown node — return none
+.ev_none:
+    xor eax, eax
+    xor edx, edx
+    jmp .ev_ret
+
+.ev_ret:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# --- Program: eval each declaration ---
+.ev_program:
+    mov r14, [r12 + AST_F1]         # decls list
+    test r14, r14
+    jz .ev_none
+    xor r15d, r15d
+.ev_prog_loop:
+    cmp r15, [r14 + NL_COUNT]
+    jge .ev_none
+    mov rcx, [r14 + NL_ITEMS]
+    mov rdi, [rcx + r15*8]
+    mov rsi, r13
+    call eval
+    inc r15
+    # Check return flag
+    cmp qword ptr [rip + return_flag], 0
+    jne .ev_none
+    jmp .ev_prog_loop
+
+# --- Function declaration: bind in env ---
+.ev_fn_decl:
+    mov rax, [r12 + AST_F1]         # name token
+    mov rsi, [rax + TOK_START]
+    mov rdx, [rax + TOK_LEN]
+    mov rdi, r13
+    mov rcx, VAL_FN
+    mov r8, r12                     # pointer to AST node as value
+    call env_set
+    mov eax, VAL_FN
+    mov rdx, r12
+    jmp .ev_ret
+
+# --- Let statement ---
+.ev_let:
+    # Eval value expression
+    mov rdi, [r12 + AST_F2]
+    mov rsi, r13
+    call eval
+    mov r14, rax                    # val_type
+    mov r15, rdx                    # val_data
+
+    # Bind name in env
+    mov rax, [r12 + AST_F1]         # name token
+    mov rsi, [rax + TOK_START]
+    mov rdx, [rax + TOK_LEN]
+    mov rdi, r13
+    mov rcx, r14
+    mov r8, r15
+    call env_set
+    mov rax, r14
+    mov rdx, r15
+    jmp .ev_ret
+
+# --- If statement ---
+.ev_if:
+    # Eval condition
+    mov rdi, [r12 + AST_F1]
+    mov rsi, r13
+    call eval
+    # Truthy check: non-zero data, or non-none type
+    call val_is_truthy
+    test eax, eax
+    jz .ev_if_else
+
+    # Then branch
+    mov r14, [r12 + AST_F2]
+    test r14, r14
+    jz .ev_none
+    jmp .ev_block_list
+
+.ev_if_else:
+    mov r14, [r12 + AST_F3]
+    test r14, r14
+    jz .ev_none
+    jmp .ev_block_list
+
+# --- While statement ---
+.ev_while:
+.ev_while_loop:
+    mov rdi, [r12 + AST_F1]
+    mov rsi, r13
+    call eval
+    call val_is_truthy
+    test eax, eax
+    jz .ev_none
+
+    mov r14, [r12 + AST_F2]
+    test r14, r14
+    jz .ev_while_loop
+
+    xor r15d, r15d
+.ev_while_body:
+    cmp r15, [r14 + NL_COUNT]
+    jge .ev_while_loop
+    mov rcx, [r14 + NL_ITEMS]
+    mov rdi, [rcx + r15*8]
+    mov rsi, r13
+    call eval
+    cmp qword ptr [rip + return_flag], 0
+    jne .ev_ret_flag
+    inc r15
+    jmp .ev_while_body
+
+# --- For statement ---
+.ev_for:
+    # Eval iterable
+    mov rdi, [r12 + AST_F2]
+    mov rsi, r13
+    call eval
+    # For now, only iterate lists
+    cmp eax, VAL_LIST
+    jne .ev_none
+    mov rbx, rdx                    # list ptr
+
+    # Get var name
+    mov rax, [r12 + AST_F1]         # var token
+    mov r14, [rax + TOK_START]
+    mov r15, [rax + TOK_LEN]
+
+    xor ecx, ecx                   # index
+    push rcx
+.ev_for_loop:
+    pop rcx
+    cmp rcx, [rbx + NL_COUNT]
+    jge .ev_none
+    push rcx
+
+    # Get element (stored as pairs: type, data)
+    mov rax, [rbx + NL_ITEMS]
+    pop rcx
+    push rcx
+    # Items are value structs (16 bytes each)
+    imul rcx, VAL_SIZE
+    add rax, rcx
+    mov rcx, [rax + VAL_TYPE]
+    mov r8, [rax + VAL_DATA]
+
+    # Bind var
+    mov rdi, r13
+    mov rsi, r14
+    mov rdx, r15
+    call env_set
+
+    # Eval body
+    mov rax, [r12 + AST_F3]
+    test rax, rax
+    jz .ev_for_next
+    push rax
+    mov r14, rax                    # save for iteration
+    # Re-get var name for next iteration
+    mov rax, [r12 + AST_F1]
+    mov r14, [rax + TOK_START]
+    mov r15, [rax + TOK_LEN]
+    pop rax
+    push r14
+    push r15
+    mov r14, rax
+
+    xor eax, eax
+.ev_for_body:
+    cmp rax, [r14 + NL_COUNT]
+    jge .ev_for_body_done
+    push rax
+    mov rcx, [r14 + NL_ITEMS]
+    mov rdi, [rcx + rax*8]
+    mov rsi, r13
+    call eval
+    cmp qword ptr [rip + return_flag], 0
+    jne .ev_for_ret
+    pop rax
+    inc rax
+    jmp .ev_for_body
+
+.ev_for_body_done:
+    pop r15
+    pop r14
+
+.ev_for_next:
+    pop rcx
+    inc rcx
+    push rcx
+    jmp .ev_for_loop
+
+.ev_for_ret:
+    pop rax         # body index
+    pop r15
+    pop r14
+    pop rcx         # for index
+    jmp .ev_ret_flag
+
+# --- Return statement ---
+.ev_return:
+    mov rdi, [r12 + AST_F1]
+    test rdi, rdi
+    jz .ev_return_none
+    mov rsi, r13
+    call eval
+    mov [rip + ret_val_type], rax
+    mov [rip + ret_val_data], rdx
+    mov qword ptr [rip + return_flag], 1
+    jmp .ev_ret
+
+.ev_return_none:
+    mov qword ptr [rip + ret_val_type], VAL_NONE
+    mov qword ptr [rip + ret_val_data], 0
+    mov qword ptr [rip + return_flag], 1
+    xor eax, eax
+    xor edx, edx
+    jmp .ev_ret
+
+.ev_ret_flag:
+    mov rax, [rip + ret_val_type]
+    mov rdx, [rip + ret_val_data]
+    jmp .ev_ret
+
+# --- Block: eval list of statements ---
+.ev_block:
+    mov r14, [r12 + AST_F1]
+    test r14, r14
+    jz .ev_none
+.ev_block_list:
+    xor r15d, r15d
+    xor eax, eax
+    xor edx, edx
+.ev_bl_loop:
+    cmp r15, [r14 + NL_COUNT]
+    jge .ev_ret
+    mov rcx, [r14 + NL_ITEMS]
+    mov rdi, [rcx + r15*8]
+    mov rsi, r13
+    push rax
+    push rdx
+    call eval
+    add rsp, 16                     # discard old values
+    cmp qword ptr [rip + return_flag], 0
+    jne .ev_ret_flag
+    inc r15
+    jmp .ev_bl_loop
+
+# --- Expression statement ---
+.ev_expr_stmt:
+    mov rdi, [r12 + AST_F1]
+    mov rsi, r13
+    call eval
+    jmp .ev_ret
+
+# --- Binary operator ---
+.ev_binop:
+    # Eval left
+    push r12
+    push r13
+    mov rdi, [r12 + AST_F1]
+    mov rsi, r13
+    call eval
+    mov r14, rax
+    mov r15, rdx
+
+    # Eval right
+    mov rdi, [r12 + AST_F2]
+    mov rsi, r13
+    call eval
+    mov rbx, rax                    # right type
+    mov rcx, rdx                    # right data
+    pop r13
+    pop r12
+
+    # Get operator token type
+    mov rax, [r12 + AST_F3]
+    test rax, rax
+    jz .ev_none
+    mov rax, [rax + TOK_TYPE]
+
+    # Integer arithmetic (if both sides are int)
+    cmp r14, VAL_INT
+    jne .ev_binop_other
+    cmp rbx, VAL_INT
+    jne .ev_binop_other
+
+    cmp rax, T_PLUS
+    je .ev_add
+    cmp rax, T_MINUS
+    je .ev_sub
+    cmp rax, T_STAR
+    je .ev_mul
+    cmp rax, T_SLASH
+    je .ev_div
+    cmp rax, T_EQEQ
+    je .ev_eq
+    cmp rax, T_BANGEQ
+    je .ev_neq
+    cmp rax, T_LT
+    je .ev_lt
+    cmp rax, T_GT
+    je .ev_gt
+    cmp rax, T_LTEQ
+    je .ev_lte
+    cmp rax, T_GTEQ
+    je .ev_gte
+    jmp .ev_binop_other
+
+.ev_add:
+    mov rax, VAL_INT
+    lea rdx, [r15 + rcx]
+    jmp .ev_ret
+.ev_sub:
+    mov rax, VAL_INT
+    mov rdx, r15
+    sub rdx, rcx
+    jmp .ev_ret
+.ev_mul:
+    mov rax, VAL_INT
+    mov rdx, r15
+    imul rdx, rcx
+    jmp .ev_ret
+.ev_div:
+    test rcx, rcx
+    jz .ev_none
+    mov rax, r15
+    cqo
+    idiv rcx
+    mov rdx, rax
+    mov eax, VAL_INT
+    jmp .ev_ret
+.ev_eq:
+    xor eax, eax
+    cmp r15, rcx
+    sete al
+    mov rdx, rax
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+.ev_neq:
+    xor eax, eax
+    cmp r15, rcx
+    setne al
+    mov rdx, rax
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+.ev_lt:
+    xor eax, eax
+    cmp r15, rcx
+    setl al
+    mov rdx, rax
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+.ev_gt:
+    xor eax, eax
+    cmp r15, rcx
+    setg al
+    mov rdx, rax
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+.ev_lte:
+    xor eax, eax
+    cmp r15, rcx
+    setle al
+    mov rdx, rax
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+.ev_gte:
+    xor eax, eax
+    cmp r15, rcx
+    setge al
+    mov rdx, rax
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+
+.ev_binop_other:
+    # String equality
+    cmp r14, VAL_STR
+    jne .ev_binop_kw
+    cmp rbx, VAL_STR
+    jne .ev_binop_kw
+    cmp rax, T_EQEQ
+    jne .ev_binop_streq_neq
+
+    # String ==
+    mov rdi, r15
+    mov rsi, rcx
+    call str_cmp
+    test eax, eax
+    setz al
+    movzx edx, al
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+
+.ev_binop_streq_neq:
+    cmp rax, T_BANGEQ
+    jne .ev_binop_kw
+    mov rdi, r15
+    mov rsi, rcx
+    call str_cmp
+    test eax, eax
+    setnz al
+    movzx edx, al
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+
+.ev_binop_kw:
+    # For keyword binary ops (with, from, when, etc.) — just return right
+    mov rax, rbx
+    mov rdx, rcx
+    jmp .ev_ret
+
+# --- Unary operator ---
+.ev_unary:
+    mov rdi, [r12 + AST_F1]
+    mov rsi, r13
+    call eval
+
+    mov rcx, [r12 + AST_F2]        # op token
+    test rcx, rcx
+    jz .ev_ret
+    mov rcx, [rcx + TOK_TYPE]
+
+    cmp rcx, T_MINUS
+    jne .ev_unary_not
+    cmp eax, VAL_INT
+    jne .ev_ret
+    neg rdx
+    jmp .ev_ret
+
+.ev_unary_not:
+    cmp rcx, T_BANG
+    jne .ev_ret
+    call val_is_truthy
+    xor eax, 1
+    mov edx, eax
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+
+# --- Call ---
+.ev_call:
+    push r12
+    push r13
+
+    # Eval callee
+    mov rdi, [r12 + AST_F1]
+    mov rsi, r13
+    call eval
+    mov r14, rax                    # callee type
+    mov r15, rdx                    # callee data
+
+    pop r13
+    pop r12
+
+    # Eval arguments
+    mov rbx, [r12 + AST_F2]        # args list
+    test rbx, rbx
+    jz .ev_call_no_args
+
+    # Allocate args array on stack conceptually; use arena
+    mov rdi, [rbx + NL_COUNT]
+    imul rdi, VAL_SIZE
+    call arena_alloc
+    push rax                        # args values array
+
+    xor ecx, ecx
+.ev_call_eval_args:
+    cmp rcx, [rbx + NL_COUNT]
+    jge .ev_call_invoke
+
+    push rcx
+    push rbx
+    mov rax, [rbx + NL_ITEMS]
+    mov rdi, [rax + rcx*8]
+    mov rsi, r13
+    call eval
+    pop rbx
+    pop rcx
+
+    # Store result
+    mov rdi, [rsp]                  # args array
+    mov r8, rcx
+    imul r8, VAL_SIZE
+    add rdi, r8
+    mov [rdi + VAL_TYPE], rax
+    mov [rdi + VAL_DATA], rdx
+
+    inc rcx
+    jmp .ev_call_eval_args
+
+.ev_call_no_args:
+    push qword ptr 0               # null args array
+    mov rbx, 0
+
+.ev_call_invoke:
+    pop rax                         # args array
+
+    # Dispatch on callee type
+    cmp r14, VAL_BUILTIN
+    je .ev_call_builtin
+    cmp r14, VAL_FN
+    je .ev_call_fn
+
+    # Not callable — return callee value
+    mov rax, r14
+    mov rdx, r15
+    jmp .ev_ret
+
+.ev_call_builtin:
+    # r15 = builtin function pointer
+    # rax = args array, rbx = AST args node list
+    mov rdi, rax                    # args array
+    test rbx, rbx
+    jz .ev_call_builtin_zero
+    mov rsi, [rbx + NL_COUNT]
+    jmp .ev_call_builtin_go
+.ev_call_builtin_zero:
+    xor esi, esi
+.ev_call_builtin_go:
+    call r15
+    # rax = type, rdx = data returned by builtin
+    jmp .ev_ret
+
+.ev_call_fn:
+    # r15 = pointer to AST_FN_DECL node
+    # rax = args array, rbx = args node list
+    # Delegate to eval_fn_call(fn_node, args_array, arg_count, parent_env)
+    mov rdi, r15                    # fn AST node
+    mov rsi, rax                    # args array
+    test rbx, rbx
+    jz .ev_call_fn_noargs
+    mov rdx, [rbx + NL_COUNT]      # arg count
+    jmp .ev_call_fn_go
+.ev_call_fn_noargs:
+    xor edx, edx
+.ev_call_fn_go:
+    mov rcx, r13                    # parent env
+    call eval_fn_call
+    jmp .ev_ret
+
+# --- Dot access (simplified: return right side as ident) ---
+.ev_dot:
+    mov rdi, [r12 + AST_F1]
+    mov rsi, r13
+    call eval
+    jmp .ev_ret
+
+# --- Index expression ---
+.ev_index:
+    mov rdi, [r12 + AST_F1]
+    mov rsi, r13
+    call eval
+    jmp .ev_ret
+
+# --- Identifier lookup ---
+.ev_ident:
+    mov rax, [r12 + AST_F1]         # token
+    test rax, rax
+    jz .ev_none
+    mov rsi, [rax + TOK_START]
+    mov rdx, [rax + TOK_LEN]
+    mov rdi, r13
+    call env_get
+    jmp .ev_ret
+
+# --- Integer literal ---
+.ev_int:
+    mov rdi, [r12 + AST_F1]         # token
+    test rdi, rdi
+    jz .ev_none
+    call tok_to_int
+    mov rdx, rax
+    mov eax, VAL_INT
+    jmp .ev_ret
+
+# --- String literal ---
+.ev_string:
+    mov rdi, [r12 + AST_F1]         # token
+    test rdi, rdi
+    jz .ev_none
+    call tok_to_str
+    # rax=ptr, rdx=len. Allocate a null-terminated copy.
+    push rax
+    push rdx
+    lea rdi, [rdx + 1]
+    call arena_alloc
+    mov rcx, rax                    # dst
+    pop rdx
+    pop rsi                         # src
+    push rcx
+    push rdx
+    mov rdi, rcx
+    call mem_copy
+    pop rdx
+    pop rcx
+    mov byte ptr [rcx + rdx], 0    # null terminate
+    mov rdx, rcx
+    mov eax, VAL_STR
+    jmp .ev_ret
+
+# --- Boolean literal ---
+.ev_bool:
+    mov rdx, [r12 + AST_F1]
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+
+# --- List literal ---
+.ev_list:
+    mov rbx, [r12 + AST_F1]        # node list
+    test rbx, rbx
+    jz .ev_none
+
+    # Create value list
+    mov rdi, [rbx + NL_COUNT]
+    imul rdi, VAL_SIZE
+    add rdi, NL_HEADER
+    call arena_alloc
+    mov r14, rax
+
+    mov rcx, [rbx + NL_COUNT]
+    mov [r14 + NL_COUNT], rcx
+    mov [r14 + NL_CAP], rcx
+    lea rax, [r14 + NL_HEADER]
+    mov [r14 + NL_ITEMS], rax
+
+    xor r15d, r15d
+.ev_list_loop:
+    cmp r15, [rbx + NL_COUNT]
+    jge .ev_list_done
+
+    mov rcx, [rbx + NL_ITEMS]
+    mov rdi, [rcx + r15*8]
+    push rbx
+    push r15
+    mov rsi, r13
+    call eval
+    pop r15
+    pop rbx
+
+    # Store value
+    mov rcx, r15
+    imul rcx, VAL_SIZE
+    add rcx, [r14 + NL_ITEMS]
+    mov [rcx + VAL_TYPE], rax
+    mov [rcx + VAL_DATA], rdx
+
+    inc r15
+    jmp .ev_list_loop
+
+.ev_list_done:
+    mov eax, VAL_LIST
+    mov rdx, r14
+    jmp .ev_ret
+
+# --- Moment/Node/Mind declarations: bind name in env ---
+.ev_moment_decl:
+.ev_node_decl:
+.ev_mind_decl:
+    mov rax, [r12 + AST_F1]         # name token
+    test rax, rax
+    jz .ev_none
+    mov rsi, [rax + TOK_START]
+    mov rdx, [rax + TOK_LEN]
+    mov rdi, r13
+    mov rcx, VAL_MOMENT
+    mov r8, r12
+    call env_set
+    mov eax, VAL_MOMENT
+    mov rdx, r12
+    jmp .ev_ret
+
+# --- Assignment statement ---
+.ev_assign:
+    # Eval value expression
+    mov rdi, [r12 + AST_F2]
+    mov rsi, r13
+    call eval
+    mov r14, rax                    # val_type
+    mov r15, rdx                    # val_data
+
+    # Bind name in env (same as let)
+    mov rax, [r12 + AST_F1]         # name token
+    mov rsi, [rax + TOK_START]
+    mov rdx, [rax + TOK_LEN]
+    mov rdi, r13
+    mov rcx, r14
+    mov r8, r15
+    call env_set
+    mov rax, r14
+    mov rdx, r15
+    jmp .ev_ret
+
+# --- Skip declarations (path, struct, etc.) ---
+.ev_skip_decl:
+    xor eax, eax
+    xor edx, edx
+    jmp .ev_ret
+
+# --- Field def: eval value ---
+.ev_field_def:
+    mov rdi, [r12 + AST_F2]
+    mov rsi, r13
+    call eval
+    jmp .ev_ret
+
+
+# ============================================================================
+# M4: INTERPRETER — Function Call (fixed)
+# ============================================================================
+
+# eval_fn_call(fn_node: rdi, args_array: rsi, arg_count: rdx, parent_env: rcx) -> val
+eval_fn_call:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rdi            # fn AST node
+    mov r13, rsi            # args array
+    mov r14, rdx            # arg count
+    mov r15, rcx            # parent env
+
+    # Create new scope
+    mov rdi, r15
+    call env_new
+    mov rbx, rax            # new_env
+
+    # Bind parameters
+    mov rcx, [r12 + AST_F2]         # params list
+    test rcx, rcx
+    jz .efc_body
+
+    xor edx, edx
+.efc_bind:
+    cmp rdx, [rcx + NL_COUNT]
+    jge .efc_body
+    cmp rdx, r14
+    jge .efc_body
+
+    push rcx
+    push rdx
+
+    # Param name
+    mov rax, [rcx + NL_ITEMS]
+    mov rax, [rax + rdx*8]         # token
+    mov rsi, [rax + TOK_START]
+    push rsi
+    mov rdx, [rax + TOK_LEN]
+    push rdx
+
+    # Arg value
+    pop rdx
+    pop rsi
+    pop rcx                         # orig rdx (index)
+    push rcx
+    mov rax, rcx
+    imul rax, VAL_SIZE
+    add rax, r13
+    mov r8, [rax + VAL_DATA]
+    mov rcx, [rax + VAL_TYPE]
+
+    mov rdi, rbx
+    call env_set
+
+    pop rdx
+    pop rcx
+    inc rdx
+    jmp .efc_bind
+
+.efc_body:
+    # Execute body
+    mov qword ptr [rip + return_flag], 0
+    mov r14, [r12 + AST_F3]         # body list
+    test r14, r14
+    jz .efc_none
+
+    xor r15d, r15d
+.efc_exec:
+    cmp r15, [r14 + NL_COUNT]
+    jge .efc_done
+    mov rcx, [r14 + NL_ITEMS]
+    mov rdi, [rcx + r15*8]
+    mov rsi, rbx                    # function's env
+    push r14
+    push r15
+    call eval
+    pop r15
+    pop r14
+    cmp qword ptr [rip + return_flag], 0
+    jne .efc_returned
+    inc r15
+    jmp .efc_exec
+
+.efc_done:
+    # No explicit return — return last value
+    jmp .efc_out
+
+.efc_returned:
+    mov qword ptr [rip + return_flag], 0
+    mov rax, [rip + ret_val_type]
+    mov rdx, [rip + ret_val_data]
+
+.efc_out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.efc_none:
+    xor eax, eax
+    xor edx, edx
+    jmp .efc_out
+
+
+# ============================================================================
+# M4: INTERPRETER — Helpers
+# ============================================================================
+
+# val_is_truthy() — checks rax(type)/rdx(data), returns 1/0 in eax
+val_is_truthy:
+    cmp eax, VAL_NONE
+    je .vit_false
+    cmp eax, VAL_BOOL
+    jne .vit_check_int
+    test rdx, rdx
+    jz .vit_false
+    jmp .vit_true
+.vit_check_int:
+    cmp eax, VAL_INT
+    jne .vit_true
+    test rdx, rdx
+    jz .vit_false
+.vit_true:
+    mov eax, 1
+    ret
+.vit_false:
+    xor eax, eax
+    ret
+
+
+# ============================================================================
+# M4: INTERPRETER — Built-in Functions
+# ============================================================================
+
+# register_builtins(env: rdi)
+register_builtins:
+    push rbx
+    mov rbx, rdi
+
+    # print
+    lea rsi, [rip + bi_print_name]
+    mov rdx, 5
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_print]
+    mov rdi, rbx
+    call env_set
+
+    # println
+    lea rsi, [rip + bi_println_name]
+    mov rdx, 7
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_println]
+    mov rdi, rbx
+    call env_set
+
+    # len
+    lea rsi, [rip + bi_len_name]
+    mov rdx, 3
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_len]
+    mov rdi, rbx
+    call env_set
+
+    # str
+    lea rsi, [rip + bi_str_name]
+    mov rdx, 3
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_str]
+    mov rdi, rbx
+    call env_set
+
+    # range
+    lea rsi, [rip + bi_range_name]
+    mov rdx, 5
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_range]
+    mov rdi, rbx
+    call env_set
+
+    # type_of
+    lea rsi, [rip + bi_typeof_name]
+    mov rdx, 7
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_typeof]
+    mov rdi, rbx
+    call env_set
+
+    pop rbx
+    ret
+
+# builtin_print(args: rdi, count: rsi) -> VAL_NONE
+builtin_print:
+    push rbx
+    push r12
+
+    mov rbx, rdi            # args array
+    mov r12, rsi            # count
+
+    xor ecx, ecx
+.bp_loop:
+    cmp rcx, r12
+    jge .bp_done
+
+    push rcx
+
+    # Get arg value
+    mov rax, rcx
+    imul rax, VAL_SIZE
+    add rax, rbx
+
+    mov rcx, [rax + VAL_TYPE]
+    mov rdx, [rax + VAL_DATA]
+
+    # Print based on type
+    cmp ecx, VAL_INT
+    je .bp_int
+    cmp ecx, VAL_STR
+    je .bp_str
+    cmp ecx, VAL_BOOL
+    je .bp_bool
+    cmp ecx, VAL_NONE
+    je .bp_none_val
+    # Default: print type
+    lea rdi, [rip + bi_obj_str]
+    call print_str
+    jmp .bp_next
+
+.bp_int:
+    mov rdi, rdx
+    call print_int
+    jmp .bp_next
+.bp_str:
+    mov rdi, rdx
+    call print_str
+    jmp .bp_next
+.bp_bool:
+    test rdx, rdx
+    jz .bp_false
+    lea rdi, [rip + str_true]
+    jmp .bp_bool_print
+.bp_false:
+    lea rdi, [rip + str_false]
+.bp_bool_print:
+    call print_str
+    jmp .bp_next
+.bp_none_val:
+    lea rdi, [rip + bi_none_str]
+    call print_str
+
+.bp_next:
+    pop rcx
+    inc rcx
+
+    # Space between args
+    cmp rcx, r12
+    jge .bp_done
+    mov dil, ' '
+    push rcx
+    call print_char
+    pop rcx
+    jmp .bp_loop
+
+.bp_done:
+    pop r12
+    pop rbx
+    xor eax, eax
+    xor edx, edx
+    ret
+
+# builtin_println — same as print but adds newline
+builtin_println:
+    call builtin_print
+    push rax
+    push rdx
+    call print_newline
+    pop rdx
+    pop rax
+    ret
+
+# builtin_len(args: rdi, count: rsi) -> VAL_INT
+builtin_len:
+    test rsi, rsi
+    jz .bl_zero
+    mov rax, [rdi + VAL_TYPE]
+    mov rdx, [rdi + VAL_DATA]
+    cmp eax, VAL_STR
+    je .bl_str
+    cmp eax, VAL_LIST
+    je .bl_list
+.bl_zero:
+    mov eax, VAL_INT
+    xor edx, edx
+    ret
+.bl_str:
+    mov rdi, rdx
+    call str_len
+    mov rdx, rax
+    mov eax, VAL_INT
+    ret
+.bl_list:
+    mov rdx, [rdx + NL_COUNT]
+    mov eax, VAL_INT
+    ret
+
+# builtin_str(args: rdi, count: rsi) -> VAL_STR
+builtin_str:
+    test rsi, rsi
+    jz .bs_empty
+    mov rax, [rdi + VAL_TYPE]
+    mov rdx, [rdi + VAL_DATA]
+    cmp eax, VAL_STR
+    je .bs_already
+    cmp eax, VAL_INT
+    je .bs_int
+.bs_empty:
+    lea rdx, [rip + bi_empty_str]
+    mov eax, VAL_STR
+    ret
+.bs_already:
+    mov eax, VAL_STR
+    ret
+.bs_int:
+    # Convert int to string
+    push rdx
+    lea rbx, [rip + int_buf + 20]
+    mov byte ptr [rbx], 0
+    mov rax, rdx
+    test rax, rax
+    jns .bs_int_pos
+    neg rax
+.bs_int_pos:
+    test rax, rax
+    jnz .bs_int_cvt
+    dec rbx
+    mov byte ptr [rbx], '0'
+    jmp .bs_int_copy
+.bs_int_cvt:
+    mov rcx, 10
+.bs_int_lp:
+    test rax, rax
+    jz .bs_int_neg
+    xor edx, edx
+    div rcx
+    add dl, '0'
+    dec rbx
+    mov [rbx], dl
+    jmp .bs_int_lp
+.bs_int_neg:
+    pop rax
+    test rax, rax
+    jns .bs_int_copy
+    dec rbx
+    mov byte ptr [rbx], '-'
+    jmp .bs_int_copy2
+.bs_int_copy:
+    pop rax
+.bs_int_copy2:
+    mov rdi, rbx
+    call str_len
+    push rax
+    lea rdi, [rax + 1]
+    call arena_alloc
+    pop rcx
+    push rax
+    mov rdi, rax
+    mov rsi, rbx
+    call str_copy
+    pop rdx
+    mov eax, VAL_STR
+    ret
+
+# builtin_range(args: rdi, count: rsi) -> VAL_LIST
+builtin_range:
+    test rsi, rsi
+    jz .br_empty
+    mov rax, [rdi + VAL_DATA]       # end value
+    test rax, rax
+    jle .br_empty
+
+    push rax
+    # Allocate list
+    imul rdi, rax, VAL_SIZE
+    add rdi, NL_HEADER
+    call arena_alloc
+    mov rbx, rax
+    pop rcx                         # count
+
+    mov [rbx + NL_COUNT], rcx
+    mov [rbx + NL_CAP], rcx
+    lea rax, [rbx + NL_HEADER]
+    mov [rbx + NL_ITEMS], rax
+
+    xor edx, edx
+.br_fill:
+    cmp rdx, rcx
+    jge .br_done
+    mov rax, rdx
+    imul rax, VAL_SIZE
+    add rax, [rbx + NL_ITEMS]
+    mov qword ptr [rax + VAL_TYPE], VAL_INT
+    mov [rax + VAL_DATA], rdx
+    inc rdx
+    jmp .br_fill
+
+.br_done:
+    mov eax, VAL_LIST
+    mov rdx, rbx
+    ret
+.br_empty:
+    xor eax, eax
+    xor edx, edx
+    ret
+
+# builtin_typeof(args: rdi, count: rsi) -> VAL_STR
+builtin_typeof:
+    test rsi, rsi
+    jz .bt_none
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_INT
+    je .bt_int
+    cmp eax, VAL_STR
+    je .bt_str
+    cmp eax, VAL_BOOL
+    je .bt_bool
+    cmp eax, VAL_LIST
+    je .bt_list
+    cmp eax, VAL_FN
+    je .bt_fn
+.bt_none:
+    lea rdx, [rip + bi_none_str]
+    mov eax, VAL_STR
+    ret
+.bt_int:
+    lea rdx, [rip + bi_int_str]
+    mov eax, VAL_STR
+    ret
+.bt_str:
+    lea rdx, [rip + bi_str_str]
+    mov eax, VAL_STR
+    ret
+.bt_bool:
+    lea rdx, [rip + bi_bool_str]
+    mov eax, VAL_STR
+    ret
+.bt_list:
+    lea rdx, [rip + bi_list_str]
+    mov eax, VAL_STR
+    ret
+.bt_fn:
+    lea rdx, [rip + bi_fn_str]
+    mov eax, VAL_STR
+    ret
+
+
+# ============================================================================
 # READ-ONLY DATA
 # ============================================================================
 .section .rodata
@@ -4104,6 +5766,22 @@ msg_got:         .asciz " got "
 msg_unknown_ast: .asciz "AST:?"
 str_true:        .asciz "true"
 str_false:       .asciz "false"
+
+# --- Interpreter builtin names ---
+bi_print_name:   .asciz "print"
+bi_println_name: .asciz "println"
+bi_len_name:     .asciz "len"
+bi_str_name:     .asciz "str"
+bi_range_name:   .asciz "range"
+bi_typeof_name:  .asciz "type_of"
+bi_obj_str:      .asciz "<object>"
+bi_none_str:     .asciz "none"
+bi_empty_str:    .asciz ""
+bi_int_str:      .asciz "int"
+bi_str_str:      .asciz "str"
+bi_bool_str:     .asciz "bool"
+bi_list_str:     .asciz "list"
+bi_fn_str:       .asciz "fn"
 
 # --- AST tag name table ---
 ast_tag_names:
