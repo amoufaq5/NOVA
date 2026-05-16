@@ -1,95 +1,112 @@
 """Tests for the Nova lexer."""
-
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from nova_interpreter.lexer.lexer import Lexer
-from nova_interpreter.tokens import TokenType
+import pytest
+from nova.lexer import Lexer
+from nova.tokens import TokenType
 
 
-def test_basic_tokens():
-    tokens = Lexer("let x = 42").tokenize()
-    types = [t.type for t in tokens[:-1]]  # exclude EOF
-    assert types == [TokenType.LET, TokenType.IDENT, TokenType.ASSIGN, TokenType.INT]
-    assert tokens[3].value == 42
-    print("  PASS: basic_tokens")
+def lex(source):
+    return Lexer(source).tokenize()
 
 
-def test_keywords():
-    src = "fn model agent arena sandbox distribute grad spawn async await"
-    tokens = Lexer(src).tokenize()
-    types = [t.type for t in tokens[:-1]]
-    expected = [
-        TokenType.FN, TokenType.MODEL, TokenType.AGENT, TokenType.ARENA,
-        TokenType.SANDBOX, TokenType.DISTRIBUTE, TokenType.GRAD,
-        TokenType.SPAWN, TokenType.ASYNC, TokenType.AWAIT,
-    ]
-    assert types == expected, f"Got {types}"
-    print("  PASS: keywords")
+def types(source):
+    return [t.type for t in lex(source) if t.type != TokenType.EOF]
 
 
-def test_operators():
-    src = "+ - * / // ** % @ == != < > <= >= |> -> =>"
-    tokens = Lexer(src).tokenize()
-    types = [t.type for t in tokens[:-1]]
-    expected = [
-        TokenType.PLUS, TokenType.MINUS, TokenType.STAR, TokenType.SLASH,
-        TokenType.DSLASH, TokenType.DSTAR, TokenType.PERCENT, TokenType.AT,
-        TokenType.EQ, TokenType.NEQ, TokenType.LT, TokenType.GT,
-        TokenType.LTE, TokenType.GTE, TokenType.PIPE_ARROW,
-        TokenType.ARROW, TokenType.FAT_ARROW,
-    ]
-    assert types == expected, f"Got {types}"
-    print("  PASS: operators")
+class TestBasicTokens:
+    def test_integers(self):
+        assert types("42") == [TokenType.INT]
+        assert types("0xFF") == [TokenType.INT]
+        assert types("0b1010") == [TokenType.INT]
+        assert types("1_000_000") == [TokenType.INT]
+
+    def test_floats(self):
+        assert types("3.14") == [TokenType.FLOAT]
+        assert types("1e10") == [TokenType.FLOAT]
+        assert types("2.5e-3") == [TokenType.FLOAT]
+
+    def test_strings(self):
+        toks = lex('"hello"')
+        assert toks[0].type == TokenType.STRING
+        assert toks[0].value == "hello"
+
+    def test_string_escapes(self):
+        toks = lex(r'"line\nbreak"')
+        assert toks[0].value == "line\nbreak"
+
+    def test_booleans(self):
+        assert types("true false") == [TokenType.TRUE, TokenType.FALSE]
+
+    def test_none(self):
+        assert types("none") == [TokenType.NONE]
+
+    def test_identifiers(self):
+        assert types("foo bar_baz x1") == [TokenType.IDENT] * 3
 
 
-def test_string_literal():
-    tokens = Lexer('"hello world"').tokenize()
-    assert tokens[0].type == TokenType.STRING
-    assert tokens[0].value == "hello world"
-    print("  PASS: string_literal")
+class TestOperators:
+    def test_arithmetic(self):
+        assert types("+ - * / // % **") == [
+            TokenType.PLUS, TokenType.MINUS, TokenType.STAR,
+            TokenType.SLASH, TokenType.DSLASH, TokenType.PERCENT,
+            TokenType.DSTAR,
+        ]
+
+    def test_comparison(self):
+        assert types("== != < > <= >=") == [
+            TokenType.EQ_EQ, TokenType.BANG_EQ, TokenType.LT, TokenType.GT,
+            TokenType.LT_EQ, TokenType.GT_EQ,
+        ]
+
+    def test_pipe(self):
+        assert types("|>") == [TokenType.PIPE_ARROW]
+
+    def test_arrow(self):
+        assert types("->") == [TokenType.ARROW]
+
+    def test_fat_arrow(self):
+        assert types("=>") == [TokenType.FAT_ARROW]
 
 
-def test_float_literal():
-    tokens = Lexer("3.14 1e10 2.5e-3").tokenize()
-    assert tokens[0].type == TokenType.FLOAT
-    assert tokens[0].value == 3.14
-    assert tokens[1].type == TokenType.FLOAT
-    assert tokens[2].type == TokenType.FLOAT
-    print("  PASS: float_literal")
+class TestKeywords:
+    def test_cognitive_keywords(self):
+        assert types("mind") == [TokenType.MIND]
+        assert types("memory") == [TokenType.MEMORY]
+        assert types("perceive") == [TokenType.PERCEIVE]
+        assert types("think") == [TokenType.THINK]
+        assert types("imagine") == [TokenType.IMAGINE]
+        assert types("learn") == [TokenType.LEARN]
+        assert types("recall") == [TokenType.RECALL]
+        assert types("store") == [TokenType.STORE]
+        assert types("believe") == [TokenType.BELIEVE]
+        assert types("simulate") == [TokenType.SIMULATE]
+        assert types("predict") == [TokenType.PREDICT]
+
+    def test_control_flow(self):
+        assert types("if elif else for while match") == [
+            TokenType.IF, TokenType.ELIF, TokenType.ELSE,
+            TokenType.FOR, TokenType.WHILE, TokenType.MATCH,
+        ]
 
 
-def test_comments():
-    tokens = Lexer("let x = 1 -- this is a comment\nlet y = 2").tokenize()
-    idents = [t.value for t in tokens if t.type == TokenType.IDENT]
-    assert idents == ["x", "y"]
-    print("  PASS: comments")
+class TestComments:
+    def test_line_comment(self):
+        assert types("42 -- this is a comment\n10") == [TokenType.INT, TokenType.NEWLINE, TokenType.INT]
+
+    def test_block_comment(self):
+        assert types("42 -{ block comment }- 10") == [TokenType.INT, TokenType.INT]
+
+    def test_nested_block_comment(self):
+        assert types("1 -{ outer -{ inner }- still comment }- 2") == [
+            TokenType.INT, TokenType.INT
+        ]
 
 
-def test_block_comments():
-    tokens = Lexer("let a = -{ nested -{ comment }- here }- 5").tokenize()
-    types = [t.type for t in tokens[:-1]]
-    assert types == [TokenType.LET, TokenType.IDENT, TokenType.ASSIGN, TokenType.INT]
-    print("  PASS: block_comments")
+class TestDelimiters:
+    def test_braces(self):
+        assert types("{ }") == [TokenType.LBRACE, TokenType.RBRACE]
 
+    def test_parens(self):
+        assert types("( )") == [TokenType.LPAREN, TokenType.RPAREN]
 
-def test_hex_binary_literals():
-    tokens = Lexer("0xFF 0b1010 0o77").tokenize()
-    assert tokens[0].value == 255
-    assert tokens[1].value == 10
-    assert tokens[2].value == 63
-    print("  PASS: hex_binary_literals")
-
-
-if __name__ == "__main__":
-    print("Running lexer tests...")
-    test_basic_tokens()
-    test_keywords()
-    test_operators()
-    test_string_literal()
-    test_float_literal()
-    test_comments()
-    test_block_comments()
-    test_hex_binary_literals()
-    print("All lexer tests passed!\n")
+    def test_brackets(self):
+        assert types("[ ]") == [TokenType.LBRACKET, TokenType.RBRACKET]

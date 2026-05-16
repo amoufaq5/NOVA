@@ -1,0 +1,63 @@
+-- Nova: A basic cognitive agent
+
+mind Agent {
+    memory working(capacity: 7)
+    memory episodic(max_episodes: 10000)
+    memory semantic(structure: "graph")
+    memory procedural(structure: "rules")
+
+    perceive(input) {
+        let importance = 0.5
+        store(input, in: "working")
+        if importance > 0.7 {
+            store(input, in: "episodic")
+        }
+        return input
+    }
+
+    think(goal) {
+        let knowledge = recall(goal, from: "semantic", limit: 10)
+        let experience = recall(goal, from: "episodic", limit: 5)
+        let consequences = predict(goal)
+        return knowledge
+    }
+
+    imagine(scenario) {
+        let result = simulate(scenario, steps: 5)
+        return result
+    }
+
+    learn(event) {
+        store(event, in: "episodic")
+    }
+
+    act(action) {
+        let result = predict(action)
+        return result
+    }
+
+    on idle() {
+        let status = "thinking"
+    }
+
+    on experience(event) {
+        store(event, in: "episodic")
+    }
+}
+
+-- Helper functions
+fn greet(name) {
+    return "Hello, " + name + "!"
+}
+
+fn factorial(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+-- Test basic operations
+let message = greet("Nova")
+print(message)
+print(factorial(5))
