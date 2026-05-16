@@ -1,5 +1,9 @@
 """Nova tree-walking interpreter — Phase 0 bootstrap."""
 
+import builtins as _py_builtins
+import math
+import random
+
 from ..ast_nodes.nodes import *
 from ..types.values import *
 from ..types.ownership import OwnershipManager
@@ -38,6 +42,24 @@ class Interpreter:
         self.global_env.define("sum", NovaBuiltin("sum", self._builtin_sum))
         self.global_env.define("min", NovaBuiltin("min", self._builtin_min))
         self.global_env.define("max", NovaBuiltin("max", self._builtin_max))
+
+        # Math builtins
+        self.global_env.define("sqrt", NovaBuiltin("sqrt", self._builtin_sqrt))
+        self.global_env.define("log", NovaBuiltin("log", self._builtin_log))
+        self.global_env.define("exp", NovaBuiltin("exp", self._builtin_exp))
+        self.global_env.define("pow", NovaBuiltin("pow", self._builtin_pow))
+        self.global_env.define("floor", NovaBuiltin("floor", self._builtin_floor))
+        self.global_env.define("ceil", NovaBuiltin("ceil", self._builtin_ceil))
+        self.global_env.define("round", NovaBuiltin("round", self._builtin_round))
+        self.global_env.define("sin", NovaBuiltin("sin", self._builtin_sin))
+        self.global_env.define("cos", NovaBuiltin("cos", self._builtin_cos))
+        self.global_env.define("tan", NovaBuiltin("tan", self._builtin_tan))
+
+        # Assert builtins (for test runner)
+        self.global_env.define("assert_eq", NovaBuiltin("assert_eq", self._builtin_assert_eq))
+        self.global_env.define("assert_ne", NovaBuiltin("assert_ne", self._builtin_assert_ne))
+        self.global_env.define("assert_true", NovaBuiltin("assert_true", self._builtin_assert_true))
+        self.global_env.define("assert_false", NovaBuiltin("assert_false", self._builtin_assert_false))
 
     @staticmethod
     def _builtin_print(args, kwargs):
@@ -133,6 +155,131 @@ class Interpreter:
             vals = [a.value for a in args]
             m = max(vals)
         return NovaFloat(m) if isinstance(m, float) else NovaInt(m)
+
+    # --- Math builtins ---
+
+    @staticmethod
+    def _builtin_sqrt(args, kwargs):
+        v = args[0]
+        return NovaFloat(math.sqrt(v.value))
+
+    @staticmethod
+    def _builtin_log(args, kwargs):
+        v = args[0]
+        return NovaFloat(math.log(v.value))
+
+    @staticmethod
+    def _builtin_exp(args, kwargs):
+        v = args[0]
+        return NovaFloat(math.exp(v.value))
+
+    @staticmethod
+    def _builtin_pow(args, kwargs):
+        base = args[0].value
+        exp = args[1].value
+        result = base ** exp
+        if isinstance(result, float) or isinstance(args[0], NovaFloat) or isinstance(args[1], NovaFloat):
+            return NovaFloat(float(result))
+        return NovaInt(int(result))
+
+    @staticmethod
+    def _builtin_floor(args, kwargs):
+        v = args[0]
+        return NovaInt(math.floor(v.value))
+
+    @staticmethod
+    def _builtin_ceil(args, kwargs):
+        v = args[0]
+        return NovaInt(math.ceil(v.value))
+
+    @staticmethod
+    def _builtin_round(args, kwargs):
+        v = args[0]
+        decimals = 0
+        if len(args) > 1:
+            decimals = args[1].value
+        elif "decimals" in kwargs:
+            decimals = kwargs["decimals"].value
+        result = round(v.value, decimals)
+        if decimals == 0:
+            return NovaInt(int(result))
+        return NovaFloat(result)
+
+    @staticmethod
+    def _builtin_sin(args, kwargs):
+        return NovaFloat(math.sin(args[0].value))
+
+    @staticmethod
+    def _builtin_cos(args, kwargs):
+        return NovaFloat(math.cos(args[0].value))
+
+    @staticmethod
+    def _builtin_tan(args, kwargs):
+        return NovaFloat(math.tan(args[0].value))
+
+    # --- Assert builtins ---
+
+    @staticmethod
+    def _builtin_assert_eq(args, kwargs):
+        a, b = args[0], args[1]
+        a_val = a.value if hasattr(a, 'value') else a
+        b_val = b.value if hasattr(b, 'value') else b
+        if a_val != b_val:
+            raise NovaPanic(f"assert_eq failed: {a!r} != {b!r}")
+        return NovaNone()
+
+    @staticmethod
+    def _builtin_assert_ne(args, kwargs):
+        a, b = args[0], args[1]
+        a_val = a.value if hasattr(a, 'value') else a
+        b_val = b.value if hasattr(b, 'value') else b
+        if a_val == b_val:
+            raise NovaPanic(f"assert_ne failed: {a!r} == {b!r}")
+        return NovaNone()
+
+    @staticmethod
+    def _builtin_assert_true(args, kwargs):
+        v = args[0]
+        truthy = False
+        if isinstance(v, NovaBool):
+            truthy = v.value
+        elif isinstance(v, NovaNone):
+            truthy = False
+        elif isinstance(v, NovaInt):
+            truthy = v.value != 0
+        elif isinstance(v, NovaFloat):
+            truthy = v.value != 0.0
+        elif isinstance(v, NovaStr):
+            truthy = len(v.value) > 0
+        elif isinstance(v, NovaList):
+            truthy = len(v.elements) > 0
+        else:
+            truthy = True
+        if not truthy:
+            raise NovaPanic(f"assert_true failed: {v!r} is not truthy")
+        return NovaNone()
+
+    @staticmethod
+    def _builtin_assert_false(args, kwargs):
+        v = args[0]
+        truthy = False
+        if isinstance(v, NovaBool):
+            truthy = v.value
+        elif isinstance(v, NovaNone):
+            truthy = False
+        elif isinstance(v, NovaInt):
+            truthy = v.value != 0
+        elif isinstance(v, NovaFloat):
+            truthy = v.value != 0.0
+        elif isinstance(v, NovaStr):
+            truthy = len(v.value) > 0
+        elif isinstance(v, NovaList):
+            truthy = len(v.elements) > 0
+        else:
+            truthy = True
+        if truthy:
+            raise NovaPanic(f"assert_false failed: {v!r} is truthy")
+        return NovaNone()
 
     # -------------------------------------------------------------------
     # Entry point
@@ -813,6 +960,72 @@ class Interpreter:
                 case "clone":
                     return NovaBuiltin("clone", lambda a, k: NovaTensor(
                         data=obj.data[:], dtype=obj.dtype, shape=obj.shape))
+                case "reshape":
+                    def _reshape(args, kwargs):
+                        if len(args) == 1 and isinstance(args[0], NovaList):
+                            new_shape = tuple(e.value for e in args[0].elements)
+                        else:
+                            new_shape = tuple(a.value for a in args)
+                        if math.prod(new_shape) != math.prod(obj.shape):
+                            raise NovaError(f"Cannot reshape {obj.shape} to {new_shape}: size mismatch")
+                        return NovaTensor(data=obj.data[:], dtype=obj.dtype, shape=new_shape)
+                    return NovaBuiltin("reshape", _reshape)
+                case "flatten":
+                    return NovaBuiltin("flatten", lambda a, k: NovaTensor(
+                        data=obj.data[:], dtype=obj.dtype, shape=(len(obj.data),)))
+                case "transpose":
+                    def _transpose(args, kwargs):
+                        if obj.ndim != 2:
+                            raise NovaError("transpose() requires a 2D tensor")
+                        rows, cols = obj.shape
+                        new_data = [0.0] * len(obj.data)
+                        for r in range(rows):
+                            for c in range(cols):
+                                new_data[c * rows + r] = obj.data[r * cols + c]
+                        return NovaTensor(data=new_data, dtype=obj.dtype, shape=(cols, rows))
+                    return NovaBuiltin("transpose", _transpose)
+                case "item":
+                    def _item(args, kwargs):
+                        if len(obj.data) != 1:
+                            raise NovaError(f"item() requires a scalar tensor, got {obj.shape}")
+                        v = obj.data[0]
+                        if obj.dtype.startswith("f"):
+                            return NovaFloat(v)
+                        return NovaInt(int(v))
+                    return NovaBuiltin("item", _item)
+                case "mean":
+                    def _mean(args, kwargs):
+                        dim = None
+                        if args:
+                            dim = args[0].value
+                        elif "dim" in kwargs:
+                            dim = kwargs["dim"].value
+                        if dim is None:
+                            return NovaFloat(sum(obj.data) / len(obj.data))
+                        # Compute mean along a dimension for nD tensors
+                        if obj.ndim != 2:
+                            return NovaFloat(sum(obj.data) / len(obj.data))
+                        rows, cols = obj.shape
+                        if dim == 0:
+                            result = [sum(obj.data[r * cols + c] for r in range(rows)) / rows for c in range(cols)]
+                            return NovaTensor(data=result, dtype=obj.dtype, shape=(cols,))
+                        elif dim == 1:
+                            result = [sum(obj.data[r * cols + c] for c in range(cols)) / cols for r in range(rows)]
+                            return NovaTensor(data=result, dtype=obj.dtype, shape=(rows,))
+                        return NovaFloat(sum(obj.data) / len(obj.data))
+                    return NovaBuiltin("mean", _mean)
+                case "max":
+                    return NovaBuiltin("max", lambda a, k: NovaFloat(max(obj.data)) if obj.data else NovaFloat(0.0))
+                case "min":
+                    return NovaBuiltin("min", lambda a, k: NovaFloat(min(obj.data)) if obj.data else NovaFloat(0.0))
+                case "abs":
+                    return NovaBuiltin("abs", lambda a, k: NovaTensor(
+                        data=[_py_builtins.abs(x) for x in obj.data], dtype=obj.dtype, shape=obj.shape))
+                case "backward":
+                    def _backward(args, kwargs):
+                        print("autograd backward pass (bootstrap stub)")
+                        return NovaNone()
+                    return NovaBuiltin("backward", _backward)
 
         if isinstance(obj, NovaFrame):
             if node.attr in obj.columns:
@@ -828,6 +1041,50 @@ class Interpreter:
                     return NovaBuiltin("push", lambda a, k: (obj.elements.append(a[0]), NovaNone())[-1])
                 case "pop":
                     return NovaBuiltin("pop", lambda a, k: obj.elements.pop() if obj.elements else NovaNone())
+                case "map":
+                    def _list_map(a, k):
+                        fn = a[0]
+                        return NovaList([self._call_value(fn, [e], {}, env) for e in obj.elements])
+                    return NovaBuiltin("map", _list_map)
+                case "filter":
+                    def _list_filter(a, k):
+                        fn = a[0]
+                        return NovaList([e for e in obj.elements if self._truthy(self._call_value(fn, [e], {}, env))])
+                    return NovaBuiltin("filter", _list_filter)
+                case "reduce":
+                    def _list_reduce(a, k):
+                        fn = a[0]
+                        acc = a[1] if len(a) > 1 else obj.elements[0]
+                        start = 0 if len(a) > 1 else 1
+                        for e in obj.elements[start:]:
+                            acc = self._call_value(fn, [acc, e], {}, env)
+                        return acc
+                    return NovaBuiltin("reduce", _list_reduce)
+                case "sort":
+                    def _list_sort(a, k):
+                        return NovaList(sorted(obj.elements, key=lambda e: e.value))
+                    return NovaBuiltin("sort", _list_sort)
+                case "reverse":
+                    return NovaBuiltin("reverse", lambda a, k: NovaList(list(reversed(obj.elements))))
+                case "contains":
+                    def _list_contains(a, k):
+                        target = a[0]
+                        return NovaBool(any(self._values_equal(target, e) for e in obj.elements))
+                    return NovaBuiltin("contains", _list_contains)
+                case "index":
+                    def _list_index(a, k):
+                        target = a[0]
+                        for i, e in enumerate(obj.elements):
+                            if self._values_equal(target, e):
+                                return NovaInt(i)
+                        return NovaInt(-1)
+                    return NovaBuiltin("index", _list_index)
+                case "join":
+                    def _list_join(a, k):
+                        sep = a[0].value if a else ""
+                        parts = [self._to_string(e) for e in obj.elements]
+                        return NovaStr(sep.join(parts))
+                    return NovaBuiltin("join", _list_join)
 
         if isinstance(obj, NovaStr):
             match node.attr:
@@ -842,6 +1099,30 @@ class Interpreter:
                         [NovaStr(s) for s in obj.value.split(a[0].value if a else " ")]))
                 case "strip":
                     return NovaBuiltin("strip", lambda a, k: NovaStr(obj.value.strip()))
+                case "contains":
+                    return NovaBuiltin("contains", lambda a, k: NovaBool(a[0].value in obj.value))
+                case "starts_with":
+                    return NovaBuiltin("starts_with", lambda a, k: NovaBool(obj.value.startswith(a[0].value)))
+                case "ends_with":
+                    return NovaBuiltin("ends_with", lambda a, k: NovaBool(obj.value.endswith(a[0].value)))
+                case "replace":
+                    return NovaBuiltin("replace", lambda a, k: NovaStr(obj.value.replace(a[0].value, a[1].value)))
+                case "join":
+                    def _str_join(a, k):
+                        if not a or not isinstance(a[0], NovaList):
+                            raise NovaError("join() requires a list argument")
+                        parts = [self._to_string(e) for e in a[0].elements]
+                        return NovaStr(obj.value.join(parts))
+                    return NovaBuiltin("join", _str_join)
+                case "chars":
+                    return NovaBuiltin("chars", lambda a, k: NovaList([NovaStr(c) for c in obj.value]))
+                case "format":
+                    def _str_format(a, k):
+                        s = obj.value
+                        for i, arg in enumerate(a):
+                            s = s.replace(f"{{{i}}}", self._to_string(arg))
+                        return NovaStr(s)
+                    return NovaBuiltin("format", _str_format)
 
         if isinstance(obj, NovaResult):
             match node.attr:
@@ -872,7 +1153,6 @@ class Interpreter:
                 case "ones":
                     return NovaBuiltin("ones", lambda a, k: NovaTensor.ones(dtype_name, dims))
                 case "randn":
-                    import random
                     def _randn(a, k):
                         size = math.prod(dims) if dims else 1
                         data = [random.gauss(0, 1) for _ in range(size)]
@@ -882,6 +1162,56 @@ class Interpreter:
                     return NovaBuiltin("empty", lambda a, k: NovaTensor(
                         data=[0.0] * (math.prod(dims) if dims else 1),
                         dtype=dtype_name, shape=dims))
+                case "rand":
+                    def _rand(a, k, _dims=dims, _dtype=dtype_name):
+                        size = math.prod(_dims) if _dims else 1
+                        data = [random.random() for _ in range(size)]
+                        return NovaTensor(data=data, dtype=_dtype, shape=_dims)
+                    return NovaBuiltin("rand", _rand)
+                case "full":
+                    def _full(a, k, _dims=dims, _dtype=dtype_name):
+                        fill_val = 0.0
+                        if a:
+                            fill_val = a[0].value
+                        elif "value" in k:
+                            fill_val = k["value"].value
+                        size = math.prod(_dims) if _dims else 1
+                        data = [float(fill_val)] * size
+                        return NovaTensor(data=data, dtype=_dtype, shape=_dims)
+                    return NovaBuiltin("full", _full)
+                case "eye":
+                    def _eye(a, k, _dims=dims, _dtype=dtype_name):
+                        if len(_dims) != 2 or _dims[0] != _dims[1]:
+                            raise NovaError(f"eye() requires square 2D tensor, got {_dims}")
+                        n = _dims[0]
+                        data = [0.0] * (n * n)
+                        for i in range(n):
+                            data[i * n + i] = 1.0
+                        return NovaTensor(data=data, dtype=_dtype, shape=_dims)
+                    return NovaBuiltin("eye", _eye)
+                case "from":
+                    def _from(a, k, _dtype=dtype_name):
+                        if not a or not isinstance(a[0], NovaList):
+                            raise NovaError("from() requires a list argument")
+                        def _flatten_list(lst):
+                            result = []
+                            for e in lst.elements:
+                                if isinstance(e, NovaList):
+                                    result.extend(_flatten_list(e))
+                                else:
+                                    result.append(float(e.value))
+                            return result
+                        def _infer_shape(lst):
+                            if not isinstance(lst, NovaList):
+                                return ()
+                            if not lst.elements:
+                                return (0,)
+                            inner = _infer_shape(lst.elements[0])
+                            return (len(lst.elements),) + inner
+                        flat = _flatten_list(a[0])
+                        shape = _infer_shape(a[0])
+                        return NovaTensor(data=flat, dtype=_dtype, shape=shape)
+                    return NovaBuiltin("from", _from)
 
         raise NovaError(f"Attribute '{node.attr}' not found on {type(obj).__name__}")
 
@@ -973,21 +1303,36 @@ class Interpreter:
     # -------------------------------------------------------------------
 
     def _interpolate_string(self, s: str, env: Environment) -> str:
+        from ..lexer.lexer import Lexer
+        from ..parser.parser import Parser
+
         result = []
         i = 0
         while i < len(s):
             if s[i] == "{" and i + 1 < len(s) and s[i + 1] != "{":
-                j = s.index("}", i)
-                expr_str = s[i + 1:j]
+                # Find matching closing brace (handle nested braces)
+                depth = 1
+                j = i + 1
+                while j < len(s) and depth > 0:
+                    if s[j] == "{":
+                        depth += 1
+                    elif s[j] == "}":
+                        depth -= 1
+                    j += 1
+                expr_str = s[i + 1:j - 1]
                 try:
-                    val = env.get(expr_str.strip())
+                    # Parse and evaluate the expression
+                    tokens = Lexer(expr_str).tokenize()
+                    parser = Parser(tokens)
+                    expr_ast = parser._expression()
+                    val = self._eval(expr_ast, env)
                     if isinstance(val, NovaStr):
                         result.append(val.value)
                     else:
-                        result.append(repr(val))
-                except NameError:
-                    result.append(s[i:j + 1])
-                i = j + 1
+                        result.append(self._to_string(val))
+                except Exception:
+                    result.append(s[i:j])
+                i = j
             else:
                 result.append(s[i])
                 i += 1

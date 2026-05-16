@@ -1,0 +1,279 @@
+-- Nova Language Showcase
+-- Demonstrates all core features in a single program
+
+-- ============================================================
+-- 1. BASICS: Variables, Functions, Control Flow
+-- ============================================================
+
+let name = "Nova"
+let version = 1
+const MAX_EPOCHS = 100
+
+fn fibonacci(n: int) -> int {
+    if n <= 1 {
+        return n
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+print("=== Basics ===")
+print("Language: " + name + " v" + version)
+print("fib(10) = " + fibonacci(10))
+
+-- ============================================================
+-- 2. RESULT TYPES AND ERROR HANDLING
+-- ============================================================
+
+print("\n=== Error Handling ===")
+
+fn parse_int(s: str) -> Result[int, str] {
+    if s == "42" {
+        return Ok(42)
+    }
+    if s == "0" {
+        return Ok(0)
+    }
+    return Err("cannot parse: " + s)
+}
+
+let r1 = parse_int("42")
+let r2 = parse_int("abc")
+
+match r1 {
+    Ok(val)  => print("Parsed: " + val),
+    Err(msg) => print("Error: " + msg),
+}
+
+match r2 {
+    Ok(val)  => print("Parsed: " + val),
+    Err(msg) => print("Error: " + msg),
+}
+
+-- try for error propagation
+fn double_parse(s: str) -> Result[int, str] {
+    let val = try parse_int(s)
+    return Ok(val * 2)
+}
+
+let r3 = double_parse("42")
+match r3 {
+    Ok(val) => print("Doubled: " + val),
+    Err(msg) => print("Propagated error: " + msg),
+}
+
+-- ============================================================
+-- 3. TENSORS AND AUTOGRAD
+-- ============================================================
+
+print("\n=== Tensors ===")
+
+let weights = tensor[f32, 3, 3].randn()
+let input = tensor[f32, 3, 1].ones()
+
+print("Weights shape: " + weights.shape)
+print("Input shape: " + input.shape)
+
+-- Matrix multiplication
+let output = weights @ input
+print("Output shape: " + output.shape)
+
+-- Autograd: differentiate any function
+fn loss_fn(w) {
+    let pred = (w * w).sum()
+    return pred
+}
+
+let grad_fn = grad(loss_fn)
+let x = tensor[f32, 4].ones()
+let gradient = grad_fn(x)
+print("Gradient of sum(x^2) at ones: " + gradient)
+
+-- ============================================================
+-- 4. MODEL DEFINITIONS
+-- ============================================================
+
+print("\n=== Models ===")
+
+model Encoder(input_dim: int, hidden_dim: int) {
+    w1 = tensor[f32, 4, 8].randn()
+    w2 = tensor[f32, 8, 2].randn()
+
+    forward(x) {
+        let h = x @ w1
+        let out = h @ w2
+        return out
+    }
+}
+
+model AutoEncoder(dim: int) {
+    encoder = Encoder(input_dim=dim, hidden_dim=8)
+
+    forward(x) {
+        return encoder(x)
+    }
+}
+
+let ae = AutoEncoder(dim=4)
+print("AutoEncoder: " + ae)
+print("Params: " + ae.parameters())
+
+let ae_input = tensor[f32, 1, 4].ones()
+let ae_output = ae(ae_input)
+print("AE output shape: " + ae_output.shape)
+
+-- ============================================================
+-- 5. AGENTS (First-class)
+-- ============================================================
+
+print("\n=== Agents ===")
+
+agent DataAnalyst(max_steps: int = 3) {
+    tools {
+        query = "sql_executor"
+        plot  = "chart_maker"
+    }
+
+    memory {
+        queries_run: int = 0
+        insights: [str] = []
+    }
+
+    plan(goal: str) {
+        let steps = ["gather data", "analyze patterns", "generate report"]
+        return steps
+    }
+
+    act(step: str) {
+        print("  Agent executing: " + step)
+        return Ok("done: " + step)
+    }
+}
+
+let analyst = DataAnalyst(max_steps=5)
+let steps = analyst.plan("Find revenue trends")
+print("Plan: " + steps)
+
+for step in steps {
+    let result = analyst.act(step)
+    match result {
+        Ok(msg) => print("  Result: " + msg),
+        Err(e)  => print("  Failed: " + e),
+    }
+}
+
+-- ============================================================
+-- 6. ARENA MEMORY MANAGEMENT
+-- ============================================================
+
+print("\n=== Arenas ===")
+
+arena gpu(budget=2147483648) {
+    -- 2GB arena for model weights
+    let w = tensor[f32, 512, 512].zeros()
+    print("Arena-allocated tensor: " + w.shape)
+    print("Size: " + w.size + " elements")
+
+    -- All allocations freed in O(1) when block exits
+}
+print("Arena freed successfully")
+
+-- ============================================================
+-- 7. DISTRIBUTION (auto-parallel)
+-- ============================================================
+
+print("\n=== Distribution ===")
+
+distribute(data_parallel, devices=4) {
+    let batch = tensor[f32, 128, 768].ones()
+    print("Distributed batch: " + batch.shape)
+    -- In production: compiler auto-shards across 4 GPUs
+}
+
+-- ============================================================
+-- 8. SAFETY: Sandbox and Constraints
+-- ============================================================
+
+print("\n=== Safety ===")
+
+sandbox(net=false, fs="readonly", memory="4gb") {
+    -- Restricted execution environment
+    let safe_result = 2 + 2
+    print("Sandboxed result: " + safe_result)
+    -- Network calls would fail here
+    -- File writes would fail here
+}
+
+-- ============================================================
+-- 9. PIPELINE OPERATOR AND LAMBDAS
+-- ============================================================
+
+print("\n=== Pipelines ===")
+
+fn square(x) { return x * x }
+fn negate(x) { return -x }
+fn to_string(x) { return "result=" + x }
+
+let pipeline_result = 5 |> square |> negate |> to_string
+print(pipeline_result)
+
+-- Lambda with closure
+fn make_multiplier(factor) {
+    return |x| x * factor
+}
+
+let triple = make_multiplier(3)
+let quadruple = make_multiplier(4)
+print("triple(7) = " + triple(7))
+print("quadruple(7) = " + quadruple(7))
+
+-- ============================================================
+-- 10. PATTERN MATCHING
+-- ============================================================
+
+print("\n=== Pattern Matching ===")
+
+fn classify(x) {
+    match x {
+        0 => "zero",
+        1 => "one",
+        _ => "other: " + x,
+    }
+}
+
+for i in range(4) {
+    let label = classify(i)
+    print(label)
+}
+
+-- ============================================================
+-- 11. FUNCTIONAL PROGRAMMING
+-- ============================================================
+
+print("\n=== Functional ===")
+
+let numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+-- Manual map + filter (stdlib methods would be cleaner)
+let evens = []
+let squares = []
+for n in numbers {
+    squares = squares + [n * n]
+    if n % 2 == 0 {
+        evens = evens + [n]
+    }
+}
+
+print("Squares: " + squares)
+print("Evens: " + evens)
+
+let total = 0
+for n in numbers {
+    total += n
+}
+print("Sum 1..10 = " + total)
+
+-- ============================================================
+-- DONE
+-- ============================================================
+
+print("\n=== All Nova features demonstrated! ===")

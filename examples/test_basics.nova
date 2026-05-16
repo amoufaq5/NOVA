@@ -1,0 +1,224 @@
+-- Nova: Basic test suite — arithmetic, strings, lists
+
+-- Arithmetic tests
+
+fn test_addition() {
+    assert_eq(1 + 2, 3)
+    assert_eq(10 + 20, 30)
+    assert_eq(-5 + 5, 0)
+}
+
+fn test_subtraction() {
+    assert_eq(10 - 3, 7)
+    assert_eq(0 - 1, -1)
+    assert_eq(100 - 100, 0)
+}
+
+fn test_multiplication() {
+    assert_eq(3 * 4, 12)
+    assert_eq(-2 * 3, -6)
+    assert_eq(0 * 999, 0)
+}
+
+fn test_division() {
+    assert_eq(10 / 2, 5.0)
+    assert_eq(7 // 2, 3)
+    assert_eq(10 % 3, 1)
+}
+
+fn test_exponentiation() {
+    assert_eq(2 ** 10, 1024)
+    assert_eq(3 ** 0, 1)
+    assert_eq(5 ** 2, 25)
+}
+
+fn test_comparison() {
+    assert_true(1 < 2)
+    assert_true(5 > 3)
+    assert_true(3 <= 3)
+    assert_true(7 >= 7)
+    assert_true(1 != 2)
+    assert_true(42 == 42)
+}
+
+fn test_boolean_logic() {
+    assert_true(true and true)
+    assert_true(true or false)
+    assert_true(not false)
+    assert_eq(true and false, false)
+    assert_eq(false or false, false)
+}
+
+-- String tests
+
+fn test_string_concat() {
+    assert_eq("hello" + " " + "world", "hello world")
+    assert_eq("nova" + "!", "nova!")
+}
+
+fn test_string_repeat() {
+    assert_eq("ab" * 3, "ababab")
+    assert_eq("x" * 0, "")
+}
+
+fn test_string_length() {
+    let s = "hello"
+    assert_eq(len(s), 5)
+    assert_eq(len(""), 0)
+    assert_eq(s.length, 5)
+}
+
+fn test_string_methods() {
+    let s = "Hello World"
+    assert_eq(s.upper(), "HELLO WORLD")
+    assert_eq(s.lower(), "hello world")
+}
+
+-- List tests
+
+fn test_list_creation() {
+    let xs = [1, 2, 3]
+    assert_eq(len(xs), 3)
+    assert_eq(xs[0], 1)
+    assert_eq(xs[2], 3)
+}
+
+fn test_list_concat() {
+    let a = [1, 2]
+    let b = [3, 4]
+    let c = a + b
+    assert_eq(len(c), 4)
+    assert_eq(c[0], 1)
+    assert_eq(c[3], 4)
+}
+
+fn test_list_push_pop() {
+    let xs = [10, 20]
+    xs.push(30)
+    assert_eq(len(xs), 3)
+    assert_eq(xs[2], 30)
+    let popped = xs.pop()
+    assert_eq(popped, 30)
+    assert_eq(len(xs), 2)
+}
+
+fn test_list_iteration() {
+    let xs = [1, 2, 3, 4, 5]
+    let total = 0
+    for x in xs {
+        total += x
+    }
+    assert_eq(total, 15)
+}
+
+-- Built-in function tests
+
+fn test_range() {
+    let r = range(5)
+    assert_eq(len(r), 5)
+    assert_eq(r[0], 0)
+    assert_eq(r[4], 4)
+}
+
+fn test_abs() {
+    assert_eq(abs(-42), 42)
+    assert_eq(abs(42), 42)
+    assert_eq(abs(0), 0)
+}
+
+fn test_min_max() {
+    assert_eq(min(3, 7), 3)
+    assert_eq(max(3, 7), 7)
+    assert_eq(min([5, 2, 8, 1]), 1)
+    assert_eq(max([5, 2, 8, 1]), 8)
+}
+
+fn test_sum() {
+    assert_eq(sum([1, 2, 3, 4]), 10)
+    assert_eq(sum([0, 0, 0]), 0)
+}
+
+-- Control flow tests
+
+fn test_if_else() {
+    let x = 10
+    let result = 0
+    if x > 5 {
+        result = 1
+    } else {
+        result = 2
+    }
+    assert_eq(result, 1)
+}
+
+fn test_while_loop() {
+    let i = 0
+    let total = 0
+    while i < 5 {
+        total += i
+        i += 1
+    }
+    assert_eq(total, 10)
+}
+
+fn test_for_break() {
+    let total = 0
+    for i in range(100) {
+        if i >= 5 {
+            break
+        }
+        total += i
+    }
+    assert_eq(total, 10)
+}
+
+-- Function tests
+
+fn test_recursion() {
+    fn factorial(n) {
+        if n <= 1 {
+            return 1
+        }
+        return n * factorial(n - 1)
+    }
+    assert_eq(factorial(5), 120)
+    assert_eq(factorial(0), 1)
+}
+
+fn test_pipeline() {
+    fn double(x) { return x * 2 }
+    fn add_one(x) { return x + 1 }
+    let result = 5 |> double |> add_one
+    assert_eq(result, 11)
+}
+
+fn test_result_types() {
+    fn safe_div(a, b) {
+        if b == 0 {
+            return Err("division by zero")
+        }
+        return Ok(a / b)
+    }
+    let r1 = safe_div(10, 2)
+    assert_true(r1.is_ok)
+    assert_eq(r1.unwrap(), 5.0)
+
+    let r2 = safe_div(10, 0)
+    assert_true(r2.is_err)
+}
+
+fn test_match_result() {
+    let val = Ok(42)
+    match val {
+        Ok(x) => assert_eq(x, 42),
+        Err(e) => assert_true(false),
+    }
+}
+
+fn test_match_err_result() {
+    let val = Err("oops")
+    match val {
+        Ok(x) => assert_true(false),
+        Err(e) => assert_eq(e, "oops"),
+    }
+}
