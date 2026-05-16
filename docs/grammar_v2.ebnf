@@ -1,0 +1,451 @@
+(* Nova v2 Grammar — Causal-First Language for Intelligent Systems *)
+(* Extensions: causal graphs, interventions, counterfactuals, world models, *)
+(* typed objectives, curriculum learning, verified autograd *)
+
+(* ===================================================================== *)
+(* LEXICAL ELEMENTS *)
+(* ===================================================================== *)
+
+letter          = "a".."z" | "A".."Z" | "_" ;
+digit           = "0".."9" ;
+ident           = letter { letter | digit } ;
+int_literal     = digit { digit }
+                | "0x" hex_digit { hex_digit }
+                | "0b" ("0"|"1") { "0"|"1" }
+                | "0o" oct_digit { oct_digit } ;
+float_literal   = digit { digit } "." digit { digit } [ ("e"|"E") ["+"|"-"] digit { digit } ] ;
+string_literal  = '"' { string_char | "{" expression "}" } '"' ;
+string_char     = any_char - ('"' | "\\" | "{") | escape_seq ;
+escape_seq      = "\\" ("n" | "t" | "r" | "\\" | '"' | "{" | "0") ;
+
+(* Comments *)
+line_comment    = "--" { any_char } newline ;
+block_comment   = "-{" { any_char | block_comment } "}-" ;  (* nestable *)
+
+(* ===================================================================== *)
+(* KEYWORDS *)
+(* ===================================================================== *)
+
+keyword = "fn" | "let" | "const" | "mut" | "if" | "elif" | "else"
+        | "for" | "in" | "while" | "loop" | "break" | "continue" | "return"
+        | "match" | "true" | "false" | "none" | "and" | "or" | "not"
+        | "import" | "from" | "as" | "type" | "struct" | "enum" | "trait"
+        | "impl" | "self" | "async" | "await" | "spawn" | "select"
+        | "try" | "panic" | "move" | "owned" | "shared"
+        (* AI-domain keywords *)
+        | "model" | "agent" | "tensor" | "frame" | "grad" | "train"
+        (* Causal keywords — NEW *)
+        | "causal" | "graph" | "nodes" | "edges" | "mechanisms"
+        | "confounders" | "invariance" | "intervene" | "counterfactual"
+        | "do" | "given" | "world_model" | "state" | "predict"
+        (* Objective keywords — NEW *)
+        | "objective" | "satisfies" | "is_invariant_to" | "is_independent_of"
+        | "decomposes_along" | "transfer"
+        (* Training keywords — NEW *)
+        | "curriculum" | "stage" | "depends_on" | "convergence" | "budget"
+        | "optimizer" | "schedule" | "auto"
+        (* Distribution keywords *)
+        | "distribute" | "shard" | "replicate" | "pipeline"
+        (* Safety keywords *)
+        | "constrain" | "sandbox" | "arena"
+        (* Memory keywords *)
+        | "channel" | "send" | "recv"
+        (* Model composition *)
+        | "forward" | "layers" | "swap" | "freeze" | "retrain"
+        ;
+
+(* ===================================================================== *)
+(* TOP-LEVEL PROGRAM *)
+(* ===================================================================== *)
+
+program         = { top_level_decl } EOF ;
+
+top_level_decl  = fn_decl
+                | model_decl
+                | agent_decl
+                | causal_graph_decl       (* NEW *)
+                | world_model_decl        (* NEW *)
+                | objective_decl          (* NEW *)
+                | curriculum_decl         (* NEW *)
+                | train_decl              (* NEW *)
+                | type_decl
+                | import_decl
+                | const_decl
+                | statement
+                ;
+
+(* ===================================================================== *)
+(* CAUSAL GRAPH DECLARATION — Novel *)
+(* ===================================================================== *)
+
+causal_graph_decl = "causal" "graph" ident [ "(" param_list ")" ] "{"
+                      causal_body
+                    "}" ;
+
+causal_body     = { causal_section } ;
+
+causal_section  = nodes_block
+                | edges_block
+                | confounders_block
+                | invariance_block
+                | mechanisms_block
+                ;
+
+nodes_block     = "nodes" "{" { node_decl } "}" ;
+node_decl       = ident ":" node_type [ "=" expression ] ;
+node_type       = "binary" | "continuous" | "categorical" "[" int_literal "]"
+                | "discrete" "[" int_literal "]"
+                | "tensor" "[" type_expr { "," shape_expr } "]"
+                | ident  (* user-defined type *)
+                ;
+
+edges_block     = "edges" "{" { edge_decl } "}" ;
+edge_decl       = ident "->" ident [ ":" edge_annotation ] ;
+edge_annotation = "linear" | "nonlinear" | "monotone" | "bounded" "(" expression ")" ;
+
+confounders_block = "confounders" "{" { confounder_decl } "}" ;
+confounder_decl   = ident "confounds" "(" ident "," ident ")" ;
+
+invariance_block  = "invariance" ":" invariance_expr { "," invariance_expr } ;
+invariance_expr   = ident "is_independent_of" (ident | "[" ident_list "]")
+                    [ "given" (ident | "[" ident_list "]") ] ;
+
+mechanisms_block  = "mechanisms" "{" { mechanism_decl } "}" ;
+mechanism_decl    = ident "(" param_list ")" "=" expression
+                  | ident "(" param_list ")" "{" { statement } "}"
+                  ;
+
+(* ===================================================================== *)
+(* WORLD MODEL DECLARATION — Novel *)
+(* ===================================================================== *)
+
+world_model_decl = "world_model" ident [ "(" param_list ")" ] "{"
+                     world_model_body
+                   "}" ;
+
+world_model_body = { world_model_section } ;
+
+world_model_section = state_block
+                    | mechanisms_block
+                    | predict_decl
+                    | what_if_decl
+                    | transition_block
+                    ;
+
+state_block     = "state" "{" { state_var_decl } "}" ;
+state_var_decl  = ident ":" type_expr [ "=" expression ] ;
+
+transition_block = "transition" "{" { transition_rule } "}" ;
+transition_rule  = ident "(" ident "+" int_literal ")" "=" expression ;
+
+predict_decl    = "predict" "(" param_list ")" [ "->" type_expr ] "{" { statement } "}" ;
+what_if_decl    = "what_if" "(" param_list ")" [ "->" type_expr ] "{" { statement } "}" ;
+
+(* ===================================================================== *)
+(* OBJECTIVE DECLARATION — Novel *)
+(* ===================================================================== *)
+
+objective_decl  = "objective" ident [ "(" param_list ")" ] "{"
+                    { objective_clause }
+                  "}" ;
+
+objective_clause = invariance_clause
+                 | structure_clause
+                 | transfer_clause
+                 | bound_clause
+                 | constraint_clause
+                 ;
+
+invariance_clause = "invariance" ":" expression "is_invariant_to" "(" expression ")" ;
+structure_clause  = "structure" ":" expression "decomposes_along" "(" expression ")" ;
+transfer_clause   = "transfer" ":" "for" "all" ident "in" expression "{" expression "}" ;
+bound_clause      = "bound" ":" expression ("<=" | ">=" | "==" | "<" | ">") expression ;
+constraint_clause = "constraint" ":" expression ;
+
+(* ===================================================================== *)
+(* TRAIN DECLARATION — Novel *)
+(* ===================================================================== *)
+
+train_decl      = "train" ident [ "with" train_config ] "{"
+                    { train_clause }
+                  "}" ;
+
+train_config    = ident "=" expression { "," ident "=" expression } ;
+
+train_clause    = "data" ":" expression
+                | "objective" ":" ident
+                | "budget" ":" budget_expr
+                | "optimizer" ":" optimizer_decl
+                | "convergence" ":" expression
+                | "schedule" ":" expression
+                | statement
+                ;
+
+budget_expr     = "arena" ident [ "[" device_spec "]" ] "(" kv_list ")" ;
+device_spec     = ident [ "*" int_literal ] ;
+
+optimizer_decl  = ident "{" { ident ":" expression } "}"
+                | ident "(" kv_list ")"
+                ;
+
+(* ===================================================================== *)
+(* CURRICULUM DECLARATION — Novel *)
+(* ===================================================================== *)
+
+curriculum_decl = "curriculum" ident "(" param_list ")" "{"
+                    { stage_decl }
+                  "}" ;
+
+stage_decl      = "stage" ident "{"
+                    [ "depends_on" ":" ident_list ]
+                    { statement }
+                  "}" ;
+
+(* ===================================================================== *)
+(* MODEL DECLARATION (extended) *)
+(* ===================================================================== *)
+
+model_decl      = "model" ident [ "(" param_list ")" ]
+                  [ ":" model_interface ]
+                  [ "satisfies" ident_list ]
+                  "{" model_body "}" ;
+
+model_interface = ident "[" type_expr "->" type_expr "]" ;
+
+model_body      = { model_member } ;
+model_member    = layer_decl
+                | forward_decl
+                | "@" annotation layer_decl  (* @shard, @replicate, @pipeline *)
+                | "layers" "{" { layer_decl } "}"
+                | "architecture" ":" expression
+                ;
+
+layer_decl      = ident "=" expression ;
+forward_decl    = "forward" "(" param_list ")" [ "->" type_expr ] "{" { statement } "}" ;
+annotation      = ident [ "(" kv_list ")" ] ;
+
+(* ===================================================================== *)
+(* AGENT DECLARATION (extended) *)
+(* ===================================================================== *)
+
+agent_decl      = "agent" ident [ "(" param_list ")" ] "{"
+                    { agent_member }
+                  "}" ;
+
+agent_member    = "tools" "{" { kv_pair } "}"
+                | "memory" "{" { state_var_decl } "}"
+                | "world" ":" world_model_ref
+                | "plan" "(" param_list ")" [ "->" type_expr ] "{" { statement } "}"
+                | "act" "(" param_list ")" [ "->" type_expr ] "{" { statement } "}"
+                | "reason" "(" param_list ")" [ "->" type_expr ] "{" { statement } "}"
+                | "learn" "(" param_list ")" "{" { statement } "}"
+                | fn_decl
+                ;
+
+world_model_ref = "world_model" ident "{" world_model_body "}"
+                | ident  (* reference to existing world model *)
+                ;
+
+(* ===================================================================== *)
+(* FUNCTION DECLARATION *)
+(* ===================================================================== *)
+
+fn_decl         = ["async"] "fn" ident "(" param_list ")"
+                  [ "->" type_expr ] "{" { statement } "}" ;
+
+param_list      = [ param { "," param } ] ;
+param           = ["move" | "mut"] ident [":" type_expr] ["=" expression] ;
+
+(* ===================================================================== *)
+(* STATEMENTS *)
+(* ===================================================================== *)
+
+statement       = let_stmt
+                | assign_stmt
+                | return_stmt
+                | if_stmt
+                | for_stmt
+                | while_stmt
+                | loop_stmt
+                | match_stmt
+                | break_stmt
+                | continue_stmt
+                | arena_stmt
+                | sandbox_stmt
+                | distribute_stmt
+                | spawn_stmt
+                | select_stmt
+                | expression_stmt
+                ;
+
+let_stmt        = ("let" | "owned") ident [":" type_expr] "=" expression ;
+assign_stmt     = lvalue ("=" | "+=" | "-=" | "*=" | "/=" | "**=" | "//=") expression ;
+lvalue          = ident { "." ident | "[" expression "]" } ;
+return_stmt     = "return" [ expression ] ;
+break_stmt      = "break" ;
+continue_stmt   = "continue" ;
+
+if_stmt         = "if" expression "{" { statement } "}"
+                  { "elif" expression "{" { statement } "}" }
+                  [ "else" "{" { statement } "}" ] ;
+
+for_stmt        = "for" ident "in" expression "{" { statement } "}" ;
+while_stmt      = "while" expression "{" { statement } "}" ;
+loop_stmt       = "loop" "{" { statement } "}" ;
+
+match_stmt      = "match" expression "{"
+                    { pattern "=>" (expression | "{" { statement } "}") [","] }
+                  "}" ;
+
+pattern         = ident "(" pattern_args ")"   (* Constructor pattern *)
+                | literal
+                | ident                         (* Binding pattern *)
+                | "_"                           (* Wildcard *)
+                | "[" [pattern {"," pattern}] "]"  (* List pattern *)
+                ;
+pattern_args    = [ pattern { "," pattern } ] ;
+
+arena_stmt      = "arena" ident [ "(" kv_list ")" ] "{" { statement } "}" ;
+sandbox_stmt    = "sandbox" "(" expression ")" "{" { statement } "}" ;
+distribute_stmt = "distribute" "(" kv_list ")" "{" { statement } "}" ;
+spawn_stmt      = "spawn" "{" { statement } "}" ;
+select_stmt     = "select" "{" { select_arm } "}" ;
+select_arm      = expression "=>" (expression | "{" { statement } "}") [","] ;
+
+expression_stmt = expression ;
+
+(* ===================================================================== *)
+(* EXPRESSIONS *)
+(* ===================================================================== *)
+
+expression      = pipe_expr ;
+
+(* Level 1: Pipeline *)
+pipe_expr       = causal_expr { "|>" causal_expr } ;
+
+(* Level 2: Causal operators — NEW *)
+causal_expr     = intervene_expr
+                | counterfactual_expr
+                | ternary_expr
+                ;
+
+intervene_expr  = "intervene" "(" expression { "," intervention } ")" "{" { statement } "}" ;
+intervention    = ident ":=" expression ;
+
+counterfactual_expr = "counterfactual" "(" expression ["," "observed" ":" expression] ")"
+                      "{" { statement } "}" ;
+
+(* Level 3: Ternary *)
+ternary_expr    = or_expr [ "if" or_expr "else" or_expr ] ;
+
+(* Level 4: Logical OR *)
+or_expr         = and_expr { "or" and_expr } ;
+
+(* Level 5: Logical AND *)
+and_expr        = not_expr { "and" not_expr } ;
+
+(* Level 6: Logical NOT *)
+not_expr        = "not" not_expr | comparison ;
+
+(* Level 7: Comparison *)
+comparison      = bitor_expr { comp_op bitor_expr } ;
+comp_op         = "==" | "!=" | "<" | ">" | "<=" | ">=" | "in" | "is" ;
+
+(* Level 8: Bitwise OR *)
+bitor_expr      = bitxor_expr { "|" bitxor_expr } ;
+
+(* Level 9: Bitwise XOR *)
+bitxor_expr     = bitand_expr { "^" bitand_expr } ;
+
+(* Level 10: Bitwise AND *)
+bitand_expr     = shift_expr { "&" shift_expr } ;
+
+(* Level 11: Shift *)
+shift_expr      = addition { ("<<" | ">>") addition } ;
+
+(* Level 12: Addition/Subtraction *)
+addition        = multiplication { ("+" | "-") multiplication } ;
+
+(* Level 13: Multiplication/Division *)
+multiplication  = unary { ("*" | "/" | "//" | "%" | "@") unary } ;
+
+(* Level 14: Unary *)
+unary           = ("-" | "+" | "~") unary | power ;
+
+(* Level 15: Exponentiation *)
+power           = postfix [ "**" unary ] ;
+
+(* Level 16: Postfix — calls, indexing, dot access *)
+postfix         = primary { call_args | index | dot_access } ;
+call_args       = "(" [ arg { "," arg } ] ")" ;
+arg             = [ ident "=" ] expression ;
+index           = "[" expression [ ":" expression [ ":" expression ] ] "]" ;
+dot_access      = "." ident [ call_args ] ;
+
+(* Level 17: Primary expressions *)
+primary         = int_literal
+                | float_literal
+                | string_literal
+                | "true" | "false" | "none"
+                | ident
+                | "(" expression ")"
+                | "[" [ expression { "," expression } ] "]"  (* list *)
+                | "{" [ kv_pair { "," kv_pair } ] "}"        (* map *)
+                | lambda_expr
+                | grad_expr
+                | tensor_type_expr
+                | "Ok" "(" expression ")"
+                | "Err" "(" expression ")"
+                | "try" expression
+                | "panic" "(" expression ")"
+                | "spawn" "{" { statement } "}"
+                | "shared" "(" expression ")"
+                | "channel" "[" type_expr "]" "(" ")"
+                | "await" expression
+                | constrain_expr
+                | "auto"                        (* compiler-determined value *)
+                | "E" "[" expression [ "|" condition ] "]"  (* expectation — NEW *)
+                ;
+
+lambda_expr     = "|" param_list "|" (expression | "{" { statement } "}") ;
+grad_expr       = "grad" "(" expression ["," grad_opts] ")" ;
+grad_opts       = "wrt" "=" expression | "order" "=" int_literal ;
+tensor_type_expr = "tensor" "[" type_expr { "," shape_expr } "]" ;
+constrain_expr  = "constrain" "{" { constraint_item } "}" ;
+constraint_item = expression [ ":" string_literal ] ;  (* expr : "reason" *)
+
+condition       = "do" "(" kv_list ")"       (* interventional conditioning *)
+                | expression                  (* observational conditioning *)
+                ;
+
+(* ===================================================================== *)
+(* TYPES *)
+(* ===================================================================== *)
+
+type_expr       = base_type [ "?" ]  (* optional *)
+                | "[" type_expr "]"  (* list type *)
+                | "{" type_expr ":" type_expr "}"  (* map type *)
+                | "Result" "[" type_expr "," type_expr "]"
+                | "tensor" "[" type_expr { "," shape_expr } "]"
+                | "channel" "[" type_expr "]"
+                | "shared" "[" type_expr "]"
+                | fn_type
+                | causal_type    (* NEW *)
+                ;
+
+base_type       = "int" | "float" | "str" | "bool" | "none" | ident ;
+fn_type         = "fn" "(" [ type_expr { "," type_expr } ] ")" "->" type_expr ;
+shape_expr      = int_literal | ident ;  (* concrete or symbolic dimension *)
+
+causal_type     = "Causal" "[" ident "," ident "]"  (* Causal[Graph, Node] — typed causal variable *)
+                | "Mechanism" "[" type_expr "->" type_expr "]"
+                | "Intervention" "[" ident "]"
+                ;
+
+(* ===================================================================== *)
+(* UTILITIES *)
+(* ===================================================================== *)
+
+kv_list         = kv_pair { "," kv_pair } ;
+kv_pair         = ident "=" expression ;
+ident_list      = ident { "," ident } ;
