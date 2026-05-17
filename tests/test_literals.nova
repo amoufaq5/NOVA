@@ -1,0 +1,48 @@
+fn main() {
+    // Hex literals
+    print("0xFF = ")
+    print_int(0xFF)
+    println("")
+
+    print("0x1A3 = ")
+    print_int(0x1A3)
+    println("")
+
+    // Octal literals
+    print("0o777 = ")
+    print_int(0o777)
+    println("")
+
+    print("0o10 = ")
+    print_int(0o10)
+    println("")
+
+    // Binary literals
+    print("0b1010 = ")
+    print_int(0b1010)
+    println("")
+
+    print("0b11111111 = ")
+    print_int(0b11111111)
+    println("")
+
+    // Const
+    const PI_APPROX = 314
+    const MAX_SIZE = 1024
+    print("PI_APPROX = ")
+    print_int(PI_APPROX)
+    println("")
+    print("MAX_SIZE = ")
+    print_int(MAX_SIZE)
+    println("")
+
+    // Hex formatting
+    print("hex(255) = ")
+    println(hex(255))
+    print("hex(4096) = ")
+    println(hex(4096))
+
+    println("All literal tests passed!")
+}
+
+main()

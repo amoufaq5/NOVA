@@ -77,6 +77,7 @@ fn token_type_name(t) {
     if t == 62 { return "break" }
     if t == 63 { return "continue" }
     if t == 64 { return "import" }
+    if t == 65 { return "const" }
     return concat("token(", concat(int_to_str(t), ")"))
 }
 
@@ -418,7 +419,12 @@ fn parse_for() {
 }
 
 fn parse_let() {
-    par_expect(TOK_LET)
+    let t = par_peek_type()
+    if t == TOK_CONST {
+        par_advance()
+    } else {
+        par_expect(TOK_LET)
+    }
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
     par_expect(TOK_EQ)
@@ -480,6 +486,7 @@ fn parse_struct_decl() {
 fn parse_stmt() {
     let t = par_peek_type()
     if t == TOK_LET { return parse_let() }
+    if t == TOK_CONST { return parse_let() }
     if t == TOK_FN { return parse_fn() }
     if t == TOK_IF { return parse_if() }
     if t == TOK_WHILE { return parse_while() }
