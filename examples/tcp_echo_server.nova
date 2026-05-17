@@ -1,0 +1,44 @@
+// Nova TCP Echo Server
+// Listens on port 8080, echoes back whatever it receives
+
+fn main() {
+    let port = 8080
+
+    // Create socket: AF_INET=2, SOCK_STREAM=1, protocol=0
+    let server_fd = socket(2, 1, 0)
+    if server_fd < 0 {
+        println("Error: cannot create socket")
+        exit(1)
+    }
+
+    // Bind to port
+    let addr = make_sockaddr_in(port, 0)
+    let result = bind_socket(server_fd, addr, 16)
+    if result < 0 {
+        println("Error: cannot bind")
+        exit(1)
+    }
+
+    // Listen
+    listen_socket(server_fd, 5)
+    print("Listening on port ")
+    print_int(port)
+    println("...")
+
+    // Accept loop
+    while 1 == 1 {
+        let client_fd = accept_conn(server_fd, 0, 0)
+        if client_fd >= 0 {
+            println("Client connected!")
+            // Read and echo
+            let buf = alloc(1024)
+            let n = recv_data(client_fd, buf, 1024)
+            if n > 0 {
+                send_data(client_fd, buf, n)
+            }
+            close_fd(client_fd)
+        }
+    }
+}
+
+main()
