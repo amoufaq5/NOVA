@@ -1,0 +1,62 @@
+// Simple expression evaluator
+// Evaluates: number op number
+
+fn eval(a, op, b) {
+    if op == 43 { return a + b }   // '+'
+    if op == 45 { return a - b }   // '-'
+    if op == 42 { return a * b }   // '*'
+    if op == 47 {                   // '/'
+        if b == 0 {
+            println("Error: division by zero")
+            return 0
+        }
+        return a / b
+    }
+    println("Unknown operator")
+    return 0
+}
+
+fn main() {
+    println("=== Nova Calculator ===")
+
+    // Demonstrate some calculations
+    print("10 + 25 = ")
+    print_int(eval(10, 43, 25))
+    println("")
+
+    print("100 - 37 = ")
+    print_int(eval(100, 45, 37))
+    println("")
+
+    print("7 * 8 = ")
+    print_int(eval(7, 42, 8))
+    println("")
+
+    print("144 / 12 = ")
+    print_int(eval(144, 47, 12))
+    println("")
+
+    // Power function
+    print("2^10 = ")
+    let result = 1
+    let i = 0
+    while i < 10 {
+        result = result * 2
+        i = i + 1
+    }
+    print_int(result)
+    println("")
+
+    // Factorial
+    print("10! = ")
+    result = 1
+    i = 1
+    while i <= 10 {
+        result = result * i
+        i = i + 1
+    }
+    print_int(result)
+    println("")
+}
+
+main()

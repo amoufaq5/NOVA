@@ -1,0 +1,86 @@
+#!/bin/bash
+# Nova Test Runner
+# Compiles and runs all test_*.nova files, reports pass/fail
+
+NOVA=${NOVA:-bin/nova}
+AS=as
+LD=ld
+PASS=0
+FAIL=0
+SKIP=0
+TOTAL=0
+
+echo "=== Nova Test Suite ==="
+echo "Compiler: $NOVA"
+echo ""
+
+for test_file in tests/test_*.nova; do
+    test_name=$(basename "$test_file" .nova)
+    TOTAL=$((TOTAL + 1))
+
+    # Skip import test (needs special handling)
+    if [ "$test_name" = "test_import" ]; then
+        echo "  SKIP  $test_name (requires import lib)"
+        SKIP=$((SKIP + 1))
+        continue
+    fi
+
+    # Compile
+    $NOVA "$test_file" -o /tmp/nova_test.s 2>/tmp/nova_test_err.txt
+    if [ $? -ne 0 ]; then
+        echo "  FAIL  $test_name (compile error)"
+        cat /tmp/nova_test_err.txt
+        FAIL=$((FAIL + 1))
+        continue
+    fi
+
+    # Assemble
+    $AS -o /tmp/nova_test.o /tmp/nova_test.s 2>/tmp/nova_test_err.txt
+    if [ $? -ne 0 ]; then
+        echo "  FAIL  $test_name (assembly error)"
+        cat /tmp/nova_test_err.txt
+        FAIL=$((FAIL + 1))
+        continue
+    fi
+
+    # Link
+    $LD -o /tmp/nova_test /tmp/nova_test.o 2>/tmp/nova_test_err.txt
+    if [ $? -ne 0 ]; then
+        echo "  FAIL  $test_name (link error)"
+        cat /tmp/nova_test_err.txt
+        FAIL=$((FAIL + 1))
+        continue
+    fi
+
+    # Run with timeout
+    timeout 10 /tmp/nova_test > /tmp/nova_test_out.txt 2>&1
+    EXIT_CODE=$?
+
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "  PASS  $test_name"
+        PASS=$((PASS + 1))
+    elif [ $EXIT_CODE -eq 124 ]; then
+        echo "  FAIL  $test_name (timeout)"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  FAIL  $test_name (exit code: $EXIT_CODE)"
+        cat /tmp/nova_test_out.txt
+        FAIL=$((FAIL + 1))
+    fi
+done
+
+echo ""
+echo "=== Results ==="
+echo "  Total:   $TOTAL"
+echo "  Passed:  $PASS"
+echo "  Failed:  $FAIL"
+echo "  Skipped: $SKIP"
+echo ""
+
+if [ $FAIL -gt 0 ]; then
+    echo "SOME TESTS FAILED"
+    exit 1
+else
+    echo "ALL TESTS PASSED"
+    exit 0
+fi
