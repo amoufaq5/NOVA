@@ -1,0 +1,26 @@
+fn main() {
+    let a = "hello"
+    let b = "hello"
+    let c = "world"
+
+    if str_eq(a, b) == 1 {
+        println("a == b: YES")
+    } else {
+        println("a == b: NO")
+    }
+
+    if str_eq(a, c) == 1 {
+        println("a == c: YES")
+    } else {
+        println("a == c: NO")
+    }
+
+    let keyword = "return"
+    if str_eq(keyword, "return") == 1 {
+        println("matched keyword")
+    } else {
+        println("no match")
+    }
+}
+
+main()

@@ -1,0 +1,22 @@
+fn main() {
+    let a = "Hello"
+    let b = " World"
+    let c = concat(a, b)
+    println(c)
+
+    let n = 42
+    let s = int_to_str(n)
+    println(s)
+
+    let x = concat("Value: ", int_to_str(123))
+    println(x)
+
+    let items = list_new()
+    push(items, 10)
+    push(items, 20)
+    push(items, 30)
+    print_int(len(items))
+    println("")
+}
+
+main()

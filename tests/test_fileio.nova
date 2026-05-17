@@ -1,0 +1,18 @@
+fn main() {
+    let content = "Hello from Nova compiled binary!"
+    let ok = write_file("/tmp/nova_test_output.txt", content)
+    if ok == 1 {
+        println("Write OK")
+    } else {
+        println("Write FAILED")
+    }
+
+    let data = read_file("/tmp/nova_test_output.txt")
+    if data == 0 {
+        println("Read FAILED")
+    } else {
+        println(data)
+    }
+}
+
+main()

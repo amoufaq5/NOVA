@@ -1,18 +1,21 @@
 // Nova Compiler: x86-64 Code Generator
 // Emits GAS Intel syntax assembly.
 // Strategy: stack-based evaluation, variables on stack frame.
+// Globals accessed via RIP-relative addressing in .bss.
 
 let NL = chr(10)
 let DQ = chr(34)
 let cg_output = ""
 let cg_label_count = 0
-let cg_strings = 0       // list of string literals
+let cg_strings = 0
 let cg_str_count = 0
-let cg_locals = 0        // current function's local variables list
+let cg_locals = 0
 let cg_local_count = 0
-let cg_params = 0        // current function's parameters
+let cg_params = 0
 let cg_param_count = 0
-let cg_fns = 0           // list of all function names (for forward decls)
+let cg_fns = 0
+let cg_globals = 0
+let cg_global_count = 0
 
 fn cg_init() {
     cg_output = ""
@@ -20,6 +23,8 @@ fn cg_init() {
     cg_strings = list_new()
     cg_str_count = 0
     cg_fns = list_new()
+    cg_globals = list_new()
+    cg_global_count = 0
 }
 
 fn out(s) {
@@ -42,6 +47,22 @@ fn add_string(s) {
     return idx
 }
 
+fn add_global(name) {
+    push(cg_globals, name)
+    cg_global_count = cg_global_count + 1
+}
+
+fn is_global(name) {
+    let i = 0
+    while i < cg_global_count {
+        if cg_globals[i] == name {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 fn local_offset(name) {
     let i = 0
     while i < cg_local_count {
@@ -50,30 +71,26 @@ fn local_offset(name) {
         }
         i = i + 1
     }
-    // Check params
     let j = 0
     while j < cg_param_count {
         if cg_params[j] == name {
-            // Params are at positive offsets from rbp (pushed before locals)
-            // param 0 is at [rbp+16], param 1 at [rbp+24], etc.
-            // Actually using registers for first 6 params, stored in frame
             return (cg_local_count + j + 1) * 8
         }
         j = j + 1
     }
-    // Not found - add as local
     push(cg_locals, name)
     cg_local_count = cg_local_count + 1
     return cg_local_count * 8
 }
 
 fn collect_locals(nd) {
-    // Pre-scan function body for let declarations to pre-allocate stack space
     let tag = ast_tag(nd)
     if tag == AST_LET_STMT {
         let name = nd[1]
-        push(cg_locals, name)
-        cg_local_count = cg_local_count + 1
+        if is_global(name) == 0 {
+            push(cg_locals, name)
+            cg_local_count = cg_local_count + 1
+        }
     }
     if tag == AST_BLOCK {
         let stmts = nd[1]
@@ -85,8 +102,10 @@ fn collect_locals(nd) {
     }
     if tag == AST_IF_STMT {
         collect_locals(nd[2])
-        if nd[3] != 0 {
-            collect_locals(nd[3])
+        let else_cl = nd[3]
+        if else_cl == 0 {
+        } else {
+            collect_locals(else_cl)
         }
     }
     if tag == AST_WHILE_STMT {
@@ -99,8 +118,6 @@ fn collect_locals(nd) {
         collect_locals(nd[3])
     }
 }
-
-// --- Code Generation ---
 
 fn gen_expr(nd) {
     let tag = ast_tag(nd)
@@ -128,18 +145,26 @@ fn gen_expr(nd) {
 
     if tag == AST_IDENT {
         let name = nd[1]
-        let off = local_offset(name)
-        out("    mov rax, [rbp - " + int_to_str(off) + "]")
+        if is_global(name) == 1 {
+            out("    mov rax, [rip + _g_" + name + "]")
+        } else {
+            let off = local_offset(name)
+            out("    mov rax, [rbp - " + int_to_str(off) + "]")
+        }
         return 0
     }
 
     if tag == AST_BIN_OP {
         let op = nd[1]
-        gen_expr(nd[3])       // right
+        gen_expr(nd[3])
         out("    push rax")
-        gen_expr(nd[2])       // left
+        gen_expr(nd[2])
         out("    pop rcx")
-        if op == "+" { out("    add rax, rcx") }
+        if op == "+" {
+            out("    mov rdi, rax")
+            out("    mov rsi, rcx")
+            out("    call _nova_add")
+        }
         else { if op == "-" { out("    sub rax, rcx") }
         else { if op == "*" { out("    imul rax, rcx") }
         else { if op == "/" {
@@ -152,14 +177,14 @@ fn gen_expr(nd) {
             out("    mov rax, rdx")
         }
         else { if op == "==" {
-            out("    cmp rax, rcx")
-            out("    sete al")
-            out("    movzx rax, al")
+            out("    mov rdi, rax")
+            out("    mov rsi, rcx")
+            out("    call _nova_eq")
         }
         else { if op == "!=" {
-            out("    cmp rax, rcx")
-            out("    setne al")
-            out("    movzx rax, al")
+            out("    mov rdi, rax")
+            out("    mov rsi, rcx")
+            out("    call _nova_neq")
         }
         else { if op == "<" {
             out("    cmp rax, rcx")
@@ -205,31 +230,30 @@ fn gen_expr(nd) {
         let callee = nd[1]
         let args = nd[2]
         let argc = len(args)
-        // Push args right to left
         let i = argc - 1
         while i >= 0 {
             gen_expr(args[i])
             out("    push rax")
             i = i - 1
         }
-        // Move args to registers (System V ABI)
         if argc > 0 { out("    pop rdi") }
         if argc > 1 { out("    pop rsi") }
         if argc > 2 { out("    pop rdx") }
         if argc > 3 { out("    pop rcx") }
         if argc > 4 { out("    pop r8") }
         if argc > 5 { out("    pop r9") }
-        // Align stack if needed
         out("    call " + callee[1])
         return 0
     }
 
     if tag == AST_INDEX_EXPR {
-        gen_expr(nd[2])       // index
+        gen_expr(nd[2])
         out("    push rax")
-        gen_expr(nd[1])       // base (pointer to array)
+        gen_expr(nd[1])
         out("    pop rcx")
-        out("    mov rax, [rax + rcx*8]")
+        out("    mov rdi, rax")
+        out("    mov rsi, rcx")
+        out("    call _nova_index")
         return 0
     }
 
@@ -243,8 +267,12 @@ fn gen_stmt(nd) {
         let name = nd[1]
         let value = nd[2]
         gen_expr(value)
-        let off = local_offset(name)
-        out("    mov [rbp - " + int_to_str(off) + "], rax")
+        if is_global(name) == 1 {
+            out("    mov [rip + _g_" + name + "], rax")
+        } else {
+            let off = local_offset(name)
+            out("    mov [rbp - " + int_to_str(off) + "], rax")
+        }
         return 0
     }
 
@@ -252,17 +280,21 @@ fn gen_stmt(nd) {
         let name = nd[1]
         let value = nd[2]
         gen_expr(value)
-        let off = local_offset(name)
-        out("    mov [rbp - " + int_to_str(off) + "], rax")
+        if is_global(name) == 1 {
+            out("    mov [rip + _g_" + name + "], rax")
+        } else {
+            let off = local_offset(name)
+            out("    mov [rbp - " + int_to_str(off) + "], rax")
+        }
         return 0
     }
 
     if tag == AST_RETURN_STMT {
         let value = nd[1]
-        if value != 0 {
-            gen_expr(value)
-        } else {
+        if value == 0 {
             out("    xor eax, eax")
+        } else {
+            gen_expr(value)
         }
         out("    mov rsp, rbp")
         out("    pop rbp")
@@ -282,7 +314,8 @@ fn gen_stmt(nd) {
         gen_block(then_body)
         out("    jmp " + end_lbl)
         out_label(else_lbl)
-        if else_body != 0 {
+        if else_body == 0 {
+        } else {
             if ast_tag(else_body) == AST_IF_STMT {
                 gen_stmt(else_body)
             } else {
@@ -313,26 +346,24 @@ fn gen_stmt(nd) {
         let iter_expr = nd[2]
         let body = nd[3]
         let var_off = local_offset(var_name)
-        // Emit iterator: assume it returns list ptr in rax
         gen_expr(iter_expr)
-        out("    push rax")            // save list ptr
-        out("    push 0")              // counter = 0
+        out("    push rax")
+        out("    push 0")
         let loop_lbl = new_label()
         let end_lbl = new_label()
         out_label(loop_lbl)
-        out("    mov rcx, [rsp]")      // counter
-        out("    mov rdi, [rsp+8]")    // list ptr
-        out("    cmp rcx, [rdi]")      // compare with list length
+        out("    mov rcx, [rsp]")
+        out("    mov rdi, [rsp+8]")
+        out("    cmp rcx, [rdi+8]")
         out("    jge " + end_lbl)
-        // Load element
-        out("    mov rdi, [rdi+16]")   // items ptr
+        out("    mov rdi, [rdi+24]")
         out("    mov rax, [rdi+rcx*8]")
         out("    mov [rbp - " + int_to_str(var_off) + "], rax")
         gen_block(body)
-        out("    inc qword ptr [rsp]") // counter++
+        out("    inc qword ptr [rsp]")
         out("    jmp " + loop_lbl)
         out_label(end_lbl)
-        out("    add rsp, 16")         // pop counter + list ptr
+        out("    add rsp, 16")
         return 0
     }
 
@@ -363,13 +394,11 @@ fn gen_function(nd) {
     let params = nd[2]
     let body = nd[3]
 
-    // Reset locals
     cg_locals = list_new()
     cg_local_count = 0
     cg_params = params
     cg_param_count = len(params)
 
-    // Store params as locals first
     let pi = 0
     while pi < cg_param_count {
         push(cg_locals, params[pi])
@@ -377,17 +406,14 @@ fn gen_function(nd) {
         pi = pi + 1
     }
 
-    // Pre-scan for let declarations
     collect_locals(body)
 
-    // Emit function prologue
     out("")
     out(".globl " + name)
     out_label(name)
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
-    // Align to 16 bytes
     if frame_size % 16 != 0 {
         frame_size = frame_size + (16 - (frame_size % 16))
     }
@@ -395,7 +421,6 @@ fn gen_function(nd) {
         out("    sub rsp, " + int_to_str(frame_size))
     }
 
-    // Store register params into local slots
     if cg_param_count > 0 { out("    mov [rbp - 8], rdi") }
     if cg_param_count > 1 { out("    mov [rbp - 16], rsi") }
     if cg_param_count > 2 { out("    mov [rbp - 24], rdx") }
@@ -403,35 +428,29 @@ fn gen_function(nd) {
     if cg_param_count > 4 { out("    mov [rbp - 40], r8") }
     if cg_param_count > 5 { out("    mov [rbp - 48], r9") }
 
-    // Generate body
     gen_block(body)
 
-    // Epilogue (implicit return 0)
     out("    xor eax, eax")
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
 }
 
-fn gen_toplevel(nd) {
-    let tag = ast_tag(nd)
-    if tag == AST_FN_DECL {
-        gen_function(nd)
-        return 0
-    }
-    // Top-level statements go into _nova_main
-    gen_stmt(nd)
-}
-
 fn gen_program(program) {
     let decls = program[1]
 
-    // Emit header
-    out(".intel_syntax noprefix")
-    out(".text")
-
-    // First pass: collect function names
+    // First pass: collect globals (top-level let declarations)
     let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_LET_STMT {
+            add_global(d[1])
+        }
+        i = i + 1
+    }
+
+    // Collect function names
+    i = 0
     while i < len(decls) {
         let d = decls[i]
         if ast_tag(d) == AST_FN_DECL {
@@ -439,6 +458,9 @@ fn gen_program(program) {
         }
         i = i + 1
     }
+
+    out(".intel_syntax noprefix")
+    out(".text")
 
     // Generate functions
     i = 0
@@ -450,17 +472,24 @@ fn gen_program(program) {
         i = i + 1
     }
 
-    // Generate _nova_main for top-level code
+    // Generate _start for top-level code
     cg_locals = list_new()
     cg_local_count = 0
     cg_params = list_new()
     cg_param_count = 0
 
-    // Collect top-level locals
+    // Collect top-level locals (non-global let inside if/while)
     i = 0
     while i < len(decls) {
         let d = decls[i]
-        if ast_tag(d) != AST_FN_DECL {
+        let dtag = ast_tag(d)
+        if dtag == AST_IF_STMT {
+            collect_locals(d)
+        }
+        if dtag == AST_WHILE_STMT {
+            collect_locals(d)
+        }
+        if dtag == AST_FOR_STMT {
             collect_locals(d)
         }
         i = i + 1
@@ -469,6 +498,10 @@ fn gen_program(program) {
     out("")
     out(".globl _start")
     out_label("_start")
+    out("    mov rdi, [rsp]")
+    out("    lea rsi, [rsp + 8]")
+    out("    mov [rip + _g___argc], rdi")
+    out("    mov [rip + _g___argv], rsi")
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
@@ -479,17 +512,17 @@ fn gen_program(program) {
         out("    sub rsp, " + int_to_str(frame_size))
     }
 
-    // Generate top-level statements
+    // Generate top-level statements (skip function declarations)
     i = 0
     while i < len(decls) {
         let d = decls[i]
-        if ast_tag(d) != AST_FN_DECL {
+        if ast_tag(d) == AST_FN_DECL {
+        } else {
             gen_stmt(d)
         }
         i = i + 1
     }
 
-    // Exit
     out("    mov rdi, 0")
     out("    mov rax, 60")
     out("    syscall")
@@ -504,9 +537,88 @@ fn gen_program(program) {
         i = i + 1
     }
 
-    // Emit runtime helpers
+    // Emit globals in .bss
+    out("")
+    out(".section .bss")
+    // Always add argc/argv globals
+    out("    .align 8")
+    out_label("_g___argc")
+    out("    .quad 0")
+    out_label("_g___argv")
+    out("    .quad 0")
+    i = 0
+    while i < cg_global_count {
+        out("    .align 8")
+        out_label("_g_" + cg_globals[i])
+        out("    .quad 0")
+        i = i + 1
+    }
+
+    // Emit runtime library
     out("")
     out(".text")
+    gen_runtime()
+
+    return cg_output
+}
+
+fn gen_runtime() {
+    // --- Smart add: integer add or string concat ---
+    out_label("_nova_add")
+    out("    cmp rdi, 4096")
+    out("    jl .add_int")
+    out("    cmp rsi, 4096")
+    out("    jl .add_int")
+    out("    jmp _nova_concat")
+    out(".add_int:")
+    out("    lea rax, [rdi + rsi]")
+    out("    ret")
+
+    // --- Smart equality: integer or string ---
+    out("")
+    out_label("_nova_eq")
+    out("    cmp rdi, rsi")
+    out("    je .eq_true")
+    out("    cmp rdi, 4096")
+    out("    jl .eq_false")
+    out("    cmp rsi, 4096")
+    out("    jl .eq_false")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_str_eq")
+    out("    pop rbp")
+    out("    ret")
+    out(".eq_true:")
+    out("    mov eax, 1")
+    out("    ret")
+    out(".eq_false:")
+    out("    xor eax, eax")
+    out("    ret")
+
+    // --- Smart not-equal ---
+    out("")
+    out_label("_nova_neq")
+    out("    cmp rdi, rsi")
+    out("    je .neq_false")
+    out("    cmp rdi, 4096")
+    out("    jl .neq_true")
+    out("    cmp rsi, 4096")
+    out("    jl .neq_true")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_str_eq")
+    out("    xor eax, 1")
+    out("    pop rbp")
+    out("    ret")
+    out(".neq_true:")
+    out("    mov eax, 1")
+    out("    ret")
+    out(".neq_false:")
+    out("    xor eax, eax")
+    out("    ret")
+
+    // --- print_int ---
+    out("")
     out_label("_nova_print_int")
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -555,6 +667,8 @@ fn gen_program(program) {
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
+
+    // --- print_str ---
     out("")
     out_label("_nova_print_str")
     out("    push rbp")
@@ -573,17 +687,447 @@ fn gen_program(program) {
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
+
+    // --- println (print string + newline) ---
     out("")
     out_label("_nova_println")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push rdi")
     out("    call _nova_print_str")
+    out("    sub rsp, 8")
+    out("    mov byte ptr [rsp], 10")
     out("    mov rsi, rsp")
-    out("    mov byte ptr [rsp-1], 10")
-    out("    lea rsi, [rsp-1]")
     out("    mov rdx, 1")
     out("    mov rdi, 1")
     out("    mov rax, 1")
     out("    syscall")
+    out("    mov rsp, rbp")
+    out("    pop rbp")
     out("    ret")
+
+    // --- Heap allocator (brk-based bump allocator) ---
+    out("")
+    out_label("_nova_alloc")
+    out("    push rbx")
+    out("    mov rbx, rdi")
+    out("    add rbx, 7")
+    out("    and rbx, -8")
+    out("    mov rax, [rip + _heap_ptr]")
+    out("    test rax, rax")
+    out("    jnz .alloc_have_heap")
+    out("    mov rdi, 0")
+    out("    mov rax, 12")
+    out("    syscall")
+    out("    mov [rip + _heap_base], rax")
+    out("    mov [rip + _heap_ptr], rax")
+    out("    lea rdi, [rax + 1048576]")
+    out("    mov rax, 12")
+    out("    syscall")
+    out("    mov [rip + _heap_end], rax")
+    out("    mov rax, [rip + _heap_ptr]")
+    out(".alloc_have_heap:")
+    out("    mov rcx, rax")
+    out("    add rcx, rbx")
+    out("    cmp rcx, [rip + _heap_end]")
+    out("    jle .alloc_ok")
+    out("    lea rdi, [rcx + 1048576]")
+    out("    mov rax, 12")
+    out("    syscall")
+    out("    mov [rip + _heap_end], rax")
+    out("    mov rax, [rip + _heap_ptr]")
+    out("    mov rcx, rax")
+    out("    add rcx, rbx")
+    out(".alloc_ok:")
+    out("    mov [rip + _heap_ptr], rcx")
+    out("    pop rbx")
+    out("    ret")
+
+    // --- strlen ---
+    out("")
+    out_label("_nova_strlen")
+    out("    xor eax, eax")
+    out("    test rdi, rdi")
+    out("    jz .sl_done")
+    out(".sl_loop:")
+    out("    cmp byte ptr [rdi + rax], 0")
+    out("    je .sl_done")
+    out("    inc rax")
+    out("    jmp .sl_loop")
+    out(".sl_done:")
+    out("    ret")
+
+    // --- concat(a, b) -> new string ---
+    out("")
+    out_label("_nova_concat")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    call _nova_strlen")
+    out("    mov r14, rax")
+    out("    mov rdi, r13")
+    out("    call _nova_strlen")
+    out("    add r14, rax")
+    out("    inc r14")
+    out("    mov rdi, r14")
+    out("    call _nova_alloc")
+    out("    mov r14, rax")
+    out("    mov rdi, rax")
+    out("    mov rsi, r12")
+    out(".cc_copy1:")
+    out("    lodsb")
+    out("    test al, al")
+    out("    jz .cc_copy2")
+    out("    stosb")
+    out("    jmp .cc_copy1")
+    out(".cc_copy2:")
+    out("    mov rsi, r13")
+    out(".cc_copy2_loop:")
+    out("    lodsb")
+    out("    stosb")
+    out("    test al, al")
+    out("    jnz .cc_copy2_loop")
+    out("    mov rax, r14")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- int_to_str(n) -> string ---
+    out("")
+    out_label("_nova_int_to_str")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    sub rsp, 32")
+    out("    mov rax, rdi")
+    out("    lea rsi, [rbp-1]")
+    out("    mov byte ptr [rsi], 0")
+    out("    xor ecx, ecx")
+    out("    test rax, rax")
+    out("    jnz .its_nonzero")
+    out("    dec rsi")
+    out("    mov byte ptr [rsi], 48")
+    out("    jmp .its_copy")
+    out(".its_nonzero:")
+    out("    jns .its_pos")
+    out("    neg rax")
+    out("    mov cl, 1")
+    out(".its_pos:")
+    out(".its_digit_loop:")
+    out("    test rax, rax")
+    out("    jz .its_sign")
+    out("    xor edx, edx")
+    out("    mov r8, 10")
+    out("    div r8")
+    out("    add dl, 48")
+    out("    dec rsi")
+    out("    mov [rsi], dl")
+    out("    jmp .its_digit_loop")
+    out(".its_sign:")
+    out("    test cl, cl")
+    out("    jz .its_copy")
+    out("    dec rsi")
+    out("    mov byte ptr [rsi], 45")
+    out(".its_copy:")
+    out("    mov rdi, rsi")
+    out("    call _nova_strlen")
+    out("    inc rax")
+    out("    mov r12, rdi")
+    out("    mov rdi, rax")
+    out("    push r12")
+    out("    call _nova_alloc")
+    out("    pop rsi")
+    out("    mov rdi, rax")
+    out("    push rax")
+    out(".its_cp:")
+    out("    lodsb")
+    out("    stosb")
+    out("    test al, al")
+    out("    jnz .its_cp")
+    out("    pop rax")
+    out("    mov rsp, rbp")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- str_eq(a, b) -> 1 or 0 ---
+    out("")
+    out_label("_nova_str_eq")
+    out("    xor eax, eax")
+    out(".se_loop:")
+    out("    mov cl, [rdi]")
+    out("    cmp cl, [rsi]")
+    out("    jne .se_done")
+    out("    test cl, cl")
+    out("    jz .se_equal")
+    out("    inc rdi")
+    out("    inc rsi")
+    out("    jmp .se_loop")
+    out(".se_equal:")
+    out("    mov eax, 1")
+    out(".se_done:")
+    out("    ret")
+
+    // --- list_new() -> ptr to [count, cap, items_ptr] ---
+    out("")
+    // List layout: [MAGIC=-1, count, cap, items_ptr] (32 bytes)
+    out_label("_nova_list_new")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    mov rdi, 32")
+    out("    call _nova_alloc")
+    out("    mov qword ptr [rax], -1")
+    out("    mov qword ptr [rax+8], 0")
+    out("    mov qword ptr [rax+16], 16")
+    out("    push rax")
+    out("    mov rdi, 128")
+    out("    call _nova_alloc")
+    out("    pop rcx")
+    out("    mov [rcx+24], rax")
+    out("    mov rax, rcx")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- push(list, val) --- list=[magic, count, cap, items]
+    out("")
+    out_label("_nova_push")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    mov rax, [rdi+8]")
+    out("    cmp rax, [rdi+16]")
+    out("    jl .push_ok")
+    out("    push rdi")
+    out("    push rsi")
+    out("    mov rcx, [rdi+16]")
+    out("    shl rcx, 1")
+    out("    mov [rdi+16], rcx")
+    out("    shl rcx, 3")
+    out("    push rdi")
+    out("    mov rdi, rcx")
+    out("    call _nova_alloc")
+    out("    pop rdi")
+    out("    mov rcx, rax")
+    out("    mov r8, [rdi+24]")
+    out("    mov r9, [rdi+8]")
+    out("    xor r10d, r10d")
+    out(".push_copy:")
+    out("    cmp r10, r9")
+    out("    jge .push_copy_done")
+    out("    mov r11, [r8+r10*8]")
+    out("    mov [rcx+r10*8], r11")
+    out("    inc r10")
+    out("    jmp .push_copy")
+    out(".push_copy_done:")
+    out("    mov [rdi+24], rcx")
+    out("    pop rsi")
+    out("    pop rdi")
+    out(".push_ok:")
+    out("    mov rax, [rdi+8]")
+    out("    mov rcx, [rdi+24]")
+    out("    mov [rcx+rax*8], rsi")
+    out("    inc qword ptr [rdi+8]")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- len(list_or_str) -> count ---
+    out("")
+    out_label("_nova_len")
+    out("    test rdi, rdi")
+    out("    jz .len_zero")
+    out("    cmp qword ptr [rdi], -1")
+    out("    je .len_list")
+    out("    xor eax, eax")
+    out(".len_str_loop:")
+    out("    cmp byte ptr [rdi + rax], 0")
+    out("    je .len_done")
+    out("    inc rax")
+    out("    jmp .len_str_loop")
+    out(".len_list:")
+    out("    mov rax, [rdi+8]")
+    out(".len_done:")
+    out("    ret")
+    out(".len_zero:")
+    out("    xor eax, eax")
+    out("    ret")
+
+    // --- exit(code) ---
+    out("")
+    out_label("_nova_exit")
+    out("    mov rax, 60")
+    out("    syscall")
+
+    // --- read_file(path) -> string ptr or 0 ---
+    out("")
+    out_label("_nova_read_file")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    mov rax, 2")
+    out("    mov rsi, 0")
+    out("    syscall")
+    out("    cmp rax, 0")
+    out("    jl .rf_fail")
+    out("    mov r12, rax")
+    out("    mov rdi, 262144")
+    out("    call _nova_alloc")
+    out("    push rax")
+    out("    mov rdi, r12")
+    out("    mov rsi, rax")
+    out("    mov rdx, 262143")
+    out("    mov rax, 0")
+    out("    syscall")
+    out("    pop rsi")
+    out("    mov byte ptr [rsi+rax], 0")
+    out("    mov rdi, r12")
+    out("    push rsi")
+    out("    mov rax, 3")
+    out("    syscall")
+    out("    pop rax")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+    out(".rf_fail:")
+    out("    xor eax, eax")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- write_file(path, data) -> 1 or 0 ---
+    out("")
+    out_label("_nova_write_file")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    mov r13, rsi")
+    out("    mov rax, 2")
+    out("    mov rsi, 577")
+    out("    mov rdx, 420")
+    out("    syscall")
+    out("    cmp rax, 0")
+    out("    jl .wf_fail")
+    out("    mov r12, rax")
+    out("    mov rdi, r13")
+    out("    call _nova_strlen")
+    out("    mov rdx, rax")
+    out("    mov rdi, r12")
+    out("    mov rsi, r13")
+    out("    mov rax, 1")
+    out("    syscall")
+    out("    mov rdi, r12")
+    out("    mov rax, 3")
+    out("    syscall")
+    out("    mov rax, 1")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+    out(".wf_fail:")
+    out("    xor eax, eax")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- index(obj, idx): list[idx] or str[idx] -> char code ---
+    out("")
+    out_label("_nova_index")
+    out("    cmp qword ptr [rdi], -1")
+    out("    je .idx_list")
+    out("    movzx eax, byte ptr [rdi + rsi]")
+    out("    ret")
+    out(".idx_list:")
+    out("    mov rax, [rdi + 24]")
+    out("    mov rax, [rax + rsi*8]")
+    out("    ret")
+
+    // --- chr(code) -> 1-char string ---
+    out("")
+    out_label("_nova_chr")
+    out("    push rdi")
+    out("    mov rdi, 2")
+    out("    call _nova_alloc")
+    out("    pop rcx")
+    out("    mov [rax], cl")
+    out("    mov byte ptr [rax+1], 0")
+    out("    ret")
+
+    // --- char_at(str, idx) -> char code ---
+    out("")
+    out_label("_nova_char_at")
+    out("    movzx eax, byte ptr [rdi + rsi]")
+    out("    ret")
+
+    // --- substr(str, start, len) -> new string ---
+    out("")
+    out_label("_nova_substr")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    lea r12, [rdi + rsi]")
+    out("    mov r13, rdx")
+    out("    lea rdi, [rdx + 1]")
+    out("    call _nova_alloc")
+    out("    mov rdi, rax")
+    out("    mov rsi, r12")
+    out("    mov rcx, r13")
+    out("    rep movsb")
+    out("    mov byte ptr [rdi], 0")
+    out("    sub rdi, r13")
+    out("    mov rax, rdi")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- str_to_int(str) -> int ---
+    out("")
+    out_label("_nova_str_to_int")
+    out("    xor eax, eax")
+    out("    xor ecx, ecx")
+    out("    cmp byte ptr [rdi], 45")
+    out("    jne .sti_loop")
+    out("    mov cl, 1")
+    out("    inc rdi")
+    out(".sti_loop:")
+    out("    movzx edx, byte ptr [rdi]")
+    out("    sub edx, 48")
+    out("    cmp edx, 9")
+    out("    ja .sti_done")
+    out("    imul rax, 10")
+    out("    add rax, rdx")
+    out("    inc rdi")
+    out("    jmp .sti_loop")
+    out(".sti_done:")
+    out("    test cl, cl")
+    out("    jz .sti_ret")
+    out("    neg rax")
+    out(".sti_ret:")
+    out("    ret")
+
+    // --- __arg(n) -> string or "" ---
+    out("")
+    out_label("_nova___arg")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    inc rdi")
+    out("    cmp rdi, [rip + _g___argc]")
+    out("    jge .arg_empty")
+    out("    mov rax, [rip + _g___argv]")
+    out("    mov rax, [rax + rdi*8]")
+    out("    pop rbp")
+    out("    ret")
+    out(".arg_empty:")
+    out("    lea rax, [rip + _empty_str]")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- Wrappers with Nova-compatible names ---
     out("")
     out_label("println")
     out("    jmp _nova_println")
@@ -591,6 +1135,49 @@ fn gen_program(program) {
     out("    jmp _nova_print_str")
     out_label("print_int")
     out("    jmp _nova_print_int")
+    out_label("concat")
+    out("    jmp _nova_concat")
+    out_label("int_to_str")
+    out("    jmp _nova_int_to_str")
+    out_label("str_to_int")
+    out("    jmp _nova_str_to_int")
+    out_label("list_new")
+    out("    jmp _nova_list_new")
+    out_label("push")
+    out("    jmp _nova_push")
+    out_label("len")
+    out("    jmp _nova_len")
+    out_label("read_file")
+    out("    jmp _nova_read_file")
+    out_label("write_file")
+    out("    jmp _nova_write_file")
+    out_label("exit")
+    out("    jmp _nova_exit")
+    out_label("chr")
+    out("    jmp _nova_chr")
+    out_label("char_at")
+    out("    jmp _nova_char_at")
+    out_label("substr")
+    out("    jmp _nova_substr")
+    out_label("__arg")
+    out("    jmp _nova___arg")
+    out_label("str_eq")
+    out("    jmp _nova_str_eq")
 
-    return cg_output
+    // --- Data for runtime ---
+    out("")
+    out(".section .rodata")
+    out_label("_empty_str")
+    out("    .asciz " + DQ + DQ)
+
+    // --- Heap state in .bss ---
+    out("")
+    out(".section .bss")
+    out("    .align 8")
+    out_label("_heap_base")
+    out("    .quad 0")
+    out_label("_heap_ptr")
+    out("    .quad 0")
+    out_label("_heap_end")
+    out("    .quad 0")
 }

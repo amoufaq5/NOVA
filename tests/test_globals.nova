@@ -1,0 +1,23 @@
+let counter = 0
+
+fn increment() {
+    counter = counter + 1
+}
+
+fn get_counter() {
+    return counter
+}
+
+fn main() {
+    increment()
+    increment()
+    increment()
+    print_int(get_counter())
+    println("")
+    counter = 100
+    increment()
+    print_int(get_counter())
+    println("")
+}
+
+main()

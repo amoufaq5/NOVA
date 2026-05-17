@@ -1,0 +1,225 @@
+// Test: compile the real Nova lexer and run it on a simple program
+
+let TOK_EOF = 0
+let TOK_INT = 1
+let TOK_STRING = 3
+let TOK_IDENT = 4
+let TOK_PLUS = 10
+let TOK_MINUS = 11
+let TOK_STAR = 12
+let TOK_LPAREN = 30
+let TOK_RPAREN = 31
+let TOK_LBRACE = 32
+let TOK_RBRACE = 33
+let TOK_COMMA = 36
+let TOK_EQ = 15
+let TOK_EQEQ = 20
+let TOK_LET = 50
+let TOK_FN = 51
+let TOK_IF = 52
+let TOK_RETURN = 57
+
+let lex_src = ""
+let lex_pos = 0
+let lex_len = 0
+let lex_tokens = 0
+
+fn lex_init(source) {
+    lex_src = source
+    lex_pos = 0
+    lex_len = len(source)
+    lex_tokens = list_new()
+}
+
+fn lex_peek() {
+    if lex_pos >= lex_len {
+        return 0
+    }
+    return char_at(lex_src, lex_pos)
+}
+
+fn lex_advance() {
+    let ch = lex_peek()
+    lex_pos = lex_pos + 1
+    return ch
+}
+
+fn is_alpha(c) {
+    if c >= 65 {
+        if c <= 90 { return 1 }
+    }
+    if c >= 97 {
+        if c <= 122 { return 1 }
+    }
+    if c == 95 { return 1 }
+    return 0
+}
+
+fn is_digit(c) {
+    if c >= 48 {
+        if c <= 57 { return 1 }
+    }
+    return 0
+}
+
+fn is_alnum(c) {
+    if is_alpha(c) == 1 { return 1 }
+    if is_digit(c) == 1 { return 1 }
+    return 0
+}
+
+fn is_whitespace(c) {
+    if c == 32 { return 1 }
+    if c == 9 { return 1 }
+    if c == 10 { return 1 }
+    return 0
+}
+
+fn emit_tok(typ, val) {
+    let tok = list_new()
+    push(tok, typ)
+    push(tok, val)
+    push(lex_tokens, tok)
+}
+
+fn skip_ws() {
+    while lex_pos < lex_len {
+        let c = lex_peek()
+        if is_whitespace(c) == 1 {
+            lex_advance()
+        } else {
+            return 0
+        }
+    }
+}
+
+fn lex_number() {
+    let start = lex_pos
+    while lex_pos < lex_len {
+        if is_digit(lex_peek()) == 0 {
+            let val = substr(lex_src, start, lex_pos - start)
+            emit_tok(TOK_INT, str_to_int(val))
+            return 0
+        }
+        lex_advance()
+    }
+    let val = substr(lex_src, start, lex_pos - start)
+    emit_tok(TOK_INT, str_to_int(val))
+}
+
+fn keyword_type(word) {
+    if word == "let" { return TOK_LET }
+    if word == "fn" { return TOK_FN }
+    if word == "if" { return TOK_IF }
+    if word == "return" { return TOK_RETURN }
+    return 0
+}
+
+fn lex_ident() {
+    let start = lex_pos
+    while lex_pos < lex_len {
+        if is_alnum(lex_peek()) == 0 {
+            let word = substr(lex_src, start, lex_pos - start)
+            let kw = keyword_type(word)
+            if kw == 0 {
+                emit_tok(TOK_IDENT, word)
+            } else {
+                emit_tok(kw, word)
+            }
+            return 0
+        }
+        lex_advance()
+    }
+    let word = substr(lex_src, start, lex_pos - start)
+    emit_tok(TOK_IDENT, word)
+}
+
+fn tokenize(source) {
+    lex_init(source)
+    while lex_pos < lex_len {
+        skip_ws()
+        if lex_pos >= lex_len {
+            emit_tok(TOK_EOF, 0)
+            return lex_tokens
+        }
+        let c = lex_peek()
+        if is_digit(c) == 1 {
+            lex_number()
+        } else {
+            if is_alpha(c) == 1 {
+                lex_ident()
+            } else {
+                if c == 40 { lex_advance(); emit_tok(TOK_LPAREN, "(") }
+                else { if c == 41 { lex_advance(); emit_tok(TOK_RPAREN, ")") }
+                else { if c == 123 { lex_advance(); emit_tok(TOK_LBRACE, "{") }
+                else { if c == 125 { lex_advance(); emit_tok(TOK_RBRACE, "}") }
+                else { if c == 44 { lex_advance(); emit_tok(TOK_COMMA, ",") }
+                else { if c == 43 { lex_advance(); emit_tok(TOK_PLUS, "+") }
+                else { if c == 45 { lex_advance(); emit_tok(TOK_MINUS, "-") }
+                else { if c == 42 { lex_advance(); emit_tok(TOK_STAR, "*") }
+                else { if c == 61 {
+                    lex_advance()
+                    if lex_peek() == 61 {
+                        lex_advance()
+                        emit_tok(TOK_EQEQ, "==")
+                    } else {
+                        emit_tok(TOK_EQ, "=")
+                    }
+                } else {
+                    lex_advance()
+                }
+                } } } } } } } }
+            }
+        }
+    }
+    emit_tok(TOK_EOF, 0)
+    return lex_tokens
+}
+
+fn tok_type_name(t) {
+    if t == TOK_EOF { return "EOF" }
+    if t == TOK_INT { return "INT" }
+    if t == TOK_IDENT { return "ID" }
+    if t == TOK_PLUS { return "+" }
+    if t == TOK_MINUS { return "-" }
+    if t == TOK_STAR { return "*" }
+    if t == TOK_LPAREN { return "(" }
+    if t == TOK_RPAREN { return ")" }
+    if t == TOK_LBRACE { return "{" }
+    if t == TOK_RBRACE { return "}" }
+    if t == TOK_EQ { return "=" }
+    if t == TOK_EQEQ { return "==" }
+    if t == TOK_COMMA { return "," }
+    if t == TOK_LET { return "let" }
+    if t == TOK_FN { return "fn" }
+    if t == TOK_IF { return "if" }
+    if t == TOK_RETURN { return "return" }
+    return "?"
+}
+
+fn main() {
+    let code = "fn add(a, b) { return a + b }"
+    let toks = tokenize(code)
+    let count = len(toks)
+    print_int(count)
+    println(" tokens")
+    let i = 0
+    while i < count {
+        let tok = toks[i]
+        let typ = tok[0]
+        let val = tok[1]
+        print(tok_type_name(typ))
+        print(" ")
+        if typ == TOK_INT {
+            print_int(val)
+        } else {
+            if typ == TOK_IDENT {
+                print(val)
+            }
+        }
+        println("")
+        i = i + 1
+    }
+}
+
+main()

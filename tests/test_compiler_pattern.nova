@@ -1,0 +1,54 @@
+let output = ""
+let label_count = 0
+let strings = 0
+let str_count = 0
+
+fn out(s) {
+    output = output + s + chr(10)
+}
+
+fn new_label() {
+    label_count = label_count + 1
+    return ".L" + int_to_str(label_count)
+}
+
+fn add_string(s) {
+    let idx = str_count
+    push(strings, s)
+    str_count = str_count + 1
+    return idx
+}
+
+fn main() {
+    strings = list_new()
+    out(".text")
+    out(".globl _start")
+    out("_start:")
+
+    let lbl = new_label()
+    out("    jmp " + lbl)
+    out(lbl + ":")
+    out("    mov rax, 60")
+    out("    syscall")
+
+    let s1 = add_string("Hello World")
+    let s2 = add_string("Goodbye")
+    out("")
+    out(".section .rodata")
+
+    let i = 0
+    while i < str_count {
+        out("_str_" + int_to_str(i) + ":")
+        out("    .asciz " + chr(34) + strings[i] + chr(34))
+        i = i + 1
+    }
+
+    println(output)
+    println("---")
+    print_int(str_count)
+    println("")
+    print_int(label_count)
+    println("")
+}
+
+main()

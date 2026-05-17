@@ -250,7 +250,11 @@ fn parse_block() {
             println("Parse error: unexpected EOF in block")
             exit(1)
         }
-        push(stmts, parse_stmt())
+        if par_peek_type() == TOK_SEMI {
+            par_advance()
+        } else {
+            push(stmts, parse_stmt())
+        }
     }
     par_expect(TOK_RBRACE)
     return ast_block(stmts)
@@ -320,13 +324,14 @@ fn parse_fn() {
 
 fn parse_return() {
     par_expect(TOK_RETURN)
-    let value = 0
     let t = par_peek_type()
-    if t != TOK_RBRACE {
-        if t != TOK_EOF {
-            value = parse_expr()
-        }
+    if t == TOK_RBRACE {
+        return ast_return(0)
     }
+    if t == TOK_EOF {
+        return ast_return(0)
+    }
+    let value = parse_expr()
     return ast_return(value)
 }
 
@@ -355,7 +360,11 @@ fn parse_program(tokens) {
     par_init(tokens)
     let decls = list_new()
     while par_peek_type() != TOK_EOF {
-        push(decls, parse_stmt())
+        if par_peek_type() == TOK_SEMI {
+            par_advance()
+        } else {
+            push(decls, parse_stmt())
+        }
     }
     return ast_program(decls)
 }

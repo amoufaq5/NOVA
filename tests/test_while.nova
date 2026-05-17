@@ -1,0 +1,40 @@
+fn sum_to(n) {
+    let total = 0
+    let i = 1
+    while i <= n {
+        total = total + i
+        i = i + 1
+    }
+    return total
+}
+
+fn is_prime(n) {
+    if n <= 1 {
+        return 0
+    }
+    let i = 2
+    while i * i <= n {
+        if n % i == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn main() {
+    print_int(sum_to(100))
+    println("")
+    let count = 0
+    let n = 2
+    while n < 50 {
+        if is_prime(n) == 1 {
+            count = count + 1
+        }
+        n = n + 1
+    }
+    print_int(count)
+    println("")
+}
+
+main()

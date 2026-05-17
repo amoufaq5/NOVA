@@ -1,0 +1,156 @@
+let src = ""
+let pos = 0
+let src_len = 0
+let tokens = 0
+let tok_count = 0
+
+fn lex_init(source) {
+    src = source
+    pos = 0
+    src_len = len(source)
+    tokens = list_new()
+    tok_count = 0
+}
+
+fn peek() {
+    if pos >= src_len {
+        return 0
+    }
+    return char_at(src, pos)
+}
+
+fn advance() {
+    let ch = peek()
+    pos = pos + 1
+    return ch
+}
+
+fn is_digit(c) {
+    if c >= 48 {
+        if c <= 57 { return 1 }
+    }
+    return 0
+}
+
+fn is_alpha(c) {
+    if c >= 65 {
+        if c <= 90 { return 1 }
+    }
+    if c >= 97 {
+        if c <= 122 { return 1 }
+    }
+    if c == 95 { return 1 }
+    return 0
+}
+
+fn skip_ws() {
+    while pos < src_len {
+        let c = peek()
+        if c == 32 {
+            advance()
+        } else {
+            if c == 10 {
+                advance()
+            } else {
+                return 0
+            }
+        }
+    }
+}
+
+fn lex_number() {
+    let start = pos
+    while pos < src_len {
+        if is_digit(peek()) == 0 {
+            let val = substr(src, start, pos - start)
+            return str_to_int(val)
+        }
+        advance()
+    }
+    let val = substr(src, start, pos - start)
+    return str_to_int(val)
+}
+
+fn lex_word() {
+    let start = pos
+    while pos < src_len {
+        let c = peek()
+        if is_alpha(c) == 0 {
+            if is_digit(c) == 0 {
+                return substr(src, start, pos - start)
+            }
+        }
+        advance()
+    }
+    return substr(src, start, pos - start)
+}
+
+fn tokenize(source) {
+    lex_init(source)
+    while pos < src_len {
+        skip_ws()
+        if pos >= src_len {
+            return tok_count
+        }
+        let c = peek()
+        if is_digit(c) == 1 {
+            let n = lex_number()
+            push(tokens, n)
+            tok_count = tok_count + 1
+        } else {
+            if is_alpha(c) == 1 {
+                let w = lex_word()
+                push(tokens, w)
+                tok_count = tok_count + 1
+            } else {
+                advance()
+                push(tokens, c)
+                tok_count = tok_count + 1
+            }
+        }
+    }
+    return tok_count
+}
+
+fn main() {
+    let code = "let x = 42 + y"
+    let count = tokenize(code)
+    println("Tokens:")
+    print_int(count)
+    println("")
+
+    let i = 0
+    while i < count {
+        let tok = tokens[i]
+        if tok == "let" {
+            println("  KW: let")
+        } else {
+            if tok == "x" {
+                println("  ID: x")
+            } else {
+                if tok == "y" {
+                    println("  ID: y")
+                } else {
+                    if tok == 42 {
+                        println("  NUM: 42")
+                    } else {
+                        if tok == 61 {
+                            println("  OP: =")
+                        } else {
+                            if tok == 43 {
+                                println("  OP: +")
+                            } else {
+                                print("  OTHER: ")
+                                print_int(tok)
+                                println("")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+main()

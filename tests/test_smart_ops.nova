@@ -1,0 +1,32 @@
+fn main() {
+    let a = "hello"
+    let b = "world"
+    let c = a + " " + b
+    println(c)
+
+    if a == "hello" {
+        println("match!")
+    } else {
+        println("no match")
+    }
+
+    if a == b {
+        println("same")
+    } else {
+        println("different")
+    }
+
+    let x = 10 + 20
+    print_int(x)
+    println("")
+
+    if x == 30 {
+        println("x is 30")
+    }
+
+    if x != 99 {
+        println("x is not 99")
+    }
+}
+
+main()

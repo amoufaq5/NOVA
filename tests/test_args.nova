@@ -1,0 +1,10 @@
+fn main() {
+    let a0 = __arg(0)
+    let a1 = __arg(1)
+    let a2 = __arg(2)
+    println("arg0: " + a0)
+    println("arg1: " + a1)
+    println("arg2: " + a2)
+}
+
+main()
