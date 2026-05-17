@@ -236,8 +236,28 @@ fn parse_cmp() {
     return left
 }
 
+fn parse_and() {
+    let left = parse_cmp()
+    while par_peek_type() == TOK_AND {
+        par_advance()
+        let right = parse_cmp()
+        left = ast_and(left, right)
+    }
+    return left
+}
+
+fn parse_or() {
+    let left = parse_and()
+    while par_peek_type() == TOK_OR {
+        par_advance()
+        let right = parse_and()
+        left = ast_or(left, right)
+    }
+    return left
+}
+
 fn parse_expr() {
-    return parse_cmp()
+    return parse_or()
 }
 
 // --- Statement Parsing ---
@@ -343,13 +363,17 @@ fn parse_stmt() {
     if t == TOK_WHILE { return parse_while() }
     if t == TOK_FOR { return parse_for() }
     if t == TOK_RETURN { return parse_return() }
+    if t == TOK_BREAK { par_advance(); return ast_break() }
+    if t == TOK_CONTINUE { par_advance(); return ast_continue() }
 
     // Assignment or expression statement
     let expr = parse_expr()
     if par_peek_type() == TOK_EQ {
         par_advance()
         let value = parse_expr()
-        // expr should be an identifier
+        if ast_tag(expr) == AST_INDEX_EXPR {
+            return ast_index_assign(expr[1], expr[2], value)
+        }
         let name = expr[1]
         return ast_assign(name, value)
     }

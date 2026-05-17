@@ -23,6 +23,15 @@ let AST_LIST_LIT = 17
 let AST_INDEX_EXPR = 18
 let AST_ASSIGN_STMT = 19
 let AST_EXPR_STMT = 20
+let AST_BREAK_STMT = 21
+let AST_CONTINUE_STMT = 22
+let AST_AND_EXPR = 23
+let AST_OR_EXPR = 24
+let AST_INDEX_ASSIGN = 25
+let AST_STRUCT_DECL = 26
+let AST_STRUCT_INIT = 27
+let AST_FIELD_ACCESS = 28
+let AST_FIELD_ASSIGN = 29
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -177,6 +186,43 @@ fn ast_expr_stmt(expr) {
     let n = list_new()
     push(n, AST_EXPR_STMT)
     push(n, expr)
+    return n
+}
+
+fn ast_break() {
+    let n = list_new()
+    push(n, AST_BREAK_STMT)
+    return n
+}
+
+fn ast_continue() {
+    let n = list_new()
+    push(n, AST_CONTINUE_STMT)
+    return n
+}
+
+fn ast_and(left, right) {
+    let n = list_new()
+    push(n, AST_AND_EXPR)
+    push(n, left)
+    push(n, right)
+    return n
+}
+
+fn ast_or(left, right) {
+    let n = list_new()
+    push(n, AST_OR_EXPR)
+    push(n, left)
+    push(n, right)
+    return n
+}
+
+fn ast_index_assign(base, idx, value) {
+    let n = list_new()
+    push(n, AST_INDEX_ASSIGN)
+    push(n, base)
+    push(n, idx)
+    push(n, value)
     return n
 }
 

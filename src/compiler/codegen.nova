@@ -16,6 +16,8 @@ let cg_param_count = 0
 let cg_fns = 0
 let cg_globals = 0
 let cg_global_count = 0
+let cg_break_label = ""
+let cg_continue_label = ""
 
 fn cg_init() {
     cg_output = ""
@@ -257,6 +259,36 @@ fn gen_expr(nd) {
         return 0
     }
 
+    if tag == AST_AND_EXPR {
+        let end_lbl = new_label()
+        gen_expr(nd[1])
+        out("    test rax, rax")
+        out("    jz " + end_lbl)
+        gen_expr(nd[2])
+        out("    test rax, rax")
+        out("    jz " + end_lbl)
+        out("    mov rax, 1")
+        out_label(end_lbl)
+        return 0
+    }
+
+    if tag == AST_OR_EXPR {
+        let true_lbl = new_label()
+        let end_lbl = new_label()
+        gen_expr(nd[1])
+        out("    test rax, rax")
+        out("    jnz " + true_lbl)
+        gen_expr(nd[2])
+        out("    test rax, rax")
+        out("    jnz " + true_lbl)
+        out("    xor eax, eax")
+        out("    jmp " + end_lbl)
+        out_label(true_lbl)
+        out("    mov rax, 1")
+        out_label(end_lbl)
+        return 0
+    }
+
     out("    # unknown expr tag " + int_to_str(tag))
 }
 
@@ -331,6 +363,10 @@ fn gen_stmt(nd) {
         let body = nd[2]
         let loop_lbl = new_label()
         let end_lbl = new_label()
+        let prev_break = cg_break_label
+        let prev_continue = cg_continue_label
+        cg_break_label = end_lbl
+        cg_continue_label = loop_lbl
         out_label(loop_lbl)
         gen_expr(cond)
         out("    test rax, rax")
@@ -338,6 +374,8 @@ fn gen_stmt(nd) {
         gen_block(body)
         out("    jmp " + loop_lbl)
         out_label(end_lbl)
+        cg_break_label = prev_break
+        cg_continue_label = prev_continue
         return 0
     }
 
@@ -351,6 +389,11 @@ fn gen_stmt(nd) {
         out("    push 0")
         let loop_lbl = new_label()
         let end_lbl = new_label()
+        let cont_lbl = new_label()
+        let prev_break = cg_break_label
+        let prev_continue = cg_continue_label
+        cg_break_label = end_lbl
+        cg_continue_label = cont_lbl
         out_label(loop_lbl)
         out("    mov rcx, [rsp]")
         out("    mov rdi, [rsp+8]")
@@ -360,15 +403,44 @@ fn gen_stmt(nd) {
         out("    mov rax, [rdi+rcx*8]")
         out("    mov [rbp - " + int_to_str(var_off) + "], rax")
         gen_block(body)
+        out_label(cont_lbl)
         out("    inc qword ptr [rsp]")
         out("    jmp " + loop_lbl)
         out_label(end_lbl)
         out("    add rsp, 16")
+        cg_break_label = prev_break
+        cg_continue_label = prev_continue
         return 0
     }
 
     if tag == AST_EXPR_STMT {
         gen_expr(nd[1])
+        return 0
+    }
+
+    if tag == AST_BREAK_STMT {
+        out("    jmp " + cg_break_label)
+        return 0
+    }
+
+    if tag == AST_CONTINUE_STMT {
+        out("    jmp " + cg_continue_label)
+        return 0
+    }
+
+    if tag == AST_INDEX_ASSIGN {
+        let base = nd[1]
+        let idx = nd[2]
+        let value = nd[3]
+        gen_expr(value)
+        out("    push rax")
+        gen_expr(idx)
+        out("    push rax")
+        gen_expr(base)
+        out("    mov rcx, [rax + 24]")
+        out("    pop rsi")
+        out("    pop rdx")
+        out("    mov [rcx + rsi*8], rdx")
         return 0
     }
 

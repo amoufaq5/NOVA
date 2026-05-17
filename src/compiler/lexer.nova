@@ -36,6 +36,8 @@ let TOK_PIPE = 40
 let TOK_TILDE = 41
 let TOK_AT = 42
 let TOK_HASH = 43
+let TOK_AND = 44
+let TOK_OR = 45
 // Keywords
 let TOK_LET = 50
 let TOK_FN = 51
@@ -49,6 +51,8 @@ let TOK_TRUE = 58
 let TOK_FALSE = 59
 let TOK_NONE = 60
 let TOK_STRUCT = 61
+let TOK_BREAK = 62
+let TOK_CONTINUE = 63
 // Flow operators
 let TOK_FLOW_FWD = 70
 let TOK_FLOW_BWD = 71
@@ -214,6 +218,8 @@ fn keyword_type(word) {
     if word == "false" { return TOK_FALSE }
     if word == "none" { return TOK_NONE }
     if word == "struct" { return TOK_STRUCT }
+    if word == "break" { return TOK_BREAK }
+    if word == "continue" { return TOK_CONTINUE }
     return 0
 }
 
@@ -282,8 +288,24 @@ fn lex_all() {
                     else { if c == 44 { lex_advance(); emit_tok(TOK_COMMA, ",") }
                     else { if c == 58 { lex_advance(); emit_tok(TOK_COLON, ":") }
                     else { if c == 59 { lex_advance(); emit_tok(TOK_SEMI, ";") }
-                    else { if c == 38 { lex_advance(); emit_tok(TOK_AMP, "&") }
-                    else { if c == 124 { lex_advance(); emit_tok(TOK_PIPE, "|") }
+                    else { if c == 38 {
+                        lex_advance()
+                        if lex_peek() == 38 {
+                            lex_advance()
+                            emit_tok(TOK_AND, "&&")
+                        } else {
+                            emit_tok(TOK_AMP, "&")
+                        }
+                    }
+                    else { if c == 124 {
+                        lex_advance()
+                        if lex_peek() == 124 {
+                            lex_advance()
+                            emit_tok(TOK_OR, "||")
+                        } else {
+                            emit_tok(TOK_PIPE, "|")
+                        }
+                    }
                     else { if c == 64 { lex_advance(); emit_tok(TOK_AT, "@") }
                     else { if c == 35 { lex_advance(); emit_tok(TOK_HASH, "#") }
                     else { if c == 61 {
