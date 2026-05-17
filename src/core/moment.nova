@@ -1,0 +1,115 @@
+// Nova Core: Moment
+// A Moment captures what happened, who was involved, what was felt,
+// and what the consequences were. It is the atomic unit of experience.
+//
+// Layout: [TAG, what_happened, who, felt_valence, felt_arousal,
+//          consequence, salience, urgency, timestamp]
+
+let MOMENT_TAG = 100
+let MOMENT_WHAT = 1
+let MOMENT_WHO = 2
+let MOMENT_VALENCE = 3
+let MOMENT_AROUSAL = 4
+let MOMENT_CONSEQUENCE = 5
+let MOMENT_SALIENCE = 6
+let MOMENT_URGENCY = 7
+let MOMENT_TIME = 8
+
+let ENTITY_TAG = 101
+let ENTITY_NAME = 1
+let ENTITY_ROLE = 2
+let ENTITY_ATTRS = 3
+
+let EMOTION_TAG = 102
+let EMOTION_VALENCE = 1
+let EMOTION_AROUSAL = 2
+let EMOTION_DOMINANCE = 3
+
+let CONSEQUENCE_TAG = 103
+let CONSEQUENCE_TYPE = 1
+let CONSEQUENCE_DESC = 2
+let CONSEQUENCE_CERTAINTY = 3
+
+let global_time = 0
+
+fn moment_new(what, who, valence, arousal, consequence, salience) {
+    global_time = global_time + 1
+    let m = list_new()
+    push(m, MOMENT_TAG)
+    push(m, what)
+    push(m, who)
+    push(m, valence)
+    push(m, arousal)
+    push(m, consequence)
+    push(m, salience)
+    push(m, 50)
+    push(m, global_time)
+    return m
+}
+
+fn moment_what(m) { return m[MOMENT_WHAT] }
+fn moment_who(m) { return m[MOMENT_WHO] }
+fn moment_valence(m) { return m[MOMENT_VALENCE] }
+fn moment_arousal(m) { return m[MOMENT_AROUSAL] }
+fn moment_consequence(m) { return m[MOMENT_CONSEQUENCE] }
+fn moment_salience(m) { return m[MOMENT_SALIENCE] }
+fn moment_urgency(m) { return m[MOMENT_URGENCY] }
+fn moment_time(m) { return m[MOMENT_TIME] }
+
+fn moment_intensity(m) {
+    let v = moment_valence(m)
+    let a = moment_arousal(m)
+    if v < 0 { v = 0 - v }
+    return (v + a) / 2
+}
+
+fn entity_new(name, role) {
+    let e = list_new()
+    push(e, ENTITY_TAG)
+    push(e, name)
+    push(e, role)
+    push(e, list_new())
+    return e
+}
+
+fn entity_name(e) { return e[ENTITY_NAME] }
+fn entity_role(e) { return e[ENTITY_ROLE] }
+
+fn emotion_new(valence, arousal, dominance) {
+    let em = list_new()
+    push(em, EMOTION_TAG)
+    push(em, valence)
+    push(em, arousal)
+    push(em, dominance)
+    return em
+}
+
+fn emotion_valence(em) { return em[EMOTION_VALENCE] }
+fn emotion_arousal(em) { return em[EMOTION_AROUSAL] }
+fn emotion_dominance(em) { return em[EMOTION_DOMINANCE] }
+
+fn emotion_drift(current, target, rate) {
+    let cv = emotion_valence(current)
+    let ca = emotion_arousal(current)
+    let cd = emotion_dominance(current)
+    let tv = emotion_valence(target)
+    let ta = emotion_arousal(target)
+    let td = emotion_dominance(target)
+    let nv = cv + (tv - cv) * rate / 100
+    let na = ca + (ta - ca) * rate / 100
+    let nd = cd + (td - cd) * rate / 100
+    return emotion_new(nv, na, nd)
+}
+
+fn consequence_new(typ, desc, certainty) {
+    let c = list_new()
+    push(c, CONSEQUENCE_TAG)
+    push(c, typ)
+    push(c, desc)
+    push(c, certainty)
+    return c
+}
+
+fn consequence_type(c) { return c[CONSEQUENCE_TYPE] }
+fn consequence_desc(c) { return c[CONSEQUENCE_DESC] }
+fn consequence_certainty(c) { return c[CONSEQUENCE_CERTAINTY] }

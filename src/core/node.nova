@@ -1,0 +1,146 @@
+// Nova Core: Node
+// Nodes are the processing units of a Mind. Each node type
+// has specialized computation: perceiver, knower, rememberer,
+// reasoner, feeler, actor.
+//
+// Layout: [TAG, name, type, state, inbox, outbox, handler]
+
+let NODE_TAG = 120
+let NODE_NAME = 1
+let NODE_TYPE = 2
+let NODE_STATE = 3
+let NODE_INBOX = 4
+let NODE_OUTBOX = 5
+let NODE_HANDLER = 6
+
+// Node types
+let NTYPE_PERCEIVER = 1
+let NTYPE_KNOWER = 2
+let NTYPE_REMEMBERER = 3
+let NTYPE_REASONER = 4
+let NTYPE_FEELER = 5
+let NTYPE_ACTOR = 6
+
+fn node_new(name, ntype) {
+    let n = list_new()
+    push(n, NODE_TAG)
+    push(n, name)
+    push(n, ntype)
+    push(n, list_new())
+    push(n, list_new())
+    push(n, list_new())
+    push(n, 0)
+    return n
+}
+
+fn node_name(n) { return n[NODE_NAME] }
+fn node_type(n) { return n[NODE_TYPE] }
+fn node_state(n) { return n[NODE_STATE] }
+fn node_inbox(n) { return n[NODE_INBOX] }
+fn node_outbox(n) { return n[NODE_OUTBOX] }
+
+fn node_receive(n, signal) {
+    let inbox = node_inbox(n)
+    push(inbox, signal)
+}
+
+fn node_emit(n, signal) {
+    let outbox = node_outbox(n)
+    push(outbox, signal)
+}
+
+fn node_drain_outbox(n) {
+    let outbox = node_outbox(n)
+    let signals = list_new()
+    let i = 0
+    while i < len(outbox) {
+        push(signals, outbox[i])
+        i = i + 1
+    }
+    // Clear outbox by resetting its count
+    // (Hack: reassign the outbox field)
+    let new_outbox = list_new()
+    n[NODE_OUTBOX] = new_outbox
+    return signals
+}
+
+// --- Perceiver: classifies incoming raw signals ---
+fn perceiver_process(node, signal) {
+    let m = signal_moment(signal)
+    let salience = moment_salience(m)
+    if salience > 20 {
+        signal_add_trace(signal, node_name(node))
+        node_emit(node, signal)
+    }
+}
+
+// --- Knower: retrieves relevant knowledge ---
+fn knower_process(node, signal) {
+    signal_add_trace(signal, node_name(node))
+    node_emit(node, signal)
+}
+
+// --- Rememberer: enriches signal with memory context ---
+fn rememberer_process(node, signal) {
+    signal_add_trace(signal, node_name(node))
+    node_emit(node, signal)
+}
+
+// --- Reasoner: applies inference strategies ---
+fn reasoner_process(node, signal) {
+    signal_add_trace(signal, node_name(node))
+    let m = signal_moment(signal)
+    let response_moment = moment_new(
+        "analysis complete",
+        moment_who(m),
+        50, 30,
+        consequence_new("insight", "processed", 70),
+        moment_salience(m)
+    )
+    let response = signal_response(
+        response_moment,
+        node_name(node),
+        signal_origin(signal)
+    )
+    node_emit(node, response)
+}
+
+// --- Feeler: updates emotional state ---
+fn feeler_process(node, signal) {
+    signal_add_trace(signal, node_name(node))
+    let m = signal_moment(signal)
+    let intensity = moment_intensity(m)
+    if intensity > 30 {
+        node_emit(node, signal)
+    }
+}
+
+// --- Actor: produces output responses ---
+fn actor_process(node, signal) {
+    signal_add_trace(signal, node_name(node))
+    node_emit(node, signal)
+}
+
+fn node_process(node) {
+    let inbox = node_inbox(node)
+    let count = len(inbox)
+    if count == 0 {
+        return 0
+    }
+    let ntype = node_type(node)
+    let i = 0
+    while i < count {
+        let sig = inbox[i]
+        if ntype == NTYPE_PERCEIVER { perceiver_process(node, sig) }
+        if ntype == NTYPE_KNOWER { knower_process(node, sig) }
+        if ntype == NTYPE_REMEMBERER { rememberer_process(node, sig) }
+        if ntype == NTYPE_REASONER { reasoner_process(node, sig) }
+        if ntype == NTYPE_FEELER { feeler_process(node, sig) }
+        if ntype == NTYPE_ACTOR { actor_process(node, sig) }
+        i = i + 1
+    }
+    // Clear inbox
+    let new_inbox = list_new()
+    n[NODE_INBOX] = new_inbox
+    return count
+}

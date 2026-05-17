@@ -1,0 +1,126 @@
+// Test the core Moment-Signal types
+
+// --- Inline the core types for testing ---
+let MOMENT_TAG = 100
+let ENTITY_TAG = 101
+let SIGNAL_TAG = 110
+let NODE_TAG = 120
+
+let global_time = 0
+
+fn moment_new(what, who, valence, arousal, consequence, salience) {
+    global_time = global_time + 1
+    let m = list_new()
+    push(m, MOMENT_TAG)
+    push(m, what)
+    push(m, who)
+    push(m, valence)
+    push(m, arousal)
+    push(m, consequence)
+    push(m, salience)
+    push(m, 50)
+    push(m, global_time)
+    return m
+}
+
+fn moment_what(m) { return m[1] }
+fn moment_salience(m) { return m[6] }
+
+fn entity_new(name, role) {
+    let e = list_new()
+    push(e, ENTITY_TAG)
+    push(e, name)
+    push(e, role)
+    return e
+}
+
+fn signal_new(sig_type, moment, origin, dest, priority) {
+    let s = list_new()
+    push(s, SIGNAL_TAG)
+    push(s, sig_type)
+    push(s, moment)
+    push(s, origin)
+    push(s, dest)
+    push(s, priority)
+    push(s, list_new())
+    return s
+}
+
+fn signal_moment(s) { return s[2] }
+
+fn node_new(name, ntype) {
+    let n = list_new()
+    push(n, NODE_TAG)
+    push(n, name)
+    push(n, ntype)
+    push(n, list_new())
+    push(n, list_new())
+    push(n, list_new())
+    return n
+}
+
+fn node_name(n) { return n[1] }
+fn node_inbox(n) { return n[4] }
+fn node_outbox(n) { return n[5] }
+
+fn node_receive(n, signal) {
+    push(node_inbox(n), signal)
+}
+
+fn node_emit(n, signal) {
+    push(node_outbox(n), signal)
+}
+
+fn main() {
+    // Create an entity
+    let alice = entity_new("Alice", "visitor")
+    println("Entity: " + alice[1] + " (" + alice[2] + ")")
+
+    // Create a moment: "Alice said hello"
+    let m = moment_new("Alice said hello", alice, 70, 40, 0, 80)
+    println("Moment: " + moment_what(m))
+    print("  Salience: ")
+    print_int(moment_salience(m))
+    println("")
+
+    // Create a signal carrying the moment
+    let sig = signal_new(1, m, "perceiver", "reasoner", 60)
+    println("Signal created")
+
+    // Create nodes
+    let perceiver = node_new("SenseGate", 1)
+    let reasoner = node_new("Think", 4)
+    println("Nodes: " + node_name(perceiver) + ", " + node_name(reasoner))
+
+    // Route signal: perceiver -> reasoner
+    node_receive(perceiver, sig)
+    print("Perceiver inbox: ")
+    print_int(len(node_inbox(perceiver)))
+    println(" signals")
+
+    // Process and forward
+    let inbox = node_inbox(perceiver)
+    let first_sig = inbox[0]
+    node_emit(perceiver, first_sig)
+    print("Perceiver outbox: ")
+    print_int(len(node_outbox(perceiver)))
+    println(" signals")
+
+    // Forward to reasoner
+    let outbox = node_outbox(perceiver)
+    let forwarded = outbox[0]
+    node_receive(reasoner, forwarded)
+    print("Reasoner inbox: ")
+    print_int(len(node_inbox(reasoner)))
+    println(" signals")
+
+    // Verify moment preserved through routing
+    let received = node_inbox(reasoner)
+    let rsig = received[0]
+    let rm = signal_moment(rsig)
+    println("Reasoner received: " + moment_what(rm))
+
+    println("--- Moment-Signal routing complete ---")
+}
+
+main()

@@ -1,0 +1,88 @@
+// Nova Mind: Memory System
+// Stores episodes (crystallized moments), supports retrieval
+// by similarity, and implements decay/consolidation.
+//
+// Episode layout: [TAG, moment, importance, access_count, last_access, tags]
+
+let EPISODE_TAG = 200
+let EP_MOMENT = 1
+let EP_IMPORTANCE = 2
+let EP_ACCESS_COUNT = 3
+let EP_LAST_ACCESS = 4
+let EP_TAGS = 5
+
+let memory_episodes = 0
+let memory_count = 0
+let memory_capacity = 1000
+
+fn memory_init() {
+    memory_episodes = list_new()
+    memory_count = 0
+}
+
+fn episode_new(moment, importance) {
+    let ep = list_new()
+    push(ep, EPISODE_TAG)
+    push(ep, moment)
+    push(ep, importance)
+    push(ep, 0)
+    push(ep, global_time)
+    push(ep, list_new())
+    return ep
+}
+
+fn episode_moment(ep) { return ep[EP_MOMENT] }
+fn episode_importance(ep) { return ep[EP_IMPORTANCE] }
+fn episode_access_count(ep) { return ep[EP_ACCESS_COUNT] }
+
+fn episode_add_tag(ep, tag) {
+    let tags = ep[EP_TAGS]
+    push(tags, tag)
+}
+
+fn memory_store(moment, importance) {
+    let ep = episode_new(moment, importance)
+    push(memory_episodes, ep)
+    memory_count = memory_count + 1
+    return ep
+}
+
+fn memory_crystallize(moment) {
+    let intensity = moment_intensity(moment)
+    if intensity > 30 {
+        let importance = intensity + moment_salience(moment)
+        return memory_store(moment, importance / 2)
+    }
+    return 0
+}
+
+fn memory_recall_recent(limit) {
+    let results = list_new()
+    let start = memory_count - limit
+    if start < 0 { start = 0 }
+    let i = start
+    while i < memory_count {
+        push(results, memory_episodes[i])
+        i = i + 1
+    }
+    return results
+}
+
+fn memory_decay(threshold) {
+    let surviving = list_new()
+    let i = 0
+    while i < memory_count {
+        let ep = memory_episodes[i]
+        let imp = episode_importance(ep)
+        let age = global_time - ep[EP_LAST_ACCESS]
+        let decay = age / 10
+        let effective = imp - decay
+        if effective >= threshold {
+            push(surviving, ep)
+        }
+        i = i + 1
+    }
+    memory_episodes = surviving
+    memory_count = len(surviving)
+    return memory_count
+}

@@ -1,0 +1,53 @@
+// Nova Core: Path
+// Paths define signal flow routes through a network of nodes.
+// Forward path: perceiver -> knower -> reasoner -> actor
+// Backward path: actor -> reasoner (reflection)
+// Reflex path: perceiver -> actor (fast bypass)
+//
+// Layout: [TAG, name, type, steps]
+
+let PATH_TAG = 140
+let PATH_NAME = 1
+let PATH_TYPE = 2
+let PATH_STEPS = 3
+
+let PATH_FORWARD = 1
+let PATH_BACKWARD = 2
+let PATH_REFLEX = 3
+
+fn path_new(name, ptype) {
+    let p = list_new()
+    push(p, PATH_TAG)
+    push(p, name)
+    push(p, ptype)
+    push(p, list_new())
+    return p
+}
+
+fn path_name(p) { return p[PATH_NAME] }
+fn path_type(p) { return p[PATH_TYPE] }
+fn path_steps(p) { return p[PATH_STEPS] }
+
+fn path_add_step(p, node) {
+    let steps = path_steps(p)
+    push(steps, node)
+}
+
+fn path_execute(p, signal) {
+    let steps = path_steps(p)
+    let current_signal = signal
+    let i = 0
+    while i < len(steps) {
+        let node = steps[i]
+        node_receive(node, current_signal)
+        node_process(node)
+        let out_signals = node_drain_outbox(node)
+        if len(out_signals) > 0 {
+            current_signal = out_signals[0]
+        } else {
+            return 0
+        }
+        i = i + 1
+    }
+    return current_signal
+}

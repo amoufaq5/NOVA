@@ -1,0 +1,219 @@
+// Nova Example: Full Mind Demo
+// Demonstrates a complete Moment-Signal processing cycle.
+
+// === Core Type Definitions (inline for standalone compilation) ===
+let MOMENT_TAG = 100
+let SIGNAL_TAG = 110
+let NODE_TAG = 120
+let EPISODE_TAG = 200
+
+let SIG_EVENT = 1
+let SIG_QUESTION = 2
+let SIG_RESPONSE = 6
+
+let NTYPE_PERCEIVER = 1
+let NTYPE_KNOWER = 2
+let NTYPE_REMEMBERER = 3
+let NTYPE_REASONER = 4
+let NTYPE_FEELER = 5
+let NTYPE_ACTOR = 6
+
+let global_time = 0
+let emotion_state_v = 50
+let emotion_state_a = 50
+
+// === Memory ===
+let memory_episodes = 0
+let memory_count = 0
+
+fn memory_init() {
+    memory_episodes = list_new()
+    memory_count = 0
+}
+
+fn memory_store(what, importance) {
+    let ep = list_new()
+    push(ep, EPISODE_TAG)
+    push(ep, what)
+    push(ep, importance)
+    push(ep, global_time)
+    push(memory_episodes, ep)
+    memory_count = memory_count + 1
+}
+
+// === Knowledge ===
+let knowledge_facts = 0
+
+fn knowledge_init() {
+    knowledge_facts = list_new()
+}
+
+fn knowledge_add(subject, relation, object) {
+    let fact = list_new()
+    push(fact, subject)
+    push(fact, relation)
+    push(fact, object)
+    push(knowledge_facts, fact)
+}
+
+fn knowledge_query(subject, relation) {
+    let i = 0
+    while i < len(knowledge_facts) {
+        let fact = knowledge_facts[i]
+        if fact[0] == subject {
+            if fact[1] == relation {
+                return fact[2]
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// === Nodes ===
+fn node_new(name, ntype) {
+    let n = list_new()
+    push(n, NODE_TAG)
+    push(n, name)
+    push(n, ntype)
+    push(n, list_new())
+    return n
+}
+
+fn node_name(n) { return n[1] }
+
+// === Signal Processing ===
+fn moment_new(what, valence, arousal, salience) {
+    global_time = global_time + 1
+    let m = list_new()
+    push(m, MOMENT_TAG)
+    push(m, what)
+    push(m, valence)
+    push(m, arousal)
+    push(m, salience)
+    push(m, global_time)
+    return m
+}
+
+fn signal_new(sig_type, moment, origin, dest) {
+    let s = list_new()
+    push(s, SIGNAL_TAG)
+    push(s, sig_type)
+    push(s, moment)
+    push(s, origin)
+    push(s, dest)
+    return s
+}
+
+// === Mind ===
+let perceiver = 0
+let knower = 0
+let rememberer = 0
+let reasoner = 0
+let feeler = 0
+let actor = 0
+
+fn mind_init() {
+    perceiver = node_new("SenseGate", NTYPE_PERCEIVER)
+    knower = node_new("Store", NTYPE_KNOWER)
+    rememberer = node_new("Memory", NTYPE_REMEMBERER)
+    reasoner = node_new("Think", NTYPE_REASONER)
+    feeler = node_new("Heart", NTYPE_FEELER)
+    actor = node_new("Output", NTYPE_ACTOR)
+    memory_init()
+    knowledge_init()
+
+    // Seed knowledge
+    knowledge_add("dog", "is_a", "mammal")
+    knowledge_add("cat", "is_a", "mammal")
+    knowledge_add("mammal", "has", "warm blood")
+    knowledge_add("greeting", "response", "reciprocate")
+    knowledge_add("question", "response", "answer")
+}
+
+fn perceive(input, salience) {
+    println("  [Perceiver] Received: " + input)
+    let m = moment_new(input, 60, 40, salience)
+    return m
+}
+
+fn remember(moment) {
+    let what = moment[1]
+    let salience = moment[4]
+    if salience > 50 {
+        memory_store(what, salience)
+        println("  [Rememberer] Stored: " + what)
+    }
+    print("  [Rememberer] Episodes in memory: ")
+    print_int(memory_count)
+    println("")
+}
+
+fn reason(moment) {
+    let what = moment[1]
+    // Try to find relevant knowledge
+    let answer = knowledge_query(what, "is_a")
+    if answer == "" {
+        answer = knowledge_query(what, "response")
+    }
+    if answer == "" {
+        println("  [Reasoner] No direct knowledge about: " + what)
+        return "unknown"
+    }
+    println("  [Reasoner] Found: " + what + " -> " + answer)
+    return answer
+}
+
+fn feel(moment) {
+    let valence = moment[2]
+    let arousal = moment[3]
+    // Drift emotional state
+    emotion_state_v = emotion_state_v + (valence - emotion_state_v) * 20 / 100
+    emotion_state_a = emotion_state_a + (arousal - emotion_state_a) * 20 / 100
+    let mood = "neutral"
+    if emotion_state_v > 60 {
+        mood = "positive"
+    }
+    if emotion_state_v < 40 {
+        mood = "negative"
+    }
+    println("  [Feeler] Mood: " + mood + " (v=" + int_to_str(emotion_state_v) + " a=" + int_to_str(emotion_state_a) + ")")
+}
+
+fn act(conclusion) {
+    println("  [Actor] Response: " + conclusion)
+}
+
+fn process_input(input, salience) {
+    println("")
+    println("=== Processing: " + input + " ===")
+    let moment = perceive(input, salience)
+    remember(moment)
+    let conclusion = reason(moment)
+    feel(moment)
+    act(conclusion)
+}
+
+fn main() {
+    println("=== Nova Mind Initialized ===")
+    mind_init()
+
+    process_input("greeting", 70)
+    process_input("dog", 60)
+    process_input("cat", 55)
+    process_input("weather", 30)
+    process_input("question", 80)
+
+    println("")
+    println("=== Final State ===")
+    print("Total memories: ")
+    print_int(memory_count)
+    println("")
+    print("Emotional state: v=")
+    print_int(emotion_state_v)
+    print(" a=")
+    print_int(emotion_state_a)
+    println("")
+}
+
+main()

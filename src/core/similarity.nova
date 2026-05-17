@@ -1,0 +1,97 @@
+// Nova Core: Similarity
+// Scoring functions for memory retrieval and pattern matching.
+// All scores are integers 0-100 (percentage-like).
+
+// Composite similarity: weighted combination of factors
+// score = 0.35*content + 0.20*entity + 0.15*emotion + 0.15*recency
+//       + 0.10*frequency + 0.05*consequence
+fn similarity_score(content_sim, entity_sim, emotion_sim, recency, frequency, consequence_sim) {
+    let score = content_sim * 35 / 100
+    score = score + entity_sim * 20 / 100
+    score = score + emotion_sim * 15 / 100
+    score = score + recency * 15 / 100
+    score = score + frequency * 10 / 100
+    score = score + consequence_sim * 5 / 100
+    return score
+}
+
+// Jaccard similarity between two lists (as sets)
+// Returns 0-100
+fn jaccard(list_a, list_b) {
+    let len_a = len(list_a)
+    let len_b = len(list_b)
+    if len_a == 0 {
+        if len_b == 0 { return 100 }
+        return 0
+    }
+    if len_b == 0 { return 0 }
+
+    let intersection = 0
+    let i = 0
+    while i < len_a {
+        let j = 0
+        while j < len_b {
+            if list_a[i] == list_b[j] {
+                intersection = intersection + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let union_size = len_a + len_b - intersection
+    if union_size == 0 { return 0 }
+    return intersection * 100 / union_size
+}
+
+// Emotional similarity: distance in valence-arousal space
+// Returns 0-100 (100 = identical)
+fn emotion_similarity(em1, em2) {
+    let dv = emotion_valence(em1) - emotion_valence(em2)
+    let da = emotion_arousal(em1) - emotion_arousal(em2)
+    if dv < 0 { dv = 0 - dv }
+    if da < 0 { da = 0 - da }
+    let dist = dv + da
+    if dist > 200 { return 0 }
+    return 100 - dist / 2
+}
+
+// Temporal recency score: decays with time distance
+// Returns 0-100
+fn recency_score(moment_time, current_time) {
+    let age = current_time - moment_time
+    if age <= 0 { return 100 }
+    if age >= 1000 { return 0 }
+    return 100 - age / 10
+}
+
+// Activation spreading: propagate energy from seed nodes
+// Returns list of activated node indices with their activation levels
+fn spread_activation(graph_edges, seed_idx, max_depth, decay_rate) {
+    let activations = list_new()
+    let frontier = list_new()
+    push(frontier, seed_idx)
+    push(activations, 100)
+
+    let depth = 0
+    while depth < max_depth {
+        let next_frontier = list_new()
+        let fi = 0
+        while fi < len(frontier) {
+            let node_idx = frontier[fi]
+            let edges = graph_edges[node_idx]
+            let ei = 0
+            while ei < len(edges) {
+                let neighbor = edges[ei]
+                let energy = 100 * decay_rate / 100
+                push(next_frontier, neighbor)
+                push(activations, energy)
+                ei = ei + 1
+            }
+            fi = fi + 1
+        }
+        frontier = next_frontier
+        depth = depth + 1
+    }
+    return activations
+}

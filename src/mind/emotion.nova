@@ -1,0 +1,67 @@
+// Nova Mind: Emotion System
+// Dimensional model: valence, arousal, dominance (each 0-100)
+// State drifts toward targets rather than jumping.
+// High arousal increases influence on other cognitive processes.
+
+let emotion_state_v = 50
+let emotion_state_a = 50
+let emotion_state_d = 50
+let emotion_baseline_v = 50
+let emotion_baseline_a = 30
+let emotion_baseline_d = 50
+let emotion_drift_rate = 15
+
+fn emotion_init() {
+    emotion_state_v = 50
+    emotion_state_a = 50
+    emotion_state_d = 50
+}
+
+fn emotion_get_valence() { return emotion_state_v }
+fn emotion_get_arousal() { return emotion_state_a }
+fn emotion_get_dominance() { return emotion_state_d }
+
+fn emotion_appraise(moment) {
+    let felt_v = moment_valence(moment)
+    let felt_a = moment_arousal(moment)
+    let salience = moment_salience(moment)
+
+    // Drift toward the moment's emotional tone
+    let weight = salience / 2
+    let target_v = felt_v
+    let target_a = felt_a
+
+    emotion_state_v = emotion_state_v + (target_v - emotion_state_v) * weight / 100
+    emotion_state_a = emotion_state_a + (target_a - emotion_state_a) * weight / 100
+}
+
+fn emotion_decay_to_baseline() {
+    emotion_state_v = emotion_state_v + (emotion_baseline_v - emotion_state_v) * emotion_drift_rate / 100
+    emotion_state_a = emotion_state_a + (emotion_baseline_a - emotion_state_a) * emotion_drift_rate / 100
+    emotion_state_d = emotion_state_d + (emotion_baseline_d - emotion_state_d) * emotion_drift_rate / 100
+}
+
+fn emotion_influence() {
+    // Returns how much emotion should influence cognition (0-100)
+    // Higher arousal = more influence
+    return emotion_state_a
+}
+
+fn emotion_describe() {
+    if emotion_state_v > 70 {
+        if emotion_state_a > 70 {
+            return "excited"
+        }
+        return "content"
+    }
+    if emotion_state_v < 30 {
+        if emotion_state_a > 70 {
+            return "anxious"
+        }
+        return "sad"
+    }
+    if emotion_state_a > 70 {
+        return "alert"
+    }
+    return "neutral"
+}

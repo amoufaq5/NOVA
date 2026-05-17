@@ -1,0 +1,55 @@
+// Nova Core: Channel
+// Channels connect nodes and route signals between them.
+// Types: direct (1:1), broadcast (1:N), filtered.
+//
+// Layout: [TAG, name, source, destinations, filter_fn]
+
+let CHANNEL_TAG = 130
+let CHAN_NAME = 1
+let CHAN_SOURCE = 2
+let CHAN_DESTS = 3
+let CHAN_FILTER = 4
+
+// Channel types
+let CHAN_DIRECT = 1
+let CHAN_BROADCAST = 2
+let CHAN_FILTERED = 3
+
+fn channel_new(name, source) {
+    let ch = list_new()
+    push(ch, CHANNEL_TAG)
+    push(ch, name)
+    push(ch, source)
+    push(ch, list_new())
+    push(ch, 0)
+    return ch
+}
+
+fn channel_name(ch) { return ch[CHAN_NAME] }
+fn channel_source(ch) { return ch[CHAN_SOURCE] }
+fn channel_dests(ch) { return ch[CHAN_DESTS] }
+
+fn channel_add_dest(ch, dest_node) {
+    let dests = channel_dests(ch)
+    push(dests, dest_node)
+}
+
+fn channel_route(ch, signal) {
+    let dests = channel_dests(ch)
+    let i = 0
+    while i < len(dests) {
+        let dest = dests[i]
+        node_receive(dest, signal)
+        i = i + 1
+    }
+    return len(dests)
+}
+
+fn channel_route_filtered(ch, signal, min_salience) {
+    let m = signal_moment(signal)
+    let sal = moment_salience(m)
+    if sal < min_salience {
+        return 0
+    }
+    return channel_route(ch, signal)
+}

@@ -1,0 +1,86 @@
+// Nova Mind: Academic Learning Track
+// Stores axioms, rules, and derives new knowledge through logical inference.
+// Knowledge is structured as a semantic graph of concepts and relationships.
+
+let AXIOM_TAG = 210
+let RULE_TAG = 211
+let KNOWLEDGE_TAG = 212
+
+let academic_axioms = 0
+let academic_rules = 0
+let academic_knowledge = 0
+let academic_count = 0
+
+fn academic_init() {
+    academic_axioms = list_new()
+    academic_rules = list_new()
+    academic_knowledge = list_new()
+    academic_count = 0
+}
+
+fn academic_add_axiom(subject, relation, object) {
+    let axiom = list_new()
+    push(axiom, AXIOM_TAG)
+    push(axiom, subject)
+    push(axiom, relation)
+    push(axiom, object)
+    push(academic_axioms, axiom)
+}
+
+fn academic_add_rule(if_relation, then_relation) {
+    let rule = list_new()
+    push(rule, RULE_TAG)
+    push(rule, if_relation)
+    push(rule, then_relation)
+    push(academic_rules, rule)
+}
+
+fn academic_query(subject, relation) {
+    // Search axioms for matching subject+relation
+    let results = list_new()
+    let i = 0
+    while i < len(academic_axioms) {
+        let axiom = academic_axioms[i]
+        if axiom[1] == subject {
+            if axiom[2] == relation {
+                push(results, axiom[3])
+            }
+        }
+        i = i + 1
+    }
+    return results
+}
+
+fn academic_derive(subject, relation) {
+    // First check direct knowledge
+    let direct = academic_query(subject, relation)
+    if len(direct) > 0 {
+        return direct
+    }
+    // Then try inference through rules
+    let i = 0
+    while i < len(academic_rules) {
+        let rule = academic_rules[i]
+        if rule[1] == relation {
+            let intermediate = academic_query(subject, rule[1])
+            if len(intermediate) > 0 {
+                return intermediate
+            }
+        }
+        i = i + 1
+    }
+    return list_new()
+}
+
+fn academic_store(subject, relation, object, source) {
+    let k = list_new()
+    push(k, KNOWLEDGE_TAG)
+    push(k, subject)
+    push(k, relation)
+    push(k, object)
+    push(k, source)
+    push(academic_knowledge, k)
+    academic_count = academic_count + 1
+    // Also add as axiom for future queries
+    academic_add_axiom(subject, relation, object)
+}

@@ -1,0 +1,79 @@
+// Nova Core: Signal
+// Signals carry Moments between Nodes through Channels.
+// Each signal has a type, payload (moment), origin, priority, and trace.
+//
+// Layout: [TAG, type, moment, origin, destination, priority, trace]
+
+let SIGNAL_TAG = 110
+let SIG_TYPE = 1
+let SIG_MOMENT = 2
+let SIG_ORIGIN = 3
+let SIG_DEST = 4
+let SIG_PRIORITY = 5
+let SIG_TRACE = 6
+
+// Signal types
+let SIG_EVENT = 1
+let SIG_QUESTION = 2
+let SIG_ORDER = 3
+let SIG_COMMAND = 4
+let SIG_REQUEST = 5
+let SIG_RESPONSE = 6
+let SIG_CORRECTION = 7
+let SIG_REFLECTION = 8
+
+fn signal_new(sig_type, moment, origin, dest, priority) {
+    let s = list_new()
+    push(s, SIGNAL_TAG)
+    push(s, sig_type)
+    push(s, moment)
+    push(s, origin)
+    push(s, dest)
+    push(s, priority)
+    push(s, list_new())
+    return s
+}
+
+fn signal_type(s) { return s[SIG_TYPE] }
+fn signal_moment(s) { return s[SIG_MOMENT] }
+fn signal_origin(s) { return s[SIG_ORIGIN] }
+fn signal_dest(s) { return s[SIG_DEST] }
+fn signal_priority(s) { return s[SIG_PRIORITY] }
+fn signal_trace(s) { return s[SIG_TRACE] }
+
+fn signal_add_trace(s, node_name) {
+    let trace = signal_trace(s)
+    push(trace, node_name)
+}
+
+fn signal_has_visited(s, node_name) {
+    let trace = signal_trace(s)
+    let i = 0
+    while i < len(trace) {
+        if trace[i] == node_name {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn signal_event(moment, origin, dest) {
+    return signal_new(SIG_EVENT, moment, origin, dest, 50)
+}
+
+fn signal_question(moment, origin, dest) {
+    return signal_new(SIG_QUESTION, moment, origin, dest, 70)
+}
+
+fn signal_command(moment, origin, dest) {
+    return signal_new(SIG_COMMAND, moment, origin, dest, 90)
+}
+
+fn signal_response(moment, origin, dest) {
+    return signal_new(SIG_RESPONSE, moment, origin, dest, 60)
+}
+
+fn signal_reflection(moment, origin, dest) {
+    return signal_new(SIG_REFLECTION, moment, origin, dest, 40)
+}

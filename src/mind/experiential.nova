@@ -1,0 +1,103 @@
+// Nova Mind: Experiential Learning Track
+// Forms knowledge from lived experience (moments with high felt intensity).
+// Crystallizes patterns into tendencies when recurrence > threshold.
+
+let TENDENCY_TAG = 220
+let TEND_TRIGGER = 1
+let TEND_BIAS = 2
+let TEND_STRENGTH = 3
+
+let experiential_tendencies = 0
+let experiential_patterns = 0
+let experiential_threshold = 3
+
+fn experiential_init() {
+    experiential_tendencies = list_new()
+    experiential_patterns = list_new()
+}
+
+fn tendency_new(trigger, bias, strength) {
+    let t = list_new()
+    push(t, TENDENCY_TAG)
+    push(t, trigger)
+    push(t, bias)
+    push(t, strength)
+    return t
+}
+
+fn tendency_trigger(t) { return t[TEND_TRIGGER] }
+fn tendency_bias(t) { return t[TEND_BIAS] }
+fn tendency_strength(t) { return t[TEND_STRENGTH] }
+
+fn experiential_record(moment) {
+    let intensity = moment_intensity(moment)
+    if intensity <= 30 {
+        return 0
+    }
+
+    // Record pattern
+    let what = moment_what(moment)
+    let pattern = list_new()
+    push(pattern, what)
+    push(pattern, moment_valence(moment))
+    push(experiential_patterns, pattern)
+
+    // Check for recurring patterns
+    let recurrence = 0
+    let i = 0
+    while i < len(experiential_patterns) {
+        let p = experiential_patterns[i]
+        if p[0] == what {
+            recurrence = recurrence + 1
+        }
+        i = i + 1
+    }
+
+    // Promote to tendency if threshold met
+    if recurrence >= experiential_threshold {
+        let avg_valence = 0
+        let count = 0
+        i = 0
+        while i < len(experiential_patterns) {
+            let p = experiential_patterns[i]
+            if p[0] == what {
+                avg_valence = avg_valence + p[1]
+                count = count + 1
+            }
+            i = i + 1
+        }
+        if count > 0 {
+            avg_valence = avg_valence / count
+        }
+        let bias = "approach"
+        if avg_valence < 50 {
+            bias = "avoid"
+        }
+        let strength = recurrence * 10
+        if strength > 100 { strength = 100 }
+        let t = tendency_new(what, bias, strength)
+        push(experiential_tendencies, t)
+        return t
+    }
+    return 0
+}
+
+fn experiential_check_tendency(trigger) {
+    let i = 0
+    while i < len(experiential_tendencies) {
+        let t = experiential_tendencies[i]
+        if tendency_trigger(t) == trigger {
+            return t
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn experiential_bias_for(trigger) {
+    let t = experiential_check_tendency(trigger)
+    if t == 0 {
+        return 0
+    }
+    return tendency_strength(t)
+}

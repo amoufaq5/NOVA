@@ -1,0 +1,93 @@
+// Nova Mind: Reasoning Engine
+// Multi-strategy inference: deductive, analogical, causal, pattern-match.
+// Strategy selected by signal type and confidence level.
+
+let STRATEGY_DEDUCTIVE = 1
+let STRATEGY_ANALOGICAL = 2
+let STRATEGY_CAUSAL = 3
+let STRATEGY_PATTERN = 4
+
+let reasoning_rules = 0
+let reasoning_rule_count = 0
+
+// Rule: [condition_tag, consequence_tag, confidence]
+fn reasoning_init() {
+    reasoning_rules = list_new()
+    reasoning_rule_count = 0
+}
+
+fn reasoning_add_rule(condition, consequence, confidence) {
+    let rule = list_new()
+    push(rule, condition)
+    push(rule, consequence)
+    push(rule, confidence)
+    push(reasoning_rules, rule)
+    reasoning_rule_count = reasoning_rule_count + 1
+}
+
+fn reasoning_select_strategy(signal) {
+    let sig_type = signal_type(signal)
+    if sig_type == SIG_QUESTION {
+        return STRATEGY_DEDUCTIVE
+    }
+    if sig_type == SIG_EVENT {
+        return STRATEGY_PATTERN
+    }
+    if sig_type == SIG_REFLECTION {
+        return STRATEGY_ANALOGICAL
+    }
+    return STRATEGY_CAUSAL
+}
+
+fn reasoning_deduce(query) {
+    // Forward chaining: find rules whose condition matches query
+    let results = list_new()
+    let i = 0
+    while i < reasoning_rule_count {
+        let rule = reasoning_rules[i]
+        let condition = rule[0]
+        if condition == query {
+            push(results, rule[1])
+        }
+        i = i + 1
+    }
+    return results
+}
+
+fn reasoning_find_analogy(moment, episodes) {
+    // Find most similar past episode
+    let best_score = 0
+    let best_idx = 0
+    let i = 0
+    while i < len(episodes) {
+        let ep = episodes[i]
+        let ep_m = episode_moment(ep)
+        let score = moment_salience(ep_m)
+        if score > best_score {
+            best_score = score
+            best_idx = i
+        }
+        i = i + 1
+    }
+    if best_score > 0 {
+        return episodes[best_idx]
+    }
+    return 0
+}
+
+fn reasoning_process(signal) {
+    let strategy = reasoning_select_strategy(signal)
+    let m = signal_moment(signal)
+
+    if strategy == STRATEGY_DEDUCTIVE {
+        let what = moment_what(m)
+        let conclusions = reasoning_deduce(what)
+        return conclusions
+    }
+
+    if strategy == STRATEGY_PATTERN {
+        return list_new()
+    }
+
+    return list_new()
+}
