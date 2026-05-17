@@ -1,0 +1,23 @@
+// Fibonacci sequence
+
+fn fib(n) {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() {
+    println("Fibonacci sequence:")
+    let i = 0
+    while i < 20 {
+        print("  fib(")
+        print_int(i)
+        print(") = ")
+        print_int(fib(i))
+        println("")
+        i = i + 1
+    }
+}
+
+main()

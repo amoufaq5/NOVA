@@ -1,0 +1,14 @@
+let NOVA_VERSION_MAJOR = 0
+let NOVA_VERSION_MINOR = 2
+let NOVA_VERSION_PATCH = 0
+
+fn nova_version() {
+    return "0.2.0"
+}
+
+fn nova_version_info() {
+    println("Nova Programming Language v0.2.0")
+    println("Self-hosting Moment-Signal Computing Language")
+    println("Target: x86-64 Linux (no libc)")
+    println("https://github.com/amoufaq5/nova")
+}
