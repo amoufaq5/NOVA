@@ -125,6 +125,52 @@ fn collect_locals(nd) {
     }
 }
 
+fn struct_field_index(struct_name, field_name) {
+    let i = 0
+    while i < cg_struct_count {
+        let s = cg_structs[i]
+        if s[0] == struct_name {
+            let fields = s[1]
+            let j = 0
+            while j < len(fields) {
+                if fields[j] == field_name {
+                    return j
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn find_field_index(field_name) {
+    let si = 0
+    while si < cg_struct_count {
+        let fields = cg_structs[si][1]
+        let fi = 0
+        while fi < len(fields) {
+            if fields[fi] == field_name {
+                return fi
+            }
+            fi = fi + 1
+        }
+        si = si + 1
+    }
+    return 0 - 1
+}
+
+fn is_struct_name(name) {
+    let si = 0
+    while si < cg_struct_count {
+        if cg_structs[si][0] == name {
+            return 1
+        }
+        si = si + 1
+    }
+    return 0
+}
+
 fn gen_expr(nd) {
     let tag = ast_tag(nd)
 
@@ -236,6 +282,22 @@ fn gen_expr(nd) {
         let callee = nd[1]
         let args = nd[2]
         let argc = len(args)
+        let callee_name = callee[1]
+        if is_struct_name(callee_name) == 1 {
+            // Struct constructor: create a list and push each arg
+            out("    call _nova_list_new")
+            out("    push rax")
+            let ai = 0
+            while ai < argc {
+                gen_expr(args[ai])
+                out("    mov rsi, rax")
+                out("    mov rdi, [rsp]")
+                out("    call _nova_push")
+                ai = ai + 1
+            }
+            out("    pop rax")
+            return 0
+        }
         let i = argc - 1
         while i >= 0 {
             gen_expr(args[i])
@@ -248,7 +310,17 @@ fn gen_expr(nd) {
         if argc > 3 { out("    pop rcx") }
         if argc > 4 { out("    pop r8") }
         if argc > 5 { out("    pop r9") }
-        out("    call " + callee[1])
+        out("    call " + callee_name)
+        return 0
+    }
+
+    if tag == AST_FIELD_ACCESS {
+        let base = nd[1]
+        let field_name = nd[2]
+        let idx = find_field_index(field_name)
+        gen_expr(base)
+        out("    mov rcx, [rax + 24]")
+        out("    mov rax, [rcx + " + int_to_str(idx * 8) + "]")
         return 0
     }
 
@@ -448,6 +520,25 @@ fn gen_stmt(nd) {
         return 0
     }
 
+    if tag == AST_FIELD_ASSIGN {
+        let base = nd[1]
+        let field_name = nd[2]
+        let value = nd[3]
+        let idx = find_field_index(field_name)
+        gen_expr(value)
+        out("    push rax")
+        gen_expr(base)
+        out("    mov rcx, [rax + 24]")
+        out("    pop rdx")
+        out("    mov [rcx + " + int_to_str(idx * 8) + "], rdx")
+        return 0
+    }
+
+    if tag == AST_STRUCT_DECL {
+        // Struct declarations are handled in gen_program first pass
+        return 0
+    }
+
     if tag == AST_BLOCK {
         gen_block(nd)
         return 0
@@ -532,8 +623,22 @@ fn gen_function(nd) {
 fn gen_program(program) {
     let decls = program[1]
 
-    // First pass: collect globals (top-level let declarations)
+    // First pass: collect struct declarations
     let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_STRUCT_DECL {
+            let entry = list_new()
+            push(entry, d[1])
+            push(entry, d[2])
+            push(cg_structs, entry)
+            cg_struct_count = cg_struct_count + 1
+        }
+        i = i + 1
+    }
+
+    // Collect globals (top-level let declarations)
+    i = 0
     while i < len(decls) {
         let d = decls[i]
         if ast_tag(d) == AST_LET_STMT {
