@@ -1,0 +1,39 @@
+struct Point {
+    x,
+    y
+}
+
+struct Color {
+    r,
+    g,
+    b
+}
+
+fn point_add(a, b) {
+    return Point(a.x + b.x, a.y + b.y)
+}
+
+fn main() {
+    let p1 = Point(10, 20)
+    let p2 = Point(30, 40)
+    let p3 = point_add(p1, p2)
+    print("p3.x = ")
+    print_int(p3.x)
+    println("")
+    print("p3.y = ")
+    print_int(p3.y)
+    println("")
+
+    let c = Color(255, 128, 0)
+    print("Red: ")
+    print_int(c.r)
+    println("")
+
+    // Field assignment
+    c.r = 100
+    print("New red: ")
+    print_int(c.r)
+    println("")
+}
+
+main()
