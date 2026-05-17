@@ -186,23 +186,32 @@ fn lex_number() {
 
 fn lex_string() {
     lex_advance()  // consume opening quote
-    let start = lex_pos
+    let result = ""
     while lex_pos < lex_len {
         let c = lex_peek()
         if c == 34 {
-            let val = substr(lex_src, start, lex_pos - start)
             lex_advance()  // consume closing quote
-            emit_tok(TOK_STRING, val)
+            emit_tok(TOK_STRING, result)
             return 0
         }
         if c == 92 {
-            lex_advance()  // skip backslash
+            lex_advance()  // consume backslash
+            let next = lex_peek()
+            if next == 110 { result = result + chr(10) }
+            else { if next == 116 { result = result + chr(9) }
+            else { if next == 92 { result = result + chr(92) }
+            else { if next == 34 { result = result + chr(34) }
+            else { if next == 48 { result = result + chr(0) }
+            else { result = result + chr(next) }
+            } } } }
+            lex_advance()
+        } else {
+            result = result + chr(c)
+            lex_advance()
         }
-        lex_advance()
     }
     // Unterminated string
-    let val = substr(lex_src, start, lex_pos - start)
-    emit_tok(TOK_STRING, val)
+    emit_tok(TOK_STRING, result)
 }
 
 fn keyword_type(word) {
@@ -344,11 +353,12 @@ fn lex_all() {
                             emit_tok(TOK_GT, ">")
                         }
                     }
+                    else { if c == 46 { lex_advance(); emit_tok(TOK_DOT, ".") }
                     else {
                         // Unknown character, skip
                         lex_advance()
                     }
-                    } } } } } } } } } } } } } } } } } } } } }
+                    } } } } } } } } } } } } } } } } } } } } } }
                 }
             }
         }

@@ -226,6 +226,31 @@ fn ast_index_assign(base, idx, value) {
     return n
 }
 
+fn ast_struct_decl(name, fields) {
+    let n = list_new()
+    push(n, AST_STRUCT_DECL)
+    push(n, name)
+    push(n, fields)
+    return n
+}
+
+fn ast_field_access(base, field) {
+    let n = list_new()
+    push(n, AST_FIELD_ACCESS)
+    push(n, base)
+    push(n, field)
+    return n
+}
+
+fn ast_field_assign(base, field, value) {
+    let n = list_new()
+    push(n, AST_FIELD_ASSIGN)
+    push(n, base)
+    push(n, field)
+    push(n, value)
+    return n
+}
+
 // --- Accessor helpers ---
 fn ast_tag(nd) {
     return nd[0]

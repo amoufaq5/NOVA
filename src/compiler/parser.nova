@@ -146,7 +146,13 @@ fn parse_postfix() {
                 par_expect(TOK_RBRACKET)
                 expr = ast_index(expr, idx)
             } else {
-                return expr
+                if t == TOK_DOT {
+                    par_advance()
+                    let field_tok = par_expect(TOK_IDENT)
+                    expr = ast_field_access(expr, field_tok[1])
+                } else {
+                    return expr
+                }
             }
         }
     }
@@ -355,6 +361,24 @@ fn parse_return() {
     return ast_return(value)
 }
 
+fn parse_struct_decl() {
+    par_expect(TOK_STRUCT)
+    let name_tok = par_expect(TOK_IDENT)
+    let name = name_tok[1]
+    par_expect(TOK_LBRACE)
+    let fields = list_new()
+    while par_peek_type() != TOK_RBRACE {
+        if par_peek_type() == TOK_COMMA {
+            par_advance()
+        } else {
+            let f = par_expect(TOK_IDENT)
+            push(fields, f[1])
+        }
+    }
+    par_expect(TOK_RBRACE)
+    return ast_struct_decl(name, fields)
+}
+
 fn parse_stmt() {
     let t = par_peek_type()
     if t == TOK_LET { return parse_let() }
@@ -365,6 +389,7 @@ fn parse_stmt() {
     if t == TOK_RETURN { return parse_return() }
     if t == TOK_BREAK { par_advance(); return ast_break() }
     if t == TOK_CONTINUE { par_advance(); return ast_continue() }
+    if t == TOK_STRUCT { return parse_struct_decl() }
 
     // Assignment or expression statement
     let expr = parse_expr()
@@ -373,6 +398,9 @@ fn parse_stmt() {
         let value = parse_expr()
         if ast_tag(expr) == AST_INDEX_EXPR {
             return ast_index_assign(expr[1], expr[2], value)
+        }
+        if ast_tag(expr) == AST_FIELD_ACCESS {
+            return ast_field_assign(expr[1], expr[2], value)
         }
         let name = expr[1]
         return ast_assign(name, value)

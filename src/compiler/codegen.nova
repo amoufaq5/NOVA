@@ -18,6 +18,8 @@ let cg_globals = 0
 let cg_global_count = 0
 let cg_break_label = ""
 let cg_continue_label = ""
+let cg_structs = 0
+let cg_struct_count = 0
 
 fn cg_init() {
     cg_output = ""
@@ -27,6 +29,8 @@ fn cg_init() {
     cg_fns = list_new()
     cg_globals = list_new()
     cg_global_count = 0
+    cg_structs = list_new()
+    cg_struct_count = 0
 }
 
 fn out(s) {
@@ -452,6 +456,23 @@ fn gen_stmt(nd) {
     out("    # unknown stmt tag " + int_to_str(tag))
 }
 
+fn escape_for_asm(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        if c == 10 { result = result + "\\n" }
+        else { if c == 9 { result = result + "\\t" }
+        else { if c == 92 { result = result + "\\\\" }
+        else { if c == 34 { result = result + "\\\"" }
+        else { if c == 0 { result = result + "\\0" }
+        else { result = result + chr(c) }
+        } } } }
+        i = i + 1
+    }
+    return result
+}
+
 fn gen_block(nd) {
     let stmts = nd[1]
     let i = 0
@@ -605,7 +626,7 @@ fn gen_program(program) {
     i = 0
     while i < cg_str_count {
         out_label("_str_" + int_to_str(i))
-        out("    .asciz " + DQ + cg_strings[i] + DQ)
+        out("    .asciz " + DQ + escape_for_asm(cg_strings[i]) + DQ)
         i = i + 1
     }
 
