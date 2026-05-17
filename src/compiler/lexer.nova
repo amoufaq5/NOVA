@@ -377,7 +377,7 @@ fn lex_all() {
                         // Unknown character, skip
                         lex_advance()
                     }
-                    } } } } } } } } } } } } } } } } } } } } } } } }
+                    } } } } } } } } } } } } } } } } } } } } } } }
                 }
             }
         }
