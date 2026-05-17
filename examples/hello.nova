@@ -1,1 +1,8 @@
-println("hello")
+// Nova: Hello World
+
+fn main() {
+    println("Hello, World!")
+    println("This was compiled by the Nova self-hosting compiler.")
+}
+
+main()
