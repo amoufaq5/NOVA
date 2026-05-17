@@ -1,0 +1,35 @@
+fn main() {
+    // Test random
+    print("Random numbers (0-99): ")
+    let i = 0
+    while i < 5 {
+        print_int(random(100))
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    // Test getenv
+    let path = getenv("PATH")
+    if path == 0 {
+        println("PATH not found (expected in bare env)")
+    } else {
+        print("PATH starts with: ")
+        println(substr(path, 0, 20))
+    }
+
+    // Test seeded random (reproducible)
+    random_seed(42)
+    print("Seeded randoms: ")
+    i = 0
+    while i < 3 {
+        print_int(random(1000))
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    println("IO/random tests done!")
+}
+
+main()
