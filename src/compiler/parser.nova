@@ -37,10 +37,69 @@ fn par_advance() {
     return tok
 }
 
+fn token_type_name(t) {
+    if t == 0 { return "EOF" }
+    if t == 1 { return "integer" }
+    if t == 2 { return "float" }
+    if t == 3 { return "string" }
+    if t == 4 { return "identifier" }
+    if t == 10 { return "+" }
+    if t == 11 { return "-" }
+    if t == 12 { return "*" }
+    if t == 13 { return "/" }
+    if t == 15 { return "=" }
+    if t == 16 { return "!" }
+    if t == 20 { return "==" }
+    if t == 21 { return "!=" }
+    if t == 22 { return "<=" }
+    if t == 23 { return ">=" }
+    if t == 30 { return "(" }
+    if t == 31 { return ")" }
+    if t == 32 { return "{" }
+    if t == 33 { return "}" }
+    if t == 34 { return "[" }
+    if t == 35 { return "]" }
+    if t == 36 { return "," }
+    if t == 37 { return ":" }
+    if t == 38 { return ";" }
+    if t == 50 { return "let" }
+    if t == 51 { return "fn" }
+    if t == 52 { return "if" }
+    if t == 53 { return "else" }
+    if t == 54 { return "while" }
+    if t == 55 { return "for" }
+    if t == 56 { return "in" }
+    if t == 57 { return "return" }
+    if t == 58 { return "true" }
+    if t == 59 { return "false" }
+    if t == 60 { return "none" }
+    if t == 61 { return "struct" }
+    if t == 62 { return "break" }
+    if t == 63 { return "continue" }
+    if t == 64 { return "import" }
+    return concat("token(", concat(int_to_str(t), ")"))
+}
+
 fn par_expect(typ) {
     let t = par_peek_type()
-    if t != typ {
-        println(concat("Parse error: expected token type ", concat(int_to_str(typ), concat(" got ", int_to_str(t)))))
+    if t == typ {
+    } else {
+        let tok = par_peek()
+        let line = 0
+        let col = 0
+        if tok == 0 {
+        } else {
+            line = tok[2]
+            col = tok[3]
+        }
+        print("Error at line ")
+        print_int(line)
+        print(", col ")
+        print_int(col)
+        print(": expected ")
+        print(token_type_name(typ))
+        print(" but got ")
+        println(token_type_name(t))
         exit(1)
     }
     return par_advance()
@@ -113,7 +172,15 @@ fn parse_primary() {
         return ast_unary("!", operand)
     }
     // Unexpected token
-    println(concat("Parse error: unexpected token type ", int_to_str(t)))
+    print("Error at line ")
+    let err_tok = par_peek()
+    if err_tok == 0 {
+        print_int(0)
+    } else {
+        print_int(err_tok[2])
+    }
+    print(": unexpected ")
+    println(token_type_name(t))
     exit(1)
     return ast_none()
 }
@@ -207,33 +274,64 @@ fn parse_add() {
     return left
 }
 
-fn parse_cmp() {
+fn parse_bitwise() {
     let left = parse_add()
+    while 1 == 1 {
+        let t = par_peek_type()
+        if t == TOK_AMP {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop("&", left, right)
+        } else { if t == TOK_PIPE {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop("|", left, right)
+        } else { if t == TOK_CARET {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop("^", left, right)
+        } else { if t == TOK_SHL {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop("<<", left, right)
+        } else { if t == TOK_SHR {
+            par_advance()
+            let right = parse_add()
+            left = ast_binop(">>", left, right)
+        } else {
+            return left
+        } } } } }
+    }
+    return left
+}
+
+fn parse_cmp() {
+    let left = parse_bitwise()
     while 1 == 1 {
         let t = par_peek_type()
         if t == TOK_LT {
             par_advance()
-            let right = parse_add()
+            let right = parse_bitwise()
             left = ast_binop("<", left, right)
         } else { if t == TOK_GT {
             par_advance()
-            let right = parse_add()
+            let right = parse_bitwise()
             left = ast_binop(">", left, right)
         } else { if t == TOK_LTEQ {
             par_advance()
-            let right = parse_add()
+            let right = parse_bitwise()
             left = ast_binop("<=", left, right)
         } else { if t == TOK_GTEQ {
             par_advance()
-            let right = parse_add()
+            let right = parse_bitwise()
             left = ast_binop(">=", left, right)
         } else { if t == TOK_EQEQ {
             par_advance()
-            let right = parse_add()
+            let right = parse_bitwise()
             left = ast_binop("==", left, right)
         } else { if t == TOK_BANGEQ {
             par_advance()
-            let right = parse_add()
+            let right = parse_bitwise()
             left = ast_binop("!=", left, right)
         } else {
             return left
@@ -273,7 +371,7 @@ fn parse_block() {
     let stmts = list_new()
     while par_peek_type() != TOK_RBRACE {
         if par_peek_type() == TOK_EOF {
-            println("Parse error: unexpected EOF in block")
+            println("Error: unexpected end of file inside block (missing closing '}')")
             exit(1)
         }
         if par_peek_type() == TOK_SEMI {

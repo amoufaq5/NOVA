@@ -1,0 +1,44 @@
+fn main() {
+    // Bitwise ops
+    let x = 255
+    let y = 15
+
+    print("255 & 15 = ")
+    print_int(x & y)
+    println("")
+
+    print("255 | 15 = ")
+    print_int(x | y)
+    println("")
+
+    print("255 ^ 15 = ")
+    print_int(x ^ y)
+    println("")
+
+    print("1 << 8 = ")
+    print_int(1 << 8)
+    println("")
+
+    print("256 >> 4 = ")
+    print_int(256 >> 4)
+    println("")
+
+    // Range-based for loop
+    print("Sum 0..9: ")
+    let sum = 0
+    for i in range(10) {
+        sum = sum + i
+    }
+    print_int(sum)
+    println("")
+
+    print("Sum 5..9: ")
+    sum = 0
+    for i in range(5, 10) {
+        sum = sum + i
+    }
+    print_int(sum)
+    println("")
+}
+
+main()

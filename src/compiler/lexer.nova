@@ -38,6 +38,9 @@ let TOK_AT = 42
 let TOK_HASH = 43
 let TOK_AND = 44
 let TOK_OR = 45
+let TOK_CARET = 46
+let TOK_SHL = 47
+let TOK_SHR = 48
 // Keywords
 let TOK_LET = 50
 let TOK_FN = 51
@@ -53,6 +56,7 @@ let TOK_NONE = 60
 let TOK_STRUCT = 61
 let TOK_BREAK = 62
 let TOK_CONTINUE = 63
+let TOK_IMPORT = 64
 // Flow operators
 let TOK_FLOW_FWD = 70
 let TOK_FLOW_BWD = 71
@@ -229,6 +233,7 @@ fn keyword_type(word) {
     if word == "struct" { return TOK_STRUCT }
     if word == "break" { return TOK_BREAK }
     if word == "continue" { return TOK_CONTINUE }
+    if word == "import" { return TOK_IMPORT }
     return 0
 }
 
@@ -337,28 +342,42 @@ fn lex_all() {
                     }
                     else { if c == 60 {
                         lex_advance()
-                        if lex_peek() == 61 {
+                        if lex_peek() == 60 {
                             lex_advance()
-                            emit_tok(TOK_LTEQ, "<=")
+                            emit_tok(TOK_SHL, "<<")
                         } else {
-                            emit_tok(TOK_LT, "<")
+                            if lex_peek() == 61 {
+                                lex_advance()
+                                emit_tok(TOK_LTEQ, "<=")
+                            } else {
+                                emit_tok(TOK_LT, "<")
+                            }
                         }
                     }
                     else { if c == 62 {
                         lex_advance()
-                        if lex_peek() == 61 {
+                        if lex_peek() == 62 {
                             lex_advance()
-                            emit_tok(TOK_GTEQ, ">=")
+                            emit_tok(TOK_SHR, ">>")
                         } else {
-                            emit_tok(TOK_GT, ">")
+                            if lex_peek() == 61 {
+                                lex_advance()
+                                emit_tok(TOK_GTEQ, ">=")
+                            } else {
+                                emit_tok(TOK_GT, ">")
+                            }
                         }
+                    }
+                    else { if c == 94 {
+                        lex_advance()
+                        emit_tok(TOK_CARET, "^")
                     }
                     else { if c == 46 { lex_advance(); emit_tok(TOK_DOT, ".") }
                     else {
                         // Unknown character, skip
                         lex_advance()
                     }
-                    } } } } } } } } } } } } } } } } } } } } } }
+                    } } } } } } } } } } } } } } } } } } } } } } } }
                 }
             }
         }

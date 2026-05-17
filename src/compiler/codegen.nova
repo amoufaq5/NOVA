@@ -258,9 +258,24 @@ fn gen_expr(nd) {
             out("    setge al")
             out("    movzx rax, al")
         }
+        else { if op == "&" {
+            out("    and rax, rcx")
+        }
+        else { if op == "|" {
+            out("    or rax, rcx")
+        }
+        else { if op == "^" {
+            out("    xor rax, rcx")
+        }
+        else { if op == "<<" {
+            out("    shl rax, cl")
+        }
+        else { if op == ">>" {
+            out("    sar rax, cl")
+        }
         else {
             out("    # unknown op: " + op)
-        } } } } } } } } } } }
+        } } } } } } } } } } } } } } } }
         return 0
     }
 
@@ -460,33 +475,82 @@ fn gen_stmt(nd) {
         let iter_expr = nd[2]
         let body = nd[3]
         let var_off = local_offset(var_name)
-        gen_expr(iter_expr)
-        out("    push rax")
-        out("    push 0")
-        let loop_lbl = new_label()
-        let end_lbl = new_label()
-        let cont_lbl = new_label()
-        let prev_break = cg_break_label
-        let prev_continue = cg_continue_label
-        cg_break_label = end_lbl
-        cg_continue_label = cont_lbl
-        out_label(loop_lbl)
-        out("    mov rcx, [rsp]")
-        out("    mov rdi, [rsp+8]")
-        out("    cmp rcx, [rdi+8]")
-        out("    jge " + end_lbl)
-        out("    mov rdi, [rdi+24]")
-        out("    mov rax, [rdi+rcx*8]")
-        out("    mov [rbp - " + int_to_str(var_off) + "], rax")
-        gen_block(body)
-        out_label(cont_lbl)
-        out("    inc qword ptr [rsp]")
-        out("    jmp " + loop_lbl)
-        out_label(end_lbl)
-        out("    add rsp, 16")
-        cg_break_label = prev_break
-        cg_continue_label = prev_continue
-        return 0
+
+        // Check if iterator is range() call
+        let is_range = 0
+        if ast_tag(iter_expr) == AST_CALL {
+            let callee = iter_expr[1]
+            if ast_tag(callee) == AST_IDENT {
+                if callee[1] == "range" {
+                    is_range = 1
+                }
+            }
+        }
+
+        if is_range == 1 {
+            let args = iter_expr[2]
+            let argc = len(args)
+            if argc == 1 {
+                // range(end) - start=0
+                out("    mov qword ptr [rbp - " + int_to_str(var_off) + "], 0")
+                gen_expr(args[0])
+                out("    push rax")
+            } else {
+                // range(start, end)
+                gen_expr(args[0])
+                out("    mov [rbp - " + int_to_str(var_off) + "], rax")
+                gen_expr(args[1])
+                out("    push rax")
+            }
+            let loop_lbl = new_label()
+            let end_lbl = new_label()
+            let cont_lbl = new_label()
+            let prev_break = cg_break_label
+            let prev_continue = cg_continue_label
+            cg_break_label = end_lbl
+            cg_continue_label = cont_lbl
+            out_label(loop_lbl)
+            out("    mov rax, [rbp - " + int_to_str(var_off) + "]")
+            out("    cmp rax, [rsp]")
+            out("    jge " + end_lbl)
+            gen_block(body)
+            out_label(cont_lbl)
+            out("    inc qword ptr [rbp - " + int_to_str(var_off) + "]")
+            out("    jmp " + loop_lbl)
+            out_label(end_lbl)
+            out("    add rsp, 8")
+            cg_break_label = prev_break
+            cg_continue_label = prev_continue
+            return 0
+        } else {
+            gen_expr(iter_expr)
+            out("    push rax")
+            out("    push 0")
+            let loop_lbl = new_label()
+            let end_lbl = new_label()
+            let cont_lbl = new_label()
+            let prev_break = cg_break_label
+            let prev_continue = cg_continue_label
+            cg_break_label = end_lbl
+            cg_continue_label = cont_lbl
+            out_label(loop_lbl)
+            out("    mov rcx, [rsp]")
+            out("    mov rdi, [rsp+8]")
+            out("    cmp rcx, [rdi+8]")
+            out("    jge " + end_lbl)
+            out("    mov rdi, [rdi+24]")
+            out("    mov rax, [rdi+rcx*8]")
+            out("    mov [rbp - " + int_to_str(var_off) + "], rax")
+            gen_block(body)
+            out_label(cont_lbl)
+            out("    inc qword ptr [rsp]")
+            out("    jmp " + loop_lbl)
+            out_label(end_lbl)
+            out("    add rsp, 16")
+            cg_break_label = prev_break
+            cg_continue_label = prev_continue
+            return 0
+        }
     }
 
     if tag == AST_EXPR_STMT {
@@ -1234,14 +1298,51 @@ fn gen_runtime() {
     // --- index(obj, idx): list[idx] or str[idx] -> char code ---
     out("")
     out_label("_nova_index")
+    out("    test rdi, rdi")
+    out("    jz .idx_null")
     out("    cmp qword ptr [rdi], -1")
     out("    je .idx_list")
+    out("    // String access - check bounds")
+    out("    push rdi")
+    out("    push rsi")
+    out("    call _nova_strlen")
+    out("    pop rsi")
+    out("    pop rdi")
+    out("    cmp rsi, rax")
+    out("    jge .idx_oob")
+    out("    cmp rsi, 0")
+    out("    jl .idx_oob")
     out("    movzx eax, byte ptr [rdi + rsi]")
     out("    ret")
     out(".idx_list:")
+    out("    // Handle negative index")
+    out("    test rsi, rsi")
+    out("    jns .idx_list_positive")
+    out("    add rsi, [rdi + 8]")
+    out("    test rsi, rsi")
+    out("    jl .idx_oob")
+    out(".idx_list_positive:")
+    out("    cmp rsi, [rdi + 8]")
+    out("    jge .idx_oob")
     out("    mov rax, [rdi + 24]")
     out("    mov rax, [rax + rsi*8]")
     out("    ret")
+    out(".idx_null:")
+    out("    lea rdi, [rip + _err_null_access]")
+    out("    call _nova_println")
+    out("    mov rdi, 1")
+    out("    mov rax, 60")
+    out("    syscall")
+    out(".idx_oob:")
+    out("    lea rdi, [rip + _err_index_oob]")
+    out("    call _nova_println")
+    out("    mov rdi, rsi")
+    out("    call _nova_print_int")
+    out("    lea rdi, [rip + _err_newline]")
+    out("    call _nova_print_str")
+    out("    mov rdi, 1")
+    out("    mov rax, 60")
+    out("    syscall")
 
     // --- chr(code) -> 1-char string ---
     out("")
