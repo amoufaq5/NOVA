@@ -1,0 +1,83 @@
+fn main() {
+    // Map operations
+    let m = map_new()
+    map_set(m, 1, 100)
+    map_set(m, 2, 200)
+    map_set(m, 3, 300)
+
+    print("map_get(1) = ")
+    print_int(map_get(m, 1))
+    println("")
+
+    print("map_get(2) = ")
+    print_int(map_get(m, 2))
+    println("")
+
+    print("map_has(3) = ")
+    print_int(map_has(m, 3))
+    println("")
+
+    print("map_has(99) = ")
+    print_int(map_has(m, 99))
+    println("")
+
+    // Update existing key
+    map_set(m, 1, 999)
+    print("map_get(1) after update = ")
+    print_int(map_get(m, 1))
+    println("")
+
+    // Sort
+    let nums = list_new()
+    push(nums, 5)
+    push(nums, 2)
+    push(nums, 8)
+    push(nums, 1)
+    push(nums, 9)
+    push(nums, 3)
+    sort(nums)
+    print("Sorted: ")
+    let i = 0
+    while i < len(nums) {
+        print_int(nums[i])
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    // Reverse
+    let rev = reverse(nums)
+    print("Reversed: ")
+    i = 0
+    while i < len(rev) {
+        print_int(rev[i])
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    // Join
+    let words = list_new()
+    push(words, "hello")
+    push(words, "world")
+    push(words, "nova")
+    let joined = join(words, ", ")
+    print("Joined: ")
+    println(joined)
+
+    // Split
+    let parts = split("a:b:c:d", 58)
+    print("Split count: ")
+    print_int(len(parts))
+    println("")
+    i = 0
+    while i < len(parts) {
+        print("  part: ")
+        println(parts[i])
+        i = i + 1
+    }
+
+    println("All map/list tests passed!")
+}
+
+main()
