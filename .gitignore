@@ -7,6 +7,9 @@ dist/
 build/
 .nova-cache/
 
+# Claude Code
+.claude/
+
 # Assembly build artifacts
 boot/nova_boot.o
 boot/nova_boot
