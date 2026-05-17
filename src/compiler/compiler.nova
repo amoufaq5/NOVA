@@ -5,11 +5,11 @@
 // Usage: nova_boot src/compiler/compiler.nova <input.nova> -o <output.s>
 // Or when self-compiled: ./nova <input.nova> -o <output.s>
 
-fn extract_dir(path) {
+fn extract_dir(fpath) {
     let last_slash = 0 - 1
     let i = 0
-    while i < len(path) {
-        if char_at(path, i) == 47 {
+    while i < len(fpath) {
+        if char_at(fpath, i) == 47 {
             last_slash = i
         }
         i = i + 1
@@ -17,7 +17,7 @@ fn extract_dir(path) {
     if last_slash < 0 {
         return "."
     }
-    return substr(path, 0, last_slash)
+    return substr(fpath, 0, last_slash)
 }
 
 fn starts_with_str(s, prefix) {
@@ -59,12 +59,12 @@ fn process_line(line, base_dir) {
         }
     }
     if q2 < 0 { return line }
-    let path = substr(line, q1 + 1, q2 - q1 - 1)
-    let full_path = concat(base_dir, concat("/", path))
-    let content = read_file(full_path)
+    let imp_path = substr(line, q1 + 1, q2 - q1 - 1)
+    let imp_full = concat(base_dir, concat("/", imp_path))
+    let content = read_file(imp_full)
     if content == 0 {
         print("Error: cannot import '")
-        print(full_path)
+        print(imp_full)
         println("'")
         exit(1)
     }

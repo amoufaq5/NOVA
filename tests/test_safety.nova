@@ -1,0 +1,42 @@
+fn main() {
+    // Test bounds checking
+    let a = list_new()
+    push(a, 10)
+    push(a, 20)
+    push(a, 30)
+
+    // Negative indexing
+    print("Last element: ")
+    print_int(a[-1])
+    println("")
+
+    // Type detection
+    print("type_of(0) = ")
+    print_int(type_of(0))
+    println("")
+
+    print("type_of(42) = ")
+    print_int(type_of(42))
+    println("")
+
+    print("type_of(\"hello\") = ")
+    print_int(type_of("hello"))
+    println("")
+
+    print("type_of(a) = ")
+    print_int(type_of(a))
+    println("")
+
+    // Assert
+    assert(1 == 1, "basic equality")
+    assert(len(a) == 3, "list length")
+
+    // Debug print
+    debug_print("my_list", a)
+    debug_print("my_string", "hello")
+    debug_print("my_int", 42)
+
+    println("All safety tests passed!")
+}
+
+main()
