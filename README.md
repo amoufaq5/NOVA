@@ -1,160 +1,267 @@
-# Nova — A Cognitive Architecture Language
+# Nova
 
-Nova is a language for building thinking machines. Not LLMs. Not chatbots.
-Machines that remember, reason, learn from experience, imagine scenarios,
-and take initiative.
+**A self-hosting compiled language for x86-64 Linux. Zero dependencies. No libc.**
 
-## Core Idea
+Self-hosting verified | x86-64 Linux | v0.2.0
 
-Nova code IS the AI brain. When you write Nova, you're wiring up a mind:
-- **Memory** — short-term (working) + long-term (episodic, semantic, procedural)
-- **Perception** — multimodal input processing (text, image, audio, data)
-- **Reasoning** — logic, causality, analogy, consequence prediction
-- **Learning** — reinforcement + bayesian belief updating + pattern extraction
-- **Imagination** — world model simulation + memory recombination
-- **Initiative** — internal goal generation, not just responding to prompts
+---
+
+## What is Nova?
+
+Nova is a compiled programming language that bootstraps itself from handwritten x86-64 assembly. The Nova compiler is written in Nova, compiled by a ~7,200-line assembly bootstrap, and the resulting native binary can compile its own source code -- completing the self-hosting loop. Nova targets x86-64 Linux directly via raw syscalls with no C library, no runtime interpreter, and no garbage collector. Beyond general-purpose programming, Nova includes domain primitives for cognitive architectures: memory systems, signal processing, and reasoning pipelines designed for building autonomous agents.
+
+## Quick Start
+
+```bash
+# Build the compiler
+make
+
+# Compile and run a program
+make run FILE=examples/hello.nova
+
+# Run all tests
+make test-all
+
+# Verify self-hosting (stage 2 output == stage 1 output)
+make self-host
+
+# See codebase stats
+make stats
+```
+
+## Hello World
+
+```nova
+fn main() {
+    println("Hello, World!")
+}
+
+main()
+```
+
+There is no implicit entry point. Execution begins at the first top-level statement and proceeds sequentially. By convention, programs define a `main()` function and call it at the end of the file.
+
+## Language Features
+
+### Core
+- **Functions** -- first-class declarations, recursion, forward references
+- **First-class function references** -- assign to variables, pass as arguments, store in lists
+- **Variables** -- `let` for mutable, `const` for named constants
+- **Structs** -- named record types with dot-notation field access and assignment
+
+### Control Flow
+- `if` / `else if` / `else`
+- `while` loops with `break` and `continue`
+- `for item in list` iteration
+- `for i in range(n)` and `for i in range(a, b)` range loops
+- `match` expressions with literal patterns and wildcard default arm
+
+### Types and Literals
+- **Integers** -- 64-bit signed
+- **Strings** -- null-terminated, immutable, with escape sequences (`\n`, `\t`, `\\`, `\"`, `\0`)
+- **Booleans** -- `true` / `false`
+- **Lists** -- dynamic arrays with bracket indexing and negative indices
+- **Maps** -- hash maps via built-in functions
+- **Fixed-point floats** -- `3.14` stored as `3140` (scale factor 1000), with `float_mul`, `float_div`, `float_to_str`
+- **Hex** (`0xFF`), **octal** (`0o777`), **binary** (`0b1010`) integer literals
+
+### Operators
+- Arithmetic: `+` `-` `*` `/` `%`
+- String concatenation via `+`
+- Comparison: `==` `!=` `<` `>` `<=` `>=`
+- Logical: `&&` `||` `!` (short-circuit)
+- Bitwise: `&` `|` `^` `<<` `>>`
+
+### Other
+- `import "path/to/file.nova"` -- source-level file inclusion
+- Comments with `//`
+
+## Built-in Functions
+
+### I/O
+`print(s)` `println(s)` `print_int(n)` `read_line()` `read_file(path)` `write_file(path, data)`
+
+### Strings
+`len(s)` `concat(a, b)` `substr(s, start, len)` `char_at(s, idx)` `chr(code)` `int_to_str(n)` `str_to_int(s)` `starts_with(s, prefix)` `ends_with(s, suffix)` `str_find(haystack, needle)` `split(s, delim)` `join(list, sep)` `hex(n)`
+
+### Lists
+`list_new()` `push(list, val)` `pop(list)` `len(list)` `list_set(list, idx, val)` `contains(list, val)` `list_remove(list, idx)` `reverse(list)` `sort(list)`
+
+### Maps
+`map_new()` `map_set(m, key, val)` `map_get(m, key)` `map_has(m, key)`
+
+### Math
+`abs(n)` `min(a, b)` `max(a, b)` `random(max)` `random_seed(n)`
+
+### Fixed-Point Float
+`float_mul(a, b)` `float_div(a, b)` `float_to_str(f)` `to_float(n)` `from_float(f)`
+
+### System
+`exit(code)` `time()` `sleep_ms(ms)` `getenv(name)` `mkdir(path)` `unlink(path)` `file_size(path)` `alloc(size)`
+
+### Network
+`socket(domain, type, proto)` `bind_socket(fd, addr, len)` `listen_socket(fd, backlog)` `accept_conn(fd, addr, len)` `connect_socket(fd, addr, len)` `send_data(fd, buf, len)` `recv_data(fd, buf, len)` `close_fd(fd)` `make_sockaddr_in(port, ip)`
+
+### Process
+`fork_process()` `waitpid(pid)` `exec_program(path, argv)` `pipe_create()`
+
+### Debug
+`assert(cond, msg)` `type_of(val)` `debug_print(label, val)`
+
+See [docs/LANGUAGE_REFERENCE.md](docs/LANGUAGE_REFERENCE.md) for full details.
 
 ## Architecture
 
 ```
-Perception → Working Memory → Reasoning → Action
-                  ↑↓                ↑↓
-           Long-Term Memory    Imagination
-                  ↑↓                ↑↓
-              Learning         World Model
+boot/nova_boot.s       Handwritten x86-64 assembly bootstrap (7,183 lines)
+src/compiler/          Self-hosting compiler written in Nova (4,653 lines)
+  lexer.nova             Tokenizer
+  parser.nova            Recursive descent parser
+  ast.nova               AST node definitions
+  codegen.nova           x86-64 code generator + runtime library
+  compiler.nova          Main entry point
+src/core/              Cognitive architecture types (545 lines)
+src/mind/              Learning, memory, emotion, reasoning (437 lines)
+src/runtime/           Runtime library: allocator, I/O, strings, scheduler (1,347 lines)
+examples/              27 example programs (1,389 lines)
+tests/                 24 test programs + test runner (1,272 lines)
+docs/                  Language reference
 ```
 
-## Quick Example
+**Total Nova source: ~71,000 lines.**
 
+## How It Works
+
+Nova achieves self-hosting through a four-stage process:
+
+1. **Handwritten bootstrap** (`boot/nova_boot.s`) -- a ~7,200-line x86-64 assembly program that can interpret Nova source code. It makes raw Linux syscalls directly; no libc is linked.
+2. **Stage 1 compilation** -- the bootstrap interprets the Nova compiler source (`src/compiler/*.nova`) and uses it to emit x86-64 assembly for the compiler itself.
+3. **Native binary** -- GNU `as` and `ld` assemble and link the stage 1 output into `bin/nova`, a native executable.
+4. **Self-hosting verification** -- `bin/nova` compiles its own source to produce stage 2 assembly. `make self-host` confirms the stage 2 output is byte-identical to stage 1.
+
+```
+                    interprets                  emits
+boot/nova_boot.s  ───────────>  compiler.nova  ──────>  stage1.s
+                                                            │
+                                                     as + ld│
+                                                            v
+                                 compiler.nova  <────  bin/nova
+                                       │                    │
+                                       └── emits ──> stage2.s
+                                                            │
+                                              diff stage1.s stage2.s  =>  identical
+```
+
+## Performance
+
+- Compiles to native x86-64 machine code -- no interpreter, no bytecode
+- All types resolved at compile time -- zero dynamic dispatch
+- Bump allocator with arena reset -- no garbage collector, no `malloc`
+- Direct Linux syscalls -- no C library overhead
+- The compiler itself runs as a native binary after the first bootstrap
+
+## Examples
+
+**Fibonacci with recursion:**
 ```nova
-mind Agent {
-    -- Memory systems
-    memory working(capacity: 7)
-    memory episodic(max_episodes: 100000)
-    memory semantic(structure: graph)
-    memory procedural(structure: rules)
-
-    -- Perception
-    perceive(input) {
-        let parsed = recognize(input)
-        working.hold(parsed)
-        if parsed.importance > 0.7 {
-            episodic.store(parsed, context: working.snapshot())
-        }
+fn fib(n) {
+    if n <= 1 {
+        return n
     }
+    return fib(n - 1) + fib(n - 2)
+}
 
-    -- Reasoning
-    think(goal) {
-        let relevant = semantic.recall(goal, limit: 20)
-        let past = episodic.similar(goal, limit: 5)
-        let plan = reason(goal, knowledge: relevant, experience: past)
-        return plan
+fn main() {
+    let i = 0
+    while i < 20 {
+        print_int(fib(i))
+        println("")
+        i = i + 1
     }
+}
 
-    -- Imagination
-    imagine(scenario) {
-        let sim = world_model.simulate(scenario, steps: 10)
-        let consequences = sim.outcomes()
-        return consequences
+main()
+```
+
+**Sieve of Eratosthenes:**
+```nova
+fn sieve(limit) {
+    let is_prime = list_new()
+    let i = 0
+    while i <= limit {
+        push(is_prime, 1)
+        i = i + 1
     }
+    list_set(is_prime, 0, 0)
+    list_set(is_prime, 1, 0)
 
-    -- Learning
-    on experience(event) {
-        -- Reinforcement: was the outcome good or bad?
-        let reward = evaluate(event.outcome, event.goal)
-        procedural.update(event.action, reward)
-
-        -- Bayesian: update beliefs
-        semantic.update_belief(event.observation)
-
-        -- Pattern: extract rules from repeated experiences
-        let patterns = episodic.find_patterns(event, min_occurrences: 3)
-        for pattern in patterns {
-            semantic.store_rule(pattern)
-        }
-    }
-
-    -- Initiative
-    on idle() {
-        let goals = assess_situation(working.contents(), semantic)
-        if goals.any_urgent() {
-            act(goals.most_urgent())
-        } else {
-            -- Imagination during idle: "what could happen?"
-            let scenarios = imagine(working.recent_context())
-            for scenario in scenarios {
-                if scenario.risk > 0.5 {
-                    prepare(scenario)
-                }
+    i = 2
+    while i * i <= limit {
+        if is_prime[i] == 1 {
+            let j = i * i
+            while j <= limit {
+                list_set(is_prime, j, 0)
+                j = j + i
             }
         }
+        i = i + 1
     }
+
+    let primes = list_new()
+    i = 2
+    while i <= limit {
+        if is_prime[i] == 1 {
+            push(primes, i)
+        }
+        i = i + 1
+    }
+    return primes
 }
 ```
 
-## Running
+**TCP echo server (no libc, raw syscalls):**
+```nova
+fn main() {
+    let server_fd = socket(2, 1, 0)
+    let addr = make_sockaddr_in(8080, 0)
+    bind_socket(server_fd, addr, 16)
+    listen_socket(server_fd, 5)
+    println("Listening on port 8080...")
 
-```bash
-nova run mind.nova          # Start the mind
-nova interact mind.nova     # Interactive conversation
-nova test mind.nova         # Run cognitive tests
+    while 1 == 1 {
+        let client_fd = accept_conn(server_fd, 0, 0)
+        if client_fd >= 0 {
+            let buf = alloc(1024)
+            let n = recv_data(client_fd, buf, 1024)
+            if n > 0 {
+                send_data(client_fd, buf, n)
+            }
+            close_fd(client_fd)
+        }
+    }
+}
+
+main()
 ```
 
-## Performance Architecture
+## Building
 
-Nova's Moment-Signal Computing model encodes performance constraints into the programming model itself. When self-hosted (compiled to native x86-64), Nova achieves speed, cache, and storage advantages over both C and Python.
+**Prerequisites:** GNU `as` and `ld` (standard GNU binutils, pre-installed on virtually every Linux system).
 
-### Speed
+That's it. No other dependencies. No C compiler. No package manager.
 
-**vs Python (10-100x faster):**
-- Compiles to native x86-64 machine code — no interpreter, no bytecode, no GIL
-- All types resolved at compile time — zero dynamic dispatch, zero runtime type checks
-- No garbage collector pauses — deterministic memory via arena allocation
+```bash
+make            # Build bin/nova
+make self-host  # Verify self-hosting
+make test-all   # Run full test suite
+make examples   # Build and run all examples
+make clean      # Remove build artifacts
+```
 
-**vs C (competitive or faster in domain-specific cases):**
-- Nova knows the entire signal graph at compile time. The compiler inlines full processing pipelines — a signal flowing through `perceiver ~> rememberer ~> reasoner ~> actor` becomes one straight-line block of machine instructions with zero function-call overhead
-- No virtual dispatch: C needs function pointers for polymorphism; Nova's node types are statically known, so the compiler generates specialized code per node
-- Path-aware optimization: `path ForwardEnrichment { ... }` declares the full flow, so the compiler pre-schedules register allocation across the entire path — something C cannot do across function boundaries
+## Contributing
 
-### Cache Efficiency
+Contributions are welcome. The compiler is written entirely in Nova (`src/compiler/`), so you can read and modify it without knowing any other language. Run `make self-host` after changes to verify the compiler can still compile itself.
 
-1. **Cache-line-sized Moments** — Moments are fixed-size structs designed to fit in 1-2 cache lines (64-128 bytes). When a node processes a signal, everything it needs is already loaded:
-   ```
-   [what_happened_ptr | who_ptr | felt_val | felt_aro | consequence_ptr | salience | urgency]
-   = 56 bytes — fits in one cache line
-   ```
+## License
 
-2. **No pointer chasing during signal flow** — Signals carry their payload inline. The entire Moment travels through the pipeline contiguously, unlike C's linked structures that jump to random memory addresses.
-
-3. **Signal batching** — The scheduler groups signals by destination node, processing them in bursts. Node code stays hot in instruction cache; signals are processed from contiguous memory.
-
-4. **Memory layout by access pattern** — The compiler knows a `rememberer` node accesses episodes by similarity score, so it lays episodes out sorted by access frequency — hot first, cold later. Impossible in C without manual effort.
-
-5. **Arena allocation per processing cycle** — Each cycle allocates from a bump allocator (one pointer increment — faster than `malloc`). At cycle end, the arena resets. Zero fragmentation, perfect locality.
-
-### Storage Efficiency
-
-1. **Experiential decay** — Nova actively forgets. Episodes below importance threshold are reclaimed. The system self-compacts.
-
-2. **Academic knowledge compression** — The semantic graph stores relationships, not duplicated data. "Dogs are mammals" and "Cats are mammals" share the "mammals" node — structural sharing.
-
-3. **Bounded signal traces** — A signal's trace has a maximum depth. Old trace entries are dropped. Constant-space bookkeeping.
-
-4. **Ephemeral Moments** — Moments exist only during the processing cycle unless crystallized into an episode. Most moments are never stored — processed and discarded. The bump allocator means "free" costs zero.
-
-5. **Tendencies replace episodes** — Once a pattern is confirmed and promoted to a behavioral tendency (3 fields: trigger, bias, strength), the underlying episodes can decay. Keep the lesson (12 bytes), forget the textbook (thousands of bytes).
-
-### Performance Comparison
-
-Processing "What is consciousness?" end-to-end:
-
-| Metric | Python | C | Nova |
-|---|---|---|---|
-| Function calls | ~500 (interpreter frames) | ~50 (manual dispatch) | ~5 (inlined path) |
-| Cache misses | ~200 (dict lookups, object headers) | ~30 (pointer following) | ~8 (contiguous flow) |
-| Memory allocated | ~50KB (objects, dicts, lists) | ~5KB (manual) | ~512 bytes (arena, one cycle) |
-| Memory freed | Eventually (GC) | Manually (error-prone) | Instantly (arena reset) |
-
-## Phase 0 — Bootstrap Interpreter in Python
-Single-agent, local execution. Python is the host runtime.
-Prove the cognitive architecture works before optimizing.
+See LICENSE.

@@ -1,3 +1,8 @@
+# Build artifacts
+/tmp/
+*.o
+
+# Python (legacy bootstrap)
 __pycache__/
 *.pyc
 *.pyo
@@ -5,11 +10,24 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Nova cache
 .nova-cache/
 
 # Claude Code
 .claude/
 
-# Assembly build artifacts
+# Assembly build artifacts (intermediate)
 boot/nova_boot.o
 boot/nova_boot
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
