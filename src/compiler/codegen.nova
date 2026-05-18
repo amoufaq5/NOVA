@@ -123,6 +123,18 @@ fn collect_locals(nd) {
         cg_local_count = cg_local_count + 1
         collect_locals(nd[3])
     }
+    if tag == AST_MATCH_STMT {
+        let arms = nd[2]
+        let ai = 0
+        while ai < len(arms) {
+            let arm = arms[ai]
+            let body = arm[2]
+            if ast_tag(body) == AST_BLOCK {
+                collect_locals(body)
+            }
+            ai = ai + 1
+        }
+    }
 }
 
 fn struct_field_index(struct_name, field_name) {
@@ -862,6 +874,61 @@ fn gen_stmt(nd) {
 
     if tag == AST_BLOCK {
         gen_block(nd)
+        return 0
+    }
+
+    if tag == AST_MATCH_STMT {
+        let expr = nd[1]
+        let arms = nd[2]
+        let end_lbl = new_label()
+
+        // Evaluate the match expression once, save on stack
+        gen_expr(expr)
+        out("    push rax")
+
+        let i = 0
+        while i < len(arms) {
+            let arm = arms[i]
+            let pattern = arm[1]
+            let body = arm[2]
+            let pat_tag = ast_tag(pattern)
+
+            if pat_tag == AST_WILDCARD {
+                // Default arm - always matches
+                out("    add rsp, 8")
+                if ast_tag(body) == AST_BLOCK {
+                    gen_block(body)
+                } else {
+                    gen_stmt(body)
+                }
+                out("    jmp " + end_lbl)
+            } else {
+                // Compare match value with pattern
+                let next_arm = new_label()
+                gen_expr(pattern)
+                out("    mov rcx, rax")
+                out("    mov rax, [rsp]")
+                out("    mov rdi, rax")
+                out("    mov rsi, rcx")
+                out("    call _nova_eq")
+                out("    test rax, rax")
+                out("    jz " + next_arm)
+                // Match! Execute body
+                out("    add rsp, 8")
+                if ast_tag(body) == AST_BLOCK {
+                    gen_block(body)
+                } else {
+                    gen_stmt(body)
+                }
+                out("    jmp " + end_lbl)
+                out_label(next_arm)
+            }
+            i = i + 1
+        }
+
+        // If no arm matched, clean up stack
+        out("    add rsp, 8")
+        out_label(end_lbl)
         return 0
     }
 

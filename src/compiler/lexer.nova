@@ -58,11 +58,18 @@ let TOK_BREAK = 62
 let TOK_CONTINUE = 63
 let TOK_IMPORT = 64
 let TOK_CONST = 65
+let TOK_MATCH = 66
+let TOK_ARROW = 67
+let TOK_UNDERSCORE = 68
+// Error handling
+let TOK_TRY = 69
+let TOK_CATCH = 70
+let TOK_THROW = 71
 // Flow operators
-let TOK_FLOW_FWD = 70
-let TOK_FLOW_BWD = 71
-let TOK_BROADCAST = 72
-let TOK_ENRICH = 73
+let TOK_FLOW_FWD = 73
+let TOK_FLOW_BWD = 74
+let TOK_BROADCAST = 75
+let TOK_ENRICH = 76
 
 // --- Lexer State ---
 let lex_src = ""
@@ -388,6 +395,7 @@ fn keyword_type(word) {
     if word == "continue" { return TOK_CONTINUE }
     if word == "import" { return TOK_IMPORT }
     if word == "const" { return TOK_CONST }
+    if word == "match" { return TOK_MATCH }
     return 0
 }
 
@@ -397,8 +405,14 @@ fn lex_ident() {
         let c = lex_peek()
         if is_alnum(c) == 0 {
             let word = substr(lex_src, start, lex_pos - start)
+            if word == "_" {
+                emit_tok(TOK_UNDERSCORE, "_")
+                return 0
+            }
             let kw = keyword_type(word)
-            if kw != 0 {
+            if kw == 0 {
+                emit_tok(TOK_IDENT, word)
+            } else {
                 if kw == TOK_TRUE {
                     emit_tok(TOK_TRUE, 1)
                 } else {
@@ -408,19 +422,21 @@ fn lex_ident() {
                         emit_tok(kw, word)
                     }
                 }
-            } else {
-                emit_tok(TOK_IDENT, word)
             }
             return 0
         }
         lex_advance()
     }
     let word = substr(lex_src, start, lex_pos - start)
+    if word == "_" {
+        emit_tok(TOK_UNDERSCORE, "_")
+        return 0
+    }
     let kw = keyword_type(word)
-    if kw != 0 {
-        emit_tok(kw, word)
-    } else {
+    if kw == 0 {
         emit_tok(TOK_IDENT, word)
+    } else {
+        emit_tok(kw, word)
     }
 }
 
@@ -482,7 +498,12 @@ fn lex_all() {
                             lex_advance()
                             emit_tok(TOK_EQEQ, "==")
                         } else {
-                            emit_tok(TOK_EQ, "=")
+                            if lex_peek() == 62 {
+                                lex_advance()
+                                emit_tok(TOK_ARROW, "=>")
+                            } else {
+                                emit_tok(TOK_EQ, "=")
+                            }
                         }
                     }
                     else { if c == 33 {

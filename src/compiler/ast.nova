@@ -33,6 +33,9 @@ let AST_STRUCT_INIT = 27
 let AST_FIELD_ACCESS = 28
 let AST_FIELD_ASSIGN = 29
 let AST_FLOAT_LIT = 30
+let AST_MATCH_STMT = 32
+let AST_MATCH_ARM = 33
+let AST_WILDCARD = 34
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -256,6 +259,28 @@ fn ast_field_assign(base, field, value) {
     push(n, base)
     push(n, field)
     push(n, value)
+    return n
+}
+
+fn ast_match(expr, arms) {
+    let n = list_new()
+    push(n, AST_MATCH_STMT)
+    push(n, expr)
+    push(n, arms)
+    return n
+}
+
+fn ast_match_arm(pattern, body) {
+    let n = list_new()
+    push(n, AST_MATCH_ARM)
+    push(n, pattern)
+    push(n, body)
+    return n
+}
+
+fn ast_wildcard() {
+    let n = list_new()
+    push(n, AST_WILDCARD)
     return n
 }
 

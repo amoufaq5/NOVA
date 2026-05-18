@@ -78,6 +78,9 @@ fn token_type_name(t) {
     if t == 63 { return "continue" }
     if t == 64 { return "import" }
     if t == 65 { return "const" }
+    if t == 66 { return "match" }
+    if t == 67 { return "=>" }
+    if t == 68 { return "_" }
     return concat("token(", concat(int_to_str(t), ")"))
 }
 
@@ -487,6 +490,38 @@ fn parse_struct_decl() {
     return ast_struct_decl(name, fields)
 }
 
+fn parse_match() {
+    par_expect(TOK_MATCH)
+    let expr = parse_expr()
+    par_expect(TOK_LBRACE)
+    let arms = list_new()
+    while par_peek_type() != TOK_RBRACE {
+        if par_peek_type() == TOK_EOF {
+            println("Error: unexpected EOF in match")
+            exit(1)
+        }
+        // Parse pattern
+        let pattern = 0
+        if par_peek_type() == TOK_UNDERSCORE {
+            par_advance()
+            pattern = ast_wildcard()
+        } else {
+            pattern = parse_expr()
+        }
+        par_expect(TOK_ARROW)
+        // Parse body - either a block or a single expression
+        let body = 0
+        if par_peek_type() == TOK_LBRACE {
+            body = parse_block()
+        } else {
+            body = ast_expr_stmt(parse_expr())
+        }
+        push(arms, ast_match_arm(pattern, body))
+    }
+    par_expect(TOK_RBRACE)
+    return ast_match(expr, arms)
+}
+
 fn parse_stmt() {
     let t = par_peek_type()
     if t == TOK_LET { return parse_let() }
@@ -499,6 +534,7 @@ fn parse_stmt() {
     if t == TOK_BREAK { par_advance(); return ast_break() }
     if t == TOK_CONTINUE { par_advance(); return ast_continue() }
     if t == TOK_STRUCT { return parse_struct_decl() }
+    if t == TOK_MATCH { return parse_match() }
 
     // Assignment or expression statement
     let expr = parse_expr()
