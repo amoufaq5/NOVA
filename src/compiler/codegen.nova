@@ -235,6 +235,11 @@ fn is_builtin_fn(name) {
     if name == "split" { return 1 }
     if name == "reverse" { return 1 }
     if name == "sort" { return 1 }
+    if name == "float_mul" { return 1 }
+    if name == "float_div" { return 1 }
+    if name == "float_to_str" { return 1 }
+    if name == "to_float" { return 1 }
+    if name == "from_float" { return 1 }
     return 0
 }
 
@@ -252,6 +257,25 @@ fn is_known_function(name) {
         return 1
     }
     return 0
+}
+
+// --- Optimization: Constant Folding Helpers ---
+// Sentinel value indicating a node cannot be constant-folded.
+// Using a large negative value that is unlikely to appear in real code.
+let FOLD_SENTINEL = 0 - 999999999
+
+fn try_fold(nd) {
+    let tag = ast_tag(nd)
+    if tag == AST_INT_LIT { return nd[1] }
+    if tag == AST_FLOAT_LIT { return nd[1] }
+    if tag == AST_BOOL_LIT { return nd[1] }
+    // Can't fold
+    return FOLD_SENTINEL
+}
+
+fn is_foldable(val) {
+    if val == FOLD_SENTINEL { return 0 }
+    return 1
 }
 
 fn gen_expr(nd) {
@@ -301,6 +325,62 @@ fn gen_expr(nd) {
 
     if tag == AST_BIN_OP {
         let op = nd[1]
+
+        // --- Optimization: Constant Folding ---
+        // If both operands are constant literals, compute at compile time.
+        let left_val = try_fold(nd[2])
+        let right_val = try_fold(nd[3])
+
+        if is_foldable(left_val) == 1 {
+            if is_foldable(right_val) == 1 {
+                // Both operands are constants - fold at compile time
+                let result = 0
+                if op == "+" { result = left_val + right_val }
+                if op == "-" { result = left_val - right_val }
+                if op == "*" { result = left_val * right_val }
+                if op == "/" {
+                    if right_val == 0 {
+                        // Division by zero: leave result as 0, runtime will catch it
+                    } else {
+                        result = left_val / right_val
+                    }
+                }
+                if op == "%" {
+                    if right_val == 0 {
+                        // Mod by zero: leave result as 0
+                    } else {
+                        result = left_val % right_val
+                    }
+                }
+                if op == "&" { result = left_val & right_val }
+                if op == "|" { result = left_val | right_val }
+                if op == "^" { result = left_val ^ right_val }
+                if op == "<<" { result = left_val << right_val }
+                if op == ">>" { result = left_val >> right_val }
+                if op == "==" {
+                    if left_val == right_val { result = 1 } else { result = 0 }
+                }
+                if op == "!=" {
+                    if left_val == right_val { result = 0 } else { result = 1 }
+                }
+                if op == "<" {
+                    if left_val < right_val { result = 1 } else { result = 0 }
+                }
+                if op == ">" {
+                    if left_val > right_val { result = 1 } else { result = 0 }
+                }
+                if op == "<=" {
+                    if left_val <= right_val { result = 1 } else { result = 0 }
+                }
+                if op == ">=" {
+                    if left_val >= right_val { result = 1 } else { result = 0 }
+                }
+                out("    mov rax, " + int_to_str(result))
+                return 0
+            }
+        }
+
+        // Non-constant path: generate code for both operands
         gen_expr(nd[3])
         out("    push rax")
         gen_expr(nd[2])
@@ -571,6 +651,30 @@ fn gen_stmt(nd) {
         let cond = nd[1]
         let then_body = nd[2]
         let else_body = nd[3]
+
+        // --- Optimization: Dead Code Elimination for constant conditions ---
+        let cond_val = try_fold(cond)
+        if is_foldable(cond_val) == 1 {
+            if cond_val == 0 {
+                // Condition is always false: only emit else branch (if any)
+                if else_body == 0 {
+                    // No else branch, entire if is dead code
+                } else {
+                    if ast_tag(else_body) == AST_IF_STMT {
+                        gen_stmt(else_body)
+                    } else {
+                        gen_block(else_body)
+                    }
+                }
+                return 0
+            } else {
+                // Condition is always true: only emit then branch
+                gen_block(then_body)
+                return 0
+            }
+        }
+
+        // Non-constant condition: generate normal if/else
         let else_lbl = new_label()
         let end_lbl = new_label()
         gen_expr(cond)
@@ -594,6 +698,17 @@ fn gen_stmt(nd) {
     if tag == AST_WHILE_STMT {
         let cond = nd[1]
         let body = nd[2]
+
+        // --- Optimization: Dead Code Elimination for constant false while ---
+        let cond_val = try_fold(cond)
+        if is_foldable(cond_val) == 1 {
+            if cond_val == 0 {
+                // while false: skip entire loop body
+                return 0
+            }
+        }
+
+        // Non-constant (or constant true) condition: generate normal loop
         let loop_lbl = new_label()
         let end_lbl = new_label()
         let prev_break = cg_break_label
@@ -2648,70 +2763,64 @@ fn gen_runtime() {
     out("    ret")
 
     // --- float_to_str(n) -> string like "3.140" ---
+    // Uses only stack slots (no callee-saved regs, since runtime clobbers them)
+    // [rbp-8]=frac, [rbp-16]=neg_flag, [rbp-24]=result_str
+    // [rbp-32..rbp-29]=frac digit buffer
     out("")
     out_label("_nova_float_to_str")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    sub rsp, 48")
-    out("    push r12")
-    out("    push r13")
-    out("    push r14")
-    out("    mov r14, rdi")
-    // Handle negative: set r13=1 if negative, work with absolute value
-    out("    xor r13d, r13d")
+    // Handle negative: store flag at [rbp-16]
+    out("    mov qword ptr [rbp - 16], 0")
     out("    test rdi, rdi")
     out("    jns .fts_pos")
-    out("    mov r13d, 1")
+    out("    mov qword ptr [rbp - 16], 1")
     out("    neg rdi")
-    out("    mov r14, rdi")
     out(".fts_pos:")
-    // Split: integer = r14/1000, frac = r14%1000
-    out("    mov rax, r14")
+    // Split: integer = rdi/1000, frac = rdi%1000
+    out("    mov rax, rdi")
     out("    xor edx, edx")
     out("    mov rcx, 1000")
     out("    div rcx")
-    out("    mov r12, rdx")
+    out("    mov [rbp - 8], rdx")
     // Convert integer part to string
     out("    mov rdi, rax")
     out("    call _nova_int_to_str")
-    out("    mov r14, rax")
+    out("    mov [rbp - 24], rax")
     // If negative, prepend "-"
-    out("    test r13d, r13d")
-    out("    jz .fts_no_sign")
+    out("    cmp qword ptr [rbp - 16], 0")
+    out("    je .fts_no_sign")
     out("    lea rdi, [rip + _float_minus]")
-    out("    mov rsi, r14")
+    out("    mov rsi, [rbp - 24]")
     out("    call _nova_concat")
-    out("    mov r14, rax")
+    out("    mov [rbp - 24], rax")
     out(".fts_no_sign:")
     // Append "."
-    out("    mov rdi, r14")
+    out("    mov rdi, [rbp - 24]")
     out("    lea rsi, [rip + _float_dot]")
     out("    call _nova_concat")
-    out("    mov r14, rax")
-    // Compute 3 fractional digits from r12 (0..999)
-    // d0 = r12/100, d1 = (r12%100)/10, d2 = r12%10
-    out("    mov rax, r12")
+    out("    mov [rbp - 24], rax")
+    // Compute 3 fractional digits from [rbp-8] (0..999)
+    out("    mov rax, [rbp - 8]")
     out("    xor edx, edx")
     out("    mov rcx, 100")
     out("    div rcx")
     out("    add al, 48")
-    out("    mov [rbp - 40], al")
+    out("    mov [rbp - 32], al")
     out("    mov rax, rdx")
     out("    xor edx, edx")
     out("    mov rcx, 10")
     out("    div rcx")
     out("    add al, 48")
-    out("    mov [rbp - 39], al")
+    out("    mov [rbp - 31], al")
     out("    add dl, 48")
-    out("    mov [rbp - 38], dl")
-    out("    mov byte ptr [rbp - 37], 0")
+    out("    mov [rbp - 30], dl")
+    out("    mov byte ptr [rbp - 29], 0")
     // Append fractional digits
-    out("    mov rdi, r14")
-    out("    lea rsi, [rbp - 40]")
+    out("    mov rdi, [rbp - 24]")
+    out("    lea rsi, [rbp - 32]")
     out("    call _nova_concat")
-    out("    pop r14")
-    out("    pop r13")
-    out("    pop r12")
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")

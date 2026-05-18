@@ -1,0 +1,47 @@
+fn add(a, b) {
+    return a + b
+}
+
+fn multiply(a, b) {
+    return a * b
+}
+
+fn apply(f, a, b) {
+    return f(a, b)
+}
+
+fn main() {
+    // Direct function reference
+    let f = add
+    print("f(3, 4) = ")
+    print_int(f(3, 4))
+    println("")
+
+    // Pass function as argument
+    print("apply(add, 10, 20) = ")
+    print_int(apply(add, 10, 20))
+    println("")
+
+    print("apply(multiply, 10, 20) = ")
+    print_int(apply(multiply, 10, 20))
+    println("")
+
+    // Reassign function variable
+    f = multiply
+    print("f(3, 4) after reassign = ")
+    print_int(f(3, 4))
+    println("")
+
+    // Store in list
+    let ops = list_new()
+    push(ops, add)
+    push(ops, multiply)
+    let op = ops[0]
+    print("ops[0](5, 6) = ")
+    print_int(op(5, 6))
+    println("")
+
+    println("Function reference tests passed!")
+}
+
+main()
