@@ -1,0 +1,34 @@
+fn main() {
+    // Basic try/catch
+    try {
+        println("in try block")
+        throw 42
+        println("THIS SHOULD NOT PRINT")
+    } catch {
+        print("caught error: ")
+        print_int(get_error())
+        println("")
+    }
+
+    // Try without throw
+    try {
+        println("no error here")
+    } catch {
+        println("THIS SHOULD NOT PRINT")
+    }
+
+    // Try with conditional throw
+    let x = 10
+    try {
+        if x > 5 {
+            throw 1
+        }
+        println("THIS SHOULD NOT PRINT")
+    } catch {
+        println("caught conditional throw")
+    }
+
+    println("Try/catch tests passed!")
+}
+
+main()
