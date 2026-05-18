@@ -398,7 +398,9 @@ fn lex_ident() {
         if is_alnum(c) == 0 {
             let word = substr(lex_src, start, lex_pos - start)
             let kw = keyword_type(word)
-            if kw != 0 {
+            if kw == 0 {
+                emit_tok(TOK_IDENT, word)
+            } else {
                 if kw == TOK_TRUE {
                     emit_tok(TOK_TRUE, 1)
                 } else {
@@ -408,8 +410,6 @@ fn lex_ident() {
                         emit_tok(kw, word)
                     }
                 }
-            } else {
-                emit_tok(TOK_IDENT, word)
             }
             return 0
         }
@@ -417,10 +417,10 @@ fn lex_ident() {
     }
     let word = substr(lex_src, start, lex_pos - start)
     let kw = keyword_type(word)
-    if kw != 0 {
-        emit_tok(kw, word)
-    } else {
+    if kw == 0 {
         emit_tok(TOK_IDENT, word)
+    } else {
+        emit_tok(kw, word)
     }
 }
 

@@ -240,6 +240,7 @@ fn is_builtin_fn(name) {
     if name == "float_to_str" { return 1 }
     if name == "to_float" { return 1 }
     if name == "from_float" { return 1 }
+    if name == "to_str" { return 1 }
     return 0
 }
 
@@ -919,8 +920,10 @@ fn gen_function(nd) {
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
-    if frame_size % 16 != 0 {
-        frame_size = frame_size + (16 - (frame_size % 16))
+    let frame_rem = frame_size % 16
+    if frame_rem == 0 {
+    } else {
+        frame_size = frame_size + (16 - frame_rem)
     }
     if frame_size > 0 {
         out("    sub rsp, " + int_to_str(frame_size))
@@ -1029,8 +1032,10 @@ fn gen_program(program) {
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
-    if frame_size % 16 != 0 {
-        frame_size = frame_size + (16 - (frame_size % 16))
+    let frame_rem2 = frame_size % 16
+    if frame_rem2 == 0 {
+    } else {
+        frame_size = frame_size + (16 - frame_rem2)
     }
     if frame_size > 0 {
         out("    sub rsp, " + int_to_str(frame_size))
@@ -2825,6 +2830,24 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- to_str(value) -> string representation ---
+    // If value < 4096: treat as integer, convert via int_to_str
+    // If value >= 4096 and [value] == -1: it's a list, return "[list]"
+    // Otherwise: it's already a string, return as-is
+    out("")
+    out_label("_nova_to_str")
+    out("    cmp rdi, 4096")
+    out("    jl .ts_int")
+    out("    cmp qword ptr [rdi], -1")
+    out("    je .ts_list")
+    out("    mov rax, rdi")
+    out("    ret")
+    out(".ts_int:")
+    out("    jmp _nova_int_to_str")
+    out(".ts_list:")
+    out("    lea rax, [rip + _str_list_repr]")
+    out("    ret")
+
     // --- Wrappers with Nova-compatible names ---
     out("")
     out_label("println")
@@ -2963,6 +2986,8 @@ fn gen_runtime() {
     out("    jmp _nova_to_float")
     out_label("from_float")
     out("    jmp _nova_from_float")
+    out_label("to_str")
+    out("    jmp _nova_to_str")
 
     // --- Data for runtime ---
     out("")
@@ -2993,6 +3018,8 @@ fn gen_runtime() {
     out("    .asciz " + DQ + "." + DQ)
     out_label("_float_minus")
     out("    .asciz " + DQ + "-" + DQ)
+    out_label("_str_list_repr")
+    out("    .asciz " + DQ + "[list]" + DQ)
 
     // --- Heap state in .bss ---
     out("")
