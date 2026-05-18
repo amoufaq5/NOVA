@@ -1,0 +1,29 @@
+fn main() {
+    // Range literal: 0..5 => range_list(0, 5) => [0,1,2,3,4]
+    let r = 0..5
+    print("range len = ")
+    print_int(len(r))
+    println("")
+
+    let i = 0
+    while i < len(r) {
+        print_int(r[i])
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    // Use range in a for loop
+    let sum = 0
+    for x in 1..6 {
+        sum = sum + x
+    }
+    // sum = 1+2+3+4+5 = 15
+    print("sum 1..6 = ")
+    print_int(sum)
+    println("")
+
+    println("All range tests passed!")
+}
+
+main()

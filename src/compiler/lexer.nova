@@ -81,6 +81,9 @@ let TOK_PERCENT_EQ = 82
 // Ternary and do-while
 let TOK_QUESTION = 83
 let TOK_DO = 84
+let TOK_DOTDOT = 85
+let TOK_ELLIPSIS = 86
+let TOK_PIPE_GT = 87
 
 // --- Lexer State ---
 let lex_src = ""
@@ -472,6 +475,22 @@ fn lex_ident() {
     }
 }
 
+fn lex_pipe_char() {
+    lex_advance()
+    let pn = lex_peek()
+    if pn == 124 {
+        lex_advance()
+        emit_tok(TOK_OR, "||")
+        return 0
+    }
+    if pn == 62 {
+        lex_advance()
+        emit_tok(TOK_PIPE_GT, "|>")
+        return 0
+    }
+    emit_tok(TOK_PIPE, "|")
+}
+
 fn lex_all() {
     while lex_pos < lex_len {
         skip_whitespace()
@@ -554,13 +573,7 @@ fn lex_all() {
                         }
                     }
                     else { if c == 124 {
-                        lex_advance()
-                        if lex_peek() == 124 {
-                            lex_advance()
-                            emit_tok(TOK_OR, "||")
-                        } else {
-                            emit_tok(TOK_PIPE, "|")
-                        }
+                        lex_pipe_char()
                     }
                     else { if c == 64 { lex_advance(); emit_tok(TOK_AT, "@") }
                     else { if c == 35 { lex_advance(); emit_tok(TOK_HASH, "#") }
@@ -619,7 +632,20 @@ fn lex_all() {
                         lex_advance()
                         emit_tok(TOK_CARET, "^")
                     }
-                    else { if c == 46 { lex_advance(); emit_tok(TOK_DOT, ".") }
+                    else { if c == 46 {
+                        lex_advance()
+                        if lex_peek() == 46 {
+                            lex_advance()
+                            if lex_peek() == 46 {
+                                lex_advance()
+                                emit_tok(TOK_ELLIPSIS, "...")
+                            } else {
+                                emit_tok(TOK_DOTDOT, "..")
+                            }
+                        } else {
+                            emit_tok(TOK_DOT, ".")
+                        }
+                    }
                     else { if c == 63 { lex_advance(); emit_tok(TOK_QUESTION, "?") }
                     else {
                         // Unknown character, skip

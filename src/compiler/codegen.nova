@@ -29,7 +29,7 @@ let cg_current_caps = 0
 let cg_current_cap_name = ""
 
 fn cg_init() {
-    cg_output = ""
+    cg_output = list_new()
     cg_label_count = 0
     cg_strings = list_new()
     cg_str_count = 0
@@ -47,11 +47,11 @@ fn cg_init() {
 }
 
 fn out(s) {
-    cg_output = cg_output + s + NL
+    push(cg_output, s)
 }
 
 fn out_label(name) {
-    cg_output = cg_output + name + ":" + NL
+    push(cg_output, name + ":")
 }
 
 fn new_label() {
@@ -165,6 +165,26 @@ fn collect_locals(nd) {
     }
     if tag == AST_DO_WHILE {
         collect_locals(nd[1])
+    }
+    if tag == AST_DESTRUCTURE {
+        let dnames = nd[1]
+        let di = 0
+        while di < len(dnames) {
+            if is_global(dnames[di]) == 0 {
+                push(cg_locals, dnames[di])
+                cg_local_count = cg_local_count + 1
+            }
+            di = di + 1
+        }
+    }
+    if tag == AST_FOR_INDEXED {
+        let idx_name = nd[1]
+        let val_name = nd[2]
+        push(cg_locals, idx_name)
+        cg_local_count = cg_local_count + 1
+        push(cg_locals, val_name)
+        cg_local_count = cg_local_count + 1
+        collect_locals(nd[4])
     }
 }
 
@@ -431,6 +451,25 @@ fn collect_idents_in(nd, names) {
         return 0
     }
     if tag == AST_FN_DECL {
+        collect_idents_in(nd[3], names)
+        return 0
+    }
+    if tag == AST_DESTRUCTURE {
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_FOR_INDEXED {
+        collect_idents_in(nd[3], names)
+        collect_idents_in(nd[4], names)
+        return 0
+    }
+    if tag == AST_NULL_ACCESS {
+        collect_idents_in(nd[1], names)
+        return 0
+    }
+    if tag == AST_SLICE {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
         collect_idents_in(nd[3], names)
         return 0
     }
@@ -1038,6 +1077,32 @@ fn gen_expr(nd) {
         return 0
     }
 
+    if tag == AST_NULL_ACCESS {
+        let null_end = new_label()
+        gen_expr(nd[1])
+        out("    test rax, rax")
+        out("    jz " + null_end)
+        let nf_name = nd[2]
+        let nf_idx = find_field_index(nf_name)
+        out("    mov rcx, [rax + 24]")
+        out("    mov rax, [rcx + " + int_to_str(nf_idx * 8) + "]")
+        out_label(null_end)
+        return 0
+    }
+
+    if tag == AST_SLICE {
+        gen_expr(nd[3])
+        out("    push rax")
+        gen_expr(nd[2])
+        out("    push rax")
+        gen_expr(nd[1])
+        out("    pop rsi")
+        out("    pop rdx")
+        out("    mov rdi, rax")
+        out("    call list_slice")
+        return 0
+    }
+
     out("    # unknown expr tag " + int_to_str(tag))
 }
 
@@ -1441,6 +1506,66 @@ fn gen_stmt(nd) {
         return 0
     }
 
+    if tag == AST_DESTRUCTURE {
+        let dnames = nd[1]
+        let dvalue = nd[2]
+        gen_expr(dvalue)
+        out("    push rax")
+        let di = 0
+        while di < len(dnames) {
+            let dname = dnames[di]
+            out("    mov rax, [rsp]")
+            out("    mov rdi, rax")
+            out("    mov rsi, " + int_to_str(di))
+            out("    call _nova_index")
+            if is_global(dname) == 1 {
+                out("    mov [rip + _g_" + dname + "], rax")
+            } else {
+                let doff = local_offset(dname)
+                out("    mov [rbp - " + int_to_str(doff) + "], rax")
+            }
+            di = di + 1
+        }
+        out("    add rsp, 8")
+        return 0
+    }
+
+    if tag == AST_FOR_INDEXED {
+        let idx_name = nd[1]
+        let val_name = nd[2]
+        let iter_expr = nd[3]
+        let body = nd[4]
+        let idx_off = local_offset(idx_name)
+        let val_off = local_offset(val_name)
+        gen_expr(iter_expr)
+        out("    push rax")
+        out("    mov qword ptr [rbp - " + int_to_str(idx_off) + "], 0")
+        let fi_loop = new_label()
+        let fi_end = new_label()
+        let fi_cont = new_label()
+        let prev_break = cg_break_label
+        let prev_continue = cg_continue_label
+        cg_break_label = fi_end
+        cg_continue_label = fi_cont
+        out_label(fi_loop)
+        out("    mov rcx, [rbp - " + int_to_str(idx_off) + "]")
+        out("    mov rdi, [rsp]")
+        out("    cmp rcx, [rdi+8]")
+        out("    jge " + fi_end)
+        out("    mov rdi, [rdi+24]")
+        out("    mov rax, [rdi+rcx*8]")
+        out("    mov [rbp - " + int_to_str(val_off) + "], rax")
+        gen_block(body)
+        out_label(fi_cont)
+        out("    inc qword ptr [rbp - " + int_to_str(idx_off) + "]")
+        out("    jmp " + fi_loop)
+        out_label(fi_end)
+        out("    add rsp, 8")
+        cg_break_label = prev_break
+        cg_continue_label = prev_continue
+        return 0
+    }
+
     out("    # unknown stmt tag " + int_to_str(tag))
 }
 
@@ -1650,6 +1775,12 @@ fn gen_program(program) {
         if dtag == AST_DO_WHILE {
             collect_locals(d)
         }
+        if dtag == AST_FOR_INDEXED {
+            collect_locals(d)
+        }
+        if dtag == AST_DESTRUCTURE {
+            collect_locals(d)
+        }
         i = i + 1
     }
 
@@ -1736,7 +1867,7 @@ fn gen_program(program) {
     out(".text")
     gen_runtime()
 
-    return cg_output
+    return join(cg_output, chr(10))
 }
 
 fn gen_runtime() {

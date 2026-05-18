@@ -39,8 +39,8 @@
 .equ MAP_PRIV_ANON,    0x22    # MAP_PRIVATE | MAP_ANONYMOUS
 
 # Sizes
-.equ INITIAL_HEAP,     0x100000    # 1 MB
-.equ ARENA_SIZE,       0x10000     # 64 KB
+.equ INITIAL_HEAP,     0x4000000   # 64 MB
+.equ ARENA_SIZE,       0x100000    # 1 MB
 .equ ALLOC_ALIGN,      8
 .equ BLOCK_HDR_SIZE,   16          # free-list block header: size + next
 
@@ -5837,6 +5837,22 @@ register_builtins:
     mov rdi, rbx
     call env_set
 
+    # join
+    lea rsi, [rip + bi_join_name]
+    mov rdx, 4
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_join]
+    mov rdi, rbx
+    call env_set
+
+    # print_int
+    lea rsi, [rip + bi_print_int_name]
+    mov rdx, 9
+    mov rcx, VAL_BUILTIN
+    lea r8, [rip + builtin_print_int]
+    mov rdi, rbx
+    call env_set
+
     pop rbx
     ret
 
@@ -6250,6 +6266,164 @@ builtin_chr:
     xor edx, edx
     ret
 
+# builtin_join(list, separator) -> VAL_STR
+# Joins list elements into a single string with separator between them
+builtin_join:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbp
+    mov rbp, rsp
+    cmp rsi, 2
+    jl .bjoin_empty
+    mov rax, [rdi + VAL_TYPE]
+    cmp eax, VAL_LIST
+    jne .bjoin_empty
+    mov r12, [rdi + VAL_DATA]                    # list ptr
+    mov rax, [rdi + VAL_SIZE + VAL_TYPE]
+    cmp eax, VAL_STR
+    jne .bjoin_empty
+    mov r13, [rdi + VAL_SIZE + VAL_DATA]         # separator str
+    # Get separator length
+    mov rdi, r13
+    call str_len
+    mov r14, rax                                 # sep_len
+    # Get list count
+    mov r15, [r12 + NL_COUNT]
+    test r15, r15
+    jz .bjoin_empty
+    # First pass: calculate total length
+    xor ebx, ebx                                # total_len = 0
+    xor ecx, ecx                                # i = 0
+    mov r12, [r12 + NL_ITEMS]                    # items ptr
+.bjoin_len_loop:
+    cmp rcx, r15
+    jge .bjoin_len_done
+    push rcx
+    # Get item string length
+    imul rax, rcx, VAL_SIZE
+    mov rax, [r12 + rax + VAL_DATA]
+    test rax, rax
+    jz .bjoin_len_skip
+    mov rdi, rax
+    call str_len
+    add rbx, rax
+.bjoin_len_skip:
+    pop rcx
+    # Add separator length (except for last element)
+    lea rax, [rcx + 1]
+    cmp rax, r15
+    jge .bjoin_len_nosep
+    add rbx, r14
+.bjoin_len_nosep:
+    inc rcx
+    jmp .bjoin_len_loop
+.bjoin_len_done:
+    # Allocate buffer of total_len + 1
+    lea rdi, [rbx + 1]
+    push rbx
+    call heap_alloc
+    pop rbx
+    mov [rbp - 8], rax
+    sub rsp, 8
+    # Second pass: copy strings
+    mov rdi, rax                                 # dest ptr
+    xor ecx, ecx                                # i = 0
+    mov rdi, [rbp - 8]                           # dest buffer
+    xor ecx, ecx                                # i = 0
+.bjoin_s_loop:
+    cmp rcx, r15
+    jge .bjoin_s_done
+    push rcx
+    push rdi
+    # Get string pointer for item i
+    imul rax, rcx, VAL_SIZE
+    mov rsi, [r12 + rax + VAL_DATA]
+    test rsi, rsi
+    jz .bjoin_s_copied
+    # Copy string
+.bjoin_s_cpy:
+    mov al, [rsi]
+    test al, al
+    jz .bjoin_s_copied
+    mov [rdi], al
+    inc rdi
+    inc rsi
+    jmp .bjoin_s_cpy
+.bjoin_s_copied:
+    # Add separator if not last
+    pop rax                                      # saved rdi (old dest)
+    mov rax, rdi                                 # current dest position
+    pop rcx
+    lea rdx, [rcx + 1]
+    cmp rdx, r15
+    jge .bjoin_s_nosep
+    # Copy separator
+    push rcx
+    push rax
+    mov rsi, r13
+.bjoin_s_sep:
+    mov cl, [rsi]
+    test cl, cl
+    jz .bjoin_s_sep_done
+    mov [rax], cl
+    inc rax
+    inc rsi
+    jmp .bjoin_s_sep
+.bjoin_s_sep_done:
+    pop rdi                                      # was rax (dest)
+    mov rdi, rax                                 # update dest
+    pop rcx
+.bjoin_s_nosep:
+    mov rdi, rax                                 # update dest ptr
+    inc rcx
+    jmp .bjoin_s_loop
+.bjoin_s_done:
+    mov byte ptr [rdi], 0                        # null-terminate
+    mov rdx, [rbp - 8]                           # result string
+    mov eax, VAL_STR
+    mov rsp, rbp
+    pop rbp
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.bjoin_empty:
+    mov rdi, 1
+    call heap_alloc
+    mov byte ptr [rax], 0
+    mov rdx, rax
+    mov eax, VAL_STR
+    pop rbp
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# builtin_print_int(value) -> VAL_NONE
+builtin_print_int:
+    cmp rsi, 1
+    jl .bpi_done
+    mov rax, [rdi + VAL_DATA]
+    # Print integer
+    push rax
+    # Convert to string and print
+    mov rdi, rax
+    call int_to_str_alloc
+    mov rdi, rax
+    call print_str
+    pop rax
+.bpi_done:
+    xor eax, eax
+    xor edx, edx
+    ret
+
 # builtin_substr(str, start, len) -> VAL_STR
 builtin_substr:
     push rbx
@@ -6535,7 +6709,7 @@ builtin_read_file:
     mov r12, rax                    # fd
 
     # Read in chunks
-    mov rdi, 65536
+    mov rdi, 524288
     call heap_alloc
     mov r13, rax                    # buffer
     xor ebx, ebx                    # total bytes read
@@ -6550,9 +6724,8 @@ builtin_read_file:
     add rbx, rax
     # Check if we need more space
     lea rcx, [rbx + 4096]
-    cmp rcx, 65536
+    cmp rcx, 524288
     jl .brf_read_loop
-    # For now, cap at 64KB
     jmp .brf_read_done
 .brf_read_done:
     # Close file
@@ -6718,6 +6891,8 @@ bi_write_file_name: .asciz "write_file"
 bi_list_set_name:   .asciz "list_set"
 bi_arg_name:        .asciz "__arg"
 bi_chr_name:        .asciz "chr"
+bi_join_name:       .asciz "join"
+bi_print_int_name:  .asciz "print_int"
 
 # --- AST tag name table ---
 ast_tag_names:

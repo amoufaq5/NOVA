@@ -42,6 +42,12 @@ let AST_LAMBDA = 37
 let AST_ENUM_DECL = 38
 let AST_TERNARY = 39
 let AST_DO_WHILE = 40
+let AST_DESTRUCTURE = 41
+let AST_FOR_INDEXED = 42
+let AST_PIPE = 43
+let AST_NULL_ACCESS = 44
+let AST_SLICE = 45
+let AST_DEFAULT_PARAM = 46
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -336,6 +342,49 @@ fn ast_do_while(body, cond) {
     push(n, AST_DO_WHILE)
     push(n, body)
     push(n, cond)
+    return n
+}
+
+fn ast_destructure(names, value) {
+    let n = list_new()
+    push(n, AST_DESTRUCTURE)
+    push(n, names)
+    push(n, value)
+    return n
+}
+
+fn ast_for_indexed(idx_name, val_name, iter, body) {
+    let n = list_new()
+    push(n, AST_FOR_INDEXED)
+    push(n, idx_name)
+    push(n, val_name)
+    push(n, iter)
+    push(n, body)
+    return n
+}
+
+fn ast_pipe(left, right) {
+    let n = list_new()
+    push(n, AST_PIPE)
+    push(n, left)
+    push(n, right)
+    return n
+}
+
+fn ast_null_access(base, name) {
+    let n = list_new()
+    push(n, AST_NULL_ACCESS)
+    push(n, base)
+    push(n, name)
+    return n
+}
+
+fn ast_slice(base, start_expr, end_expr) {
+    let n = list_new()
+    push(n, AST_SLICE)
+    push(n, base)
+    push(n, start_expr)
+    push(n, end_expr)
     return n
 }
 

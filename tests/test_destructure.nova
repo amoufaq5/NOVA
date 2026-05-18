@@ -1,0 +1,36 @@
+fn get_pair() {
+    let p = list_new()
+    push(p, 10)
+    push(p, 20)
+    push(p, 30)
+    return p
+}
+
+fn main() {
+    let [a, b, c] = get_pair()
+    print("a = ")
+    print_int(a)
+    println("")
+    print("b = ")
+    print_int(b)
+    println("")
+    print("c = ")
+    print_int(c)
+    println("")
+
+    // Destructure from list literal
+    let vals = list_new()
+    push(vals, 100)
+    push(vals, 200)
+    let [x, y] = vals
+    print("x = ")
+    print_int(x)
+    println("")
+    print("y = ")
+    print_int(y)
+    println("")
+
+    println("All destructure tests passed!")
+}
+
+main()

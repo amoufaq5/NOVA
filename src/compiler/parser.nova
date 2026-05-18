@@ -402,15 +402,39 @@ fn parse_postfix() {
             if t == TOK_LBRACKET {
                 par_advance()
                 let idx = parse_expr()
-                par_expect(TOK_RBRACKET)
-                expr = ast_index(expr, idx)
-            } else {
-                if t == TOK_DOT {
+                if par_peek_type() == TOK_COLON {
                     par_advance()
-                    let field_tok = par_expect(TOK_IDENT)
-                    expr = ast_field_access(expr, field_tok[1])
+                    let end_idx = parse_expr()
+                    par_expect(TOK_RBRACKET)
+                    expr = ast_slice(expr, idx, end_idx)
                 } else {
-                    return expr
+                    par_expect(TOK_RBRACKET)
+                    expr = ast_index(expr, idx)
+                }
+            } else {
+                if t == TOK_QUESTION {
+                    let next_pos2 = par_pos + 1
+                    if next_pos2 < par_count {
+                        let next_tok2 = par_tokens[next_pos2]
+                        if next_tok2[0] == TOK_DOT {
+                            par_advance()
+                            par_advance()
+                            let nf_tok = par_expect(TOK_IDENT)
+                            expr = ast_null_access(expr, nf_tok[1])
+                        } else {
+                            return expr
+                        }
+                    } else {
+                        return expr
+                    }
+                } else {
+                    if t == TOK_DOT {
+                        par_advance()
+                        let field_tok = par_expect(TOK_IDENT)
+                        expr = ast_field_access(expr, field_tok[1])
+                    } else {
+                        return expr
+                    }
                 }
             }
         }
@@ -459,7 +483,16 @@ fn parse_add() {
                 let right = parse_mul()
                 left = ast_binop("-", left, right)
             } else {
-                return left
+                if t == TOK_DOTDOT {
+                    par_advance()
+                    let right = parse_mul()
+                    let rng_args = list_new()
+                    push(rng_args, left)
+                    push(rng_args, right)
+                    left = ast_call(ast_ident("range_list"), rng_args)
+                } else {
+                    return left
+                }
             }
         }
     }
@@ -552,8 +585,32 @@ fn parse_or() {
     return left
 }
 
-fn parse_expr() {
+fn parse_pipe() {
     let left = parse_or()
+    while par_peek_type() == TOK_PIPE_GT {
+        par_advance()
+        let right = parse_or()
+        if ast_tag(right) == AST_CALL {
+            let new_args = list_new()
+            push(new_args, left)
+            let old_args = right[2]
+            let pai = 0
+            while pai < len(old_args) {
+                push(new_args, old_args[pai])
+                pai = pai + 1
+            }
+            left = ast_call(right[1], new_args)
+        } else {
+            let pipe_args = list_new()
+            push(pipe_args, left)
+            left = ast_call(right, pipe_args)
+        }
+    }
+    return left
+}
+
+fn parse_expr() {
+    let left = parse_pipe()
     if par_peek_type() == TOK_QUESTION {
         par_advance()
         let then_val = parse_expr()
@@ -617,6 +674,15 @@ fn parse_for() {
     par_expect(TOK_FOR)
     let var_tok = par_expect(TOK_IDENT)
     let var_name = var_tok[1]
+    if par_peek_type() == TOK_COMMA {
+        par_advance()
+        let val_tok = par_expect(TOK_IDENT)
+        let val_name = val_tok[1]
+        par_expect(TOK_IN)
+        let iter = parse_expr()
+        let body = parse_block()
+        return ast_for_indexed(var_name, val_name, iter, body)
+    }
     par_expect(TOK_IN)
     let iter = parse_expr()
     let body = parse_block()
@@ -631,6 +697,24 @@ fn parse_let() {
         par_advance()
     } else {
         par_expect(TOK_LET)
+    }
+    if par_peek_type() == TOK_LBRACKET {
+        par_advance()
+        let dnames = list_new()
+        if par_peek_type() == TOK_RBRACKET {
+        } else {
+            let dtok = par_expect(TOK_IDENT)
+            push(dnames, dtok[1])
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                let dtok2 = par_expect(TOK_IDENT)
+                push(dnames, dtok2[1])
+            }
+        }
+        par_expect(TOK_RBRACKET)
+        par_expect(TOK_EQ)
+        let dvalue = parse_expr()
+        return ast_destructure(dnames, dvalue)
     }
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]

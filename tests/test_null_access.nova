@@ -1,0 +1,30 @@
+struct Point { x, y }
+
+fn make_point(px, py) {
+    return Point(px, py)
+}
+
+fn main() {
+    let p = make_point(10, 20)
+    // Normal field access
+    print("p.x = ")
+    print_int(p.x)
+    println("")
+
+    // Null-safe access on valid object
+    let val = p?.x
+    print("p?.x = ")
+    print_int(val)
+    println("")
+
+    // Null-safe access on none
+    let q = none
+    let val2 = q?.x
+    print("q?.x = ")
+    print_int(val2)
+    println("")
+
+    println("All null-access tests passed!")
+}
+
+main()

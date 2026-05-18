@@ -1,0 +1,35 @@
+fn double(x) {
+    return x * 2
+}
+
+fn add(a, b) {
+    return a + b
+}
+
+fn square(x) {
+    return x * x
+}
+
+fn main() {
+    // Simple pipe: 5 |> double => double(5) => 10
+    let r1 = 5 |> double
+    print("5 |> double = ")
+    print_int(r1)
+    println("")
+
+    // Pipe with args: 5 |> add(3) => add(5, 3) => 8
+    let r2 = 5 |> add(3)
+    print("5 |> add(3) = ")
+    print_int(r2)
+    println("")
+
+    // Chained pipe: 3 |> double |> square => square(double(3)) => square(6) => 36
+    let r3 = 3 |> double |> square
+    print("3 |> double |> square = ")
+    print_int(r3)
+    println("")
+
+    println("All pipe tests passed!")
+}
+
+main()

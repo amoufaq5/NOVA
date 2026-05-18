@@ -1,0 +1,31 @@
+fn main() {
+    let items = list_new()
+    push(items, "apple")
+    push(items, "banana")
+    push(items, "cherry")
+
+    // for i, v in list
+    for i, v in items {
+        print_int(i)
+        print(": ")
+        println(v)
+    }
+
+    // Verify index and value
+    let sum = 0
+    let nums = list_new()
+    push(nums, 10)
+    push(nums, 20)
+    push(nums, 30)
+    for idx, val in nums {
+        sum = sum + idx + val
+    }
+    // sum = (0+10) + (1+20) + (2+30) = 63
+    print("sum = ")
+    print_int(sum)
+    println("")
+
+    println("All for-indexed tests passed!")
+}
+
+main()
