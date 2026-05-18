@@ -70,6 +70,14 @@ let TOK_FLOW_FWD = 73
 let TOK_FLOW_BWD = 74
 let TOK_BROADCAST = 75
 let TOK_ENRICH = 76
+// Enum
+let TOK_ENUM = 77
+// Compound assignment
+let TOK_PLUS_EQ = 78
+let TOK_MINUS_EQ = 79
+let TOK_STAR_EQ = 80
+let TOK_SLASH_EQ = 81
+let TOK_PERCENT_EQ = 82
 
 // --- Lexer State ---
 let lex_src = ""
@@ -399,6 +407,7 @@ fn keyword_type(word) {
     if word == "try" { return TOK_TRY }
     if word == "catch" { return TOK_CATCH }
     if word == "throw" { return TOK_THROW }
+    if word == "enum" { return TOK_ENUM }
     return 0
 }
 
@@ -461,11 +470,51 @@ fn lex_all() {
                 if c == 34 {
                     lex_string()
                 } else {
-                    if c == 43 { lex_advance(); emit_tok(TOK_PLUS, "+") }
-                    else { if c == 45 { lex_advance(); emit_tok(TOK_MINUS, "-") }
-                    else { if c == 42 { lex_advance(); emit_tok(TOK_STAR, "*") }
-                    else { if c == 47 { lex_advance(); emit_tok(TOK_SLASH, "/") }
-                    else { if c == 37 { lex_advance(); emit_tok(TOK_PERCENT, "%") }
+                    if c == 43 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_PLUS_EQ, "+=")
+                        } else {
+                            emit_tok(TOK_PLUS, "+")
+                        }
+                    }
+                    else { if c == 45 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_MINUS_EQ, "-=")
+                        } else {
+                            emit_tok(TOK_MINUS, "-")
+                        }
+                    }
+                    else { if c == 42 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_STAR_EQ, "*=")
+                        } else {
+                            emit_tok(TOK_STAR, "*")
+                        }
+                    }
+                    else { if c == 47 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_SLASH_EQ, "/=")
+                        } else {
+                            emit_tok(TOK_SLASH, "/")
+                        }
+                    }
+                    else { if c == 37 {
+                        lex_advance()
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_PERCENT_EQ, "%=")
+                        } else {
+                            emit_tok(TOK_PERCENT, "%")
+                        }
+                    }
                     else { if c == 40 { lex_advance(); emit_tok(TOK_LPAREN, "(") }
                     else { if c == 41 { lex_advance(); emit_tok(TOK_RPAREN, ")") }
                     else { if c == 123 { lex_advance(); emit_tok(TOK_LBRACE, "{") }

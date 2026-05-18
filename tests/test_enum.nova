@@ -1,0 +1,38 @@
+// Test: Enum types
+
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+let d = Direction.North
+assert(d == 0, "North == 0")
+assert(Direction.South == 1, "South == 1")
+assert(Direction.East == 2, "East == 2")
+assert(Direction.West == 3, "West == 3")
+
+// Use in match
+match d {
+    0 => println("Going North")
+    1 => println("Going South")
+    _ => println("Going somewhere else")
+}
+
+// Use in conditions
+if d == Direction.North {
+    println("Correct: heading North")
+}
+
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+assert(Color.Red == 0, "Red == 0")
+assert(Color.Green == 1, "Green == 1")
+assert(Color.Blue == 2, "Blue == 2")
+
+println("All enum tests passed!")

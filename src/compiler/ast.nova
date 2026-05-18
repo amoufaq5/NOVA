@@ -38,6 +38,8 @@ let AST_MATCH_ARM = 33
 let AST_WILDCARD = 34
 let AST_TRY_CATCH = 35
 let AST_THROW = 36
+let AST_LAMBDA = 37
+let AST_ENUM_DECL = 38
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -298,6 +300,23 @@ fn ast_throw(value) {
     let n = list_new()
     push(n, AST_THROW)
     push(n, value)
+    return n
+}
+
+fn ast_lambda(name, params, body) {
+    let n = list_new()
+    push(n, AST_LAMBDA)
+    push(n, name)
+    push(n, params)
+    push(n, body)
+    return n
+}
+
+fn ast_enum_decl(name, variants) {
+    let n = list_new()
+    push(n, AST_ENUM_DECL)
+    push(n, name)
+    push(n, variants)
     return n
 }
 

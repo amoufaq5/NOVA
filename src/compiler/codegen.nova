@@ -21,6 +21,8 @@ let cg_continue_label = ""
 let cg_catch_label = ""
 let cg_structs = 0
 let cg_struct_count = 0
+let cg_enums = 0
+let cg_enum_count = 0
 
 fn cg_init() {
     cg_output = ""
@@ -32,6 +34,8 @@ fn cg_init() {
     cg_global_count = 0
     cg_structs = list_new()
     cg_struct_count = 0
+    cg_enums = list_new()
+    cg_enum_count = 0
 }
 
 fn out(s) {
@@ -188,6 +192,35 @@ fn is_struct_name(name) {
     return 0
 }
 
+fn is_enum_name(name) {
+    let si = 0
+    while si < cg_enum_count {
+        if cg_enums[si][0] == name {
+            return 1
+        }
+        si = si + 1
+    }
+    return 0
+}
+
+fn enum_variant_index(enum_name, variant_name) {
+    let si = 0
+    while si < cg_enum_count {
+        if cg_enums[si][0] == enum_name {
+            let variants = cg_enums[si][1]
+            let vi = 0
+            while vi < len(variants) {
+                if variants[vi] == variant_name {
+                    return vi
+                }
+                vi = vi + 1
+            }
+        }
+        si = si + 1
+    }
+    return 0 - 1
+}
+
 fn is_builtin_fn(name) {
     if name == "println" { return 1 }
     if name == "print" { return 1 }
@@ -259,6 +292,23 @@ fn is_builtin_fn(name) {
     if name == "from_float" { return 1 }
     if name == "to_str" { return 1 }
     if name == "get_error" { return 1 }
+    if name == "map_list" { return 1 }
+    if name == "filter" { return 1 }
+    if name == "reduce" { return 1 }
+    if name == "foreach" { return 1 }
+    if name == "keys" { return 1 }
+    if name == "values" { return 1 }
+    if name == "str_upper" { return 1 }
+    if name == "str_lower" { return 1 }
+    if name == "str_trim" { return 1 }
+    if name == "str_replace" { return 1 }
+    if name == "str_repeat" { return 1 }
+    if name == "char_code" { return 1 }
+    if name == "to_int" { return 1 }
+    if name == "range_list" { return 1 }
+    if name == "list_copy" { return 1 }
+    if name == "list_slice" { return 1 }
+    if name == "append_list" { return 1 }
     return 0
 }
 
@@ -570,9 +620,43 @@ fn gen_expr(nd) {
         return 0
     }
 
+    if tag == AST_LIST_LIT {
+        let elems = nd[1]
+        let ecount = len(elems)
+        out("    call _nova_list_new")
+        if ecount > 0 {
+            out("    push rax")
+            let ei = 0
+            while ei < ecount {
+                gen_expr(elems[ei])
+                out("    mov rsi, rax")
+                out("    mov rdi, [rsp]")
+                out("    call _nova_push")
+                ei = ei + 1
+            }
+            out("    pop rax")
+        }
+        return 0
+    }
+
+    if tag == AST_LAMBDA {
+        let lname = nd[1]
+        out("    lea rax, [rip + " + lname + "]")
+        return 0
+    }
+
     if tag == AST_FIELD_ACCESS {
         let base = nd[1]
         let field_name = nd[2]
+        // Check if base is an enum name
+        if ast_tag(base) == AST_IDENT {
+            let base_name = base[1]
+            if is_enum_name(base_name) == 1 {
+                let vidx = enum_variant_index(base_name, field_name)
+                out("    mov rax, " + int_to_str(vidx))
+                return 0
+            }
+        }
         let idx = find_field_index(field_name)
         gen_expr(base)
         out("    mov rcx, [rax + 24]")
@@ -875,7 +959,10 @@ fn gen_stmt(nd) {
     }
 
     if tag == AST_STRUCT_DECL {
-        // Struct declarations are handled in gen_program first pass
+        return 0
+    }
+
+    if tag == AST_ENUM_DECL {
         return 0
     }
 
@@ -1071,7 +1158,7 @@ fn gen_function(nd) {
 fn gen_program(program) {
     let decls = program[1]
 
-    // First pass: collect struct declarations
+    // First pass: collect struct and enum declarations
     let i = 0
     while i < len(decls) {
         let d = decls[i]
@@ -1081,6 +1168,13 @@ fn gen_program(program) {
             push(entry, d[2])
             push(cg_structs, entry)
             cg_struct_count = cg_struct_count + 1
+        }
+        if ast_tag(d) == AST_ENUM_DECL {
+            let entry = list_new()
+            push(entry, d[1])
+            push(entry, d[2])
+            push(cg_enums, entry)
+            cg_enum_count = cg_enum_count + 1
         }
         i = i + 1
     }
@@ -1095,7 +1189,7 @@ fn gen_program(program) {
         i = i + 1
     }
 
-    // Collect function names
+    // Collect function names (including lambdas from parser)
     i = 0
     while i < len(decls) {
         let d = decls[i]
@@ -1103,6 +1197,13 @@ fn gen_program(program) {
             push(cg_fns, d[1])
         }
         i = i + 1
+    }
+    // Register lambda names
+    let li = 0
+    while li < len(par_lambdas) {
+        let lam = par_lambdas[li]
+        push(cg_fns, lam[1])
+        li = li + 1
     }
 
     out(".intel_syntax noprefix")
@@ -1116,6 +1217,13 @@ fn gen_program(program) {
             gen_function(d)
         }
         i = i + 1
+    }
+
+    // Generate lambda functions
+    li = 0
+    while li < len(par_lambdas) {
+        gen_function(par_lambdas[li])
+        li = li + 1
     }
 
     // Generate _start for top-level code
@@ -1613,6 +1721,18 @@ fn gen_runtime() {
     out("    ret")
     out(".len_zero:")
     out("    xor eax, eax")
+    out("    ret")
+
+    // --- str_len(ptr): count bytes until null ---
+    out("")
+    out_label("_nova_str_len")
+    out("    xor eax, eax")
+    out(".strlen_loop:")
+    out("    cmp byte ptr [rdi + rax], 0")
+    out("    je .strlen_done")
+    out("    inc rax")
+    out("    jmp .strlen_loop")
+    out(".strlen_done:")
     out("    ret")
 
     // --- exit(code) ---
@@ -2978,6 +3098,615 @@ fn gen_runtime() {
     out("    lea rax, [rip + _str_list_repr]")
     out("    ret")
 
+    // --- map_list(list, fn): create new list by applying fn to each element ---
+    out("")
+    out_label("_nova_map_list")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    push r15")
+    out("    mov r12, rdi")  // source list
+    out("    mov r13, rsi")  // function pointer
+    out("    call _nova_list_new")
+    out("    mov r14, rax")  // result list
+    out("    xor r15d, r15d")  // index
+    out(".ml_loop:")
+    out("    cmp r15, [r12 + 8]")
+    out("    jge .ml_done")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rdi, [rax + r15*8]")
+    out("    mov r11, r13")
+    out("    call r11")
+    out("    mov rsi, rax")
+    out("    mov rdi, r14")
+    out("    call _nova_push")
+    out("    inc r15")
+    out("    jmp .ml_loop")
+    out(".ml_done:")
+    out("    mov rax, r14")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- filter(list, fn): new list with elements where fn returns non-zero ---
+    out("")
+    out_label("_nova_filter")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    push r15")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    call _nova_list_new")
+    out("    mov r14, rax")
+    out("    xor r15d, r15d")
+    out(".fl_loop:")
+    out("    cmp r15, [r12 + 8]")
+    out("    jge .fl_done")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rdi, [rax + r15*8]")
+    out("    push rdi")
+    out("    mov r11, r13")
+    out("    call r11")
+    out("    pop rdi")
+    out("    test rax, rax")
+    out("    jz .fl_skip")
+    out("    mov rsi, rdi")
+    out("    mov rdi, r14")
+    out("    call _nova_push")
+    out(".fl_skip:")
+    out("    inc r15")
+    out("    jmp .fl_loop")
+    out(".fl_done:")
+    out("    mov rax, r14")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- reduce(list, fn, init): accumulate with fn(acc, elem) ---
+    out("")
+    out_label("_nova_reduce")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    push r15")
+    out("    mov r12, rdi")  // list
+    out("    mov r13, rsi")  // function
+    out("    mov r14, rdx")  // accumulator
+    out("    xor r15d, r15d")
+    out(".rd_loop:")
+    out("    cmp r15, [r12 + 8]")
+    out("    jge .rd_done")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rsi, [rax + r15*8]")
+    out("    mov rdi, r14")
+    out("    mov r11, r13")
+    out("    call r11")
+    out("    mov r14, rax")
+    out("    inc r15")
+    out("    jmp .rd_loop")
+    out(".rd_done:")
+    out("    mov rax, r14")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- foreach(list, fn): call fn(elem) for each, return 0 ---
+    out("")
+    out_label("_nova_foreach")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    xor r14d, r14d")
+    out(".fe_loop:")
+    out("    cmp r14, [r12 + 8]")
+    out("    jge .fe_done")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rdi, [rax + r14*8]")
+    out("    mov r11, r13")
+    out("    call r11")
+    out("    inc r14")
+    out("    jmp .fe_loop")
+    out(".fe_done:")
+    out("    xor eax, eax")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- keys(map): return list of keys ---
+    out("")
+    out_label("_nova_keys")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    call _nova_list_new")
+    out("    mov r13, rax")
+    out("    mov r14, [r12 + 8]")  // capacity
+    out("    xor ecx, ecx")
+    out(".keys_loop:")
+    out("    cmp rcx, r14")
+    out("    jge .keys_done")
+    out("    mov rax, [r12 + 24]")  // entries_ptr
+    out("    imul rdi, rcx, 24")
+    out("    add rdi, rax")
+    out("    cmp qword ptr [rdi + 16], 0")  // occupied?
+    out("    je .keys_skip")
+    out("    push rcx")
+    out("    mov rsi, [rdi]")  // key
+    out("    mov rdi, r13")
+    out("    call _nova_push")
+    out("    pop rcx")
+    out(".keys_skip:")
+    out("    inc rcx")
+    out("    jmp .keys_loop")
+    out(".keys_done:")
+    out("    mov rax, r13")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- values(map): return list of values ---
+    out("")
+    out_label("_nova_values")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    call _nova_list_new")
+    out("    mov r13, rax")
+    out("    mov r14, [r12 + 8]")
+    out("    xor ecx, ecx")
+    out(".vals_loop:")
+    out("    cmp rcx, r14")
+    out("    jge .vals_done")
+    out("    mov rax, [r12 + 24]")
+    out("    imul rdi, rcx, 24")
+    out("    add rdi, rax")
+    out("    cmp qword ptr [rdi + 16], 0")
+    out("    je .vals_skip")
+    out("    push rcx")
+    out("    mov rsi, [rdi + 8]")  // value
+    out("    mov rdi, r13")
+    out("    call _nova_push")
+    out("    pop rcx")
+    out(".vals_skip:")
+    out("    inc rcx")
+    out("    jmp .vals_loop")
+    out(".vals_done:")
+    out("    mov rax, r13")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- str_upper(str): uppercase a string ---
+    out("")
+    out_label("_nova_str_upper")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    mov r12, rdi")
+    out("    call _nova_str_len")
+    out("    mov r13, rax")
+    out("    lea rdi, [rax + 1]")
+    out("    call _nova_alloc")
+    out("    push rax")
+    out("    xor ecx, ecx")
+    out(".su_loop:")
+    out("    cmp rcx, r13")
+    out("    jge .su_done")
+    out("    movzx edx, byte ptr [r12 + rcx]")
+    out("    cmp dl, 97")
+    out("    jl .su_copy")
+    out("    cmp dl, 122")
+    out("    jg .su_copy")
+    out("    sub dl, 32")
+    out(".su_copy:")
+    out("    mov rax, [rsp]")
+    out("    mov [rax + rcx], dl")
+    out("    inc rcx")
+    out("    jmp .su_loop")
+    out(".su_done:")
+    out("    pop rax")
+    out("    mov byte ptr [rax + r13], 0")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- str_lower(str): lowercase a string ---
+    out("")
+    out_label("_nova_str_lower")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    mov r12, rdi")
+    out("    call _nova_str_len")
+    out("    mov r13, rax")
+    out("    lea rdi, [rax + 1]")
+    out("    call _nova_alloc")
+    out("    push rax")
+    out("    xor ecx, ecx")
+    out(".slw_loop:")
+    out("    cmp rcx, r13")
+    out("    jge .slw_done")
+    out("    movzx edx, byte ptr [r12 + rcx]")
+    out("    cmp dl, 65")
+    out("    jl .slw_copy")
+    out("    cmp dl, 90")
+    out("    jg .slw_copy")
+    out("    add dl, 32")
+    out(".slw_copy:")
+    out("    mov rax, [rsp]")
+    out("    mov [rax + rcx], dl")
+    out("    inc rcx")
+    out("    jmp .slw_loop")
+    out(".slw_done:")
+    out("    pop rax")
+    out("    mov byte ptr [rax + r13], 0")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- str_trim(str): trim leading/trailing whitespace ---
+    out("")
+    out_label("_nova_str_trim")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    mov r12, rdi")
+    out("    call _nova_str_len")
+    out("    mov r13, rax")
+    // find start (skip whitespace)
+    out("    xor ecx, ecx")
+    out(".st_lead:")
+    out("    cmp rcx, r13")
+    out("    jge .st_empty")
+    out("    movzx edx, byte ptr [r12 + rcx]")
+    out("    cmp dl, 32")
+    out("    je .st_lead_next")
+    out("    cmp dl, 9")
+    out("    je .st_lead_next")
+    out("    cmp dl, 10")
+    out("    je .st_lead_next")
+    out("    cmp dl, 13")
+    out("    je .st_lead_next")
+    out("    jmp .st_find_end")
+    out(".st_lead_next:")
+    out("    inc rcx")
+    out("    jmp .st_lead")
+    out(".st_empty:")
+    out("    lea rax, [rip + _empty_str]")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+    out(".st_find_end:")
+    out("    mov rsi, rcx")  // start
+    out("    mov rcx, r13")
+    out("    dec rcx")
+    out(".st_trail:")
+    out("    movzx edx, byte ptr [r12 + rcx]")
+    out("    cmp dl, 32")
+    out("    je .st_trail_next")
+    out("    cmp dl, 9")
+    out("    je .st_trail_next")
+    out("    cmp dl, 10")
+    out("    je .st_trail_next")
+    out("    cmp dl, 13")
+    out("    je .st_trail_next")
+    out("    jmp .st_copy")
+    out(".st_trail_next:")
+    out("    dec rcx")
+    out("    jmp .st_trail")
+    out(".st_copy:")
+    out("    inc rcx")
+    out("    sub rcx, rsi")  // length
+    out("    mov rdi, r12")
+    out("    add rdi, rsi")  // src start
+    out("    mov rsi, rcx")  // length
+    // substr(src+start, 0, len)
+    out("    push rcx")
+    out("    push rdi")
+    out("    lea rdi, [rcx + 1]")
+    out("    call _nova_alloc")
+    out("    pop rdi")
+    out("    pop rcx")
+    out("    push rax")
+    out("    mov rsi, rdi")
+    out("    pop rdi")
+    out("    push rdi")
+    // copy rcx bytes from rsi to rdi
+    out("    xor r8d, r8d")
+    out(".st_cloop:")
+    out("    cmp r8, rcx")
+    out("    jge .st_cdone")
+    out("    movzx edx, byte ptr [rsi + r8]")
+    out("    mov [rdi + r8], dl")
+    out("    inc r8")
+    out("    jmp .st_cloop")
+    out(".st_cdone:")
+    out("    pop rax")
+    out("    mov byte ptr [rax + rcx], 0")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- str_replace(str, old, new): replace all occurrences ---
+    out("")
+    out_label("_nova_str_replace")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    push r15")
+    out("    mov r12, rdi")  // source
+    out("    mov r13, rsi")  // old
+    out("    mov r14, rdx")  // new
+    // Get lengths
+    out("    call _nova_str_len")
+    out("    push rax")  // src_len
+    out("    mov rdi, r13")
+    out("    call _nova_str_len")
+    out("    mov r15, rax")  // old_len
+    // Build result string by concatenation
+    out("    lea rax, [rip + _empty_str]")
+    out("    push rax")  // result
+    out("    xor ecx, ecx")  // i
+    out("    push rcx")
+    out(".sr_loop:")
+    out("    mov rcx, [rsp]")  // i
+    out("    mov rax, [rsp + 16]")  // src_len
+    out("    cmp rcx, rax")
+    out("    jge .sr_done")
+    // Check if old matches at position i
+    out("    mov rdi, r12")
+    out("    add rdi, rcx")
+    out("    mov rsi, r13")
+    out("    mov rdx, r15")
+    out("    call _nova_strncmp")
+    out("    test rax, rax")
+    out("    jnz .sr_nomatch")
+    // Match found: append new string
+    out("    mov rdi, [rsp + 8]")
+    out("    mov rsi, r14")
+    out("    call _nova_concat")
+    out("    mov [rsp + 8], rax")
+    out("    mov rcx, [rsp]")
+    out("    add rcx, r15")
+    out("    mov [rsp], rcx")
+    out("    jmp .sr_loop")
+    out(".sr_nomatch:")
+    // Append one char
+    out("    mov rcx, [rsp]")
+    out("    movzx edi, byte ptr [r12 + rcx]")
+    out("    call _nova_chr")
+    out("    mov rsi, rax")
+    out("    mov rdi, [rsp + 8]")
+    out("    call _nova_concat")
+    out("    mov [rsp + 8], rax")
+    out("    inc qword ptr [rsp]")
+    out("    jmp .sr_loop")
+    out(".sr_done:")
+    out("    mov rax, [rsp + 8]")
+    out("    add rsp, 24")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // Helper: compare n bytes, return 0 if equal
+    out("")
+    out_label("_nova_strncmp")
+    out("    xor ecx, ecx")
+    out(".snc_loop:")
+    out("    cmp rcx, rdx")
+    out("    jge .snc_eq")
+    out("    movzx eax, byte ptr [rdi + rcx]")
+    out("    movzx r8d, byte ptr [rsi + rcx]")
+    out("    cmp al, r8b")
+    out("    jne .snc_neq")
+    out("    inc rcx")
+    out("    jmp .snc_loop")
+    out(".snc_eq:")
+    out("    xor eax, eax")
+    out("    ret")
+    out(".snc_neq:")
+    out("    mov eax, 1")
+    out("    ret")
+
+    // --- str_repeat(str, n): repeat string n times ---
+    out("")
+    out_label("_nova_str_repeat")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    lea rax, [rip + _empty_str]")
+    out("    push rax")
+    out(".srp_loop:")
+    out("    cmp r13, 0")
+    out("    jle .srp_done")
+    out("    mov rdi, [rsp]")
+    out("    mov rsi, r12")
+    out("    call _nova_concat")
+    out("    mov [rsp], rax")
+    out("    dec r13")
+    out("    jmp .srp_loop")
+    out(".srp_done:")
+    out("    pop rax")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- char_code(str): return ASCII code of first char ---
+    out("")
+    out_label("_nova_char_code")
+    out("    movzx eax, byte ptr [rdi]")
+    out("    ret")
+
+    // --- to_int(str): parse string to integer ---
+    out("")
+    out_label("_nova_to_int")
+    out("    jmp _nova_str_to_int")
+
+    // --- range_list(start, end): create list [start, start+1, ..., end-1] ---
+    out("")
+    out_label("_nova_range_list")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    call _nova_list_new")
+    out("    push rax")
+    out(".rgl_loop:")
+    out("    cmp r12, r13")
+    out("    jge .rgl_done")
+    out("    mov rdi, [rsp]")
+    out("    mov rsi, r12")
+    out("    call _nova_push")
+    out("    inc r12")
+    out("    jmp .rgl_loop")
+    out(".rgl_done:")
+    out("    pop rax")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- list_copy(list): shallow copy ---
+    out("")
+    out_label("_nova_list_copy")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    mov r12, rdi")
+    out("    call _nova_list_new")
+    out("    mov r13, rax")
+    out("    xor ecx, ecx")
+    out(".lc_loop:")
+    out("    cmp rcx, [r12 + 8]")
+    out("    jge .lc_done")
+    out("    push rcx")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rsi, [rax + rcx*8]")
+    out("    mov rdi, r13")
+    out("    call _nova_push")
+    out("    pop rcx")
+    out("    inc rcx")
+    out("    jmp .lc_loop")
+    out(".lc_done:")
+    out("    mov rax, r13")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- list_slice(list, start, end): sublist ---
+    out("")
+    out_label("_nova_list_slice")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")  // start
+    out("    mov r14, rdx")  // end
+    out("    call _nova_list_new")
+    out("    push rax")
+    out(".ls_loop:")
+    out("    cmp r13, r14")
+    out("    jge .ls_done")
+    out("    cmp r13, [r12 + 8]")
+    out("    jge .ls_done")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rsi, [rax + r13*8]")
+    out("    mov rdi, [rsp]")
+    out("    push r13")
+    out("    call _nova_push")
+    out("    pop r13")
+    out("    inc r13")
+    out("    jmp .ls_loop")
+    out(".ls_done:")
+    out("    pop rax")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- append_list(dst, src): append all elements of src to dst ---
+    out("")
+    out_label("_nova_append_list")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    xor r14d, r14d")
+    out(".al_loop:")
+    out("    cmp r14, [r13 + 8]")
+    out("    jge .al_done")
+    out("    mov rax, [r13 + 24]")
+    out("    mov rsi, [rax + r14*8]")
+    out("    mov rdi, r12")
+    out("    call _nova_push")
+    out("    inc r14")
+    out("    jmp .al_loop")
+    out(".al_done:")
+    out("    mov rax, r12")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
     // --- Wrappers with Nova-compatible names ---
     out("")
     out_label("println")
@@ -3126,6 +3855,40 @@ fn gen_runtime() {
     out("    ret")
     out_label("get_error")
     out("    jmp _nova_get_error")
+    out_label("map_list")
+    out("    jmp _nova_map_list")
+    out_label("filter")
+    out("    jmp _nova_filter")
+    out_label("reduce")
+    out("    jmp _nova_reduce")
+    out_label("foreach")
+    out("    jmp _nova_foreach")
+    out_label("keys")
+    out("    jmp _nova_keys")
+    out_label("values")
+    out("    jmp _nova_values")
+    out_label("str_upper")
+    out("    jmp _nova_str_upper")
+    out_label("str_lower")
+    out("    jmp _nova_str_lower")
+    out_label("str_trim")
+    out("    jmp _nova_str_trim")
+    out_label("str_replace")
+    out("    jmp _nova_str_replace")
+    out_label("str_repeat")
+    out("    jmp _nova_str_repeat")
+    out_label("char_code")
+    out("    jmp _nova_char_code")
+    out_label("to_int")
+    out("    jmp _nova_to_int")
+    out_label("range_list")
+    out("    jmp _nova_range_list")
+    out_label("list_copy")
+    out("    jmp _nova_list_copy")
+    out_label("list_slice")
+    out("    jmp _nova_list_slice")
+    out_label("append_list")
+    out("    jmp _nova_append_list")
 
     // --- Data for runtime ---
     out("")

@@ -1,0 +1,56 @@
+// Test: Extended standard library functions
+
+// String functions
+let s = "Hello World"
+let upper = str_upper(s)
+assert(upper == "HELLO WORLD", "str_upper")
+
+let lower = str_lower(s)
+assert(lower == "hello world", "str_lower")
+
+let padded = "  hello  "
+let trimmed = str_trim(padded)
+assert(trimmed == "hello", "str_trim")
+
+let replaced = str_replace("hello world", "world", "nova")
+assert(replaced == "hello nova", "str_replace")
+
+let repeated = str_repeat("ab", 3)
+assert(repeated == "ababab", "str_repeat")
+
+// char_code
+let code = char_code("A")
+assert(code == 65, "char_code A")
+
+// to_int
+let n = to_int("42")
+assert(n == 42, "to_int")
+
+// range_list
+let r = range_list(0, 5)
+assert(len(r) == 5, "range_list len")
+assert(r[0] == 0, "range_list first")
+assert(r[4] == 4, "range_list last")
+
+// list_copy
+let orig = [1, 2, 3]
+let copy = list_copy(orig)
+assert(len(copy) == 3, "list_copy len")
+assert(copy[0] == 1, "list_copy val")
+push(copy, 4)
+assert(len(orig) == 3, "copy is independent")
+
+// list_slice
+let sliced = list_slice(r, 1, 4)
+assert(len(sliced) == 3, "list_slice len")
+assert(sliced[0] == 1, "list_slice start")
+assert(sliced[2] == 3, "list_slice end")
+
+// append_list
+let a = [1, 2]
+let b = [3, 4]
+append_list(a, b)
+assert(len(a) == 4, "append_list len")
+assert(a[2] == 3, "append_list val")
+
+println("All stdlib tests passed!")

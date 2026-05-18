@@ -5,11 +5,15 @@
 let par_tokens = 0
 let par_pos = 0
 let par_count = 0
+let par_lambda_count = 0
+let par_lambdas = 0
 
 fn par_init(tokens) {
     par_tokens = tokens
     par_pos = 0
     par_count = len(tokens)
+    par_lambda_count = 0
+    par_lambdas = list_new()
 }
 
 fn par_peek() {
@@ -84,6 +88,12 @@ fn token_type_name(t) {
     if t == 69 { return "try" }
     if t == 70 { return "catch" }
     if t == 71 { return "throw" }
+    if t == 77 { return "enum" }
+    if t == 78 { return "+=" }
+    if t == 79 { return "-=" }
+    if t == 80 { return "*=" }
+    if t == 81 { return "/=" }
+    if t == 82 { return "%=" }
     return concat("token(", concat(int_to_str(t), ")"))
 }
 
@@ -285,6 +295,36 @@ fn parse_primary() {
         par_advance()
         let operand = parse_unary()
         return ast_unary("!", operand)
+    }
+    if t == TOK_FN {
+        // Check if this is a lambda: fn( without identifier
+        let next_pos = par_pos + 1
+        if next_pos < par_count {
+            let next_tok = par_tokens[next_pos]
+            if next_tok[0] == TOK_LPAREN {
+                // Lambda expression
+                par_advance()
+                par_expect(TOK_LPAREN)
+                let params = list_new()
+                if par_peek_type() == TOK_RPAREN {
+                } else {
+                    let p = par_expect(TOK_IDENT)
+                    push(params, p[1])
+                    while par_peek_type() == TOK_COMMA {
+                        par_advance()
+                        let p2 = par_expect(TOK_IDENT)
+                        push(params, p2[1])
+                    }
+                }
+                par_expect(TOK_RPAREN)
+                let body = parse_block()
+                let lname = "_lambda_" + int_to_str(par_lambda_count)
+                par_lambda_count = par_lambda_count + 1
+                let fn_node = ast_fn_decl(lname, params, body)
+                push(par_lambdas, fn_node)
+                return ast_lambda(lname, params, body)
+            }
+        }
     }
     // Unexpected token
     print("Error at line ")
@@ -671,6 +711,7 @@ fn parse_stmt() {
     if t == TOK_MATCH { return parse_match() }
     if t == TOK_TRY { return parse_try() }
     if t == TOK_THROW { return parse_throw() }
+    if t == TOK_ENUM { return parse_enum() }
 
     // Assignment or expression statement
     let expr = parse_expr()
@@ -686,7 +727,55 @@ fn parse_stmt() {
         let name = expr[1]
         return ast_assign(name, value)
     }
+    // Compound assignment: +=, -=, *=, /=, %=
+    let pt = par_peek_type()
+    let compound_op = ""
+    if pt == TOK_PLUS_EQ { compound_op = "+" }
+    if pt == TOK_MINUS_EQ { compound_op = "-" }
+    if pt == TOK_STAR_EQ { compound_op = "*" }
+    if pt == TOK_SLASH_EQ { compound_op = "/" }
+    if pt == TOK_PERCENT_EQ { compound_op = "%" }
+    if compound_op == "" {
+    } else {
+        par_advance()
+        let rhs = parse_expr()
+        if ast_tag(expr) == AST_INDEX_EXPR {
+            let base = expr[1]
+            let idx = expr[2]
+            return ast_index_assign(base, idx, ast_binop(compound_op, ast_index(base, idx), rhs))
+        }
+        if ast_tag(expr) == AST_FIELD_ACCESS {
+            let fbase = expr[1]
+            let fname = expr[2]
+            return ast_field_assign(fbase, fname, ast_binop(compound_op, ast_field_access(fbase, fname), rhs))
+        }
+        let name = expr[1]
+        return ast_assign(name, ast_binop(compound_op, ast_ident(name), rhs))
+    }
     return ast_expr_stmt(expr)
+}
+
+fn parse_enum() {
+    par_expect(TOK_ENUM)
+    let name_tok = par_expect(TOK_IDENT)
+    let name = name_tok[1]
+    par_expect(TOK_LBRACE)
+    let variants = list_new()
+    let enum_done = 0
+    while enum_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            enum_done = 1
+        } else {
+            if par_peek_type() == TOK_COMMA {
+                par_advance()
+            } else {
+                let v = par_expect(TOK_IDENT)
+                push(variants, v[1])
+            }
+        }
+    }
+    par_expect(TOK_RBRACE)
+    return ast_enum_decl(name, variants)
 }
 
 fn parse_program(tokens) {

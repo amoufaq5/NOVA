@@ -1,0 +1,50 @@
+// Higher-order functions and lambdas in Nova
+
+// Define a pipeline of transformations
+let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+// Filter evens, double them, sum the result
+let evens = filter(data, fn(x) { return x % 2 == 0 })
+let doubled = map_list(evens, fn(x) { return x * 2 })
+let total = reduce(doubled, fn(acc, x) { return acc + x }, 0)
+
+println("Data: [1..10]")
+print("Even numbers doubled and summed: ")
+print_int(total)
+println("")
+
+// Functional composition
+fn apply_twice(f, x) {
+    return f(f(x))
+}
+
+let inc = fn(n) { return n + 1 }
+let result = apply_twice(inc, 5)
+print("apply_twice(inc, 5) = ")
+print_int(result)
+println("")
+
+// Using enums
+enum Op {
+    Add,
+    Sub,
+    Mul
+}
+
+fn calculate(op, a, b) {
+    match op {
+        0 => { return a + b }
+        1 => { return a - b }
+        2 => { return a * b }
+        _ => { return 0 }
+    }
+    return 0
+}
+
+print("Add 3+4 = ")
+print_int(calculate(Op.Add, 3, 4))
+println("")
+
+print("Mul 3*4 = ")
+print_int(calculate(Op.Mul, 3, 4))
+println("")
