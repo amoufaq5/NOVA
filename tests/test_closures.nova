@@ -1,0 +1,42 @@
+// Test: Closures (lambdas capturing outer variables)
+
+// Basic closure with filter
+let threshold = 3
+let above = filter([1, 2, 3, 4, 5], fn(x) { return x > threshold })
+assert(above.len() == 2, "closure filter len")
+assert(above[0] == 4, "closure filter[0]")
+assert(above[1] == 5, "closure filter[1]")
+
+// Closure with map
+let multiplier = 10
+let scaled = map_list([1, 2, 3], fn(x) { return x * multiplier })
+assert(scaled.len() == 3, "closure map len")
+assert(scaled[0] == 10, "closure map[0]")
+assert(scaled[1] == 20, "closure map[1]")
+assert(scaled[2] == 30, "closure map[2]")
+
+// Closure capturing string
+let prefix = "Hello "
+let greets = map_list(["Alice", "Bob"], fn(name) { return prefix + name })
+assert(greets[0] == "Hello Alice", "closure string 0")
+assert(greets[1] == "Hello Bob", "closure string 1")
+
+// Closure with multiple captures
+let base_val = 100
+let step_val = 5
+let result = map_list([0, 1, 2], fn(i) { return base_val + i * step_val })
+assert(result[0] == 100, "multi-capture 0")
+assert(result[1] == 105, "multi-capture 1")
+assert(result[2] == 110, "multi-capture 2")
+
+// Closure with reduce
+let initial = 1000
+let total = reduce([1, 2, 3], fn(acc, x) { return acc + x }, initial)
+assert(total == 1006, "closure reduce")
+
+// Closure with any/all
+let min_val = 3
+assert(any([1, 2, 3, 4], fn(x) { return x > min_val }) == 1, "closure any")
+assert(all([1, 2, 3, 4], fn(x) { return x > min_val }) == 0, "closure all")
+
+println("All closure tests passed!")

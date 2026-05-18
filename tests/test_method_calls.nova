@@ -1,0 +1,39 @@
+// Test: Method call syntax (obj.method(args) → method(obj, args))
+
+let items = [1, 2, 3, 4, 5]
+assert(items.len() == 5, "list.len()")
+
+items.push(6)
+assert(items.len() == 6, "list.push()")
+assert(items[5] == 6, "list.push() value")
+
+let popped = items.pop()
+assert(popped == 6, "list.pop()")
+assert(items.len() == 5, "after pop")
+
+let s = "hello world"
+assert(s.len() == 11, "str.len()")
+assert(s.contains("world") == 1, "str.contains()")
+assert(s.starts_with("hello") == 1, "str.starts_with()")
+assert(s.ends_with("world") == 1, "str.ends_with()")
+
+let parts = "a,b,c".split(",")
+assert(parts.len() == 3, "str.split()")
+assert(parts[0] == "a", "split[0]")
+
+let nums = [3, 1, 2]
+nums.sort()
+assert(nums[0] == 1, "list.sort()")
+
+let joined = parts.join("-")
+assert(joined == "a-b-c", "list.join()")
+
+let m = map_new()
+m.map_set("x", 10)
+assert(m.map_get("x") == 10, "map method calls")
+assert(m.map_has("x") == 1, "map.map_has()")
+
+let copied = items.list_copy()
+assert(copied.len() == 5, "list.list_copy()")
+
+println("All method call tests passed!")

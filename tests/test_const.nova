@@ -1,0 +1,16 @@
+// Test: Const enforcement
+
+const X = 42
+assert(X == 42, "const value")
+
+const NAME = "Nova"
+assert(NAME == "Nova", "const string")
+
+const FLAG = 1
+assert(FLAG == 1, "const flag")
+
+// Use const in expressions
+let y = X + 8
+assert(y == 50, "const in expression")
+
+println("All const tests passed!")

@@ -1,0 +1,28 @@
+// Test: Type annotations (parsed and ignored)
+
+let x: int = 42
+assert(x == 42, "let with type")
+
+const PI: float = 3141
+assert(PI == 3141, "const with type")
+
+fn add(a: int, b: int): int {
+    return a + b
+}
+assert(add(3, 4) == 7, "fn with type annotations")
+
+fn greet(name: str): str {
+    return "Hello " + name
+}
+assert(greet("World") == "Hello World", "fn return type")
+
+fn identity(x: int): int {
+    return x
+}
+assert(identity(99) == 99, "identity typed")
+
+// Lambda with type annotations
+let double = fn(x: int): int { return x * 2 }
+assert(double(5) == 10, "typed lambda")
+
+println("All type annotation tests passed!")

@@ -23,6 +23,10 @@ let cg_structs = 0
 let cg_struct_count = 0
 let cg_enums = 0
 let cg_enum_count = 0
+let cg_lambda_caps = 0
+let cg_capture_slots = 0
+let cg_current_caps = 0
+let cg_current_cap_name = ""
 
 fn cg_init() {
     cg_output = ""
@@ -36,6 +40,10 @@ fn cg_init() {
     cg_struct_count = 0
     cg_enums = list_new()
     cg_enum_count = 0
+    cg_lambda_caps = list_new()
+    cg_capture_slots = list_new()
+    cg_current_caps = 0
+    cg_current_cap_name = ""
 }
 
 fn out(s) {
@@ -67,6 +75,17 @@ fn is_global(name) {
     let i = 0
     while i < cg_global_count {
         if cg_globals[i] == name {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn has_local(name) {
+    let i = 0
+    while i < cg_local_count {
+        if cg_locals[i] == name {
             return 1
         }
         i = i + 1
@@ -222,6 +241,247 @@ fn enum_variant_index(enum_name, variant_name) {
         si = si + 1
     }
     return 0 - 1
+}
+
+fn get_lambda_caps(lname) {
+    let i = 0
+    while i < len(cg_lambda_caps) {
+        let entry = cg_lambda_caps[i]
+        if entry[0] == lname { return entry[1] }
+        i = i + 1
+    }
+    return list_new()
+}
+
+fn is_capture_var(name) {
+    if cg_current_caps == 0 { return 0 }
+    let i = 0
+    while i < len(cg_current_caps) {
+        if cg_current_caps[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn collect_idents_in(nd, names) {
+    if nd == 0 { return 0 }
+    let tag = nd[0]
+    if tag == AST_IDENT {
+        let nm = nd[1]
+        let qi = 0
+        let already = 0
+        while qi < len(names) {
+            if names[qi] == nm { already = 1 }
+            qi = qi + 1
+        }
+        if already == 0 { push(names, nm) }
+        return 0
+    }
+    if tag == AST_INT_LIT { return 0 }
+    if tag == AST_FLOAT_LIT { return 0 }
+    if tag == AST_STR_LIT { return 0 }
+    if tag == AST_BOOL_LIT { return 0 }
+    if tag == AST_NONE_LIT { return 0 }
+    if tag == AST_WILDCARD { return 0 }
+    if tag == AST_BREAK_STMT { return 0 }
+    if tag == AST_CONTINUE_STMT { return 0 }
+    if tag == AST_STRUCT_DECL { return 0 }
+    if tag == AST_ENUM_DECL { return 0 }
+    if tag == AST_LAMBDA { return 0 }
+    if tag == AST_ASSIGN_STMT {
+        let aname = nd[1]
+        let qi = 0
+        let already = 0
+        while qi < len(names) {
+            if names[qi] == aname { already = 1 }
+            qi = qi + 1
+        }
+        if already == 0 { push(names, aname) }
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_BIN_OP {
+        collect_idents_in(nd[2], names)
+        collect_idents_in(nd[3], names)
+        return 0
+    }
+    if tag == AST_UNARY_OP {
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_AND_EXPR {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_OR_EXPR {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_LET_STMT {
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_RETURN_STMT {
+        if nd[1] == 0 { } else {
+            collect_idents_in(nd[1], names)
+        }
+        return 0
+    }
+    if tag == AST_BLOCK {
+        let stmts = nd[1]
+        let bi = 0
+        while bi < len(stmts) {
+            collect_idents_in(stmts[bi], names)
+            bi = bi + 1
+        }
+        return 0
+    }
+    if tag == AST_CALL {
+        collect_idents_in(nd[1], names)
+        let cargs = nd[2]
+        let ci = 0
+        while ci < len(cargs) {
+            collect_idents_in(cargs[ci], names)
+            ci = ci + 1
+        }
+        return 0
+    }
+    if tag == AST_IF_STMT {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        if nd[3] == 0 { } else {
+            collect_idents_in(nd[3], names)
+        }
+        return 0
+    }
+    if tag == AST_WHILE_STMT {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_FOR_STMT {
+        collect_idents_in(nd[2], names)
+        collect_idents_in(nd[3], names)
+        return 0
+    }
+    if tag == AST_DO_WHILE {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_INDEX_EXPR {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_INDEX_ASSIGN {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        collect_idents_in(nd[3], names)
+        return 0
+    }
+    if tag == AST_FIELD_ACCESS {
+        collect_idents_in(nd[1], names)
+        return 0
+    }
+    if tag == AST_FIELD_ASSIGN {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[3], names)
+        return 0
+    }
+    if tag == AST_EXPR_STMT {
+        collect_idents_in(nd[1], names)
+        return 0
+    }
+    if tag == AST_TERNARY {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        collect_idents_in(nd[3], names)
+        return 0
+    }
+    if tag == AST_LIST_LIT {
+        let elems = nd[1]
+        let ei = 0
+        while ei < len(elems) {
+            collect_idents_in(elems[ei], names)
+            ei = ei + 1
+        }
+        return 0
+    }
+    if tag == AST_MATCH_STMT {
+        collect_idents_in(nd[1], names)
+        let marms = nd[2]
+        let mi = 0
+        while mi < len(marms) {
+            collect_idents_in(marms[mi][1], names)
+            collect_idents_in(marms[mi][2], names)
+            mi = mi + 1
+        }
+        return 0
+    }
+    if tag == AST_TRY_CATCH {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_THROW {
+        collect_idents_in(nd[1], names)
+        return 0
+    }
+    if tag == AST_FN_DECL {
+        collect_idents_in(nd[3], names)
+        return 0
+    }
+    return 0
+}
+
+fn compute_captures(lam) {
+    let lam_params = lam[2]
+    let lam_body = lam[3]
+    let all_names = list_new()
+    collect_idents_in(lam_body, all_names)
+    let save_locals = cg_locals
+    let save_lcount = cg_local_count
+    cg_locals = list_new()
+    cg_local_count = 0
+    let pi = 0
+    while pi < len(lam_params) {
+        push(cg_locals, lam_params[pi])
+        cg_local_count = cg_local_count + 1
+        pi = pi + 1
+    }
+    collect_locals(lam_body)
+    let body_bound = cg_locals
+    let body_bcount = cg_local_count
+    cg_locals = save_locals
+    cg_local_count = save_lcount
+    let captures = list_new()
+    let ni = 0
+    while ni < len(all_names) {
+        let nm = all_names[ni]
+        let skip = 0
+        let bi = 0
+        while bi < body_bcount {
+            if body_bound[bi] == nm { skip = 1 }
+            bi = bi + 1
+        }
+        if skip == 0 {
+            if is_builtin_fn(nm) == 1 { skip = 1 }
+        }
+        if skip == 0 {
+            if is_known_function(nm) == 1 { skip = 1 }
+        }
+        if skip == 0 {
+            if is_global(nm) == 1 { skip = 1 }
+        }
+        if skip == 0 {
+            push(captures, nm)
+        }
+        ni = ni + 1
+    }
+    return captures
 }
 
 fn is_builtin_fn(name) {
@@ -389,17 +649,25 @@ fn gen_expr(nd) {
 
     if tag == AST_IDENT {
         let name = nd[1]
-        // Check if this is a function reference (getting address of a function)
         if is_known_function(name) == 1 {
             out("    lea rax, [rip + " + name + "]")
             return 0
         }
-        if is_global(name) == 1 {
-            out("    mov rax, [rip + _g_" + name + "]")
-        } else {
+        if has_local(name) == 1 {
             let off = local_offset(name)
             out("    mov rax, [rbp - " + int_to_str(off) + "]")
+            return 0
         }
+        if is_capture_var(name) == 1 {
+            out("    mov rax, [rip + _cap_" + cg_current_cap_name + "_" + name + "]")
+            return 0
+        }
+        if is_global(name) == 1 {
+            out("    mov rax, [rip + _g_" + name + "]")
+            return 0
+        }
+        let off = local_offset(name)
+        out("    mov rax, [rbp - " + int_to_str(off) + "]")
         return 0
     }
 
@@ -577,6 +845,29 @@ fn gen_expr(nd) {
                 is_direct = 1
             }
         }
+        if ast_tag(callee) == AST_FIELD_ACCESS {
+            let mbase = callee[1]
+            let mname = callee[2]
+            if is_known_function(mname) == 1 {
+                let mai = argc - 1
+                while mai >= 0 {
+                    gen_expr(args[mai])
+                    out("    push rax")
+                    mai = mai - 1
+                }
+                gen_expr(mbase)
+                out("    push rax")
+                let mtotal = argc + 1
+                if mtotal > 0 { out("    pop rdi") }
+                if mtotal > 1 { out("    pop rsi") }
+                if mtotal > 2 { out("    pop rdx") }
+                if mtotal > 3 { out("    pop rcx") }
+                if mtotal > 4 { out("    pop r8") }
+                if mtotal > 5 { out("    pop r9") }
+                out("    call " + mname)
+                return 0
+            }
+        }
         if is_direct == 1 {
             // Direct call to a known function
             let i = argc - 1
@@ -652,6 +943,23 @@ fn gen_expr(nd) {
 
     if tag == AST_LAMBDA {
         let lname = nd[1]
+        let lcaps = get_lambda_caps(lname)
+        let lci = 0
+        while lci < len(lcaps) {
+            let cap_nm = lcaps[lci]
+            if is_global(cap_nm) == 1 {
+                out("    mov rax, [rip + _g_" + cap_nm + "]")
+            } else {
+                if is_capture_var(cap_nm) == 1 {
+                    out("    mov rax, [rip + _cap_" + cg_current_cap_name + "_" + cap_nm + "]")
+                } else {
+                    let cap_off = local_offset(cap_nm)
+                    out("    mov rax, [rbp - " + int_to_str(cap_off) + "]")
+                }
+            }
+            out("    mov [rip + _cap_" + lname + "_" + cap_nm + "], rax")
+            lci = lci + 1
+        }
         out("    lea rax, [rip + " + lname + "]")
         return 0
     }
@@ -753,11 +1061,20 @@ fn gen_stmt(nd) {
         let name = nd[1]
         let value = nd[2]
         gen_expr(value)
-        if is_global(name) == 1 {
-            out("    mov [rip + _g_" + name + "], rax")
-        } else {
+        if has_local(name) == 1 {
             let off = local_offset(name)
             out("    mov [rbp - " + int_to_str(off) + "], rax")
+        } else {
+            if is_capture_var(name) == 1 {
+                out("    mov [rip + _cap_" + cg_current_cap_name + "_" + name + "], rax")
+            } else {
+                if is_global(name) == 1 {
+                    out("    mov [rip + _g_" + name + "], rax")
+                } else {
+                    let off = local_offset(name)
+                    out("    mov [rbp - " + int_to_str(off) + "], rax")
+                }
+            }
         }
         return 0
     }
@@ -1158,6 +1475,15 @@ fn gen_function(nd) {
     let params = nd[2]
     let body = nd[3]
 
+    let fn_caps = get_lambda_caps(name)
+    if len(fn_caps) > 0 {
+        cg_current_caps = fn_caps
+        cg_current_cap_name = name
+    } else {
+        cg_current_caps = 0
+        cg_current_cap_name = ""
+    }
+
     cg_locals = list_new()
     cg_local_count = 0
     cg_params = params
@@ -1250,6 +1576,28 @@ fn gen_program(program) {
     while li < len(par_lambdas) {
         let lam = par_lambdas[li]
         push(cg_fns, lam[1])
+        li = li + 1
+    }
+
+    // Pre-pass: compute captures for all lambdas
+    li = 0
+    while li < len(par_lambdas) {
+        let lam = par_lambdas[li]
+        let caps = compute_captures(lam)
+        if len(caps) > 0 {
+            let cap_entry = list_new()
+            push(cap_entry, lam[1])
+            push(cap_entry, caps)
+            push(cg_lambda_caps, cap_entry)
+            let ci = 0
+            while ci < len(caps) {
+                let slot_entry = list_new()
+                push(slot_entry, lam[1])
+                push(slot_entry, caps[ci])
+                push(cg_capture_slots, slot_entry)
+                ci = ci + 1
+            }
+        }
         li = li + 1
     }
 
@@ -1369,6 +1717,16 @@ fn gen_program(program) {
     while i < cg_global_count {
         out("    .align 8")
         out_label("_g_" + cg_globals[i])
+        out("    .quad 0")
+        i = i + 1
+    }
+
+    // Emit closure capture slots
+    i = 0
+    while i < len(cg_capture_slots) {
+        let slot = cg_capture_slots[i]
+        out("    .align 8")
+        out_label("_cap_" + slot[0] + "_" + slot[1])
         out("    .quad 0")
         i = i + 1
     }
@@ -2011,9 +2369,20 @@ fn gen_runtime() {
     out("    mov [rax+rsi*8], rdx")
     out("    ret")
 
-    // --- contains(list, val) -> 1 if found, 0 if not ---
+    // --- contains(list_or_str, val) -> 1 if found, 0 if not ---
     out("")
     out_label("_nova_contains")
+    out("    cmp qword ptr [rdi], -1")
+    out("    je .contains_is_list")
+    out("    call _nova_str_find")
+    out("    cmp rax, 0")
+    out("    jl .contains_str_no")
+    out("    mov eax, 1")
+    out("    ret")
+    out(".contains_str_no:")
+    out("    xor eax, eax")
+    out("    ret")
+    out(".contains_is_list:")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    push r12")
@@ -2751,6 +3120,28 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- _nova_hash_key(key in rdi) -> hash in rax ---
+    out("")
+    out_label("_nova_hash_key")
+    out("    mov rax, rdi")
+    out("    cmp rax, 4096")
+    out("    jl .hk_int")
+    out("    xor eax, eax")
+    out(".hk_str_loop:")
+    out("    movzx ecx, byte ptr [rdi]")
+    out("    test cl, cl")
+    out("    jz .hk_done")
+    out("    imul rax, 31")
+    out("    add rax, rcx")
+    out("    inc rdi")
+    out("    jmp .hk_str_loop")
+    out(".hk_int:")
+    out("    test rax, rax")
+    out("    jns .hk_done")
+    out("    neg rax")
+    out(".hk_done:")
+    out("    ret")
+
     // --- map_set(map, key, value) ---
     out("")
     out_label("_nova_map_set")
@@ -2759,43 +3150,53 @@ fn gen_runtime() {
     out("    push r12")
     out("    push r13")
     out("    push r14")
+    out("    push r15")
     out("    mov r12, rdi")
     out("    mov r13, rsi")
     out("    mov r14, rdx")
-    out("    mov rax, rsi")
-    out("    test rax, rax")
-    out("    jns .ms_pos")
-    out("    neg rax")
-    out(".ms_pos:")
+    out("    mov rdi, rsi")
+    out("    call _nova_hash_key")
     out("    xor edx, edx")
     out("    div qword ptr [r12 + 16]")
-    out("    mov rcx, rdx")
+    out("    mov r15, rdx")
     out("    mov rdi, [r12 + 24]")
     out(".ms_probe:")
-    out("    mov rax, rcx")
+    out("    mov rax, r15")
     out("    imul rax, 24")
     out("    add rax, rdi")
     out("    cmp qword ptr [rax + 16], 0")
     out("    je .ms_insert")
-    out("    cmp [rax], r13")
-    out("    je .ms_update")
-    out("    inc rcx")
-    out("    cmp rcx, [r12 + 16]")
+    out("    push rax")
+    out("    push rdi")
+    out("    mov rdi, [rax]")
+    out("    mov rsi, r13")
+    out("    call _nova_eq")
+    out("    pop rdi")
+    out("    pop rax")
+    out("    test rax, rax")
+    out("    jnz .ms_update")
+    out("    inc r15")
+    out("    cmp r15, [r12 + 16]")
     out("    jl .ms_probe")
-    out("    xor ecx, ecx")
+    out("    xor r15d, r15d")
     out("    jmp .ms_probe")
     out(".ms_insert:")
     out("    mov [rax], r13")
     out("    mov [rax + 8], r14")
     out("    mov qword ptr [rax + 16], 1")
     out("    inc qword ptr [r12 + 8]")
+    out("    pop r15")
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
     out("    ret")
     out(".ms_update:")
+    out("    mov rax, r15")
+    out("    imul rax, 24")
+    out("    add rax, [r12 + 24]")
     out("    mov [rax + 8], r14")
+    out("    pop r15")
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")
@@ -2807,40 +3208,58 @@ fn gen_runtime() {
     out_label("_nova_map_get")
     out("    push rbp")
     out("    mov rbp, rsp")
-    out("    mov rax, rsi")
-    out("    test rax, rax")
-    out("    jns .mg_pos")
-    out("    neg rax")
-    out(".mg_pos:")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    push r15")
+    out("    push rbx")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    mov rdi, rsi")
+    out("    call _nova_hash_key")
     out("    xor edx, edx")
-    out("    div qword ptr [rdi + 16]")
-    out("    mov rcx, rdx")
-    out("    mov r8, [rdi + 24]")
-    out("    mov r9, [rdi + 16]")
-    out("    xor r10d, r10d")
+    out("    div qword ptr [r12 + 16]")
+    out("    mov r14, rdx")
+    out("    mov r15, [r12 + 16]")
+    out("    xor ebx, ebx")
     out(".mg_probe:")
-    out("    cmp r10, r9")
+    out("    cmp rbx, r15")
     out("    jge .mg_not_found")
-    out("    mov rax, rcx")
+    out("    mov rax, r14")
     out("    imul rax, 24")
-    out("    add rax, r8")
+    out("    add rax, [r12 + 24]")
     out("    cmp qword ptr [rax + 16], 0")
     out("    je .mg_not_found")
-    out("    cmp [rax], rsi")
-    out("    je .mg_found")
-    out("    inc rcx")
-    out("    cmp rcx, r9")
+    out("    push rax")
+    out("    mov rdi, [rax]")
+    out("    mov rsi, r13")
+    out("    call _nova_eq")
+    out("    test rax, rax")
+    out("    pop rax")
+    out("    jnz .mg_found")
+    out("    inc r14")
+    out("    cmp r14, r15")
     out("    jl .mg_no_wrap")
-    out("    xor ecx, ecx")
+    out("    xor r14d, r14d")
     out(".mg_no_wrap:")
-    out("    inc r10")
+    out("    inc rbx")
     out("    jmp .mg_probe")
     out(".mg_found:")
     out("    mov rax, [rax + 8]")
+    out("    pop rbx")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
     out("    pop rbp")
     out("    ret")
     out(".mg_not_found:")
     out("    xor eax, eax")
+    out("    pop rbx")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
     out("    pop rbp")
     out("    ret")
 
@@ -2919,6 +3338,10 @@ fn gen_runtime() {
     out("    mov r13, rsi")
     out("    call _nova_list_new")
     out("    mov r14, rax")
+    out("    cmp r13, 256")
+    out("    jl .split_char_ready")
+    out("    movzx r13d, byte ptr [r13]")
+    out(".split_char_ready:")
     out("    xor r15d, r15d")
     out("    xor ebx, ebx")
     out(".split_loop:")

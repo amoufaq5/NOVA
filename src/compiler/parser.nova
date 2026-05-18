@@ -7,6 +7,7 @@ let par_pos = 0
 let par_count = 0
 let par_lambda_count = 0
 let par_lambdas = 0
+let par_consts = 0
 
 fn par_init(tokens) {
     par_tokens = tokens
@@ -14,6 +15,7 @@ fn par_init(tokens) {
     par_count = len(tokens)
     par_lambda_count = 0
     par_lambdas = list_new()
+    par_consts = list_new()
 }
 
 fn par_peek() {
@@ -130,6 +132,26 @@ fn par_match(typ) {
         return 1
     }
     return 0
+}
+
+fn par_skip_type() {
+    par_expect(TOK_IDENT)
+    if par_peek_type() == TOK_LT {
+        par_advance()
+        let depth = 1
+        let tdone = 0
+        while tdone == 0 {
+            let tt = par_peek_type()
+            if tt == TOK_LT { depth = depth + 1 }
+            if tt == TOK_GT { depth = depth - 1 }
+            if tt == TOK_EOF {
+                println("Error: unexpected EOF in type annotation")
+                exit(1)
+            }
+            if depth == 0 { tdone = 1 }
+            par_advance()
+        }
+    }
 }
 
 // --- String Interpolation ---
@@ -312,13 +334,25 @@ fn parse_primary() {
                 } else {
                     let p = par_expect(TOK_IDENT)
                     push(params, p[1])
+                    if par_peek_type() == TOK_COLON {
+                        par_advance()
+                        par_skip_type()
+                    }
                     while par_peek_type() == TOK_COMMA {
                         par_advance()
                         let p2 = par_expect(TOK_IDENT)
                         push(params, p2[1])
+                        if par_peek_type() == TOK_COLON {
+                            par_advance()
+                            par_skip_type()
+                        }
                     }
                 }
                 par_expect(TOK_RPAREN)
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    par_skip_type()
+                }
                 let body = parse_block()
                 let lname = "_lambda_" + int_to_str(par_lambda_count)
                 par_lambda_count = par_lambda_count + 1
@@ -591,15 +625,24 @@ fn parse_for() {
 
 fn parse_let() {
     let t = par_peek_type()
+    let is_const_decl = 0
     if t == TOK_CONST {
+        is_const_decl = 1
         par_advance()
     } else {
         par_expect(TOK_LET)
     }
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
+    if par_peek_type() == TOK_COLON {
+        par_advance()
+        par_skip_type()
+    }
     par_expect(TOK_EQ)
     let value = parse_expr()
+    if is_const_decl == 1 {
+        push(par_consts, name)
+    }
     return ast_let(name, value)
 }
 
@@ -613,13 +656,25 @@ fn parse_fn() {
     } else {
         let p = par_expect(TOK_IDENT)
         push(params, p[1])
+        if par_peek_type() == TOK_COLON {
+            par_advance()
+            par_skip_type()
+        }
         while par_peek_type() == TOK_COMMA {
             par_advance()
             let p2 = par_expect(TOK_IDENT)
             push(params, p2[1])
+            if par_peek_type() == TOK_COLON {
+                par_advance()
+                par_skip_type()
+            }
         }
     }
     par_expect(TOK_RPAREN)
+    if par_peek_type() == TOK_COLON {
+        par_advance()
+        par_skip_type()
+    }
     let body = parse_block()
     return ast_fn_decl(name, params, body)
 }
@@ -736,6 +791,15 @@ fn parse_stmt() {
             return ast_field_assign(expr[1], expr[2], value)
         }
         let name = expr[1]
+        let ci = 0
+        while ci < len(par_consts) {
+            if par_consts[ci] == name {
+                print("Error: cannot reassign const variable: ")
+                println(name)
+                exit(1)
+            }
+            ci = ci + 1
+        }
         return ast_assign(name, value)
     }
     // Compound assignment: +=, -=, *=, /=, %=
@@ -761,6 +825,15 @@ fn parse_stmt() {
             return ast_field_assign(fbase, fname, ast_binop(compound_op, ast_field_access(fbase, fname), rhs))
         }
         let name = expr[1]
+        let ci = 0
+        while ci < len(par_consts) {
+            if par_consts[ci] == name {
+                print("Error: cannot reassign const variable: ")
+                println(name)
+                exit(1)
+            }
+            ci = ci + 1
+        }
         return ast_assign(name, ast_binop(compound_op, ast_ident(name), rhs))
     }
     return ast_expr_stmt(expr)
