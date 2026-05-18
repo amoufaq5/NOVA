@@ -265,7 +265,8 @@ fn parse_primary() {
     if t == TOK_LBRACKET {
         par_advance()
         let elems = list_new()
-        if par_peek_type() != TOK_RBRACKET {
+        if par_peek_type() == TOK_RBRACKET {
+        } else {
             push(elems, parse_expr())
             while par_peek_type() == TOK_COMMA {
                 par_advance()
@@ -311,7 +312,8 @@ fn parse_postfix() {
             // Function call
             par_advance()
             let args = list_new()
-            if par_peek_type() != TOK_RPAREN {
+            if par_peek_type() == TOK_RPAREN {
+            } else {
                 push(args, parse_expr())
                 while par_peek_type() == TOK_COMMA {
                     par_advance()
@@ -483,15 +485,21 @@ fn parse_expr() {
 fn parse_block() {
     par_expect(TOK_LBRACE)
     let stmts = list_new()
-    while par_peek_type() != TOK_RBRACE {
-        if par_peek_type() == TOK_EOF {
-            println("Error: unexpected end of file inside block (missing closing '}')")
-            exit(1)
-        }
-        if par_peek_type() == TOK_SEMI {
-            par_advance()
+    let block_done = 0
+    while block_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            block_done = 1
         } else {
-            push(stmts, parse_stmt())
+            if par_peek_type() == TOK_EOF {
+                println("Error: unexpected end of file inside block (missing closing '}')")
+                exit(1)
+            } else {
+                if par_peek_type() == TOK_SEMI {
+                    par_advance()
+                } else {
+                    push(stmts, parse_stmt())
+                }
+            }
         }
     }
     par_expect(TOK_RBRACE)
@@ -551,7 +559,8 @@ fn parse_fn() {
     let name = name_tok[1]
     par_expect(TOK_LPAREN)
     let params = list_new()
-    if par_peek_type() != TOK_RPAREN {
+    if par_peek_type() == TOK_RPAREN {
+    } else {
         let p = par_expect(TOK_IDENT)
         push(params, p[1])
         while par_peek_type() == TOK_COMMA {
@@ -584,12 +593,17 @@ fn parse_struct_decl() {
     let name = name_tok[1]
     par_expect(TOK_LBRACE)
     let fields = list_new()
-    while par_peek_type() != TOK_RBRACE {
-        if par_peek_type() == TOK_COMMA {
-            par_advance()
+    let struct_done = 0
+    while struct_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            struct_done = 1
         } else {
-            let f = par_expect(TOK_IDENT)
-            push(fields, f[1])
+            if par_peek_type() == TOK_COMMA {
+                par_advance()
+            } else {
+                let f = par_expect(TOK_IDENT)
+                push(fields, f[1])
+            }
         }
     }
     par_expect(TOK_RBRACE)
@@ -678,11 +692,16 @@ fn parse_stmt() {
 fn parse_program(tokens) {
     par_init(tokens)
     let decls = list_new()
-    while par_peek_type() != TOK_EOF {
-        if par_peek_type() == TOK_SEMI {
-            par_advance()
+    let done = 0
+    while done == 0 {
+        if par_peek_type() == TOK_EOF {
+            done = 1
         } else {
-            push(decls, parse_stmt())
+            if par_peek_type() == TOK_SEMI {
+                par_advance()
+            } else {
+                push(decls, parse_stmt())
+            }
         }
     }
     return ast_program(decls)

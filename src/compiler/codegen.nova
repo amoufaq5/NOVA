@@ -1044,8 +1044,10 @@ fn gen_function(nd) {
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
-    if frame_size % 16 != 0 {
-        frame_size = frame_size + (16 - (frame_size % 16))
+    let frame_rem = frame_size % 16
+    if frame_rem == 0 {
+    } else {
+        frame_size = frame_size + (16 - frame_rem)
     }
     if frame_size > 0 {
         out("    sub rsp, " + int_to_str(frame_size))
@@ -1160,8 +1162,10 @@ fn gen_program(program) {
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
-    if frame_size % 16 != 0 {
-        frame_size = frame_size + (16 - (frame_size % 16))
+    let frame_rem2 = frame_size % 16
+    if frame_rem2 == 0 {
+    } else {
+        frame_size = frame_size + (16 - frame_rem2)
     }
     if frame_size > 0 {
         out("    sub rsp, " + int_to_str(frame_size))

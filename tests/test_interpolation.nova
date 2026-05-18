@@ -1,0 +1,62 @@
+fn main() {
+    let name = "World"
+    let age = 25
+
+    // String interpolation
+    println("Hello, ${name}!")
+    println("Age: ${age}")
+    println("Sum: ${10 + 20}")
+
+    // Multiple interpolations
+    println("${name} is ${age} years old")
+
+    // Nested expressions
+    let x = 42
+    println("x = ${x}, x*2 = ${x * 2}")
+
+    // Multi-line string (via escape)
+    println("Line 1\nLine 2\nLine 3")
+
+    // to_str utility with integers
+    print("to_str(42) = ")
+    println(to_str(42))
+
+    // to_str utility with strings
+    print("to_str(hello) = ")
+    println(to_str("hello"))
+
+    // to_str utility with list
+    let lst = list_new()
+    push(lst, 10)
+    push(lst, 20)
+    print("to_str(list) = ")
+    println(to_str(lst))
+
+    // Interpolation with list via to_str
+    println("list value: ${lst}")
+
+    // Edge case: $ not followed by {
+    println("Price: $5")
+
+    // Edge case: no interpolation
+    println("No interpolation here")
+
+    // Edge case: only interpolation
+    let val = "only"
+    println("${val}")
+
+    // Edge case: interpolation at start
+    println("${x} is at start")
+
+    // Edge case: interpolation at end
+    println("value is ${x}")
+
+    // Edge case: adjacent interpolations
+    let a = "hello"
+    let b = "world"
+    println("${a}${b}")
+
+    println("Interpolation tests passed!")
+}
+
+main()
