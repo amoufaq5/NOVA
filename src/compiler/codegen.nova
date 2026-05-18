@@ -144,6 +144,9 @@ fn collect_locals(nd) {
         collect_locals(nd[1])
         collect_locals(nd[2])
     }
+    if tag == AST_DO_WHILE {
+        collect_locals(nd[1])
+    }
 }
 
 fn struct_field_index(struct_name, field_name) {
@@ -309,6 +312,14 @@ fn is_builtin_fn(name) {
     if name == "list_copy" { return 1 }
     if name == "list_slice" { return 1 }
     if name == "append_list" { return 1 }
+    if name == "index_of" { return 1 }
+    if name == "last_index_of" { return 1 }
+    if name == "map_remove" { return 1 }
+    if name == "map_count" { return 1 }
+    if name == "zip" { return 1 }
+    if name == "flat_map" { return 1 }
+    if name == "any" { return 1 }
+    if name == "all" { return 1 }
     return 0
 }
 
@@ -705,6 +716,20 @@ fn gen_expr(nd) {
         return 0
     }
 
+    if tag == AST_TERNARY {
+        let else_lbl = new_label()
+        let end_lbl = new_label()
+        gen_expr(nd[1])
+        out("    test rax, rax")
+        out("    jz " + else_lbl)
+        gen_expr(nd[2])
+        out("    jmp " + end_lbl)
+        out_label(else_lbl)
+        gen_expr(nd[3])
+        out_label(end_lbl)
+        return 0
+    }
+
     out("    # unknown expr tag " + int_to_str(tag))
 }
 
@@ -911,6 +936,28 @@ fn gen_stmt(nd) {
             cg_continue_label = prev_continue
             return 0
         }
+    }
+
+    if tag == AST_DO_WHILE {
+        let body = nd[1]
+        let cond = nd[2]
+        let loop_lbl = new_label()
+        let end_lbl = new_label()
+        let cont_lbl = new_label()
+        let prev_break = cg_break_label
+        let prev_continue = cg_continue_label
+        cg_break_label = end_lbl
+        cg_continue_label = cont_lbl
+        out_label(loop_lbl)
+        gen_block(body)
+        out_label(cont_lbl)
+        gen_expr(cond)
+        out("    test rax, rax")
+        out("    jnz " + loop_lbl)
+        out_label(end_lbl)
+        cg_break_label = prev_break
+        cg_continue_label = prev_continue
+        return 0
     }
 
     if tag == AST_EXPR_STMT {
@@ -1250,6 +1297,9 @@ fn gen_program(program) {
             collect_locals(d)
         }
         if dtag == AST_TRY_CATCH {
+            collect_locals(d)
+        }
+        if dtag == AST_DO_WHILE {
             collect_locals(d)
         }
         i = i + 1
@@ -3245,7 +3295,7 @@ fn gen_runtime() {
     out("    mov r12, rdi")
     out("    call _nova_list_new")
     out("    mov r13, rax")
-    out("    mov r14, [r12 + 8]")  // capacity
+    out("    mov r14, [r12 + 16]")
     out("    xor ecx, ecx")
     out(".keys_loop:")
     out("    cmp rcx, r14")
@@ -3282,7 +3332,7 @@ fn gen_runtime() {
     out("    mov r12, rdi")
     out("    call _nova_list_new")
     out("    mov r13, rax")
-    out("    mov r14, [r12 + 8]")
+    out("    mov r14, [r12 + 16]")
     out("    xor ecx, ecx")
     out(".vals_loop:")
     out("    cmp rcx, r14")
@@ -3707,6 +3757,277 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- index_of(list, value): find first index of value, or -1 ---
+    out("")
+    out_label("_nova_index_of")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    mov rcx, [rdi + 8]")
+    out("    mov rdi, [rdi + 24]")
+    out("    xor eax, eax")
+    out(".iof_loop:")
+    out("    cmp rax, rcx")
+    out("    jge .iof_notfound")
+    out("    cmp [rdi + rax*8], rsi")
+    out("    je .iof_found")
+    out("    inc rax")
+    out("    jmp .iof_loop")
+    out(".iof_found:")
+    out("    pop rbp")
+    out("    ret")
+    out(".iof_notfound:")
+    out("    mov rax, -1")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- last_index_of(list, value): find last index of value, or -1 ---
+    out("")
+    out_label("_nova_last_index_of")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    mov rcx, [rdi + 8]")
+    out("    mov rdi, [rdi + 24]")
+    out("    mov rax, rcx")
+    out("    dec rax")
+    out(".liof_loop:")
+    out("    cmp rax, 0")
+    out("    jl .liof_notfound")
+    out("    cmp [rdi + rax*8], rsi")
+    out("    je .liof_found")
+    out("    dec rax")
+    out("    jmp .liof_loop")
+    out(".liof_found:")
+    out("    pop rbp")
+    out("    ret")
+    out(".liof_notfound:")
+    out("    mov rax, -1")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- map_remove(map, key) ---
+    out("")
+    out_label("_nova_map_remove")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    mov rcx, [r12 + 16]")
+    out("    mov rdi, [r12 + 24]")
+    out("    xor eax, eax")
+    out(".mr_loop:")
+    out("    cmp rax, rcx")
+    out("    jge .mr_done")
+    out("    imul rsi, rax, 24")
+    out("    add rsi, rdi")
+    out("    cmp qword ptr [rsi + 16], 0")
+    out("    je .mr_next")
+    out("    push rax")
+    out("    push rcx")
+    out("    push rdi")
+    out("    mov rdi, [rsi]")
+    out("    mov rsi, r13")
+    out("    call _nova_eq")
+    out("    pop rdi")
+    out("    pop rcx")
+    out("    pop rsi")
+    out("    test rax, rax")
+    out("    jz .mr_next2")
+    out("    imul rax, rsi, 24")
+    out("    add rax, rdi")
+    out("    mov qword ptr [rax + 16], 0")
+    out("    dec qword ptr [r12 + 8]")
+    out("    jmp .mr_done")
+    out(".mr_next2:")
+    out("    mov rax, rsi")
+    out(".mr_next:")
+    out("    inc rax")
+    out("    jmp .mr_loop")
+    out(".mr_done:")
+    out("    xor eax, eax")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- map_count(map): return count of entries ---
+    out("")
+    out_label("_nova_map_count")
+    out("    mov rax, [rdi + 8]")
+    out("    ret")
+
+    // --- zip(list_a, list_b): create list of [a, b] pairs ---
+    out("")
+    out_label("_nova_zip")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    push r15")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    call _nova_list_new")
+    out("    mov r14, rax")
+    // min length
+    out("    mov rax, [r12 + 8]")
+    out("    mov rcx, [r13 + 8]")
+    out("    cmp rax, rcx")
+    out("    cmovg rax, rcx")
+    out("    mov r15, rax")
+    out("    xor ecx, ecx")
+    out(".zip_loop:")
+    out("    cmp rcx, r15")
+    out("    jge .zip_done")
+    out("    push rcx")
+    // create pair list
+    out("    call _nova_list_new")
+    out("    push rax")
+    out("    mov rdi, rax")
+    out("    mov rcx, [rsp + 8]")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rsi, [rax + rcx*8]")
+    out("    call _nova_push")
+    out("    mov rdi, [rsp]")
+    out("    mov rcx, [rsp + 8]")
+    out("    mov rax, [r13 + 24]")
+    out("    mov rsi, [rax + rcx*8]")
+    out("    call _nova_push")
+    // push pair to result
+    out("    pop rsi")
+    out("    mov rdi, r14")
+    out("    call _nova_push")
+    out("    pop rcx")
+    out("    inc rcx")
+    out("    jmp .zip_loop")
+    out(".zip_done:")
+    out("    mov rax, r14")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- flat_map(list, fn): map then flatten one level ---
+    out("")
+    out_label("_nova_flat_map")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    push r15")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    call _nova_list_new")
+    out("    mov r14, rax")
+    out("    xor r15d, r15d")
+    out(".fm_loop:")
+    out("    cmp r15, [r12 + 8]")
+    out("    jge .fm_done")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rdi, [rax + r15*8]")
+    out("    mov r11, r13")
+    out("    call r11")
+    // result should be a list, append its elements
+    out("    cmp qword ptr [rax], -1")
+    out("    jne .fm_single")
+    out("    mov rdi, r14")
+    out("    mov rsi, rax")
+    out("    call _nova_append_list")
+    out("    jmp .fm_next")
+    out(".fm_single:")
+    out("    mov rsi, rax")
+    out("    mov rdi, r14")
+    out("    call _nova_push")
+    out(".fm_next:")
+    out("    inc r15")
+    out("    jmp .fm_loop")
+    out(".fm_done:")
+    out("    mov rax, r14")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- any(list, fn): returns 1 if fn returns true for any element ---
+    out("")
+    out_label("_nova_any")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    xor r14d, r14d")
+    out(".any_loop:")
+    out("    cmp r14, [r12 + 8]")
+    out("    jge .any_false")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rdi, [rax + r14*8]")
+    out("    mov r11, r13")
+    out("    call r11")
+    out("    test rax, rax")
+    out("    jnz .any_true")
+    out("    inc r14")
+    out("    jmp .any_loop")
+    out(".any_true:")
+    out("    mov eax, 1")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+    out(".any_false:")
+    out("    xor eax, eax")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- all(list, fn): returns 1 if fn returns true for all elements ---
+    out("")
+    out_label("_nova_all")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    xor r14d, r14d")
+    out(".all_loop:")
+    out("    cmp r14, [r12 + 8]")
+    out("    jge .all_true")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rdi, [rax + r14*8]")
+    out("    mov r11, r13")
+    out("    call r11")
+    out("    test rax, rax")
+    out("    jz .all_false")
+    out("    inc r14")
+    out("    jmp .all_loop")
+    out(".all_true:")
+    out("    mov eax, 1")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+    out(".all_false:")
+    out("    xor eax, eax")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
     // --- Wrappers with Nova-compatible names ---
     out("")
     out_label("println")
@@ -3889,6 +4210,22 @@ fn gen_runtime() {
     out("    jmp _nova_list_slice")
     out_label("append_list")
     out("    jmp _nova_append_list")
+    out_label("index_of")
+    out("    jmp _nova_index_of")
+    out_label("last_index_of")
+    out("    jmp _nova_last_index_of")
+    out_label("map_remove")
+    out("    jmp _nova_map_remove")
+    out_label("map_count")
+    out("    jmp _nova_map_count")
+    out_label("zip")
+    out("    jmp _nova_zip")
+    out_label("flat_map")
+    out("    jmp _nova_flat_map")
+    out_label("any")
+    out("    jmp _nova_any")
+    out_label("all")
+    out("    jmp _nova_all")
 
     // --- Data for runtime ---
     out("")

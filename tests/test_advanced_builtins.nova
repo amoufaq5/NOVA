@@ -1,0 +1,54 @@
+// Test: Advanced list/map builtins
+
+// index_of
+let nums = [10, 20, 30, 40, 50]
+assert(index_of(nums, 30) == 2, "index_of found")
+assert(index_of(nums, 99) == 0 - 1, "index_of not found")
+
+// last_index_of
+let dupes = [1, 2, 3, 2, 1]
+assert(last_index_of(dupes, 2) == 3, "last_index_of")
+assert(last_index_of(dupes, 1) == 4, "last_index_of last")
+
+// map_count
+let m = map_new()
+map_set(m, "a", 1)
+map_set(m, "b", 2)
+map_set(m, "c", 3)
+assert(map_count(m) == 3, "map_count")
+
+// map_remove
+map_remove(m, "b")
+assert(map_has(m, "b") == 0, "map_remove")
+assert(map_count(m) == 2, "map_count after remove")
+
+// zip
+let a = [1, 2, 3]
+let b = [10, 20, 30]
+let zipped = zip(a, b)
+assert(len(zipped) == 3, "zip length")
+let pair = zipped[0]
+assert(pair[0] == 1, "zip first.0")
+assert(pair[1] == 10, "zip first.1")
+
+// any / all
+let vals = [1, 2, 3, 4, 5]
+assert(any(vals, fn(x) { return x > 4 }) == 1, "any true")
+assert(any(vals, fn(x) { return x > 10 }) == 0, "any false")
+assert(all(vals, fn(x) { return x > 0 }) == 1, "all true")
+assert(all(vals, fn(x) { return x > 3 }) == 0, "all false")
+
+// flat_map
+let nested = [1, 2, 3]
+let flat = flat_map(nested, fn(x) {
+    let r = list_new()
+    push(r, x)
+    push(r, x * 10)
+    return r
+})
+assert(len(flat) == 6, "flat_map length")
+assert(flat[0] == 1, "flat_map 0")
+assert(flat[1] == 10, "flat_map 1")
+assert(flat[2] == 2, "flat_map 2")
+
+println("All advanced builtin tests passed!")

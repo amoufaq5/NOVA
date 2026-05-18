@@ -40,6 +40,8 @@ let AST_TRY_CATCH = 35
 let AST_THROW = 36
 let AST_LAMBDA = 37
 let AST_ENUM_DECL = 38
+let AST_TERNARY = 39
+let AST_DO_WHILE = 40
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -317,6 +319,23 @@ fn ast_enum_decl(name, variants) {
     push(n, AST_ENUM_DECL)
     push(n, name)
     push(n, variants)
+    return n
+}
+
+fn ast_ternary(cond, then_val, else_val) {
+    let n = list_new()
+    push(n, AST_TERNARY)
+    push(n, cond)
+    push(n, then_val)
+    push(n, else_val)
+    return n
+}
+
+fn ast_do_while(body, cond) {
+    let n = list_new()
+    push(n, AST_DO_WHILE)
+    push(n, body)
+    push(n, cond)
     return n
 }
 

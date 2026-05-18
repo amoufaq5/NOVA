@@ -1,0 +1,51 @@
+// Test: Ternary expressions and do-while loops
+
+// Ternary basics
+let x = 1 == 1 ? 10 : 20
+assert(x == 10, "ternary true")
+
+let y = 1 == 2 ? 10 : 20
+assert(y == 20, "ternary false")
+
+// Nested ternary
+let z = 1 > 2 ? 100 : 2 > 1 ? 200 : 300
+assert(z == 200, "nested ternary")
+
+// Ternary in expressions
+let a = 5 + (1 == 1 ? 10 : 0)
+assert(a == 15, "ternary in expr")
+
+// Do-while loop
+let count = 0
+do {
+    count += 1
+} while count < 5
+assert(count == 5, "do-while basic")
+
+// Do-while executes at least once
+let ran = 0
+do {
+    ran = 1
+} while 0 == 1
+assert(ran == 1, "do-while runs once")
+
+// Do-while with break
+let total = 0
+do {
+    total += 1
+    if total == 3 {
+        break
+    }
+} while total < 10
+assert(total == 3, "do-while break")
+
+/* Multi-line comment test
+   This should be completely ignored
+   by the lexer */
+let after_comment = 42
+assert(after_comment == 42, "multi-line comment")
+
+/* single line block comment */ let inline_after = 7
+assert(inline_after == 7, "inline block comment")
+
+println("All ternary/do-while/comment tests passed!")

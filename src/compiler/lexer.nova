@@ -78,6 +78,9 @@ let TOK_MINUS_EQ = 79
 let TOK_STAR_EQ = 80
 let TOK_SLASH_EQ = 81
 let TOK_PERCENT_EQ = 82
+// Ternary and do-while
+let TOK_QUESTION = 83
+let TOK_DO = 84
 
 // --- Lexer State ---
 let lex_src = ""
@@ -180,7 +183,23 @@ fn skip_whitespace() {
                         }
                     }
                 } else {
-                    return 0
+                    if lex_peek_at(1) == 42 {
+                        // Block comment /* ... */
+                        lex_advance()
+                        lex_advance()
+                        while lex_pos < lex_len {
+                            if lex_peek() == 42 {
+                                if lex_peek_at(1) == 47 {
+                                    lex_advance()
+                                    lex_advance()
+                                    return skip_whitespace()
+                                }
+                            }
+                            lex_advance()
+                        }
+                    } else {
+                        return 0
+                    }
                 }
             } else {
                 return 0
@@ -408,6 +427,7 @@ fn keyword_type(word) {
     if word == "catch" { return TOK_CATCH }
     if word == "throw" { return TOK_THROW }
     if word == "enum" { return TOK_ENUM }
+    if word == "do" { return TOK_DO }
     return 0
 }
 
@@ -600,11 +620,12 @@ fn lex_all() {
                         emit_tok(TOK_CARET, "^")
                     }
                     else { if c == 46 { lex_advance(); emit_tok(TOK_DOT, ".") }
+                    else { if c == 63 { lex_advance(); emit_tok(TOK_QUESTION, "?") }
                     else {
                         // Unknown character, skip
                         lex_advance()
                     }
-                    } } } } } } } } } } } } } } } } } } } } } } }
+                    } } } } } } } } } } } } } } } } } } } } } } } }
                 }
             }
         }

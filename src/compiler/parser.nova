@@ -94,6 +94,8 @@ fn token_type_name(t) {
     if t == 80 { return "*=" }
     if t == 81 { return "/=" }
     if t == 82 { return "%=" }
+    if t == 83 { return "?" }
+    if t == 84 { return "do" }
     return concat("token(", concat(int_to_str(t), ")"))
 }
 
@@ -517,7 +519,15 @@ fn parse_or() {
 }
 
 fn parse_expr() {
-    return parse_or()
+    let left = parse_or()
+    if par_peek_type() == TOK_QUESTION {
+        par_advance()
+        let then_val = parse_expr()
+        par_expect(TOK_COLON)
+        let else_val = parse_expr()
+        return ast_ternary(left, then_val, else_val)
+    }
+    return left
 }
 
 // --- Statement Parsing ---
@@ -712,6 +722,7 @@ fn parse_stmt() {
     if t == TOK_TRY { return parse_try() }
     if t == TOK_THROW { return parse_throw() }
     if t == TOK_ENUM { return parse_enum() }
+    if t == TOK_DO { return parse_do_while() }
 
     // Assignment or expression statement
     let expr = parse_expr()
@@ -753,6 +764,14 @@ fn parse_stmt() {
         return ast_assign(name, ast_binop(compound_op, ast_ident(name), rhs))
     }
     return ast_expr_stmt(expr)
+}
+
+fn parse_do_while() {
+    par_expect(TOK_DO)
+    let body = parse_block()
+    par_expect(TOK_WHILE)
+    let cond = parse_expr()
+    return ast_do_while(body, cond)
 }
 
 fn parse_enum() {
