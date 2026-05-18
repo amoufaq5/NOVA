@@ -32,6 +32,7 @@ let AST_STRUCT_DECL = 26
 let AST_STRUCT_INIT = 27
 let AST_FIELD_ACCESS = 28
 let AST_FIELD_ASSIGN = 29
+let AST_FLOAT_LIT = 30
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -135,6 +136,13 @@ fn ast_ident(name) {
 fn ast_int(value) {
     let n = list_new()
     push(n, AST_INT_LIT)
+    push(n, value)
+    return n
+}
+
+fn ast_float(value) {
+    let n = list_new()
+    push(n, AST_FLOAT_LIT)
     push(n, value)
     return n
 }

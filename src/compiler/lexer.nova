@@ -267,15 +267,75 @@ fn lex_number() {
         }
     }
 
-    // Normal decimal number (existing code)
+    // Normal decimal number
     while lex_pos < lex_len {
         let c2 = lex_peek()
-        if is_digit(c2) == 0 {
+        if is_digit(c2) == 1 {
+            lex_advance()
+        } else {
+            // Check for decimal point: '.' followed by digit means float
+            if c2 == 46 {
+                if lex_pos + 1 < lex_len {
+                    let after_dot = lex_peek_at(1)
+                    if is_digit(after_dot) == 1 {
+                        // Parse as fixed-point float (scaled by 1000)
+                        let int_str = substr(lex_src, start, lex_pos - start)
+                        let int_v = str_to_int(int_str)
+                        lex_advance()  // consume '.'
+                        let frac_start = lex_pos
+                        // Scan fractional digits
+                        while lex_pos < lex_len {
+                            if is_digit(lex_peek()) == 1 {
+                                lex_advance()
+                            } else {
+                                // End of fractional part (non-digit found)
+                                let frac_str = substr(lex_src, frac_start, lex_pos - frac_start)
+                                let frac_len = lex_pos - frac_start
+                                let frac_v = str_to_int(frac_str)
+                                // Scale fractional part to 3 decimal places
+                                if frac_len == 1 { frac_v = frac_v * 100 }
+                                if frac_len == 2 { frac_v = frac_v * 10 }
+                                // frac_len == 3: keep as-is
+                                if frac_len > 3 {
+                                    let extra = frac_len - 3
+                                    let d = 1
+                                    let ei = 0
+                                    while ei < extra {
+                                        d = d * 10
+                                        ei = ei + 1
+                                    }
+                                    frac_v = frac_v / d
+                                }
+                                emit_tok(TOK_FLOAT, int_v * 1000 + frac_v)
+                                return 0
+                            }
+                        }
+                        // Reached end of source during fractional part
+                        let frac_str = substr(lex_src, frac_start, lex_pos - frac_start)
+                        let frac_len = lex_pos - frac_start
+                        let frac_v = str_to_int(frac_str)
+                        if frac_len == 1 { frac_v = frac_v * 100 }
+                        if frac_len == 2 { frac_v = frac_v * 10 }
+                        if frac_len > 3 {
+                            let extra = frac_len - 3
+                            let d = 1
+                            let ei = 0
+                            while ei < extra {
+                                d = d * 10
+                                ei = ei + 1
+                            }
+                            frac_v = frac_v / d
+                        }
+                        emit_tok(TOK_FLOAT, int_v * 1000 + frac_v)
+                        return 0
+                    }
+                }
+            }
+            // Not a float, emit as integer
             let val = substr(lex_src, start, lex_pos - start)
             emit_tok(TOK_INT, str_to_int(val))
             return 0
         }
-        lex_advance()
     }
     let val = substr(lex_src, start, lex_pos - start)
     emit_tok(TOK_INT, str_to_int(val))

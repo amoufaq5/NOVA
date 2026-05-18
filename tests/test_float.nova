@@ -1,0 +1,54 @@
+// Test: Fixed-point floating-point arithmetic (scale factor 1000)
+// 3.14 is stored as 3140, 2.718 as 2718, etc.
+
+fn main() {
+    // Fixed-point literals
+    let pi = 3.14
+    let e = 2.718
+
+    print("pi = ")
+    println(float_to_str(pi))
+
+    print("e = ")
+    println(float_to_str(e))
+
+    // Addition works directly (same scale)
+    print("pi + e = ")
+    println(float_to_str(pi + e))
+
+    // Multiplication needs float_mul
+    print("pi * e = ")
+    println(float_to_str(float_mul(pi, e)))
+
+    // Division needs float_div
+    print("pi / e = ")
+    println(float_to_str(float_div(pi, e)))
+
+    // Convert int to float
+    let ten = to_float(10)
+    print("10.0 = ")
+    println(float_to_str(ten))
+
+    // Convert float to int (truncates)
+    print("int(pi) = ")
+    print_int(from_float(pi))
+    println("")
+
+    // Subtraction works directly
+    print("pi - e = ")
+    println(float_to_str(pi - e))
+
+    // Test with 1-digit fraction
+    let half = 1.5
+    print("1.5 = ")
+    println(float_to_str(half))
+
+    // Test with 3-digit fraction
+    let precise = 2.456
+    print("2.456 = ")
+    println(float_to_str(precise))
+
+    println("Float tests passed!")
+}
+
+main()

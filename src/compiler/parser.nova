@@ -123,6 +123,10 @@ fn parse_primary() {
         let tok = par_advance()
         return ast_int(tok[1])
     }
+    if t == TOK_FLOAT {
+        let tok = par_advance()
+        return ast_float(tok[1])
+    }
     if t == TOK_STRING {
         let tok = par_advance()
         return ast_str(tok[1])

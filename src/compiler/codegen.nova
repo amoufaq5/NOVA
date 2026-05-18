@@ -171,10 +171,98 @@ fn is_struct_name(name) {
     return 0
 }
 
+fn is_builtin_fn(name) {
+    if name == "println" { return 1 }
+    if name == "print" { return 1 }
+    if name == "print_int" { return 1 }
+    if name == "concat" { return 1 }
+    if name == "int_to_str" { return 1 }
+    if name == "str_to_int" { return 1 }
+    if name == "list_new" { return 1 }
+    if name == "push" { return 1 }
+    if name == "len" { return 1 }
+    if name == "read_file" { return 1 }
+    if name == "write_file" { return 1 }
+    if name == "exit" { return 1 }
+    if name == "chr" { return 1 }
+    if name == "char_at" { return 1 }
+    if name == "substr" { return 1 }
+    if name == "__arg" { return 1 }
+    if name == "str_eq" { return 1 }
+    if name == "pop" { return 1 }
+    if name == "list_set" { return 1 }
+    if name == "contains" { return 1 }
+    if name == "list_remove" { return 1 }
+    if name == "starts_with" { return 1 }
+    if name == "ends_with" { return 1 }
+    if name == "str_find" { return 1 }
+    if name == "abs" { return 1 }
+    if name == "min" { return 1 }
+    if name == "max" { return 1 }
+    if name == "assert" { return 1 }
+    if name == "type_of" { return 1 }
+    if name == "debug_print" { return 1 }
+    if name == "alloc" { return 1 }
+    if name == "time" { return 1 }
+    if name == "sleep_ms" { return 1 }
+    if name == "mkdir" { return 1 }
+    if name == "unlink" { return 1 }
+    if name == "file_size" { return 1 }
+    if name == "socket" { return 1 }
+    if name == "bind_socket" { return 1 }
+    if name == "listen_socket" { return 1 }
+    if name == "accept_conn" { return 1 }
+    if name == "connect_socket" { return 1 }
+    if name == "send_data" { return 1 }
+    if name == "recv_data" { return 1 }
+    if name == "close_fd" { return 1 }
+    if name == "make_sockaddr_in" { return 1 }
+    if name == "fork_process" { return 1 }
+    if name == "waitpid" { return 1 }
+    if name == "exec_program" { return 1 }
+    if name == "pipe_create" { return 1 }
+    if name == "hex" { return 1 }
+    if name == "read_line" { return 1 }
+    if name == "read_stdin" { return 1 }
+    if name == "getenv" { return 1 }
+    if name == "random" { return 1 }
+    if name == "random_seed" { return 1 }
+    if name == "map_new" { return 1 }
+    if name == "map_set" { return 1 }
+    if name == "map_get" { return 1 }
+    if name == "map_has" { return 1 }
+    if name == "join" { return 1 }
+    if name == "split" { return 1 }
+    if name == "reverse" { return 1 }
+    if name == "sort" { return 1 }
+    return 0
+}
+
+fn is_known_function(name) {
+    // Check user-defined functions
+    let fi = 0
+    while fi < len(cg_fns) {
+        if cg_fns[fi] == name {
+            return 1
+        }
+        fi = fi + 1
+    }
+    // Check builtins
+    if is_builtin_fn(name) == 1 {
+        return 1
+    }
+    return 0
+}
+
 fn gen_expr(nd) {
     let tag = ast_tag(nd)
 
     if tag == AST_INT_LIT {
+        out("    mov rax, " + int_to_str(nd[1]))
+        return 0
+    }
+
+    if tag == AST_FLOAT_LIT {
         out("    mov rax, " + int_to_str(nd[1]))
         return 0
     }
@@ -197,6 +285,11 @@ fn gen_expr(nd) {
 
     if tag == AST_IDENT {
         let name = nd[1]
+        // Check if this is a function reference (getting address of a function)
+        if is_known_function(name) == 1 {
+            out("    lea rax, [rip + " + name + "]")
+            return 0
+        }
         if is_global(name) == 1 {
             out("    mov rax, [rip + _g_" + name + "]")
         } else {
@@ -301,35 +394,80 @@ fn gen_expr(nd) {
         let callee = nd[1]
         let args = nd[2]
         let argc = len(args)
-        let callee_name = callee[1]
-        if is_struct_name(callee_name) == 1 {
-            // Struct constructor: create a list and push each arg
-            out("    call _nova_list_new")
-            out("    push rax")
-            let ai = 0
-            while ai < argc {
-                gen_expr(args[ai])
-                out("    mov rsi, rax")
-                out("    mov rdi, [rsp]")
-                out("    call _nova_push")
-                ai = ai + 1
+        let callee_name = ""
+        let is_direct = 0
+        if ast_tag(callee) == AST_IDENT {
+            callee_name = callee[1]
+            if is_struct_name(callee_name) == 1 {
+                // Struct constructor: create a list and push each arg
+                out("    call _nova_list_new")
+                out("    push rax")
+                let ai = 0
+                while ai < argc {
+                    gen_expr(args[ai])
+                    out("    mov rsi, rax")
+                    out("    mov rdi, [rsp]")
+                    out("    call _nova_push")
+                    ai = ai + 1
+                }
+                out("    pop rax")
+                return 0
             }
-            out("    pop rax")
-            return 0
+            if is_known_function(callee_name) == 1 {
+                is_direct = 1
+            }
         }
-        let i = argc - 1
-        while i >= 0 {
-            gen_expr(args[i])
-            out("    push rax")
-            i = i - 1
+        if is_direct == 1 {
+            // Direct call to a known function
+            let i = argc - 1
+            while i >= 0 {
+                gen_expr(args[i])
+                out("    push rax")
+                i = i - 1
+            }
+            if argc > 0 { out("    pop rdi") }
+            if argc > 1 { out("    pop rsi") }
+            if argc > 2 { out("    pop rdx") }
+            if argc > 3 { out("    pop rcx") }
+            if argc > 4 { out("    pop r8") }
+            if argc > 5 { out("    pop r9") }
+            out("    call " + callee_name)
+        } else {
+            // Indirect call through a function pointer variable
+            // Evaluate args first, push onto stack
+            let i = argc - 1
+            while i >= 0 {
+                gen_expr(args[i])
+                out("    push rax")
+                i = i - 1
+            }
+            if argc > 0 { out("    pop rdi") }
+            if argc > 1 { out("    pop rsi") }
+            if argc > 2 { out("    pop rdx") }
+            if argc > 3 { out("    pop rcx") }
+            if argc > 4 { out("    pop r8") }
+            if argc > 5 { out("    pop r9") }
+            // Load function pointer into r11 (caller-saved, not used for args)
+            // The callee could be an identifier (variable) or any expression
+            if ast_tag(callee) == AST_IDENT {
+                if is_global(callee_name) == 1 {
+                    out("    mov r11, [rip + _g_" + callee_name + "]")
+                } else {
+                    let off = local_offset(callee_name)
+                    out("    mov r11, [rbp - " + int_to_str(off) + "]")
+                }
+            } else {
+                // Complex expression callee - save arg registers, evaluate, restore
+                // For now, push all arg regs, evaluate callee, then restore
+                if argc > 0 { out("    push rdi") }
+                if argc > 1 { out("    push rsi") }
+                gen_expr(callee)
+                out("    mov r11, rax")
+                if argc > 1 { out("    pop rsi") }
+                if argc > 0 { out("    pop rdi") }
+            }
+            out("    call r11")
         }
-        if argc > 0 { out("    pop rdi") }
-        if argc > 1 { out("    pop rsi") }
-        if argc > 2 { out("    pop rdx") }
-        if argc > 3 { out("    pop rcx") }
-        if argc > 4 { out("    pop r8") }
-        if argc > 5 { out("    pop r9") }
-        out("    call " + callee_name)
         return 0
     }
 
@@ -2474,6 +2612,110 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- float_mul(a, b) -> (a * b) / 1000 ---
+    out("")
+    out_label("_nova_float_mul")
+    out("    mov rax, rdi")
+    out("    imul rsi")
+    out("    mov rcx, 1000")
+    out("    cqo")
+    out("    idiv rcx")
+    out("    ret")
+
+    // --- float_div(a, b) -> (a * 1000) / b ---
+    out("")
+    out_label("_nova_float_div")
+    out("    mov rax, rdi")
+    out("    mov rcx, 1000")
+    out("    imul rcx")
+    out("    idiv rsi")
+    out("    ret")
+
+    // --- to_float(n) -> n * 1000 ---
+    out("")
+    out_label("_nova_to_float")
+    out("    mov rax, rdi")
+    out("    imul rax, 1000")
+    out("    ret")
+
+    // --- from_float(f) -> f / 1000 ---
+    out("")
+    out_label("_nova_from_float")
+    out("    mov rax, rdi")
+    out("    cqo")
+    out("    mov rcx, 1000")
+    out("    idiv rcx")
+    out("    ret")
+
+    // --- float_to_str(n) -> string like "3.140" ---
+    out("")
+    out_label("_nova_float_to_str")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    sub rsp, 48")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r14, rdi")
+    // Handle negative: set r13=1 if negative, work with absolute value
+    out("    xor r13d, r13d")
+    out("    test rdi, rdi")
+    out("    jns .fts_pos")
+    out("    mov r13d, 1")
+    out("    neg rdi")
+    out("    mov r14, rdi")
+    out(".fts_pos:")
+    // Split: integer = r14/1000, frac = r14%1000
+    out("    mov rax, r14")
+    out("    xor edx, edx")
+    out("    mov rcx, 1000")
+    out("    div rcx")
+    out("    mov r12, rdx")
+    // Convert integer part to string
+    out("    mov rdi, rax")
+    out("    call _nova_int_to_str")
+    out("    mov r14, rax")
+    // If negative, prepend "-"
+    out("    test r13d, r13d")
+    out("    jz .fts_no_sign")
+    out("    lea rdi, [rip + _float_minus]")
+    out("    mov rsi, r14")
+    out("    call _nova_concat")
+    out("    mov r14, rax")
+    out(".fts_no_sign:")
+    // Append "."
+    out("    mov rdi, r14")
+    out("    lea rsi, [rip + _float_dot]")
+    out("    call _nova_concat")
+    out("    mov r14, rax")
+    // Compute 3 fractional digits from r12 (0..999)
+    // d0 = r12/100, d1 = (r12%100)/10, d2 = r12%10
+    out("    mov rax, r12")
+    out("    xor edx, edx")
+    out("    mov rcx, 100")
+    out("    div rcx")
+    out("    add al, 48")
+    out("    mov [rbp - 40], al")
+    out("    mov rax, rdx")
+    out("    xor edx, edx")
+    out("    mov rcx, 10")
+    out("    div rcx")
+    out("    add al, 48")
+    out("    mov [rbp - 39], al")
+    out("    add dl, 48")
+    out("    mov [rbp - 38], dl")
+    out("    mov byte ptr [rbp - 37], 0")
+    // Append fractional digits
+    out("    mov rdi, r14")
+    out("    lea rsi, [rbp - 40]")
+    out("    call _nova_concat")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    mov rsp, rbp")
+    out("    pop rbp")
+    out("    ret")
+
     // --- Wrappers with Nova-compatible names ---
     out("")
     out_label("println")
@@ -2602,6 +2844,16 @@ fn gen_runtime() {
     out("    jmp _nova_reverse")
     out_label("sort")
     out("    jmp _nova_sort")
+    out_label("float_mul")
+    out("    jmp _nova_float_mul")
+    out_label("float_div")
+    out("    jmp _nova_float_div")
+    out_label("float_to_str")
+    out("    jmp _nova_float_to_str")
+    out_label("to_float")
+    out("    jmp _nova_to_float")
+    out_label("from_float")
+    out("    jmp _nova_from_float")
 
     // --- Data for runtime ---
     out("")
@@ -2628,6 +2880,10 @@ fn gen_runtime() {
     out("    .asciz " + DQ + "list[len=" + DQ)
     out_label("_debug_list_suffix")
     out("    .asciz " + DQ + "]" + DQ)
+    out_label("_float_dot")
+    out("    .asciz " + DQ + "." + DQ)
+    out_label("_float_minus")
+    out("    .asciz " + DQ + "-" + DQ)
 
     // --- Heap state in .bss ---
     out("")
