@@ -1,0 +1,68 @@
+// Binary search on sorted list
+
+fn binary_search(arr, target) {
+    let low = 0
+    let high = len(arr) - 1
+
+    while low <= high {
+        let mid = (low + high) / 2
+        let val = arr[mid]
+
+        if val == target {
+            return mid
+        }
+        if val < target {
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
+    }
+    return -1
+}
+
+fn main() {
+    println("=== Binary Search Demo ===")
+
+    let arr = list_new()
+    let i = 0
+    while i < 20 {
+        push(arr, i * 3)
+        i = i + 1
+    }
+
+    print("Array: ")
+    i = 0
+    while i < len(arr) {
+        print_int(arr[i])
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    let targets = list_new()
+    push(targets, 0)
+    push(targets, 9)
+    push(targets, 15)
+    push(targets, 42)
+    push(targets, 57)
+    push(targets, 100)
+
+    i = 0
+    while i < len(targets) {
+        let t = targets[i]
+        let idx = binary_search(arr, t)
+        print("Search for ")
+        print_int(t)
+        print(": ")
+        if idx < 0 {
+            println("not found")
+        } else {
+            print("found at index ")
+            print_int(idx)
+            println("")
+        }
+        i = i + 1
+    }
+}
+
+main()

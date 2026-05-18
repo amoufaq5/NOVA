@@ -1,0 +1,96 @@
+// Linked List implementation using lists as nodes
+// Each node is a list: [value, next_ptr]
+
+fn node_new(value) {
+    let n = list_new()
+    push(n, value)
+    push(n, 0)  // next = null
+    return n
+}
+
+fn node_value(n) { return n[0] }
+fn node_next(n) { return n[1] }
+
+fn node_set_next(n, next) {
+    list_set(n, 1, next)
+}
+
+fn list_prepend(head, value) {
+    let n = node_new(value)
+    node_set_next(n, head)
+    return n
+}
+
+fn list_append(head, value) {
+    let n = node_new(value)
+    if head == 0 {
+        return n
+    }
+    let curr = head
+    while node_next(curr) != 0 {
+        curr = node_next(curr)
+    }
+    node_set_next(curr, n)
+    return head
+}
+
+fn list_print(head) {
+    let curr = head
+    while curr != 0 {
+        print_int(node_value(curr))
+        let next = node_next(curr)
+        if next != 0 {
+            print(" -> ")
+        }
+        curr = next
+    }
+    println("")
+}
+
+fn list_length(head) {
+    let count = 0
+    let curr = head
+    while curr != 0 {
+        count = count + 1
+        curr = node_next(curr)
+    }
+    return count
+}
+
+fn list_find(head, value) {
+    let curr = head
+    while curr != 0 {
+        if node_value(curr) == value {
+            return 1
+        }
+        curr = node_next(curr)
+    }
+    return 0
+}
+
+fn main() {
+    println("=== Linked List Demo ===")
+
+    let head = 0
+    head = list_append(head, 10)
+    head = list_append(head, 20)
+    head = list_append(head, 30)
+    head = list_prepend(head, 5)
+
+    print("List: ")
+    list_print(head)
+
+    print("Length: ")
+    print_int(list_length(head))
+    println("")
+
+    print("Contains 20: ")
+    print_int(list_find(head, 20))
+    println("")
+
+    print("Contains 99: ")
+    print_int(list_find(head, 99))
+    println("")
+}
+
+main()

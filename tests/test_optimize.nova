@@ -1,0 +1,99 @@
+// Test: Compiler Optimizations
+// Tests constant folding and dead code elimination
+
+fn main() {
+    // --- Constant Folding: Arithmetic ---
+    let a = 10 + 20
+    print("10 + 20 = ")
+    print_int(a)
+    println("")
+
+    let b = 100 - 37
+    print("100 - 37 = ")
+    print_int(b)
+    println("")
+
+    let c = 6 * 7
+    print("6 * 7 = ")
+    print_int(c)
+    println("")
+
+    let d = 100 / 4
+    print("100 / 4 = ")
+    print_int(d)
+    println("")
+
+    let e = 17 % 5
+    print("17 % 5 = ")
+    print_int(e)
+    println("")
+
+    // --- Constant Folding: Bitwise ---
+    let f = 255 & 15
+    print("255 & 15 = ")
+    print_int(f)
+    println("")
+
+    let g = 170 | 85
+    print("170 | 85 = ")
+    print_int(g)
+    println("")
+
+    let h = 255 ^ 15
+    print("255 ^ 15 = ")
+    print_int(h)
+    println("")
+
+    let sh1 = 1 << 8
+    print("1 << 8 = ")
+    print_int(sh1)
+    println("")
+
+    let sh2 = 256 >> 4
+    print("256 >> 4 = ")
+    print_int(sh2)
+    println("")
+
+    // --- Constant Folding: Comparisons ---
+    let cmp1 = 5 < 10
+    print("5 < 10 = ")
+    print_int(cmp1)
+    println("")
+
+    let cmp2 = 10 > 5
+    print("10 > 5 = ")
+    print_int(cmp2)
+    println("")
+
+    let cmp3 = 5 == 5
+    print("5 == 5 = ")
+    print_int(cmp3)
+    println("")
+
+    // --- Dead Code Elimination ---
+    if 0 {
+        println("BUG: dead code in if-false executed")
+        exit(1)
+    }
+
+    if 1 {
+        println("Constant true branch works")
+    }
+
+    if 0 {
+        println("BUG: dead code in if-false with else")
+        exit(1)
+    } else {
+        println("Constant false -> else branch works")
+    }
+
+    // While false eliminated
+    while 0 {
+        println("BUG: dead code in while-false executed")
+        exit(1)
+    }
+
+    println("All optimization tests passed!")
+}
+
+main()

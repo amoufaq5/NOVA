@@ -1,0 +1,26 @@
+// Tower of Hanoi
+
+fn hanoi(n, from, to, aux) {
+    if n == 1 {
+        print("Move disk 1 from ")
+        print(from)
+        print(" to ")
+        println(to)
+        return 0
+    }
+    hanoi(n - 1, from, aux, to)
+    print("Move disk ")
+    print_int(n)
+    print(" from ")
+    print(from)
+    print(" to ")
+    println(to)
+    hanoi(n - 1, aux, to, from)
+}
+
+fn main() {
+    println("=== Tower of Hanoi (4 disks) ===")
+    hanoi(4, "A", "C", "B")
+}
+
+main()

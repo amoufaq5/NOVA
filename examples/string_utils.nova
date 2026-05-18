@@ -1,0 +1,89 @@
+// String utility functions
+
+fn repeat_str(s, n) {
+    let result = ""
+    let i = 0
+    while i < n {
+        result = result + s
+        i = i + 1
+    }
+    return result
+}
+
+fn pad_left(s, width, ch) {
+    let slen = len(s)
+    if slen >= width {
+        return s
+    }
+    return repeat_str(ch, width - slen) + s
+}
+
+fn pad_right(s, width, ch) {
+    let slen = len(s)
+    if slen >= width {
+        return s
+    }
+    return s + repeat_str(ch, width - slen)
+}
+
+fn center(s, width, ch) {
+    let slen = len(s)
+    if slen >= width {
+        return s
+    }
+    let left_pad = (width - slen) / 2
+    let right_pad = width - slen - left_pad
+    return repeat_str(ch, left_pad) + s + repeat_str(ch, right_pad)
+}
+
+fn to_upper_char(c) {
+    if c >= 97 {
+        if c <= 122 {
+            return c - 32
+        }
+    }
+    return c
+}
+
+fn to_upper(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        result = result + chr(to_upper_char(char_at(s, i)))
+        i = i + 1
+    }
+    return result
+}
+
+fn to_lower_char(c) {
+    if c >= 65 {
+        if c <= 90 {
+            return c + 32
+        }
+    }
+    return c
+}
+
+fn to_lower(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        result = result + chr(to_lower_char(char_at(s, i)))
+        i = i + 1
+    }
+    return result
+}
+
+fn main() {
+    println("=== String Utilities ===")
+
+    println(repeat_str("=-", 20))
+    println(pad_left("42", 8, "0"))
+    println(pad_right("hello", 10, "."))
+    println(center("NOVA", 20, "*"))
+    println(to_upper("hello world"))
+    println(to_lower("HELLO WORLD"))
+    println(repeat_str("=-", 20))
+}
+
+main()

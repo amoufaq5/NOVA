@@ -1,0 +1,83 @@
+// Brainfuck interpreter in Nova
+
+fn bf_run(program) {
+    let tape = list_new()
+    let i = 0
+    while i < 30000 {
+        push(tape, 0)
+        i = i + 1
+    }
+
+    let ptr = 0
+    let pc = 0
+    let prog_len = len(program)
+
+    while pc < prog_len {
+        let cmd = char_at(program, pc)
+
+        if cmd == 62 {          // >
+            ptr = ptr + 1
+        }
+        if cmd == 60 {          // <
+            ptr = ptr - 1
+        }
+        if cmd == 43 {          // +
+            list_set(tape, ptr, tape[ptr] + 1)
+        }
+        if cmd == 45 {          // -
+            list_set(tape, ptr, tape[ptr] - 1)
+        }
+        if cmd == 46 {          // .
+            print(chr(tape[ptr]))
+        }
+        if cmd == 44 {          // ,
+            // skip input for now
+        }
+        if cmd == 91 {          // [
+            if tape[ptr] == 0 {
+                let depth = 1
+                while depth > 0 {
+                    pc = pc + 1
+                    if char_at(program, pc) == 91 {
+                        depth = depth + 1
+                    }
+                    if char_at(program, pc) == 93 {
+                        depth = depth - 1
+                    }
+                }
+            }
+        }
+        if cmd == 93 {          // ]
+            if tape[ptr] != 0 {
+                let depth = 1
+                while depth > 0 {
+                    pc = pc - 1
+                    if char_at(program, pc) == 93 {
+                        depth = depth + 1
+                    }
+                    if char_at(program, pc) == 91 {
+                        depth = depth - 1
+                    }
+                }
+            }
+        }
+
+        pc = pc + 1
+    }
+}
+
+fn main() {
+    println("=== Brainfuck Interpreter ===")
+
+    // Hello World in Brainfuck
+    print("Output: ")
+    bf_run("++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.")
+    println("")
+
+    // Print "Hi" (simpler)
+    print("Output: ")
+    bf_run("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++.++.")
+    println("")
+}
+
+main()
