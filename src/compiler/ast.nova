@@ -48,6 +48,9 @@ let AST_PIPE = 43
 let AST_NULL_ACCESS = 44
 let AST_SLICE = 45
 let AST_DEFAULT_PARAM = 46
+let AST_LIST_COMP = 47
+let AST_MAP_LIT = 48
+let AST_SPREAD = 49
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -385,6 +388,31 @@ fn ast_slice(base, start_expr, end_expr) {
     push(n, base)
     push(n, start_expr)
     push(n, end_expr)
+    return n
+}
+
+fn ast_list_comp(expr, var_name, iter, cond) {
+    let n = list_new()
+    push(n, AST_LIST_COMP)
+    push(n, expr)
+    push(n, var_name)
+    push(n, iter)
+    push(n, cond)
+    return n
+}
+
+fn ast_map_lit(ks, vs) {
+    let n = list_new()
+    push(n, AST_MAP_LIT)
+    push(n, ks)
+    push(n, vs)
+    return n
+}
+
+fn ast_spread(name) {
+    let n = list_new()
+    push(n, AST_SPREAD)
+    push(n, name)
     return n
 }
 

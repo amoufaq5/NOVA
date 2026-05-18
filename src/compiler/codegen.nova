@@ -113,6 +113,32 @@ fn local_offset(name) {
     return cg_local_count * 8
 }
 
+fn collect_comp_vars(expr) {
+    if expr == 0 { return 0 }
+    let tag = ast_tag(expr)
+    if tag == AST_LIST_COMP {
+        let lc_var = expr[2]
+        push(cg_locals, lc_var)
+        cg_local_count = cg_local_count + 1
+        return 0
+    }
+    if tag == AST_CALL {
+        let cargs = expr[2]
+        let ci = 0
+        while ci < len(cargs) {
+            collect_comp_vars(cargs[ci])
+            ci = ci + 1
+        }
+        return 0
+    }
+    if tag == AST_BIN_OP {
+        collect_comp_vars(expr[2])
+        collect_comp_vars(expr[3])
+        return 0
+    }
+    return 0
+}
+
 fn collect_locals(nd) {
     let tag = ast_tag(nd)
     if tag == AST_LET_STMT {
@@ -121,6 +147,7 @@ fn collect_locals(nd) {
             push(cg_locals, name)
             cg_local_count = cg_local_count + 1
         }
+        collect_comp_vars(nd[2])
     }
     if tag == AST_BLOCK {
         let stmts = nd[1]
@@ -185,6 +212,22 @@ fn collect_locals(nd) {
         push(cg_locals, val_name)
         cg_local_count = cg_local_count + 1
         collect_locals(nd[4])
+    }
+    if tag == AST_LIST_COMP {
+        let lc_var = nd[2]
+        push(cg_locals, lc_var)
+        cg_local_count = cg_local_count + 1
+    }
+    if tag == AST_EXPR_STMT {
+        collect_comp_vars(nd[1])
+    }
+    if tag == AST_ASSIGN_STMT {
+        collect_comp_vars(nd[2])
+    }
+    if tag == AST_RETURN_STMT {
+        if nd[1] == 0 { } else {
+            collect_comp_vars(nd[1])
+        }
     }
 }
 
@@ -471,6 +514,25 @@ fn collect_idents_in(nd, names) {
         collect_idents_in(nd[1], names)
         collect_idents_in(nd[2], names)
         collect_idents_in(nd[3], names)
+        return 0
+    }
+    if tag == AST_LIST_COMP {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[3], names)
+        if nd[4] == 0 { } else {
+            collect_idents_in(nd[4], names)
+        }
+        return 0
+    }
+    if tag == AST_MAP_LIT {
+        let mkeys = nd[1]
+        let mvals = nd[2]
+        let mi = 0
+        while mi < len(mkeys) {
+            collect_idents_in(mkeys[mi], names)
+            collect_idents_in(mvals[mi], names)
+            mi = mi + 1
+        }
         return 0
     }
     return 0
@@ -1074,6 +1136,80 @@ fn gen_expr(nd) {
         out_label(else_lbl)
         gen_expr(nd[3])
         out_label(end_lbl)
+        return 0
+    }
+
+    if tag == AST_LIST_COMP {
+        let comp_expr = nd[1]
+        let comp_var = nd[2]
+        let comp_iter = nd[3]
+        let comp_cond = nd[4]
+        let comp_var_off = local_offset(comp_var)
+        out("    call _nova_list_new")
+        out("    push rax")
+        gen_expr(comp_iter)
+        out("    push rax")
+        out("    push 0")
+        let comp_loop = new_label()
+        let comp_end = new_label()
+        out_label(comp_loop)
+        out("    mov rcx, [rsp]")
+        out("    mov rdi, [rsp+8]")
+        out("    cmp rcx, [rdi+8]")
+        out("    jge " + comp_end)
+        out("    mov rdi, [rdi+24]")
+        out("    mov rax, [rdi+rcx*8]")
+        out("    mov [rbp - " + int_to_str(comp_var_off) + "], rax")
+        if comp_cond == 0 {
+        } else {
+            let comp_skip = new_label()
+            gen_expr(comp_cond)
+            out("    test rax, rax")
+            out("    jz " + comp_skip)
+            gen_expr(comp_expr)
+            out("    mov rsi, rax")
+            out("    mov rdi, [rsp+16]")
+            out("    call _nova_push")
+            out_label(comp_skip)
+            out("    inc qword ptr [rsp]")
+            out("    jmp " + comp_loop)
+            out_label(comp_end)
+            out("    add rsp, 16")
+            out("    pop rax")
+            return 0
+        }
+        gen_expr(comp_expr)
+        out("    mov rsi, rax")
+        out("    mov rdi, [rsp+16]")
+        out("    call _nova_push")
+        out("    inc qword ptr [rsp]")
+        out("    jmp " + comp_loop)
+        out_label(comp_end)
+        out("    add rsp, 16")
+        out("    pop rax")
+        return 0
+    }
+
+    if tag == AST_MAP_LIT {
+        let mkeys = nd[1]
+        let mvals = nd[2]
+        let mcount = len(mkeys)
+        out("    call _nova_map_new")
+        if mcount > 0 {
+            out("    push rax")
+            let mi = 0
+            while mi < mcount {
+                gen_expr(mkeys[mi])
+                out("    push rax")
+                gen_expr(mvals[mi])
+                out("    mov rdx, rax")
+                out("    pop rsi")
+                out("    mov rdi, [rsp]")
+                out("    call _nova_map_set")
+                mi = mi + 1
+            }
+            out("    pop rax")
+        }
         return 0
     }
 
@@ -1780,6 +1916,15 @@ fn gen_program(program) {
         }
         if dtag == AST_DESTRUCTURE {
             collect_locals(d)
+        }
+        if dtag == AST_EXPR_STMT {
+            collect_locals(d)
+        }
+        if dtag == AST_LET_STMT {
+            collect_comp_vars(d[2])
+        }
+        if dtag == AST_ASSIGN_STMT {
+            collect_comp_vars(d[2])
         }
         i = i + 1
     }

@@ -1,0 +1,36 @@
+fn main() {
+    // Empty map
+    let m1 = {}
+    print("empty map has = ")
+    print_int(map_has(m1, "x"))
+    println("")
+
+    // Map with entries
+    let m2 = {"name": "Nova", "version": "1"}
+    print("name = ")
+    println(map_get(m2, "name"))
+    print("version = ")
+    println(map_get(m2, "version"))
+
+    // Map with integer values
+    let m3 = {"a": 1, "b": 2, "c": 3}
+    print("a = ")
+    print_int(map_get(m3, "a"))
+    println("")
+    print("b = ")
+    print_int(map_get(m3, "b"))
+    println("")
+    print("c = ")
+    print_int(map_get(m3, "c"))
+    println("")
+
+    // Map with trailing comma
+    let m4 = {"x": 42,}
+    print("x = ")
+    print_int(map_get(m4, "x"))
+    println("")
+
+    println("All map literal tests passed!")
+}
+
+main()

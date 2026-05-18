@@ -1,0 +1,61 @@
+fn greet(name, times) {
+    if times == 0 {
+        times = 1
+    }
+    let i = 0
+    while i < times {
+        print("Hello, ")
+        println(name)
+        i = i + 1
+    }
+}
+
+fn add_with_default(a, b = 10) {
+    return a + b
+}
+
+fn make_list(size = 3, val = 1) {
+    let result = list_new()
+    let i = 0
+    while i < size {
+        push(result, val)
+        i = i + 1
+    }
+    return result
+}
+
+fn main() {
+    // Default param: b defaults to 10
+    let r1 = add_with_default(5)
+    print("add_with_default(5) = ")
+    print_int(r1)
+    println("")
+
+    // Override default
+    let r2 = add_with_default(5, 20)
+    print("add_with_default(5, 20) = ")
+    print_int(r2)
+    println("")
+
+    // Multiple defaults
+    let r3 = make_list()
+    print("make_list() len = ")
+    print_int(len(r3))
+    println("")
+
+    let r4 = make_list(5)
+    print("make_list(5) len = ")
+    print_int(len(r4))
+    println("")
+
+    let r5 = make_list(2, 99)
+    print("make_list(2, 99) = [")
+    print_int(r5[0])
+    print(", ")
+    print_int(r5[1])
+    println("]")
+
+    println("All default param tests passed!")
+}
+
+main()

@@ -1,0 +1,45 @@
+fn main() {
+    // Simple list comprehension
+    let nums = [1, 2, 3, 4, 5]
+    let doubled = [x * 2 for x in nums]
+    print("doubled = ")
+    let i = 0
+    while i < len(doubled) {
+        print_int(doubled[i])
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    // List comprehension with filter
+    let evens = [x for x in nums if x % 2 == 0]
+    print("evens = ")
+    i = 0
+    while i < len(evens) {
+        print_int(evens[i])
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    // List comprehension with transform and filter
+    let big = [x * 10 for x in nums if x > 3]
+    print("big = ")
+    i = 0
+    while i < len(big) {
+        print_int(big[i])
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    // Empty result
+    let none_match = [x for x in nums if x > 100]
+    print("none_match len = ")
+    print_int(len(none_match))
+    println("")
+
+    println("All list comp tests passed!")
+}
+
+main()

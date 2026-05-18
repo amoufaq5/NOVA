@@ -298,17 +298,60 @@ fn parse_primary() {
     }
     if t == TOK_LBRACKET {
         par_advance()
-        let elems = list_new()
         if par_peek_type() == TOK_RBRACKET {
-        } else {
-            push(elems, parse_expr())
-            while par_peek_type() == TOK_COMMA {
+            par_advance()
+            return ast_list(list_new())
+        }
+        let first = parse_expr()
+        if par_peek_type() == TOK_FOR {
+            par_advance()
+            let cv = par_expect(TOK_IDENT)
+            par_expect(TOK_IN)
+            let citer = parse_expr()
+            let ccond = 0
+            if par_peek_type() == TOK_IF {
                 par_advance()
-                push(elems, parse_expr())
+                ccond = parse_expr()
             }
+            par_expect(TOK_RBRACKET)
+            return ast_list_comp(first, cv[1], citer, ccond)
+        }
+        let elems = list_new()
+        push(elems, first)
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            push(elems, parse_expr())
         }
         par_expect(TOK_RBRACKET)
         return ast_list(elems)
+    }
+    if t == TOK_LBRACE {
+        par_advance()
+        let mkeys = list_new()
+        let mvals = list_new()
+        if par_peek_type() == TOK_RBRACE {
+            par_advance()
+            return ast_map_lit(mkeys, mvals)
+        }
+        let mk = parse_expr()
+        par_expect(TOK_COLON)
+        let mv = parse_expr()
+        push(mkeys, mk)
+        push(mvals, mv)
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            if par_peek_type() == TOK_RBRACE {
+                // trailing comma
+            } else {
+                let mk2 = parse_expr()
+                par_expect(TOK_COLON)
+                let mv2 = parse_expr()
+                push(mkeys, mk2)
+                push(mvals, mv2)
+            }
+        }
+        par_expect(TOK_RBRACE)
+        return ast_map_lit(mkeys, mvals)
     }
     if t == TOK_MINUS {
         par_advance()
@@ -326,34 +369,18 @@ fn parse_primary() {
         if next_pos < par_count {
             let next_tok = par_tokens[next_pos]
             if next_tok[0] == TOK_LPAREN {
-                // Lambda expression
                 par_advance()
                 par_expect(TOK_LPAREN)
-                let params = list_new()
-                if par_peek_type() == TOK_RPAREN {
-                } else {
-                    let p = par_expect(TOK_IDENT)
-                    push(params, p[1])
-                    if par_peek_type() == TOK_COLON {
-                        par_advance()
-                        par_skip_type()
-                    }
-                    while par_peek_type() == TOK_COMMA {
-                        par_advance()
-                        let p2 = par_expect(TOK_IDENT)
-                        push(params, p2[1])
-                        if par_peek_type() == TOK_COLON {
-                            par_advance()
-                            par_skip_type()
-                        }
-                    }
-                }
+                let pinfo = parse_param_list()
+                let params = pinfo[0]
+                let defaults = pinfo[1]
                 par_expect(TOK_RPAREN)
                 if par_peek_type() == TOK_COLON {
                     par_advance()
                     par_skip_type()
                 }
                 let body = parse_block()
+                body = inject_defaults(body, defaults)
                 let lname = "_lambda_" + int_to_str(par_lambda_count)
                 par_lambda_count = par_lambda_count + 1
                 let fn_node = ast_fn_decl(lname, params, body)
@@ -730,36 +757,122 @@ fn parse_let() {
     return ast_let(name, value)
 }
 
+fn parse_param_list() {
+    let params = list_new()
+    let defaults = list_new()
+    let has_rest = 0
+    let rest_name = ""
+    if par_peek_type() == TOK_RPAREN {
+        let result = list_new()
+        push(result, params)
+        push(result, defaults)
+        push(result, rest_name)
+        return result
+    }
+    if par_peek_type() == TOK_ELLIPSIS {
+        par_advance()
+        let rt = par_expect(TOK_IDENT)
+        rest_name = rt[1]
+        push(params, rest_name)
+        let result = list_new()
+        push(result, params)
+        push(result, defaults)
+        push(result, rest_name)
+        return result
+    }
+    let p = par_expect(TOK_IDENT)
+    push(params, p[1])
+    if par_peek_type() == TOK_COLON {
+        par_advance()
+        par_skip_type()
+    }
+    if par_peek_type() == TOK_EQ {
+        par_advance()
+        let dv = parse_expr()
+        let dp = list_new()
+        push(dp, p[1])
+        push(dp, dv)
+        push(defaults, dp)
+    }
+    while par_peek_type() == TOK_COMMA {
+        par_advance()
+        if par_peek_type() == TOK_ELLIPSIS {
+            par_advance()
+            let rt = par_expect(TOK_IDENT)
+            rest_name = rt[1]
+            push(params, rest_name)
+            let result = list_new()
+            push(result, params)
+            push(result, defaults)
+            push(result, rest_name)
+            return result
+        }
+        let p2 = par_expect(TOK_IDENT)
+        push(params, p2[1])
+        if par_peek_type() == TOK_COLON {
+            par_advance()
+            par_skip_type()
+        }
+        if par_peek_type() == TOK_EQ {
+            par_advance()
+            let dv2 = parse_expr()
+            let dp2 = list_new()
+            push(dp2, p2[1])
+            push(dp2, dv2)
+            push(defaults, dp2)
+        }
+    }
+    let result = list_new()
+    push(result, params)
+    push(result, defaults)
+    push(result, rest_name)
+    return result
+}
+
+fn inject_defaults(body, defaults) {
+    if len(defaults) == 0 { return body }
+    let stmts = body[1]
+    let new_stmts = list_new()
+    let di = 0
+    while di < len(defaults) {
+        let dp = defaults[di]
+        let pname = dp[0]
+        let pval = dp[1]
+        let check = ast_if(
+            ast_binop("==", ast_ident(pname), ast_int(0)),
+            ast_block(list_new()),
+            0
+        )
+        let assign_stmts = list_new()
+        push(assign_stmts, ast_assign(pname, pval))
+        check[2] = ast_block(assign_stmts)
+        push(new_stmts, check)
+        di = di + 1
+    }
+    let si = 0
+    while si < len(stmts) {
+        push(new_stmts, stmts[si])
+        si = si + 1
+    }
+    return ast_block(new_stmts)
+}
+
 fn parse_fn() {
     par_expect(TOK_FN)
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
     par_expect(TOK_LPAREN)
-    let params = list_new()
-    if par_peek_type() == TOK_RPAREN {
-    } else {
-        let p = par_expect(TOK_IDENT)
-        push(params, p[1])
-        if par_peek_type() == TOK_COLON {
-            par_advance()
-            par_skip_type()
-        }
-        while par_peek_type() == TOK_COMMA {
-            par_advance()
-            let p2 = par_expect(TOK_IDENT)
-            push(params, p2[1])
-            if par_peek_type() == TOK_COLON {
-                par_advance()
-                par_skip_type()
-            }
-        }
-    }
+    let pinfo = parse_param_list()
+    let params = pinfo[0]
+    let defaults = pinfo[1]
+    let rest_name = pinfo[2]
     par_expect(TOK_RPAREN)
     if par_peek_type() == TOK_COLON {
         par_advance()
         par_skip_type()
     }
     let body = parse_block()
+    body = inject_defaults(body, defaults)
     return ast_fn_decl(name, params, body)
 }
 
