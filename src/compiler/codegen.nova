@@ -18,6 +18,7 @@ let cg_globals = 0
 let cg_global_count = 0
 let cg_break_label = ""
 let cg_continue_label = ""
+let cg_catch_label = ""
 let cg_structs = 0
 let cg_struct_count = 0
 
@@ -134,6 +135,10 @@ fn collect_locals(nd) {
             }
             ai = ai + 1
         }
+    }
+    if tag == AST_TRY_CATCH {
+        collect_locals(nd[1])
+        collect_locals(nd[2])
     }
 }
 
@@ -252,6 +257,8 @@ fn is_builtin_fn(name) {
     if name == "float_to_str" { return 1 }
     if name == "to_float" { return 1 }
     if name == "from_float" { return 1 }
+    if name == "to_str" { return 1 }
+    if name == "get_error" { return 1 }
     return 0
 }
 
@@ -932,6 +939,57 @@ fn gen_stmt(nd) {
         return 0
     }
 
+    if tag == AST_TRY_CATCH {
+        let try_body = nd[1]
+        let catch_body = nd[2]
+        let catch_lbl = new_label()
+        let end_lbl = new_label()
+
+        // Save old catch label, set new one
+        let old_catch = cg_catch_label
+        cg_catch_label = catch_lbl
+
+        // Clear error flag
+        out("    mov qword ptr [rip + _nova_error_flag], 0")
+
+        // Execute try body
+        gen_block(try_body)
+
+        // After try body: check if error occurred
+        out("    cmp qword ptr [rip + _nova_error_flag], 0")
+        out("    jne " + catch_lbl)
+        out("    jmp " + end_lbl)
+
+        out_label(catch_lbl)
+        // Execute catch body
+        gen_block(catch_body)
+        // Clear error flag after catch
+        out("    mov qword ptr [rip + _nova_error_flag], 0")
+
+        out_label(end_lbl)
+
+        // Restore old catch label
+        cg_catch_label = old_catch
+        return 0
+    }
+
+    if tag == AST_THROW {
+        let value = nd[1]
+        gen_expr(value)
+        out("    mov [rip + _nova_error_flag], rax")
+        out("    mov [rip + _nova_error_value], rax")
+        // Jump to current catch handler if available
+        if cg_catch_label == "" {
+            // No try/catch - exit with error code
+            out("    mov rdi, rax")
+            out("    mov rax, 60")
+            out("    syscall")
+        } else {
+            out("    jmp " + cg_catch_label)
+        }
+        return 0
+    }
+
     out("    # unknown stmt tag " + int_to_str(tag))
 }
 
@@ -1076,6 +1134,12 @@ fn gen_program(program) {
             collect_locals(d)
         }
         if dtag == AST_FOR_STMT {
+            collect_locals(d)
+        }
+        if dtag == AST_MATCH_STMT {
+            collect_locals(d)
+        }
+        if dtag == AST_TRY_CATCH {
             collect_locals(d)
         }
         i = i + 1
@@ -2892,6 +2956,24 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- to_str(value) -> string representation ---
+    // If value < 4096: treat as integer, convert via int_to_str
+    // If value >= 4096 and [value] == -1: it's a list, return "[list]"
+    // Otherwise: it's already a string, return as-is
+    out("")
+    out_label("_nova_to_str")
+    out("    cmp rdi, 4096")
+    out("    jl .ts_int")
+    out("    cmp qword ptr [rdi], -1")
+    out("    je .ts_list")
+    out("    mov rax, rdi")
+    out("    ret")
+    out(".ts_int:")
+    out("    jmp _nova_int_to_str")
+    out(".ts_list:")
+    out("    lea rax, [rip + _str_list_repr]")
+    out("    ret")
+
     // --- Wrappers with Nova-compatible names ---
     out("")
     out_label("println")
@@ -3030,6 +3112,16 @@ fn gen_runtime() {
     out("    jmp _nova_to_float")
     out_label("from_float")
     out("    jmp _nova_from_float")
+    out_label("to_str")
+    out("    jmp _nova_to_str")
+
+    // --- get_error() -> returns error value from last throw ---
+    out("")
+    out_label("_nova_get_error")
+    out("    mov rax, [rip + _nova_error_value]")
+    out("    ret")
+    out_label("get_error")
+    out("    jmp _nova_get_error")
 
     // --- Data for runtime ---
     out("")
@@ -3060,6 +3152,8 @@ fn gen_runtime() {
     out("    .asciz " + DQ + "." + DQ)
     out_label("_float_minus")
     out("    .asciz " + DQ + "-" + DQ)
+    out_label("_str_list_repr")
+    out("    .asciz " + DQ + "[list]" + DQ)
 
     // --- Heap state in .bss ---
     out("")
@@ -3072,5 +3166,9 @@ fn gen_runtime() {
     out_label("_heap_end")
     out("    .quad 0")
     out_label("_rand_state")
+    out("    .quad 0")
+    out_label("_nova_error_flag")
+    out("    .quad 0")
+    out_label("_nova_error_value")
     out("    .quad 0")
 }

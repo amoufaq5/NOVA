@@ -1,0 +1,44 @@
+fn describe(n) {
+    match n {
+        0 => println("zero")
+        1 => println("one")
+        2 => println("two")
+        _ => {
+            print("other: ")
+            print_int(n)
+            println("")
+        }
+    }
+}
+
+fn classify(s) {
+    match s {
+        "hello" => println("greeting")
+        "bye" => println("farewell")
+        _ => println("unknown word")
+    }
+}
+
+fn main() {
+    describe(0)
+    describe(1)
+    describe(2)
+    describe(42)
+
+    classify("hello")
+    classify("bye")
+    classify("test")
+
+    // Match as value selector
+    let x = 3
+    match x {
+        1 => println("x is 1")
+        2 => println("x is 2")
+        3 => println("x is 3")
+        _ => println("x is something else")
+    }
+
+    println("Match tests passed!")
+}
+
+main()

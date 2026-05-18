@@ -396,6 +396,9 @@ fn keyword_type(word) {
     if word == "import" { return TOK_IMPORT }
     if word == "const" { return TOK_CONST }
     if word == "match" { return TOK_MATCH }
+    if word == "try" { return TOK_TRY }
+    if word == "catch" { return TOK_CATCH }
+    if word == "throw" { return TOK_THROW }
     return 0
 }
 

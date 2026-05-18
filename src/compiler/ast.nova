@@ -36,6 +36,8 @@ let AST_FLOAT_LIT = 30
 let AST_MATCH_STMT = 32
 let AST_MATCH_ARM = 33
 let AST_WILDCARD = 34
+let AST_TRY_CATCH = 35
+let AST_THROW = 36
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -281,6 +283,21 @@ fn ast_match_arm(pattern, body) {
 fn ast_wildcard() {
     let n = list_new()
     push(n, AST_WILDCARD)
+    return n
+}
+
+fn ast_try_catch(try_body, catch_body) {
+    let n = list_new()
+    push(n, AST_TRY_CATCH)
+    push(n, try_body)
+    push(n, catch_body)
+    return n
+}
+
+fn ast_throw(value) {
+    let n = list_new()
+    push(n, AST_THROW)
+    push(n, value)
     return n
 }
 
