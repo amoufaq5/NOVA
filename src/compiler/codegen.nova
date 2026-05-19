@@ -145,6 +145,13 @@ fn new_label() {
 }
 
 fn add_string(s) {
+    let si = 0
+    while si < cg_str_count {
+        if cg_strings[si] == s {
+            return si
+        }
+        si = si + 1
+    }
     let idx = cg_str_count
     push(cg_strings, s)
     cg_str_count = cg_str_count + 1
@@ -2001,6 +2008,16 @@ fn gen_stmt(nd) {
             di = di + 1
         }
         out("    add rsp, 8")
+        return 0
+    }
+
+    if tag == AST_ASM {
+        let asm_lines = nd[1]
+        let ai = 0
+        while ai < len(asm_lines) {
+            out("    " + asm_lines[ai])
+            ai = ai + 1
+        }
         return 0
     }
 
@@ -4136,6 +4153,26 @@ fn peephole_optimize() {
             if nxt == "    pop rcx" {
                 list_set(cg_output, i, "")
                 list_set(cg_output, i + 1, "    mov rcx, rax")
+            }
+            if nxt == "    pop rdi" {
+                list_set(cg_output, i, "")
+                list_set(cg_output, i + 1, "    mov rdi, rax")
+            }
+            if nxt == "    pop rsi" {
+                list_set(cg_output, i, "")
+                list_set(cg_output, i + 1, "    mov rsi, rax")
+            }
+        }
+        if cur == "    push rcx" {
+            if nxt == "    pop rcx" {
+                list_set(cg_output, i, "")
+                list_set(cg_output, i + 1, "")
+            }
+        }
+        if cur == "    push rdi" {
+            if nxt == "    pop rdi" {
+                list_set(cg_output, i, "")
+                list_set(cg_output, i + 1, "")
             }
         }
         i = i + 1

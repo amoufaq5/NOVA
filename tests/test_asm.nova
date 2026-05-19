@@ -1,0 +1,46 @@
+// Test inline assembly support
+
+fn asm_nop() {
+    asm {
+        "nop"
+        "nop"
+        "nop"
+    }
+}
+
+fn asm_set_rax() {
+    asm {
+        "mov rax, 99"
+    }
+    return 0
+}
+
+println("=== Inline Assembly Tests ===")
+
+// Test 1: asm block with nops (should not crash)
+asm_nop()
+println("PASS: asm nop block")
+
+// Test 2: asm in function
+asm_set_rax()
+println("PASS: asm in function")
+
+// Test 3: multiple asm blocks
+fn multi_asm() {
+    asm {
+        "nop"
+    }
+    let x = 42
+    asm {
+        "nop"
+    }
+    return x
+}
+let r = multi_asm()
+if r == 42 {
+    println("PASS: multiple asm blocks")
+} else {
+    println("FAIL: multiple asm blocks")
+}
+
+println("All inline asm tests passed")

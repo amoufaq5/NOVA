@@ -52,6 +52,8 @@ let AST_LIST_COMP = 47
 let AST_MAP_LIT = 48
 let AST_SPREAD = 49
 let AST_METHOD_DECL = 50
+let AST_ASM = 51
+let AST_CONST_STMT = 52
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -424,6 +426,13 @@ fn ast_method_decl(sname, mname, params, body) {
     push(n, mname)
     push(n, params)
     push(n, body)
+    return n
+}
+
+fn ast_asm(lines) {
+    let n = list_new()
+    push(n, AST_ASM)
+    push(n, lines)
     return n
 }
 

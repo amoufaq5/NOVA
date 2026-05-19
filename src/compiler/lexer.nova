@@ -87,6 +87,7 @@ let TOK_PIPE_GT = 87
 let TOK_STAR_STAR = 88
 let TOK_FINALLY = 89
 let TOK_STAR_STAR_EQ = 90
+let TOK_ASM = 91
 
 // --- Lexer State ---
 let lex_src = ""
@@ -500,6 +501,7 @@ fn keyword_type(word) {
     if word == "enum" { return TOK_ENUM }
     if word == "do" { return TOK_DO }
     if word == "finally" { return TOK_FINALLY }
+    if word == "asm" { return TOK_ASM }
     return 0
 }
 

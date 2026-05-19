@@ -1096,6 +1096,7 @@ fn parse_stmt_inner() {
     if t == TOK_THROW { return parse_throw() }
     if t == TOK_ENUM { return parse_enum() }
     if t == TOK_DO { return parse_do_while() }
+    if t == TOK_ASM { return parse_asm() }
 
     // Assignment or expression statement
     let expr = parse_expr()
@@ -1170,6 +1171,23 @@ fn parse_stmt() {
     // Append source line number as the last element for debug info
     push(result, stmt_line)
     return result
+}
+
+fn parse_asm() {
+    par_expect(TOK_ASM)
+    par_expect(TOK_LBRACE)
+    let lines = list_new()
+    while par_peek_type() != TOK_RBRACE {
+        let t = par_advance()
+        if t[0] == TOK_STRING {
+            push(lines, t[1])
+        } else {
+            println("Error: asm block expects string literals")
+            exit(1)
+        }
+    }
+    par_expect(TOK_RBRACE)
+    return ast_asm(lines)
 }
 
 fn parse_do_while() {
