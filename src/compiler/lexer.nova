@@ -88,6 +88,7 @@ let TOK_STAR_STAR = 88
 let TOK_FINALLY = 89
 let TOK_STAR_STAR_EQ = 90
 let TOK_ASM = 91
+let TOK_EXTERN = 92
 
 // --- Lexer State ---
 let lex_src = ""
@@ -502,6 +503,7 @@ fn keyword_type(word) {
     if word == "do" { return TOK_DO }
     if word == "finally" { return TOK_FINALLY }
     if word == "asm" { return TOK_ASM }
+    if word == "extern" { return TOK_EXTERN }
     return 0
 }
 

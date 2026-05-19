@@ -54,6 +54,7 @@ let AST_SPREAD = 49
 let AST_METHOD_DECL = 50
 let AST_ASM = 51
 let AST_CONST_STMT = 52
+let AST_EXTERN_FN = 53
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -426,6 +427,14 @@ fn ast_method_decl(sname, mname, params, body) {
     push(n, mname)
     push(n, params)
     push(n, body)
+    return n
+}
+
+fn ast_extern_fn(name, param_count) {
+    let n = list_new()
+    push(n, AST_EXTERN_FN)
+    push(n, name)
+    push(n, param_count)
     return n
 }
 

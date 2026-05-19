@@ -34,6 +34,8 @@ let cg_lbl_continues = 0
 let cg_lbl_count = 0
 let cg_methods = 0
 let cg_method_count = 0
+let cg_externs = 0
+let cg_extern_count = 0
 let cg_debug = 1
 let cg_source_file = ""
 let cg_last_debug_line = 0
@@ -60,6 +62,8 @@ fn cg_init() {
     cg_lbl_count = 0
     cg_methods = list_new()
     cg_method_count = 0
+    cg_externs = list_new()
+    cg_extern_count = 0
     cg_last_debug_line = 0
 }
 
@@ -2220,6 +2224,18 @@ fn gen_program(program) {
         i = i + 1
     }
 
+    // Collect extern function declarations
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_EXTERN_FN {
+            push(cg_fns, d[1])
+            push(cg_externs, d[1])
+            cg_extern_count = cg_extern_count + 1
+        }
+        i = i + 1
+    }
+
     // Collect function names (including lambdas from parser)
     i = 0
     while i < len(decls) {
@@ -2297,6 +2313,21 @@ fn gen_program(program) {
     while li < len(par_lambdas) {
         gen_function(par_lambdas[li])
         li = li + 1
+    }
+
+    // Emit top-level asm blocks (outside _start)
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_ASM {
+            let asm_lines = d[1]
+            let ai = 0
+            while ai < len(asm_lines) {
+                out("    " + asm_lines[ai])
+                ai = ai + 1
+            }
+        }
+        i = i + 1
     }
 
     // Generate _start for top-level code
@@ -2382,6 +2413,8 @@ fn gen_program(program) {
         let skip_top = 0
         if ast_tag(d) == AST_FN_DECL { skip_top = 1 }
         if ast_tag(d) == AST_METHOD_DECL { skip_top = 1 }
+        if ast_tag(d) == AST_EXTERN_FN { skip_top = 1 }
+        if ast_tag(d) == AST_ASM { skip_top = 1 }
         if skip_top == 0 {
             gen_stmt(d)
         }

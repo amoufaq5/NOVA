@@ -1066,6 +1066,7 @@ fn parse_stmt_inner() {
     if t == TOK_LET { return parse_let() }
     if t == TOK_CONST { return parse_let() }
     if t == TOK_FN { return parse_fn() }
+    if t == TOK_EXTERN { return parse_extern_fn() }
     if t == TOK_IF { return parse_if() }
     if t == TOK_WHILE { return parse_while() }
     if t == TOK_FOR { return parse_for() }
@@ -1171,6 +1172,26 @@ fn parse_stmt() {
     // Append source line number as the last element for debug info
     push(result, stmt_line)
     return result
+}
+
+fn parse_extern_fn() {
+    par_expect(TOK_EXTERN)
+    par_expect(TOK_FN)
+    let name_tok = par_expect(TOK_IDENT)
+    let name = name_tok[1]
+    par_expect(TOK_LPAREN)
+    let pc = 0
+    if par_peek_type() != TOK_RPAREN {
+        par_expect(TOK_IDENT)
+        pc = 1
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            par_expect(TOK_IDENT)
+            pc = pc + 1
+        }
+    }
+    par_expect(TOK_RPAREN)
+    return ast_extern_fn(name, pc)
 }
 
 fn parse_asm() {
