@@ -240,11 +240,32 @@ fn preprocess_imports(source, base_dir) {
     return result
 }
 
+let cg_show_stats = 0
+
 fn compile(source) {
     let tokens = tokenize(source)
     let ast = parse_program(tokens)
     cg_init()
     let asm_code = gen_program(ast)
+    if cg_show_stats == 1 {
+        println("--- Compilation Stats ---")
+        print("  Source size:   ")
+        print(int_to_str(len(source)))
+        println(" bytes")
+        print("  Tokens:       ")
+        println(int_to_str(len(tokens)))
+        print("  Functions:    ")
+        println(int_to_str(len(cg_fns)))
+        print("  Globals:      ")
+        println(int_to_str(cg_global_count))
+        print("  Strings:      ")
+        println(int_to_str(cg_str_count))
+        print("  Labels:       ")
+        println(int_to_str(cg_label_count))
+        print("  Output size:  ")
+        print(int_to_str(len(asm_code)))
+        println(" bytes")
+    }
     return asm_code
 }
 
@@ -302,7 +323,11 @@ fn main() {
                         if cur == "--debug" {
                             cg_debug = 1
                         } else {
-                            input_file = cur
+                            if cur == "--stats" {
+                                cg_show_stats = 1
+                            } else {
+                                input_file = cur
+                            }
                         }
                     }
                 }
