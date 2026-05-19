@@ -1,0 +1,66 @@
+// Test: Process-based Task Pool
+
+import "../src/runtime/taskpool.nova"
+
+fn double(x) {
+    return x * 2
+}
+
+fn square(x) {
+    return x * x
+}
+
+fn test_task_run() {
+    let result = task_run(double, 21)
+    assert(result == 42)
+    result = task_run(square, 7)
+    assert(result == 49)
+    println("  PASS: task_run")
+}
+
+fn test_parallel_map() {
+    let items = [2, 3, 4, 5]
+    let results = parallel_map_int(items, square)
+    assert(len(results) == 4)
+    assert(results[0] == 4)
+    assert(results[1] == 9)
+    assert(results[2] == 16)
+    assert(results[3] == 25)
+    println("  PASS: parallel_map_int")
+}
+
+fn compute_a(x) {
+    return 100
+}
+
+fn compute_b(x) {
+    return 200
+}
+
+fn compute_c(x) {
+    return 300
+}
+
+fn test_parallel_run_all() {
+    let fns = [compute_a, compute_b, compute_c]
+    let results = parallel_run_all(fns)
+    assert(len(results) == 3)
+    assert(results[0] == 100)
+    assert(results[1] == 200)
+    assert(results[2] == 300)
+    println("  PASS: parallel_run_all")
+}
+
+fn test_parallel_reduce() {
+    let items = [1, 2, 3, 4, 5]
+    let total = parallel_reduce_int(items, square, 0)
+    assert(total == 55)
+    println("  PASS: parallel_reduce_int")
+}
+
+println("=== Task Pool Tests ===")
+test_task_run()
+test_parallel_map()
+test_parallel_run_all()
+test_parallel_reduce()
+println("=== All task pool tests passed ===")

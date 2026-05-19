@@ -1,0 +1,167 @@
+// Test: Advanced Coroutine Features
+// Tests generators, task groups, and schedulers.
+
+import "../src/runtime/coroutine.nova"
+
+// --- Generator tests ---
+
+fn range_gen(n) {
+    let i = 0
+    while i < n {
+        coro_yield(i)
+        i = i + 1
+    }
+    return 0
+}
+
+fn test_generator() {
+    let g = gen_new(range_gen, 5)
+    assert(gen_has_next(g) == 1)
+    assert(gen_next(g) == 0)
+    assert(gen_next(g) == 1)
+    assert(gen_next(g) == 2)
+    assert(gen_next(g) == 3)
+    assert(gen_next(g) == 4)
+    assert(gen_has_next(g) == 0)
+    println("  PASS: generator")
+}
+
+fn squares_gen(n) {
+    let i = 1
+    while i <= n {
+        coro_yield(i * i)
+        i = i + 1
+    }
+    return 0
+}
+
+fn test_gen_collect() {
+    let g = gen_new(squares_gen, 5)
+    let result = gen_collect(g, 100)
+    assert(len(result) == 5)
+    assert(result[0] == 1)
+    assert(result[1] == 4)
+    assert(result[2] == 9)
+    assert(result[3] == 16)
+    assert(result[4] == 25)
+    println("  PASS: gen_collect")
+}
+
+fn test_gen_take() {
+    let g = gen_new(squares_gen, 10)
+    let first3 = gen_take(g, 3)
+    assert(len(first3) == 3)
+    assert(first3[0] == 1)
+    assert(first3[1] == 4)
+    assert(first3[2] == 9)
+    let next = gen_next(g)
+    assert(next == 16)
+    println("  PASS: gen_take")
+}
+
+fn test_gen_skip() {
+    let g = gen_new(range_gen, 10)
+    gen_skip(g, 7)
+    assert(gen_next(g) == 7)
+    assert(gen_next(g) == 8)
+    assert(gen_next(g) == 9)
+    assert(gen_has_next(g) == 0)
+    println("  PASS: gen_skip")
+}
+
+// --- Task group tests ---
+
+fn accumulate(n) {
+    let total = 0
+    let i = 1
+    while i <= n {
+        total = total + i
+        coro_yield(total)
+        i = i + 1
+    }
+    return total
+}
+
+fn test_task_group() {
+    let tg = task_group_new()
+    task_group_add(tg, accumulate, 3)
+    task_group_add(tg, accumulate, 4)
+    task_group_add(tg, accumulate, 5)
+    let results = task_group_run(tg)
+    assert(len(results) == 3)
+    assert(results[0] == 6)
+    assert(results[1] == 10)
+    assert(results[2] == 15)
+    println("  PASS: task group")
+}
+
+// --- Scheduler tests ---
+
+let sched_log = list_new()
+
+fn worker_a(id) {
+    push(sched_log, 10)
+    coro_yield(0)
+    push(sched_log, 11)
+    coro_yield(0)
+    push(sched_log, 12)
+    return 0
+}
+
+fn worker_b(id) {
+    push(sched_log, 20)
+    coro_yield(0)
+    push(sched_log, 21)
+    return 0
+}
+
+fn test_scheduler() {
+    let s = scheduler_new()
+    scheduler_spawn(s, worker_a, 1)
+    scheduler_spawn(s, worker_b, 2)
+    scheduler_run_all(s)
+
+    assert(len(sched_log) == 5)
+    assert(sched_log[0] == 10)
+    assert(sched_log[1] == 20)
+    assert(sched_log[2] == 11)
+    assert(sched_log[3] == 21)
+    assert(sched_log[4] == 12)
+    println("  PASS: scheduler round-robin")
+}
+
+// --- Empty and single-element generators ---
+
+fn empty_gen(x) {
+    return 0
+}
+
+fn test_empty_generator() {
+    let g = gen_new(empty_gen, 0)
+    assert(gen_has_next(g) == 0)
+    println("  PASS: empty generator")
+}
+
+fn single_gen(x) {
+    coro_yield(42)
+    return 0
+}
+
+fn test_single_generator() {
+    let g = gen_new(single_gen, 0)
+    assert(gen_has_next(g) == 1)
+    assert(gen_next(g) == 42)
+    assert(gen_has_next(g) == 0)
+    println("  PASS: single-value generator")
+}
+
+println("=== Advanced Coroutine Tests ===")
+test_generator()
+test_gen_collect()
+test_gen_take()
+test_gen_skip()
+test_task_group()
+test_scheduler()
+test_empty_generator()
+test_single_generator()
+println("=== All advanced coroutine tests passed ===")

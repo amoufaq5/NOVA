@@ -1,0 +1,121 @@
+// Nova Runtime: Task Pool
+// Process-based parallelism using fork/pipe for true parallel execution.
+// Each task runs in a separate OS process and returns an integer result.
+
+fn task_run(fn_ref, arg) {
+    let pipes = pipe_create()
+    let read_fd = pipes[0]
+    let write_fd = pipes[1]
+    let pid = fork_process()
+    if pid == 0 {
+        close_fd(read_fd)
+        let result = fn_ref(arg)
+        let buf = int_to_str(result)
+        send_data(write_fd, buf, len(buf))
+        close_fd(write_fd)
+        exit(0)
+    }
+    close_fd(write_fd)
+    let buf = alloc(64)
+    let n = recv_data(read_fd, buf, 63)
+    close_fd(read_fd)
+    waitpid(pid)
+    if n > 0 {
+        return str_to_int(buf)
+    }
+    return 0
+}
+
+fn parallel_map_int(items, fn_ref) {
+    let n = len(items)
+    let pids = list_new()
+    let read_fds = list_new()
+    let i = 0
+    while i < n {
+        let pipes = pipe_create()
+        let read_fd = pipes[0]
+        let write_fd = pipes[1]
+        let pid = fork_process()
+        if pid == 0 {
+            close_fd(read_fd)
+            let result = fn_ref(items[i])
+            let buf = int_to_str(result)
+            send_data(write_fd, buf, len(buf))
+            close_fd(write_fd)
+            exit(0)
+        }
+        close_fd(write_fd)
+        push(pids, pid)
+        push(read_fds, read_fd)
+        i = i + 1
+    }
+
+    let results = list_new()
+    i = 0
+    while i < n {
+        let buf = alloc(64)
+        let nbytes = recv_data(read_fds[i], buf, 63)
+        close_fd(read_fds[i])
+        waitpid(pids[i])
+        if nbytes > 0 {
+            push(results, str_to_int(buf))
+        } else {
+            push(results, 0)
+        }
+        i = i + 1
+    }
+    return results
+}
+
+fn parallel_run_all(fn_list) {
+    let n = len(fn_list)
+    let pids = list_new()
+    let read_fds = list_new()
+    let i = 0
+    while i < n {
+        let pipes = pipe_create()
+        let read_fd = pipes[0]
+        let write_fd = pipes[1]
+        let pid = fork_process()
+        if pid == 0 {
+            close_fd(read_fd)
+            let fn_ref = fn_list[i]
+            let result = fn_ref(0)
+            let buf = int_to_str(result)
+            send_data(write_fd, buf, len(buf))
+            close_fd(write_fd)
+            exit(0)
+        }
+        close_fd(write_fd)
+        push(pids, pid)
+        push(read_fds, read_fd)
+        i = i + 1
+    }
+
+    let results = list_new()
+    i = 0
+    while i < n {
+        let buf = alloc(64)
+        let nbytes = recv_data(read_fds[i], buf, 63)
+        close_fd(read_fds[i])
+        waitpid(pids[i])
+        if nbytes > 0 {
+            push(results, str_to_int(buf))
+        } else {
+            push(results, 0)
+        }
+        i = i + 1
+    }
+    return results
+}
+
+fn parallel_reduce_int(items, fn_ref, init) {
+    let mapped = parallel_map_int(items, fn_ref)
+    let result = init
+    let i = 0
+    while i < len(mapped) {
+        result = result + mapped[i]
+        i = i + 1
+    }
+    return result
+}

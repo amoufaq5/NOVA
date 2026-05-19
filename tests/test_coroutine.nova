@@ -1,0 +1,121 @@
+// Test: Coroutines
+
+fn counter(start) {
+    let i = start
+    while i < start + 5 {
+        coro_yield(i)
+        i = i + 1
+    }
+    return 999
+}
+
+fn test_basic_coro() {
+    let c = coro_new(counter, 10)
+    assert(coro_done(c) == 0)
+    assert(coro_state(c) == 0)
+
+    let v = coro_resume(c)
+    assert(v == 10)
+    assert(coro_state(c) == 2)
+
+    v = coro_resume(c)
+    assert(v == 11)
+
+    v = coro_resume(c)
+    assert(v == 12)
+
+    v = coro_resume(c)
+    assert(v == 13)
+
+    v = coro_resume(c)
+    assert(v == 14)
+
+    v = coro_resume(c)
+    assert(v == 999)
+    assert(coro_done(c) == 1)
+    assert(coro_state(c) == 3)
+    assert(coro_result(c) == 999)
+    println("  PASS: basic coroutine")
+}
+
+fn adder(n) {
+    let total = 0
+    let i = 0
+    while i < n {
+        total = total + i
+        coro_yield(total)
+        i = i + 1
+    }
+    return total
+}
+
+fn test_multiple_coros() {
+    let c1 = coro_new(counter, 0)
+    let c2 = coro_new(adder, 5)
+
+    let v1 = coro_resume(c1)
+    let v2 = coro_resume(c2)
+    assert(v1 == 0)
+    assert(v2 == 0)
+
+    v1 = coro_resume(c1)
+    v2 = coro_resume(c2)
+    assert(v1 == 1)
+    assert(v2 == 1)
+
+    v1 = coro_resume(c1)
+    v2 = coro_resume(c2)
+    assert(v1 == 2)
+    assert(v2 == 3)
+
+    println("  PASS: multiple coroutines")
+}
+
+fn simple_fn(x) {
+    return x * 2
+}
+
+fn test_no_yield() {
+    let c = coro_new(simple_fn, 21)
+    let v = coro_resume(c)
+    assert(v == 42)
+    assert(coro_done(c) == 1)
+    println("  PASS: no-yield coroutine")
+}
+
+fn fibonacci_gen(limit) {
+    let a = 0
+    let b = 1
+    let count = 0
+    while count < limit {
+        coro_yield(a)
+        let tmp = a + b
+        a = b
+        b = tmp
+        count = count + 1
+    }
+    return a
+}
+
+fn test_fibonacci_generator() {
+    let g = coro_new(fibonacci_gen, 8)
+    assert(coro_resume(g) == 0)
+    assert(coro_resume(g) == 1)
+    assert(coro_resume(g) == 1)
+    assert(coro_resume(g) == 2)
+    assert(coro_resume(g) == 3)
+    assert(coro_resume(g) == 5)
+    assert(coro_resume(g) == 8)
+    assert(coro_resume(g) == 13)
+    let final_val = coro_resume(g)
+    assert(final_val == 21)
+    assert(coro_done(g) == 1)
+    println("  PASS: fibonacci generator")
+}
+
+println("=== Coroutine Tests ===")
+test_basic_coro()
+test_multiple_coros()
+test_no_yield()
+test_fibonacci_generator()
+println("=== All coroutine tests passed ===")

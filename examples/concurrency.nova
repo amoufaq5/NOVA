@@ -1,0 +1,188 @@
+// Example: Concurrency in Nova
+// Demonstrates coroutines, generators, channels, and task groups.
+
+import "../src/runtime/coroutine.nova"
+import "../src/runtime/chan.nova"
+
+// --- 1. Generators: Lazy Fibonacci sequence ---
+
+fn fibonacci(limit) {
+    let a = 0
+    let b = 1
+    let count = 0
+    while count < limit {
+        coro_yield(a)
+        let tmp = a + b
+        a = b
+        b = tmp
+        count = count + 1
+    }
+    return 0
+}
+
+fn demo_generators() {
+    println("=== Generators ===")
+    let fib = gen_new(fibonacci, 12)
+    print("Fibonacci: ")
+    while gen_has_next(fib) == 1 {
+        print(int_to_str(gen_next(fib)))
+        if gen_has_next(fib) == 1 {
+            print(", ")
+        }
+    }
+    println("")
+}
+
+// --- 2. Coroutines: Cooperative multitasking ---
+
+let event_log = list_new()
+
+fn sensor_task(id) {
+    let reading = id * 10
+    let i = 0
+    while i < 3 {
+        push(event_log, concat("sensor", concat(int_to_str(id), concat("=", int_to_str(reading)))))
+        coro_yield(reading)
+        reading = reading + 1
+        i = i + 1
+    }
+    return reading
+}
+
+fn demo_cooperative() {
+    println("")
+    println("=== Cooperative Multitasking ===")
+    let s = scheduler_new()
+    scheduler_spawn(s, sensor_task, 1)
+    scheduler_spawn(s, sensor_task, 2)
+    scheduler_spawn(s, sensor_task, 3)
+    scheduler_run_all(s)
+
+    println("Event log (round-robin interleaving):")
+    let i = 0
+    while i < len(event_log) {
+        println("  " + event_log[i])
+        i = i + 1
+    }
+}
+
+// --- 3. Channels: Producer-consumer pipeline ---
+
+let data_chan = chan_new(8)
+let result_chan = chan_new(8)
+
+fn data_producer(n) {
+    let i = 1
+    while i <= n {
+        chan_send(data_chan, i)
+        i = i + 1
+    }
+    chan_close(data_chan)
+    return 0
+}
+
+fn data_processor(x) {
+    while chan_closed(data_chan) == 0 {
+        if chan_is_empty(data_chan) == 0 {
+            let val = chan_try_recv(data_chan)
+            chan_try_send(result_chan, val * val)
+        }
+        coro_yield(0)
+    }
+    while chan_is_empty(data_chan) == 0 {
+        let val = chan_try_recv(data_chan)
+        chan_try_send(result_chan, val * val)
+    }
+    chan_close(result_chan)
+    return 0
+}
+
+fn demo_channels() {
+    println("")
+    println("=== Channel Pipeline ===")
+    let prod = coro_new(data_producer, 6)
+    let proc = coro_new(data_processor, 0)
+
+    while coro_done(prod) == 0 {
+        coro_resume(prod)
+        if coro_done(proc) == 0 {
+            coro_resume(proc)
+        }
+    }
+    while coro_done(proc) == 0 {
+        coro_resume(proc)
+    }
+
+    let results = chan_drain(result_chan)
+    print("Squares of 1..6: ")
+    let i = 0
+    while i < len(results) {
+        if i > 0 { print(", ") }
+        print(int_to_str(results[i]))
+        i = i + 1
+    }
+    println("")
+}
+
+// --- 4. Task group: parallel computation ---
+
+fn sum_to(n) {
+    let total = 0
+    let i = 1
+    while i <= n {
+        total = total + i
+        coro_yield(total)
+        i = i + 1
+    }
+    return total
+}
+
+fn demo_task_group() {
+    println("")
+    println("=== Task Group ===")
+    let tg = task_group_new()
+    task_group_add(tg, sum_to, 10)
+    task_group_add(tg, sum_to, 20)
+    task_group_add(tg, sum_to, 50)
+    let results = task_group_run(tg)
+    println("sum(1..10)  = " + int_to_str(results[0]))
+    println("sum(1..20)  = " + int_to_str(results[1]))
+    println("sum(1..50)  = " + int_to_str(results[2]))
+}
+
+// --- 5. Generator composition ---
+
+fn evens(limit) {
+    let i = 0
+    while i < limit {
+        coro_yield(i * 2)
+        i = i + 1
+    }
+    return 0
+}
+
+fn demo_gen_ops() {
+    println("")
+    println("=== Generator Operations ===")
+    let g = gen_new(evens, 20)
+    gen_skip(g, 5)
+    let slice = gen_take(g, 5)
+    print("evens, skip 5, take 5: ")
+    let i = 0
+    while i < len(slice) {
+        if i > 0 { print(", ") }
+        print(int_to_str(slice[i]))
+        i = i + 1
+    }
+    println("")
+}
+
+// --- Run all demos ---
+
+demo_generators()
+demo_cooperative()
+demo_channels()
+demo_task_group()
+demo_gen_ops()
+println("")
+println("Done.")

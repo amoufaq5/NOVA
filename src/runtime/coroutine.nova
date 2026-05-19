@@ -1,0 +1,191 @@
+// Nova Runtime: Coroutine & Task Utilities
+// Higher-level abstractions on top of coro_new/coro_resume/coro_yield.
+
+let CORO_READY = 0
+let CORO_RUNNING = 1
+let CORO_SUSPENDED = 2
+let CORO_DONE = 3
+
+// --- Generator: lazy sequence producer ---
+// Uses look-ahead buffering so gen_has_next can peek without consuming.
+// Only yielded values are generated; the function's return value is NOT
+// included in the sequence.
+
+fn gen_new(producer_fn, arg) {
+    let g = list_new()
+    push(g, coro_new(producer_fn, arg))
+    push(g, 0)
+    push(g, 0)
+    push(g, 0)
+    return g
+}
+
+fn _gen_advance(g) {
+    if g[1] == 1 { return 0 }
+    if g[2] == 1 { return 1 }
+    let c = g[0]
+    if coro_done(c) == 1 {
+        g[1] = 1
+        return 0
+    }
+    let val = coro_resume(c)
+    if coro_done(c) == 1 {
+        g[1] = 1
+        return 0
+    }
+    g[2] = 1
+    g[3] = val
+    return 1
+}
+
+fn gen_has_next(g) {
+    return _gen_advance(g)
+}
+
+fn gen_next(g) {
+    if _gen_advance(g) == 0 { return 0 }
+    let val = g[3]
+    g[2] = 0
+    return val
+}
+
+fn gen_collect(g, limit) {
+    let result = list_new()
+    let count = 0
+    while gen_has_next(g) == 1 {
+        if count >= limit { return result }
+        push(result, gen_next(g))
+        count = count + 1
+    }
+    return result
+}
+
+fn gen_take(g, n) {
+    return gen_collect(g, n)
+}
+
+fn gen_skip(g, n) {
+    let i = 0
+    while i < n {
+        if gen_has_next(g) == 0 { return 0 }
+        gen_next(g)
+        i = i + 1
+    }
+    return 1
+}
+
+// --- Task group: run multiple coroutines round-robin ---
+
+fn task_group_new() {
+    return list_new()
+}
+
+fn task_group_add(tg, fn_ref, arg) {
+    let c = coro_new(fn_ref, arg)
+    push(tg, c)
+    return c
+}
+
+fn task_group_run(tg) {
+    let results = list_new()
+    let i = 0
+    while i < len(tg) {
+        push(results, 0)
+        i = i + 1
+    }
+    let active = len(tg)
+    while active > 0 {
+        i = 0
+        while i < len(tg) {
+            let c = tg[i]
+            if coro_done(c) == 0 {
+                let val = coro_resume(c)
+                if coro_done(c) == 1 {
+                    list_set(results, i, val)
+                    active = active - 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    return results
+}
+
+// --- Scheduler: cooperative round-robin with yield ---
+
+fn scheduler_new() {
+    let s = list_new()
+    push(s, list_new())
+    push(s, 0)
+    return s
+}
+
+fn scheduler_spawn(sched, fn_ref, arg) {
+    let tasks = sched[0]
+    let c = coro_new(fn_ref, arg)
+    push(tasks, c)
+}
+
+fn scheduler_tick(sched) {
+    let tasks = sched[0]
+    let alive = list_new()
+    let i = 0
+    while i < len(tasks) {
+        let c = tasks[i]
+        if coro_done(c) == 0 {
+            coro_resume(c)
+            if coro_done(c) == 0 {
+                push(alive, c)
+            }
+        }
+        i = i + 1
+    }
+    sched[0] = alive
+    return len(alive)
+}
+
+fn scheduler_run_all(sched) {
+    let remaining = scheduler_tick(sched)
+    while remaining > 0 {
+        remaining = scheduler_tick(sched)
+    }
+}
+
+fn scheduler_active_count(sched) {
+    let tasks = sched[0]
+    let count = 0
+    let i = 0
+    while i < len(tasks) {
+        if coro_done(tasks[i]) == 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// --- Pipeline: chain of producer -> transformer -> consumer ---
+
+fn pipeline_new() {
+    return list_new()
+}
+
+fn pipeline_add_stage(pipe, fn_ref) {
+    push(pipe, fn_ref)
+}
+
+fn pipeline_run(pipe, input) {
+    let val = input
+    let i = 0
+    while i < len(pipe) {
+        let stage = pipe[i]
+        let c = coro_new(stage, val)
+        let last = 0
+        while coro_done(c) == 0 {
+            last = coro_resume(c)
+        }
+        val = last
+        i = i + 1
+    }
+    return val
+}

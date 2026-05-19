@@ -1,0 +1,105 @@
+// Nova Runtime: Channels
+// Go-style buffered channels for inter-coroutine communication.
+// Channels are in-memory queues since coroutines share address space.
+
+let CHAN_OPEN = 0
+let CHAN_CLOSED = 1
+
+fn chan_new(capacity) {
+    let ch = list_new()
+    push(ch, list_new())
+    push(ch, capacity)
+    push(ch, CHAN_OPEN)
+    push(ch, 0)
+    push(ch, 0)
+    return ch
+}
+
+fn chan_buf(ch) { return ch[0] }
+fn chan_cap(ch) { return ch[1] }
+fn chan_status(ch) { return ch[2] }
+fn chan_send_count(ch) { return ch[3] }
+fn chan_recv_count(ch) { return ch[4] }
+
+fn chan_len(ch) {
+    return len(chan_buf(ch))
+}
+
+fn chan_is_full(ch) {
+    if chan_len(ch) >= chan_cap(ch) { return 1 }
+    return 0
+}
+
+fn chan_is_empty(ch) {
+    if chan_len(ch) == 0 { return 1 }
+    return 0
+}
+
+fn chan_closed(ch) {
+    if chan_status(ch) == CHAN_CLOSED { return 1 }
+    return 0
+}
+
+fn chan_close(ch) {
+    ch[2] = CHAN_CLOSED
+}
+
+fn chan_send(ch, val) {
+    if chan_closed(ch) == 1 { return 0 }
+    while chan_is_full(ch) == 1 {
+        coro_yield(0)
+        if chan_closed(ch) == 1 { return 0 }
+    }
+    let buf = chan_buf(ch)
+    push(buf, val)
+    ch[3] = ch[3] + 1
+    return 1
+}
+
+fn chan_recv(ch) {
+    while chan_is_empty(ch) == 1 {
+        if chan_closed(ch) == 1 { return 0 }
+        coro_yield(0)
+    }
+    let buf = chan_buf(ch)
+    let val = buf[0]
+    let i = 1
+    while i < len(buf) {
+        buf[i - 1] = buf[i]
+        i = i + 1
+    }
+    pop(buf)
+    ch[4] = ch[4] + 1
+    return val
+}
+
+fn chan_try_send(ch, val) {
+    if chan_closed(ch) == 1 { return 0 }
+    if chan_is_full(ch) == 1 { return 0 }
+    let buf = chan_buf(ch)
+    push(buf, val)
+    ch[3] = ch[3] + 1
+    return 1
+}
+
+fn chan_try_recv(ch) {
+    if chan_is_empty(ch) == 1 { return 0 }
+    let buf = chan_buf(ch)
+    let val = buf[0]
+    let i = 1
+    while i < len(buf) {
+        buf[i - 1] = buf[i]
+        i = i + 1
+    }
+    pop(buf)
+    ch[4] = ch[4] + 1
+    return val
+}
+
+fn chan_drain(ch) {
+    let result = list_new()
+    while chan_is_empty(ch) == 0 {
+        push(result, chan_try_recv(ch))
+    }
+    return result
+}

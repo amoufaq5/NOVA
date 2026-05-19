@@ -1,0 +1,126 @@
+// Test: Channels for inter-coroutine communication
+
+import "../src/runtime/chan.nova"
+
+fn test_basic_chan() {
+    let ch = chan_new(3)
+    assert(chan_len(ch) == 0)
+    assert(chan_is_empty(ch) == 1)
+    assert(chan_is_full(ch) == 0)
+
+    chan_try_send(ch, 10)
+    assert(chan_len(ch) == 1)
+    chan_try_send(ch, 20)
+    chan_try_send(ch, 30)
+    assert(chan_len(ch) == 3)
+    assert(chan_is_full(ch) == 1)
+
+    let ok = chan_try_send(ch, 40)
+    assert(ok == 0)
+
+    let v = chan_try_recv(ch)
+    assert(v == 10)
+    v = chan_try_recv(ch)
+    assert(v == 20)
+    v = chan_try_recv(ch)
+    assert(v == 30)
+    assert(chan_is_empty(ch) == 1)
+    println("  PASS: basic channel ops")
+}
+
+fn test_chan_close() {
+    let ch = chan_new(5)
+    chan_try_send(ch, 1)
+    chan_try_send(ch, 2)
+    chan_close(ch)
+    assert(chan_closed(ch) == 1)
+
+    let ok = chan_try_send(ch, 3)
+    assert(ok == 0)
+
+    let v = chan_try_recv(ch)
+    assert(v == 1)
+    v = chan_try_recv(ch)
+    assert(v == 2)
+    println("  PASS: channel close")
+}
+
+fn test_chan_drain() {
+    let ch = chan_new(10)
+    chan_try_send(ch, 100)
+    chan_try_send(ch, 200)
+    chan_try_send(ch, 300)
+    let items = chan_drain(ch)
+    assert(len(items) == 3)
+    assert(items[0] == 100)
+    assert(items[1] == 200)
+    assert(items[2] == 300)
+    assert(chan_is_empty(ch) == 1)
+    println("  PASS: channel drain")
+}
+
+fn test_chan_counts() {
+    let ch = chan_new(5)
+    chan_try_send(ch, 1)
+    chan_try_send(ch, 2)
+    assert(chan_send_count(ch) == 2)
+    chan_try_recv(ch)
+    assert(chan_recv_count(ch) == 1)
+    chan_try_recv(ch)
+    assert(chan_recv_count(ch) == 2)
+    println("  PASS: channel counts")
+}
+
+// --- Producer/consumer with coroutines ---
+
+let test_ch = chan_new(2)
+
+fn producer(n) {
+    let i = 1
+    while i <= n {
+        chan_send(test_ch, i * 10)
+        i = i + 1
+    }
+    chan_close(test_ch)
+    return 0
+}
+
+fn consumer(x) {
+    let total = 0
+    while chan_closed(test_ch) == 0 {
+        if chan_is_empty(test_ch) == 0 {
+            total = total + chan_try_recv(test_ch)
+        }
+        coro_yield(total)
+    }
+    while chan_is_empty(test_ch) == 0 {
+        total = total + chan_try_recv(test_ch)
+    }
+    return total
+}
+
+fn test_producer_consumer() {
+    let p = coro_new(producer, 5)
+    let c = coro_new(consumer, 0)
+
+    while coro_done(p) == 0 {
+        coro_resume(p)
+        if coro_done(c) == 0 {
+            coro_resume(c)
+        }
+    }
+    while coro_done(c) == 0 {
+        coro_resume(c)
+    }
+    let result = coro_result(c)
+    assert(result == 150)
+    println("  PASS: producer/consumer")
+}
+
+println("=== Channel Tests ===")
+test_basic_chan()
+test_chan_close()
+test_chan_drain()
+test_chan_counts()
+test_producer_consumer()
+println("=== All channel tests passed ===")
