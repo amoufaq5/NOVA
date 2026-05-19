@@ -1,0 +1,95 @@
+#!/bin/bash
+# Nova: compile and run a .nova program in one step
+# Usage: ./nova run <file.nova> [args...]
+#        ./nova build <file.nova> [-o output]
+#        ./nova pkg <subcommand>
+
+set -e
+
+NOVA_ROOT="$(cd "$(dirname "$0")" && pwd)"
+NOVA_COMPILER="$NOVA_ROOT/bin/nova"
+AS=as
+LD=ld
+
+if [ ! -f "$NOVA_COMPILER" ]; then
+    echo "Error: Nova compiler not found at $NOVA_COMPILER"
+    echo "Run 'make' first to build the compiler."
+    exit 1
+fi
+
+case "$1" in
+    run)
+        shift
+        if [ -z "$1" ]; then
+            echo "Usage: nova run <file.nova> [args...]"
+            exit 1
+        fi
+        SOURCE="$1"
+        shift
+        TMPDIR=$(mktemp -d)
+        trap "rm -rf $TMPDIR" EXIT
+        "$NOVA_COMPILER" "$SOURCE" --nova-root="$NOVA_ROOT" -o "$TMPDIR/out.s" 2>&1 | grep -v "^===" || true
+        $AS -o "$TMPDIR/out.o" "$TMPDIR/out.s" 2>/dev/null
+        $LD -o "$TMPDIR/out" "$TMPDIR/out.o"
+        "$TMPDIR/out" "$@"
+        ;;
+    build)
+        shift
+        if [ -z "$1" ]; then
+            echo "Usage: nova build <file.nova> [-o output]"
+            exit 1
+        fi
+        SOURCE="$1"
+        shift
+        OUTPUT="${SOURCE%.nova}"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -o) OUTPUT="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        TMPDIR=$(mktemp -d)
+        trap "rm -rf $TMPDIR" EXIT
+        "$NOVA_COMPILER" "$SOURCE" --nova-root="$NOVA_ROOT" -o "$TMPDIR/out.s"
+        $AS -o "$TMPDIR/out.o" "$TMPDIR/out.s"
+        $LD -o "$OUTPUT" "$TMPDIR/out.o"
+        echo "Built: $OUTPUT"
+        ;;
+    pkg)
+        shift
+        "$NOVA_COMPILER" pkg "$@"
+        ;;
+    version)
+        echo "Nova Programming Language v0.9.0"
+        echo "Self-hosting compiler for x86-64 Linux"
+        echo "Binary: $NOVA_COMPILER"
+        ;;
+    help|--help|-h)
+        echo "Nova Programming Language"
+        echo ""
+        echo "Usage:"
+        echo "  nova run <file.nova> [args...]   Compile and run a program"
+        echo "  nova build <file.nova> [-o out]   Compile to binary"
+        echo "  nova pkg <command>                Package manager"
+        echo "  nova version                      Show version info"
+        echo "  nova help                         Show this help"
+        ;;
+    *)
+        if [ -f "$1" ]; then
+            # If given a file directly, run it
+            SOURCE="$1"
+            shift
+            TMPDIR=$(mktemp -d)
+            trap "rm -rf $TMPDIR" EXIT
+            "$NOVA_COMPILER" "$SOURCE" --nova-root="$NOVA_ROOT" -o "$TMPDIR/out.s" 2>&1 | grep -v "^===" || true
+            $AS -o "$TMPDIR/out.o" "$TMPDIR/out.s" 2>/dev/null
+            $LD -o "$TMPDIR/out" "$TMPDIR/out.o"
+            "$TMPDIR/out" "$@"
+        else
+            echo "Nova Programming Language"
+            echo "Usage: nova <run|build|pkg|version|help> [args...]"
+            echo "       nova <file.nova> [args...]"
+            exit 1
+        fi
+        ;;
+esac
