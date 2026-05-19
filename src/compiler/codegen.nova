@@ -2125,6 +2125,9 @@ fn gen_function(nd) {
 }
 
 fn gen_program(program) {
+    if cg_target == 2 {
+        return wasm_gen_program(program)
+    }
     let decls = program[1]
 
     // First pass: collect struct and enum declarations
@@ -2385,6 +2388,1705 @@ fn gen_program(program) {
     gen_runtime()
 
     peephole_optimize()
+
+    return join(cg_output, chr(10))
+}
+
+// =====================================================================
+// WASM Backend — emits WebAssembly Text Format (WAT)
+// =====================================================================
+
+let wasm_strs = 0
+let wasm_str_offset = 0
+let wasm_data_entries = 0
+let wasm_indent = 0
+let wasm_local_map = 0
+let wasm_local_idx = 0
+let wasm_globals_list = 0
+let wasm_break_depth = 0
+let wasm_continue_depth = 0
+let wasm_block_depth = 0
+let wasm_fn_names = 0
+
+fn wi(line) {
+    let prefix = ""
+    let ii = 0
+    while ii < wasm_indent {
+        prefix = prefix + "  "
+        ii = ii + 1
+    }
+    push(cg_output, prefix + line)
+}
+
+fn wasm_add_str(s) {
+    let offset = wasm_str_offset
+    push(wasm_data_entries, offset)
+    push(wasm_data_entries, s)
+    wasm_str_offset = wasm_str_offset + len(s) + 1
+    return offset
+}
+
+fn wasm_escape_str(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        let c = char_at(s, i)
+        if c == 34 {
+            result = result + chr(92) + chr(34)
+        } else {
+            if c == 92 {
+                result = result + chr(92) + chr(92)
+            } else {
+                if c == 10 {
+                    result = result + chr(92) + "n"
+                } else {
+                    if c < 32 {
+                        result = result + "."
+                    } else {
+                        result = result + chr(c)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn wasm_local_get(name) {
+    wi("local.get $" + name)
+}
+
+fn wasm_local_set(name) {
+    wi("local.set $" + name)
+}
+
+fn wasm_global_get(name) {
+    wi("global.get $g_" + name)
+}
+
+fn wasm_global_set(name) {
+    wi("global.set $g_" + name)
+}
+
+fn wasm_is_global(name) {
+    let i = 0
+    while i < cg_global_count {
+        if cg_globals[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn wasm_is_fn(name) {
+    let i = 0
+    while i < len(wasm_fn_names) {
+        if wasm_fn_names[i] == name { return 1 }
+        i = i + 1
+    }
+    if is_builtin_fn(name) == 1 { return 1 }
+    return 0
+}
+
+fn wasm_collect_locals(nd) {
+    let tag = ast_tag(nd)
+    if tag == AST_LET_STMT {
+        let vname = nd[1]
+        if wasm_is_global(vname) == 0 {
+            let exists = 0
+            let k = 0
+            while k < len(wasm_local_map) {
+                if wasm_local_map[k] == vname { exists = 1 }
+                k = k + 1
+            }
+            if exists == 0 {
+                push(wasm_local_map, vname)
+            }
+        }
+    }
+    if tag == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            wasm_collect_locals(stmts[i])
+            i = i + 1
+        }
+    }
+    if tag == AST_IF_STMT {
+        wasm_collect_locals(nd[2])
+        if len(nd) > 3 {
+            if nd[3] == 0 {
+            } else {
+                wasm_collect_locals(nd[3])
+            }
+        }
+    }
+    if tag == AST_WHILE_STMT {
+        wasm_collect_locals(nd[2])
+    }
+    if tag == AST_FOR_STMT {
+        let vname = nd[1]
+        let exists = 0
+        let k = 0
+        while k < len(wasm_local_map) {
+            if wasm_local_map[k] == vname { exists = 1 }
+            k = k + 1
+        }
+        if exists == 0 {
+            push(wasm_local_map, vname)
+        }
+        wasm_collect_locals(nd[3])
+    }
+    if tag == AST_DO_WHILE {
+        wasm_collect_locals(nd[1])
+    }
+    if tag == AST_TRY_CATCH {
+        wasm_collect_locals(nd[1])
+        wasm_collect_locals(nd[2])
+    }
+    if tag == AST_FOR_INDEXED {
+        let iname = nd[1]
+        let vname2 = nd[2]
+        let exists = 0
+        let k = 0
+        while k < len(wasm_local_map) {
+            if wasm_local_map[k] == iname { exists = 1 }
+            k = k + 1
+        }
+        if exists == 0 { push(wasm_local_map, iname) }
+        exists = 0
+        k = 0
+        while k < len(wasm_local_map) {
+            if wasm_local_map[k] == vname2 { exists = 1 }
+            k = k + 1
+        }
+        if exists == 0 { push(wasm_local_map, vname2) }
+        wasm_collect_locals(nd[4])
+    }
+}
+
+fn wasm_gen_expr(nd) {
+    let tag = ast_tag(nd)
+
+    if tag == AST_INT_LIT {
+        wi("i64.const " + int_to_str(nd[1]))
+        return 0
+    }
+
+    if tag == AST_BOOL_LIT {
+        if nd[1] == 1 {
+            wi("i64.const 1")
+        } else {
+            wi("i64.const 0")
+        }
+        return 0
+    }
+
+    if tag == AST_NONE_LIT {
+        wi("i64.const 0")
+        return 0
+    }
+
+    if tag == AST_FLOAT_LIT {
+        wi("i64.const " + int_to_str(nd[1]))
+        return 0
+    }
+
+    if tag == AST_STR_LIT {
+        let offset = wasm_add_str(nd[1])
+        wi("i64.const " + int_to_str(offset))
+        return 0
+    }
+
+    if tag == AST_IDENT {
+        let name = nd[1]
+        if wasm_is_global(name) == 1 {
+            wasm_global_get(name)
+        } else {
+            if wasm_is_fn(name) == 1 {
+                wi("i64.const 0")
+            } else {
+                wasm_local_get(name)
+            }
+        }
+        return 0
+    }
+
+    if tag == AST_BIN_OP {
+        let op = nd[1]
+        if op == "==" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("call $rt_eq")
+            return 0
+        }
+        if op == "+" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("call $rt_add")
+            return 0
+        }
+        if op == "-" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.sub")
+            return 0
+        }
+        if op == "*" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.mul")
+            return 0
+        }
+        if op == "/" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.div_s")
+            return 0
+        }
+        if op == "%" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.rem_s")
+            return 0
+        }
+        if op == "<" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.lt_s")
+            wi("i64.extend_i32_u")
+            return 0
+        }
+        if op == ">" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.gt_s")
+            wi("i64.extend_i32_u")
+            return 0
+        }
+        if op == "<=" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.le_s")
+            wi("i64.extend_i32_u")
+            return 0
+        }
+        if op == ">=" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.ge_s")
+            wi("i64.extend_i32_u")
+            return 0
+        }
+        if op == "!=" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("call $rt_eq")
+            wi("i64.eqz")
+            wi("i64.extend_i32_u")
+            return 0
+        }
+        if op == "&" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.and")
+            return 0
+        }
+        if op == "|" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.or")
+            return 0
+        }
+        if op == "^" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.xor")
+            return 0
+        }
+        if op == "<<" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.shl")
+            return 0
+        }
+        if op == ">>" {
+            wasm_gen_expr(nd[2])
+            wasm_gen_expr(nd[3])
+            wi("i64.shr_s")
+            return 0
+        }
+        wasm_gen_expr(nd[2])
+        wasm_gen_expr(nd[3])
+        wi("i64.add")
+        return 0
+    }
+
+    if tag == AST_UNARY_OP {
+        let op = nd[1]
+        if op == "-" {
+            wi("i64.const 0")
+            wasm_gen_expr(nd[2])
+            wi("i64.sub")
+            return 0
+        }
+        if op == "!" {
+            wasm_gen_expr(nd[2])
+            wi("i64.eqz")
+            wi("i64.extend_i32_u")
+            return 0
+        }
+        wasm_gen_expr(nd[2])
+        return 0
+    }
+
+    if tag == AST_AND_EXPR {
+        wasm_gen_expr(nd[1])
+        wi("i64.eqz")
+        wi("if (result i64)")
+        wasm_indent = wasm_indent + 1
+        wi("i64.const 0")
+        wasm_indent = wasm_indent - 1
+        wi("else")
+        wasm_indent = wasm_indent + 1
+        wasm_gen_expr(nd[2])
+        wasm_indent = wasm_indent - 1
+        wi("end")
+        return 0
+    }
+
+    if tag == AST_OR_EXPR {
+        wasm_gen_expr(nd[1])
+        wi("i64.eqz")
+        wi("i32.eqz")
+        wi("if (result i64)")
+        wasm_indent = wasm_indent + 1
+        wi("i64.const 1")
+        wasm_indent = wasm_indent - 1
+        wi("else")
+        wasm_indent = wasm_indent + 1
+        wasm_gen_expr(nd[2])
+        wasm_indent = wasm_indent - 1
+        wi("end")
+        return 0
+    }
+
+    if tag == AST_CALL {
+        let callee = nd[1]
+        let args = nd[2]
+        let callee_name = ""
+        if ast_tag(callee) == AST_IDENT {
+            callee_name = callee[1]
+        }
+        if ast_tag(callee) == AST_FIELD_ACCESS {
+            callee_name = callee[1][1] + "_" + callee[2]
+        }
+        let i = 0
+        while i < len(args) {
+            wasm_gen_expr(args[i])
+            i = i + 1
+        }
+        wi("call $" + callee_name)
+        return 0
+    }
+
+    if tag == AST_INDEX_EXPR {
+        wasm_gen_expr(nd[1])
+        wasm_gen_expr(nd[2])
+        wi("call $rt_index")
+        return 0
+    }
+
+    if tag == AST_LIST_LIT {
+        let elems = nd[1]
+        wi("call $list_new")
+        wi("global.set $g__wasm_list_tmp")
+        let i = 0
+        while i < len(elems) {
+            wi("global.get $g__wasm_list_tmp")
+            wasm_gen_expr(elems[i])
+            wi("call $push")
+            wi("drop")
+            i = i + 1
+        }
+        wi("global.get $g__wasm_list_tmp")
+        return 0
+    }
+
+    if tag == AST_TERNARY {
+        wasm_gen_expr(nd[1])
+        wi("i64.eqz")
+        wi("i32.eqz")
+        wi("if (result i64)")
+        wasm_indent = wasm_indent + 1
+        wasm_gen_expr(nd[2])
+        wasm_indent = wasm_indent - 1
+        wi("else")
+        wasm_indent = wasm_indent + 1
+        wasm_gen_expr(nd[3])
+        wasm_indent = wasm_indent - 1
+        wi("end")
+        return 0
+    }
+
+    wi("i64.const 0")
+    return 0
+}
+
+fn wasm_gen_stmt(nd) {
+    let tag = ast_tag(nd)
+
+    if tag == AST_EXPR_STMT {
+        wasm_gen_expr(nd[1])
+        wi("drop")
+        return 0
+    }
+
+    if tag == AST_LET_STMT {
+        let vname = nd[1]
+        wasm_gen_expr(nd[2])
+        if wasm_is_global(vname) == 1 {
+            wasm_global_set(vname)
+        } else {
+            wasm_local_set(vname)
+        }
+        return 0
+    }
+
+    if tag == AST_ASSIGN_STMT {
+        let vname = nd[1]
+        wasm_gen_expr(nd[2])
+        if wasm_is_global(vname) == 1 {
+            wasm_global_set(vname)
+        } else {
+            wasm_local_set(vname)
+        }
+        return 0
+    }
+
+    if tag == AST_IF_STMT {
+        wasm_gen_expr(nd[1])
+        wi("i64.eqz")
+        wi("i32.eqz")
+        wi("if")
+        wasm_indent = wasm_indent + 1
+        wasm_block_depth = wasm_block_depth + 1
+        wasm_gen_block_stmts(nd[2])
+        wasm_block_depth = wasm_block_depth - 1
+        wasm_indent = wasm_indent - 1
+        if len(nd) > 3 {
+            let else_nd = nd[3]
+            if else_nd == 0 {
+            } else {
+                wi("else")
+                wasm_indent = wasm_indent + 1
+                wasm_block_depth = wasm_block_depth + 1
+                let else_tag = ast_tag(else_nd)
+                if else_tag == AST_BLOCK {
+                    wasm_gen_block_stmts(else_nd)
+                } else {
+                    if else_tag == AST_IF_STMT {
+                        wasm_gen_stmt(else_nd)
+                    } else {
+                        wasm_gen_block_stmts(else_nd)
+                    }
+                }
+                wasm_block_depth = wasm_block_depth - 1
+                wasm_indent = wasm_indent - 1
+            }
+        }
+        wi("end")
+        return 0
+    }
+
+    if tag == AST_WHILE_STMT {
+        let save_break = wasm_break_depth
+        let save_cont = wasm_continue_depth
+        wi("block $brk" + int_to_str(cg_label_count))
+        wi("loop $cont" + int_to_str(cg_label_count))
+        wasm_indent = wasm_indent + 1
+        wasm_break_depth = 1
+        wasm_continue_depth = 0
+        wasm_block_depth = wasm_block_depth + 2
+        wasm_gen_expr(nd[1])
+        wi("i64.eqz")
+        wi("br_if $brk" + int_to_str(cg_label_count))
+        wasm_gen_block_stmts(nd[2])
+        wi("br $cont" + int_to_str(cg_label_count))
+        wasm_block_depth = wasm_block_depth - 2
+        wasm_indent = wasm_indent - 1
+        wi("end")
+        wi("end")
+        wasm_break_depth = save_break
+        wasm_continue_depth = save_cont
+        cg_label_count = cg_label_count + 1
+        return 0
+    }
+
+    if tag == AST_FOR_STMT {
+        let vname = nd[1]
+        let iter_expr = nd[2]
+        let body = nd[3]
+        wasm_gen_expr(iter_expr)
+        wasm_local_set("_for_iter")
+        wi("i64.const 0")
+        wasm_local_set("_for_idx")
+        let save_break = wasm_break_depth
+        let save_cont = wasm_continue_depth
+        wi("block $brk" + int_to_str(cg_label_count))
+        wi("loop $cont" + int_to_str(cg_label_count))
+        wasm_indent = wasm_indent + 1
+        wasm_break_depth = 1
+        wasm_continue_depth = 0
+        wasm_block_depth = wasm_block_depth + 2
+        wasm_local_get("_for_idx")
+        wasm_local_get("_for_iter")
+        wi("call $len")
+        wi("i64.ge_s")
+        wi("br_if $brk" + int_to_str(cg_label_count))
+        wasm_local_get("_for_iter")
+        wasm_local_get("_for_idx")
+        wi("call $rt_index")
+        wasm_local_set(vname)
+        wasm_gen_block_stmts(body)
+        wasm_local_get("_for_idx")
+        wi("i64.const 1")
+        wi("i64.add")
+        wasm_local_set("_for_idx")
+        wi("br $cont" + int_to_str(cg_label_count))
+        wasm_block_depth = wasm_block_depth - 2
+        wasm_indent = wasm_indent - 1
+        wi("end")
+        wi("end")
+        wasm_break_depth = save_break
+        wasm_continue_depth = save_cont
+        cg_label_count = cg_label_count + 1
+        return 0
+    }
+
+    if tag == AST_RETURN_STMT {
+        wasm_gen_expr(nd[1])
+        wi("return")
+        return 0
+    }
+
+    if tag == AST_BLOCK {
+        wasm_gen_block_stmts(nd)
+        return 0
+    }
+
+    if tag == AST_BREAK_STMT {
+        wi("br $brk" + int_to_str(cg_label_count - 1))
+        return 0
+    }
+
+    if tag == AST_CONTINUE_STMT {
+        wi("br $cont" + int_to_str(cg_label_count - 1))
+        return 0
+    }
+
+    if tag == AST_INDEX_ASSIGN {
+        wasm_gen_expr(nd[1])
+        wasm_gen_expr(nd[2])
+        wasm_gen_expr(nd[3])
+        wi("call $rt_index_set")
+        wi("drop")
+        return 0
+    }
+
+    if tag == AST_FN_DECL {
+        return 0
+    }
+    if tag == AST_STRUCT_DECL {
+        return 0
+    }
+    if tag == AST_ENUM_DECL {
+        return 0
+    }
+    if tag == AST_METHOD_DECL {
+        return 0
+    }
+
+    return 0
+}
+
+fn wasm_gen_block_stmts(nd) {
+    if ast_tag(nd) == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            wasm_gen_stmt(stmts[i])
+            i = i + 1
+        }
+    } else {
+        wasm_gen_stmt(nd)
+    }
+}
+
+fn wasm_gen_function(d) {
+    let fname = d[1]
+    let params = d[2]
+    let body = d[3]
+    wasm_local_map = list_new()
+    wasm_local_idx = 0
+    let sig = "(func $" + fname
+    let pi = 0
+    while pi < len(params) {
+        let pname = params[pi]
+        if ast_tag(pname) == AST_DEFAULT_PARAM {
+            pname = pname[1]
+        }
+        sig = sig + " (param $" + pname + " i64)"
+        pi = pi + 1
+    }
+    sig = sig + " (result i64)"
+    wasm_collect_locals(body)
+    wi(sig)
+    wasm_indent = wasm_indent + 1
+    let li = 0
+    while li < len(wasm_local_map) {
+        wi("(local $" + wasm_local_map[li] + " i64)")
+        li = li + 1
+    }
+    wi("(local $_for_iter i64)")
+    wi("(local $_for_idx i64)")
+    wasm_gen_block_stmts(body)
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+}
+
+fn wasm_gen_rt_core() {
+    // Memory allocator
+    wi("(func $alloc (param $size i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $ptr i64)")
+    wi("global.get $heap_ptr")
+    wi("local.set $ptr")
+    wi("global.get $heap_ptr")
+    wi("local.get $size")
+    wi("i64.add")
+    wi("global.set $heap_ptr")
+    wi("local.get $ptr")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // rt_eq — compare two values (int or string)
+    wi("(func $rt_eq (param $a i64) (param $b i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $a")
+    wi("i64.const 4096")
+    wi("i64.lt_s")
+    wi("if (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $a")
+    wi("local.get $b")
+    wi("i64.eq")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi("else")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $a")
+    wi("local.get $b")
+    wi("call $rt_streq")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // rt_streq — compare two null-terminated strings
+    wi("(func $rt_streq (param $a i64) (param $b i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $ia i32)")
+    wi("(local $ib i32)")
+    wi("(local $ca i32)")
+    wi("(local $cb i32)")
+    wi("local.get $a")
+    wi("i32.wrap_i64")
+    wi("local.set $ia")
+    wi("local.get $b")
+    wi("i32.wrap_i64")
+    wi("local.set $ib")
+    wi("block $done")
+    wi("loop $cmp")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $ia")
+    wi("i32.load8_u")
+    wi("local.set $ca")
+    wi("local.get $ib")
+    wi("i32.load8_u")
+    wi("local.set $cb")
+    wi("local.get $ca")
+    wi("local.get $cb")
+    wi("i32.ne")
+    wi("if")
+    wi("  i64.const 0")
+    wi("  return")
+    wi("end")
+    wi("local.get $ca")
+    wi("i32.eqz")
+    wi("br_if $done")
+    wi("local.get $ia")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $ia")
+    wi("local.get $ib")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $ib")
+    wi("br $cmp")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("i64.const 1")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // rt_add — smart add (int add or string concat)
+    wi("(func $rt_add (param $a i64) (param $b i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $a")
+    wi("i64.const 4096")
+    wi("i64.lt_s")
+    wi("if (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $a")
+    wi("local.get $b")
+    wi("i64.add")
+    wasm_indent = wasm_indent - 1
+    wi("else")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $a")
+    wi("local.get $b")
+    wi("call $concat")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // strlen
+    wi("(func $rt_strlen (param $s i32) (result i32)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $n i32)")
+    wi("block $done")
+    wi("loop $cnt")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $s")
+    wi("local.get $n")
+    wi("i32.add")
+    wi("i32.load8_u")
+    wi("i32.eqz")
+    wi("br_if $done")
+    wi("local.get $n")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $n")
+    wi("br $cnt")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("local.get $n")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // len — length of string or list
+    wi("(func $len (param $v i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $v")
+    wi("i64.const 4096")
+    wi("i64.lt_s")
+    wi("if (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi("else")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $v")
+    wi("i32.wrap_i64")
+    wi("i64.load")
+    wi("i64.const -1")
+    wi("i64.eq")
+    wi("if (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $v")
+    wi("i32.wrap_i64")
+    wi("i32.const 8")
+    wi("i32.add")
+    wi("i64.load")
+    wasm_indent = wasm_indent - 1
+    wi("else")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $v")
+    wi("i32.wrap_i64")
+    wi("call $rt_strlen")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // concat — concatenate two strings
+    wi("(func $concat (param $a i64) (param $b i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $la i32)")
+    wi("(local $lb i32)")
+    wi("(local $dst i32)")
+    wi("(local $i i32)")
+    wi("local.get $a")
+    wi("i32.wrap_i64")
+    wi("call $rt_strlen")
+    wi("local.set $la")
+    wi("local.get $b")
+    wi("i32.wrap_i64")
+    wi("call $rt_strlen")
+    wi("local.set $lb")
+    wi("local.get $la")
+    wi("local.get $lb")
+    wi("i32.add")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("i64.extend_i32_u")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $dst")
+    wi("i32.const 0")
+    wi("local.set $i")
+    wi("block $d1")
+    wi("loop $c1")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $la")
+    wi("i32.ge_u")
+    wi("br_if $d1")
+    wi("local.get $dst")
+    wi("local.get $i")
+    wi("i32.add")
+    wi("local.get $a")
+    wi("i32.wrap_i64")
+    wi("local.get $i")
+    wi("i32.add")
+    wi("i32.load8_u")
+    wi("i32.store8")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $c1")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("i32.const 0")
+    wi("local.set $i")
+    wi("block $d2")
+    wi("loop $c2")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $lb")
+    wi("i32.ge_u")
+    wi("br_if $d2")
+    wi("local.get $dst")
+    wi("local.get $la")
+    wi("i32.add")
+    wi("local.get $i")
+    wi("i32.add")
+    wi("local.get $b")
+    wi("i32.wrap_i64")
+    wi("local.get $i")
+    wi("i32.add")
+    wi("i32.load8_u")
+    wi("i32.store8")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $c2")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("local.get $dst")
+    wi("local.get $la")
+    wi("i32.add")
+    wi("local.get $lb")
+    wi("i32.add")
+    wi("i32.const 0")
+    wi("i32.store8")
+    wi("local.get $dst")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+}
+
+fn wasm_gen_rt_io() {
+    // print — write string to stdout
+    wi("(func $print (param $s i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $ptr i32)")
+    wi("(local $slen i32)")
+    wi("local.get $s")
+    wi("i32.wrap_i64")
+    wi("local.set $ptr")
+    wi("local.get $ptr")
+    wi("call $rt_strlen")
+    wi("local.set $slen")
+    wi("i32.const 0")
+    wi("local.get $ptr")
+    wi("i32.store")
+    wi("i32.const 4")
+    wi("local.get $slen")
+    wi("i32.store")
+    wi("i32.const 1")
+    wi("i32.const 0")
+    wi("i32.const 1")
+    wi("i32.const 8")
+    wi("call $fd_write")
+    wi("drop")
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // println — print + newline
+    let nl_offset = wasm_add_str(chr(10))
+    wi("(func $println (param $s i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $s")
+    wi("call $print")
+    wi("drop")
+    wi("i64.const " + int_to_str(nl_offset))
+    wi("call $print")
+    wi("drop")
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // int_to_str
+    wi("(func $int_to_str (param $n i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $buf i32)")
+    wi("(local $pos i32)")
+    wi("(local $neg i32)")
+    wi("(local $d i64)")
+    wi("(local $tmp i64)")
+    wi("i32.const 24")
+    wi("i64.extend_i32_u")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $buf")
+    wi("local.get $buf")
+    wi("i32.const 20")
+    wi("i32.add")
+    wi("local.set $pos")
+    wi("local.get $pos")
+    wi("i32.const 0")
+    wi("i32.store8")
+    wi("local.get $n")
+    wi("i64.const 0")
+    wi("i64.lt_s")
+    wi("if")
+    wasm_indent = wasm_indent + 1
+    wi("i32.const 1")
+    wi("local.set $neg")
+    wi("i64.const 0")
+    wi("local.get $n")
+    wi("i64.sub")
+    wi("local.set $n")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("local.get $n")
+    wi("i64.eqz")
+    wi("if")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $pos")
+    wi("i32.const 1")
+    wi("i32.sub")
+    wi("local.set $pos")
+    wi("local.get $pos")
+    wi("i32.const 48")
+    wi("i32.store8")
+    wasm_indent = wasm_indent - 1
+    wi("else")
+    wasm_indent = wasm_indent + 1
+    wi("block $done")
+    wi("loop $digits")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $n")
+    wi("i64.eqz")
+    wi("br_if $done")
+    wi("local.get $n")
+    wi("i64.const 10")
+    wi("i64.rem_s")
+    wi("local.set $d")
+    wi("local.get $pos")
+    wi("i32.const 1")
+    wi("i32.sub")
+    wi("local.set $pos")
+    wi("local.get $pos")
+    wi("local.get $d")
+    wi("i32.wrap_i64")
+    wi("i32.const 48")
+    wi("i32.add")
+    wi("i32.store8")
+    wi("local.get $n")
+    wi("i64.const 10")
+    wi("i64.div_s")
+    wi("local.set $n")
+    wi("br $digits")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("local.get $neg")
+    wi("if")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $pos")
+    wi("i32.const 1")
+    wi("i32.sub")
+    wi("local.set $pos")
+    wi("local.get $pos")
+    wi("i32.const 45")
+    wi("i32.store8")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("local.get $pos")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // print_int
+    wi("(func $print_int (param $n i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $n")
+    wi("call $int_to_str")
+    wi("call $print")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // assert
+    let assert_msg = wasm_add_str("Assertion failed")
+    let assert_sep = wasm_add_str(": ")
+    wi("(func $assert (param $cond i64) (param $msg i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $cond")
+    wi("i64.eqz")
+    wi("if")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const " + int_to_str(assert_msg))
+    wi("call $print")
+    wi("drop")
+    wi("i64.const " + int_to_str(assert_sep))
+    wi("call $print")
+    wi("drop")
+    wi("local.get $msg")
+    wi("call $println")
+    wi("drop")
+    wi("i32.const 1")
+    wi("call $proc_exit")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // list_new — allocate list header [magic=-1, count=0, cap=8, items_ptr]
+    wi("(func $list_new (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $hdr i32)")
+    wi("(local $items i32)")
+    wi("i64.const 32")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $hdr")
+    wi("i64.const 64")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $items")
+    wi("local.get $hdr")
+    wi("i64.const -1")
+    wi("i64.store")
+    wi("local.get $hdr")
+    wi("i32.const 8")
+    wi("i32.add")
+    wi("i64.const 0")
+    wi("i64.store")
+    wi("local.get $hdr")
+    wi("i32.const 16")
+    wi("i32.add")
+    wi("i64.const 8")
+    wi("i64.store")
+    wi("local.get $hdr")
+    wi("i32.const 24")
+    wi("i32.add")
+    wi("local.get $items")
+    wi("i64.extend_i32_u")
+    wi("i64.store")
+    wi("local.get $hdr")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // push — append value to list
+    wi("(func $push (param $list i64) (param $val i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $hdr i32)")
+    wi("(local $cnt i64)")
+    wi("(local $items i32)")
+    wi("local.get $list")
+    wi("i32.wrap_i64")
+    wi("local.set $hdr")
+    wi("local.get $hdr")
+    wi("i32.const 8")
+    wi("i32.add")
+    wi("i64.load")
+    wi("local.set $cnt")
+    wi("local.get $hdr")
+    wi("i32.const 24")
+    wi("i32.add")
+    wi("i64.load")
+    wi("i32.wrap_i64")
+    wi("local.set $items")
+    wi("local.get $items")
+    wi("local.get $cnt")
+    wi("i32.wrap_i64")
+    wi("i32.const 8")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("local.get $val")
+    wi("i64.store")
+    wi("local.get $hdr")
+    wi("i32.const 8")
+    wi("i32.add")
+    wi("local.get $cnt")
+    wi("i64.const 1")
+    wi("i64.add")
+    wi("i64.store")
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // rt_index — list[i]
+    wi("(func $rt_index (param $list i64) (param $idx i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $hdr i32)")
+    wi("(local $items i32)")
+    wi("local.get $list")
+    wi("i32.wrap_i64")
+    wi("local.set $hdr")
+    wi("local.get $hdr")
+    wi("i32.const 24")
+    wi("i32.add")
+    wi("i64.load")
+    wi("i32.wrap_i64")
+    wi("local.set $items")
+    wi("local.get $items")
+    wi("local.get $idx")
+    wi("i32.wrap_i64")
+    wi("i32.const 8")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("i64.load")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // rt_index_set — list[i] = val
+    wi("(func $rt_index_set (param $list i64) (param $idx i64) (param $val i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $hdr i32)")
+    wi("(local $items i32)")
+    wi("local.get $list")
+    wi("i32.wrap_i64")
+    wi("local.set $hdr")
+    wi("local.get $hdr")
+    wi("i32.const 24")
+    wi("i32.add")
+    wi("i64.load")
+    wi("i32.wrap_i64")
+    wi("local.set $items")
+    wi("local.get $items")
+    wi("local.get $idx")
+    wi("i32.wrap_i64")
+    wi("i32.const 8")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("local.get $val")
+    wi("i64.store")
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // rt_list_push — used by list literal codegen (pushes and returns list)
+    wi("(func $rt_list_push (param $val i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $list i64)")
+    wi("global.get $g__wasm_list_tmp")
+    wi("local.set $list")
+    wi("local.get $list")
+    wi("local.get $val")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $list")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // list_set — alias for rt_index_set
+    wi("(func $list_set (param $list i64) (param $idx i64) (param $val i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $list")
+    wi("local.get $idx")
+    wi("local.get $val")
+    wi("call $rt_index_set")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+}
+
+fn wasm_gen_rt_extra() {
+    // pop — remove and return last element
+    wi("(func $pop (param $list i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $hdr i32)")
+    wi("(local $cnt i64)")
+    wi("(local $items i32)")
+    wi("(local $val i64)")
+    wi("local.get $list")
+    wi("i32.wrap_i64")
+    wi("local.set $hdr")
+    wi("local.get $hdr")
+    wi("i32.const 8")
+    wi("i32.add")
+    wi("i64.load")
+    wi("local.set $cnt")
+    wi("local.get $hdr")
+    wi("i32.const 24")
+    wi("i32.add")
+    wi("i64.load")
+    wi("i32.wrap_i64")
+    wi("local.set $items")
+    wi("local.get $items")
+    wi("local.get $cnt")
+    wi("i64.const 1")
+    wi("i64.sub")
+    wi("i32.wrap_i64")
+    wi("i32.const 8")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("i64.load")
+    wi("local.set $val")
+    wi("local.get $hdr")
+    wi("i32.const 8")
+    wi("i32.add")
+    wi("local.get $cnt")
+    wi("i64.const 1")
+    wi("i64.sub")
+    wi("i64.store")
+    wi("local.get $val")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // exit
+    wi("(func $exit (param $code i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $code")
+    wi("i32.wrap_i64")
+    wi("call $proc_exit")
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // str_to_int — parse integer from string
+    wi("(func $str_to_int (param $s i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $ptr i32)")
+    wi("(local $result i64)")
+    wi("(local $c i32)")
+    wi("(local $neg i32)")
+    wi("local.get $s")
+    wi("i32.wrap_i64")
+    wi("local.set $ptr")
+    wi("local.get $ptr")
+    wi("i32.load8_u")
+    wi("i32.const 45")
+    wi("i32.eq")
+    wi("if")
+    wi("  i32.const 1")
+    wi("  local.set $neg")
+    wi("  local.get $ptr")
+    wi("  i32.const 1")
+    wi("  i32.add")
+    wi("  local.set $ptr")
+    wi("end")
+    wi("block $done")
+    wi("loop $parse")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $ptr")
+    wi("i32.load8_u")
+    wi("local.set $c")
+    wi("local.get $c")
+    wi("i32.eqz")
+    wi("br_if $done")
+    wi("local.get $c")
+    wi("i32.const 48")
+    wi("i32.lt_u")
+    wi("br_if $done")
+    wi("local.get $c")
+    wi("i32.const 57")
+    wi("i32.gt_u")
+    wi("br_if $done")
+    wi("local.get $result")
+    wi("i64.const 10")
+    wi("i64.mul")
+    wi("local.get $c")
+    wi("i32.const 48")
+    wi("i32.sub")
+    wi("i64.extend_i32_u")
+    wi("i64.add")
+    wi("local.set $result")
+    wi("local.get $ptr")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $ptr")
+    wi("br $parse")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("local.get $neg")
+    wi("if (result i64)")
+    wi("  i64.const 0")
+    wi("  local.get $result")
+    wi("  i64.sub")
+    wi("else")
+    wi("  local.get $result")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // char_at — return char code at index
+    wi("(func $char_at (param $s i64) (param $idx i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $s")
+    wi("i32.wrap_i64")
+    wi("local.get $idx")
+    wi("i32.wrap_i64")
+    wi("i32.add")
+    wi("i32.load8_u")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // chr — create single-char string
+    wi("(func $chr (param $c i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $ptr i32)")
+    wi("i64.const 2")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $ptr")
+    wi("local.get $ptr")
+    wi("local.get $c")
+    wi("i32.wrap_i64")
+    wi("i32.store8")
+    wi("local.get $ptr")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("i32.const 0")
+    wi("i32.store8")
+    wi("local.get $ptr")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // substr
+    wi("(func $substr (param $s i64) (param $start i64) (param $slen i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $ptr i32)")
+    wi("(local $dst i32)")
+    wi("(local $i i32)")
+    wi("local.get $slen")
+    wi("i64.const 1")
+    wi("i64.add")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $dst")
+    wi("local.get $s")
+    wi("i32.wrap_i64")
+    wi("local.get $start")
+    wi("i32.wrap_i64")
+    wi("i32.add")
+    wi("local.set $ptr")
+    wi("block $done")
+    wi("loop $cp")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $slen")
+    wi("i32.wrap_i64")
+    wi("i32.ge_u")
+    wi("br_if $done")
+    wi("local.get $dst")
+    wi("local.get $i")
+    wi("i32.add")
+    wi("local.get $ptr")
+    wi("local.get $i")
+    wi("i32.add")
+    wi("i32.load8_u")
+    wi("i32.store8")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $cp")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("local.get $dst")
+    wi("local.get $slen")
+    wi("i32.wrap_i64")
+    wi("i32.add")
+    wi("i32.const 0")
+    wi("i32.store8")
+    wi("local.get $dst")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // type_of
+    wi("(func $type_of (param $v i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $v")
+    wi("i64.const 4096")
+    wi("i64.lt_s")
+    wi("if (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const 1")
+    wasm_indent = wasm_indent - 1
+    wi("else")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $v")
+    wi("i32.wrap_i64")
+    wi("i64.load")
+    wi("i64.const -1")
+    wi("i64.eq")
+    wi("if (result i64)")
+    wi("  i64.const 3")
+    wi("else")
+    wi("  local.get $v")
+    wi("  i32.wrap_i64")
+    wi("  i64.load")
+    wi("  i64.const -2")
+    wi("  i64.eq")
+    wi("  if (result i64)")
+    wi("    i64.const 4")
+    wi("  else")
+    wi("    i64.const 2")
+    wi("  end")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // contains — check if list contains value
+    wi("(func $contains (param $list i64) (param $val i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $i i64)")
+    wi("(local $n i64)")
+    wi("local.get $list")
+    wi("call $len")
+    wi("local.set $n")
+    wi("block $found")
+    wi("loop $search")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $n")
+    wi("i64.ge_s")
+    wi("br_if $found")
+    wi("local.get $list")
+    wi("local.get $i")
+    wi("call $rt_index")
+    wi("local.get $val")
+    wi("call $rt_eq")
+    wi("i64.eqz")
+    wi("i32.eqz")
+    wi("if")
+    wi("  i64.const 1")
+    wi("  return")
+    wi("end")
+    wi("local.get $i")
+    wi("i64.const 1")
+    wi("i64.add")
+    wi("local.set $i")
+    wi("br $search")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // debug_print — print label and value
+    wi("(func $debug_print (param $label i64) (param $val i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $label")
+    wi("call $print")
+    wi("drop")
+    let sep = wasm_add_str(": ")
+    wi("i64.const " + int_to_str(sep))
+    wi("call $print")
+    wi("drop")
+    wi("local.get $val")
+    wi("call $int_to_str")
+    wi("call $println")
+    wi("drop")
+    wi("i64.const 0")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+}
+
+fn wasm_gen_program(program) {
+    let decls = program[1]
+    wasm_strs = list_new()
+    wasm_str_offset = 8192
+    wasm_data_entries = list_new()
+    wasm_indent = 0
+    wasm_fn_names = list_new()
+    wasm_block_depth = 0
+
+    // Collect globals
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_LET_STMT {
+            add_global(d[1])
+        }
+        i = i + 1
+    }
+
+    // Collect function names
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            push(cg_fns, d[1])
+            push(wasm_fn_names, d[1])
+        }
+        i = i + 1
+    }
+
+    let Q = chr(34)
+
+    // Module header
+    out("(module")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_write" + Q + " (func $fd_write (param i32 i32 i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "proc_exit" + Q + " (func $proc_exit (param i32)))")
+    out("  (memory (export " + Q + "memory" + Q + ") 256)")
+    out("  (global $heap_ptr (mut i64) (i64.const 65536))")
+    out("  (global $g__wasm_list_tmp (mut i64) (i64.const 0))")
+    i = 0
+    while i < cg_global_count {
+        out("  (global $g_" + cg_globals[i] + " (mut i64) (i64.const 0))")
+        i = i + 1
+    }
+    out("")
+
+    // Runtime functions
+    wasm_indent = 1
+    wasm_gen_rt_core()
+    wasm_gen_rt_io()
+    wasm_gen_rt_extra()
+
+    // User functions
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            wasm_gen_function(d)
+        }
+        i = i + 1
+    }
+
+    // _start entry point
+    out("  (func (export " + Q + "_start" + Q + ")")
+    wasm_indent = 2
+
+    // Collect top-level locals
+    wasm_local_map = list_new()
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        let dtag = ast_tag(d)
+        if dtag == AST_IF_STMT { wasm_collect_locals(d) }
+        if dtag == AST_WHILE_STMT { wasm_collect_locals(d) }
+        if dtag == AST_FOR_STMT { wasm_collect_locals(d) }
+        if dtag == AST_DO_WHILE { wasm_collect_locals(d) }
+        if dtag == AST_FOR_INDEXED { wasm_collect_locals(d) }
+        if dtag == AST_EXPR_STMT { wasm_collect_locals(d) }
+        i = i + 1
+    }
+
+    let li = 0
+    while li < len(wasm_local_map) {
+        wi("(local $" + wasm_local_map[li] + " i64)")
+        li = li + 1
+    }
+    wi("(local $_for_iter i64)")
+    wi("(local $_for_idx i64)")
+
+    // Generate top-level statements
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        let dtag2 = ast_tag(d)
+        let skip = 0
+        if dtag2 == AST_FN_DECL { skip = 1 }
+        if dtag2 == AST_METHOD_DECL { skip = 1 }
+        if dtag2 == AST_STRUCT_DECL { skip = 1 }
+        if dtag2 == AST_ENUM_DECL { skip = 1 }
+        if skip == 0 {
+            wasm_gen_stmt(d)
+        }
+        i = i + 1
+    }
+
+    out("  )")
+    out("")
+
+    // Data section for strings
+    i = 0
+    while i < len(wasm_data_entries) {
+        let doff = wasm_data_entries[i]
+        let dstr = wasm_data_entries[i + 1]
+        out("  (data (i32.const " + int_to_str(doff) + ") " + Q + wasm_escape_str(dstr) + chr(92) + "00" + Q + ")")
+        i = i + 2
+    }
+
+    out(")")
 
     return join(cg_output, chr(10))
 }
@@ -2935,12 +4637,12 @@ fn gen_runtime() {
     out("    cmp rax, 0")
     out("    jl .rf_fail")
     out("    mov r12, rax")
-    out("    mov rdi, 262144")
+    out("    mov rdi, 524288")
     out("    call _nova_alloc")
     out("    push rax")
     out("    mov rdi, r12")
     out("    mov rsi, rax")
-    out("    mov rdx, 262143")
+    out("    mov rdx, 524287")
     emit_syscall(0)
     out("    pop rsi")
     out("    mov byte ptr [rsi+rax], 0")

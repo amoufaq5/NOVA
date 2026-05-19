@@ -1,0 +1,23 @@
+// Simple WASM test
+fn add(a, b) {
+    return a + b
+}
+
+fn factorial(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+println("Hello from Nova WASM!")
+println("3 + 4 = " + int_to_str(add(3, 4)))
+println("5! = " + int_to_str(factorial(5)))
+
+let i = 1
+while i <= 5 {
+    println("  i = " + int_to_str(i))
+    i = i + 1
+}
+
+println("Done.")

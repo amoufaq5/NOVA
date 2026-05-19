@@ -173,9 +173,14 @@ fn main() {
                     if tname == "linux" {
                         cg_target = 0
                     } else {
-                        println(concat("Unknown target: ", tname))
-                        println("Supported targets: linux, macos")
-                        exit(1)
+                        if tname == "wasm" {
+                            cg_target = 2
+                            println("Target: WebAssembly (WASI)")
+                        } else {
+                            println(concat("Unknown target: ", tname))
+                            println("Supported targets: linux, macos, wasm")
+                            exit(1)
+                        }
                     }
                 }
             } else {
@@ -187,7 +192,7 @@ fn main() {
     }
 
     if input_file == "" {
-        println("Usage: nova <input.nova> [-o output.s] [--target=linux|macos]")
+        println("Usage: nova <input.nova> [-o output.s] [--target=linux|macos|wasm]")
         exit(1)
     }
 

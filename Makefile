@@ -52,6 +52,27 @@ cross-macos: bin/nova
 	@echo "  as -o nova.o nova_macos.s"
 	@echo "  ld -e _main -o nova nova.o"
 
+# Compile to WASM and run (requires Node.js + wabt npm package)
+wasm: bin/nova
+	@if [ -z "$(FILE)" ]; then echo "Usage: make wasm FILE=path/to/file.nova"; exit 1; fi
+	@bin/nova $(FILE) --target=wasm -o /tmp/nova_wasm.wat
+	@node -e "\
+	const wabt = require('wabt'); const fs = require('fs');\
+	wabt().then(w => {\
+	  const src = fs.readFileSync('/tmp/nova_wasm.wat', 'utf8');\
+	  const mod = w.parseWat('test.wat', src); mod.validate();\
+	  const {buffer} = mod.toBinary({});\
+	  fs.writeFileSync('/tmp/nova_wasm.wasm', Buffer.from(buffer));\
+	});" 2>/dev/null
+	@node --experimental-wasi-unstable-preview1 -e "\
+	const {WASI} = require('wasi'); const fs = require('fs');\
+	const wasi = new WASI({version: 'preview1', args: [], env: {}, preopens: {}});\
+	const importObject = {wasi_snapshot_preview1: wasi.wasiImport};\
+	const wasm = fs.readFileSync('/tmp/nova_wasm.wasm');\
+	WebAssembly.instantiate(wasm, importObject).then(({instance}) => {\
+	  wasi.start(instance);\
+	}).catch(e => { console.error('WASM error:', e.message); process.exit(1); });" 2>/dev/null
+
 # Compile a .nova file to a binary
 %.out: %.nova bin/nova
 	bin/nova $< -o /tmp/$*.s

@@ -1,0 +1,122 @@
+// Comprehensive WASM target test
+// Tests: functions, recursion, strings, lists, if/else, while, for, globals
+
+fn add(a, b) { return a + b }
+fn mul(a, b) { return a * b }
+fn sub(a, b) { return a - b }
+
+fn my_max(a, b) {
+    if a > b { return a }
+    return b
+}
+
+fn my_abs(n) {
+    if n < 0 { return 0 - n }
+    return n
+}
+
+fn factorial(n) {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+
+fn fib(n) {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    return fib(n - 1) + fib(n - 2)
+}
+
+// Test basic arithmetic
+println("=== Arithmetic ===")
+assert(add(3, 4) == 7, "add")
+assert(mul(5, 6) == 30, "mul")
+assert(sub(10, 3) == 7, "sub")
+assert(my_max(5, 9) == 9, "max1")
+assert(my_max(9, 5) == 9, "max2")
+assert(my_abs(0 - 5) == 5, "abs")
+println("Arithmetic: OK")
+
+// Test recursion
+println("=== Recursion ===")
+assert(factorial(0) == 1, "fact0")
+assert(factorial(1) == 1, "fact1")
+assert(factorial(5) == 120, "fact5")
+assert(factorial(6) == 720, "fact6")
+assert(fib(0) == 0, "fib0")
+assert(fib(1) == 1, "fib1")
+assert(fib(7) == 13, "fib7")
+assert(fib(10) == 55, "fib10")
+println("Recursion: OK")
+
+// Test strings
+println("=== Strings ===")
+let s1 = "hello"
+let s2 = " world"
+let s3 = s1 + s2
+assert(s3 == "hello world", "concat")
+assert(len(s1) == 5, "strlen")
+assert(len(s3) == 11, "strlen2")
+println("Strings: OK")
+
+// Test globals and mutation
+println("=== Globals ===")
+let counter = 0
+counter = counter + 1
+counter = counter + 1
+counter = counter + 1
+assert(counter == 3, "global_mut")
+println("Globals: OK")
+
+// Test while loop
+println("=== While ===")
+let total = 0
+let i = 1
+while i <= 50 {
+    total = total + i
+    i = i + 1
+}
+assert(total == 1275, "sum_1_to_50")
+println("While: OK")
+
+// Test if/else
+println("=== If/Else ===")
+fn classify(n) {
+    if n > 0 { return "positive" }
+    if n < 0 { return "negative" }
+    return "zero"
+}
+assert(classify(5) == "positive", "pos")
+assert(classify(0 - 3) == "negative", "neg")
+assert(classify(0) == "zero", "zero")
+println("If/Else: OK")
+
+// Test lists
+println("=== Lists ===")
+let lst = [10, 20, 30, 40, 50]
+assert(len(lst) == 5, "list_len")
+assert(lst[0] == 10, "list_idx0")
+assert(lst[4] == 50, "list_idx4")
+push(lst, 60)
+assert(len(lst) == 6, "list_push")
+assert(lst[5] == 60, "list_push_val")
+println("Lists: OK")
+
+// Test int_to_str
+println("=== Conversions ===")
+assert(int_to_str(42) == "42", "i2s_pos")
+assert(int_to_str(0) == "0", "i2s_zero")
+println("Conversions: OK")
+
+// Test boolean ops
+println("=== Boolean ===")
+assert((1 == 1) == 1, "eq_true")
+assert((1 == 2) == 0, "eq_false")
+assert((5 > 3) == 1, "gt_true")
+assert((3 > 5) == 0, "gt_false")
+assert((3 < 5) == 1, "lt_true")
+assert((5 >= 5) == 1, "gte")
+assert((5 <= 5) == 1, "lte")
+println("Boolean: OK")
+
+println("")
+println("All WASM tests passed!")
