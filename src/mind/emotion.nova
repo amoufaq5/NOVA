@@ -2,66 +2,411 @@
 // Dimensional model: valence, arousal, dominance (each 0-100)
 // State drifts toward targets rather than jumping.
 // High arousal increases influence on other cognitive processes.
+//
+// Valence:   0 = extreme displeasure, 50 = neutral, 100 = extreme pleasure
+// Arousal:   0 = deep calm, 100 = maximum activation
+// Dominance: 0 = no control, 100 = full control
+//
+// Mood is a slow-moving baseline shift that colors all experience.
+// Appraisal evaluates moments against the current emotional context.
+// History enables trend analysis for self-awareness.
 
+// ============================================================
+// Current emotional state
+// ============================================================
 let emotion_state_v = 50
-let emotion_state_a = 50
+let emotion_state_a = 30
 let emotion_state_d = 50
+
+// ============================================================
+// Baseline: the resting state we drift back toward
+// ============================================================
 let emotion_baseline_v = 50
 let emotion_baseline_a = 30
 let emotion_baseline_d = 50
-let emotion_drift_rate = 15
 
+// ============================================================
+// Mood: long-term emotional tendency (slow-changing baseline shift)
+// ============================================================
+let emotion_mood_v = 50
+let emotion_mood_a = 30
+let emotion_mood_d = 50
+
+// ============================================================
+// Drift parameters
+// ============================================================
+let emotion_drift_rate = 15
+let emotion_mood_rate = 3
+
+// ============================================================
+// History: list of recent [v, a, d] snapshots for trend analysis
+// ============================================================
+let emotion_history = 0
+let emotion_history_max = 20
+
+// ============================================================
+// emotion_init: set all dimensions to neutral defaults
+// V=50 (neutral valence), A=30 (calm), D=50 (balanced control)
+// ============================================================
 fn emotion_init() {
     emotion_state_v = 50
-    emotion_state_a = 50
+    emotion_state_a = 30
     emotion_state_d = 50
+    emotion_baseline_v = 50
+    emotion_baseline_a = 30
+    emotion_baseline_d = 50
+    emotion_mood_v = 50
+    emotion_mood_a = 30
+    emotion_mood_d = 50
+    emotion_drift_rate = 15
+    emotion_mood_rate = 3
+    emotion_history = list_new()
+    emotion_history_max = 20
 }
 
+// ============================================================
+// Accessors
+// ============================================================
 fn emotion_get_valence() { return emotion_state_v }
 fn emotion_get_arousal() { return emotion_state_a }
 fn emotion_get_dominance() { return emotion_state_d }
 
+// ============================================================
+// emotion_set_baseline: change the resting state
+// ============================================================
+fn emotion_set_baseline(v, a, d) {
+    emotion_baseline_v = v
+    emotion_baseline_a = a
+    emotion_baseline_d = d
+}
+
+// ============================================================
+// emotion_appraise: evaluate a moment's emotional impact
+// Extracts valence, arousal, salience from the moment.
+// Higher salience = greater weight on the emotional shift.
+// Drifts state toward moment's emotional tone, never jumps.
+// Also adjusts dominance: high-salience moments that are
+// negative reduce dominance (feeling overwhelmed), while
+// high-salience positive moments increase it (feeling capable).
+// Records the resulting state in history.
+// ============================================================
 fn emotion_appraise(moment) {
     let felt_v = moment_valence(moment)
     let felt_a = moment_arousal(moment)
     let salience = moment_salience(moment)
 
-    // Drift toward the moment's emotional tone
+    // Weight is proportional to salience: 0-100 -> 0-50 influence
     let weight = salience / 2
+    if weight < 5 {
+        weight = 5
+    }
+
+    // Drift valence toward moment's valence
     let target_v = felt_v
-    let target_a = felt_a
-
     emotion_state_v = emotion_state_v + (target_v - emotion_state_v) * weight / 100
+
+    // Drift arousal toward moment's arousal
+    let target_a = felt_a
     emotion_state_a = emotion_state_a + (target_a - emotion_state_a) * weight / 100
+
+    // Drift dominance based on salience and valence:
+    // Positive high-salience moments boost dominance (feeling in control)
+    // Negative high-salience moments reduce dominance (feeling overwhelmed)
+    let dominance_target = emotion_state_d
+    if salience > 50 {
+        if felt_v > 55 {
+            // Positive event with high salience: feel more in control
+            dominance_target = emotion_state_d + salience / 5
+        }
+        if felt_v < 45 {
+            // Negative event with high salience: feel less in control
+            dominance_target = emotion_state_d - salience / 5
+        }
+    }
+    // Clamp dominance target
+    if dominance_target < 0 { dominance_target = 0 }
+    if dominance_target > 100 { dominance_target = 100 }
+    emotion_state_d = emotion_state_d + (dominance_target - emotion_state_d) * weight / 100
+
+    // Clamp all values to 0-100
+    emotion_state_v = max(0, min(100, emotion_state_v))
+    emotion_state_a = max(0, min(100, emotion_state_a))
+    emotion_state_d = max(0, min(100, emotion_state_d))
+
+    // Record in history
+    let snap = list_new()
+    push(snap, emotion_state_v)
+    push(snap, emotion_state_a)
+    push(snap, emotion_state_d)
+    push(emotion_history, snap)
+
+    // Trim history if it exceeds max
+    if len(emotion_history) > emotion_history_max {
+        let trimmed = list_new()
+        let start = len(emotion_history) - emotion_history_max
+        let i = start
+        while i < len(emotion_history) {
+            push(trimmed, emotion_history[i])
+            i = i + 1
+        }
+        emotion_history = trimmed
+    }
 }
 
+// ============================================================
+// emotion_decay_to_baseline: drift current state toward baseline
+// Called each tick to gradually return to resting state.
+// Uses emotion_drift_rate to control speed of return.
+// ============================================================
 fn emotion_decay_to_baseline() {
-    emotion_state_v = emotion_state_v + (emotion_baseline_v - emotion_state_v) * emotion_drift_rate / 100
-    emotion_state_a = emotion_state_a + (emotion_baseline_a - emotion_state_a) * emotion_drift_rate / 100
-    emotion_state_d = emotion_state_d + (emotion_baseline_d - emotion_state_d) * emotion_drift_rate / 100
+    // Effective baseline is shifted by mood
+    let eff_v = (emotion_baseline_v + emotion_mood_v) / 2
+    let eff_a = (emotion_baseline_a + emotion_mood_a) / 2
+    let eff_d = (emotion_baseline_d + emotion_mood_d) / 2
+
+    emotion_state_v = emotion_state_v + (eff_v - emotion_state_v) * emotion_drift_rate / 100
+    emotion_state_a = emotion_state_a + (eff_a - emotion_state_a) * emotion_drift_rate / 100
+    emotion_state_d = emotion_state_d + (eff_d - emotion_state_d) * emotion_drift_rate / 100
 }
 
+// ============================================================
+// emotion_update_mood: shift mood based on average of recent
+// emotion history. Mood changes very slowly (emotion_mood_rate).
+// This creates a long-term emotional tendency: repeated positive
+// experiences gradually raise mood, repeated negative ones lower it.
+// ============================================================
+fn emotion_update_mood() {
+    let count = len(emotion_history)
+    if count == 0 {
+        return 0
+    }
+
+    // Compute average of recent history
+    let sum_v = 0
+    let sum_a = 0
+    let sum_d = 0
+    let i = 0
+    while i < count {
+        let entry = emotion_history[i]
+        sum_v = sum_v + entry[0]
+        sum_a = sum_a + entry[1]
+        sum_d = sum_d + entry[2]
+        i = i + 1
+    }
+    let avg_v = sum_v / count
+    let avg_a = sum_a / count
+    let avg_d = sum_d / count
+
+    // Drift mood toward the average very slowly
+    emotion_mood_v = emotion_mood_v + (avg_v - emotion_mood_v) * emotion_mood_rate / 100
+    emotion_mood_a = emotion_mood_a + (avg_a - emotion_mood_a) * emotion_mood_rate / 100
+    emotion_mood_d = emotion_mood_d + (avg_d - emotion_mood_d) * emotion_mood_rate / 100
+
+    return 1
+}
+
+// ============================================================
+// emotion_influence: returns 0-100 indicating how much emotion
+// should affect cognition. Based on arousal: higher arousal
+// means emotion has more influence on reasoning, attention, etc.
+// ============================================================
 fn emotion_influence() {
-    // Returns how much emotion should influence cognition (0-100)
-    // Higher arousal = more influence
-    return emotion_state_a
+    // Arousal directly maps to influence
+    // Slight boost if valence is extreme (strong feelings demand attention)
+    let base = emotion_state_a
+    let v_dist = abs(emotion_state_v - 50)
+    let boost = v_dist / 5
+    let influence = base + boost
+    if influence > 100 {
+        influence = 100
+    }
+    return influence
 }
 
+// ============================================================
+// emotion_describe: returns a string label for the current
+// emotional state based on V-A-D dimensions.
+// Uses thresholds: high > 60, low < 40, mid = 40-60
+// ============================================================
 fn emotion_describe() {
-    if emotion_state_v > 70 {
-        if emotion_state_a > 70 {
+    let v = emotion_state_v
+    let a = emotion_state_a
+    let d = emotion_state_d
+
+    // Low valence quadrants
+    if v < 40 {
+        if a > 60 {
+            // Low V, high A — distinguish anger from fear via dominance
+            if d > 60 {
+                return "angry"
+            }
+            return "afraid"
+        }
+        // Low V, low A
+        return "sad"
+    }
+
+    // High valence quadrants
+    if v > 60 {
+        if a > 60 {
             return "excited"
         }
         return "content"
     }
-    if emotion_state_v < 30 {
-        if emotion_state_a > 70 {
-            return "anxious"
-        }
-        return "sad"
-    }
-    if emotion_state_a > 70 {
+
+    // Mid valence
+    if a > 60 {
         return "alert"
     }
+    if a < 40 {
+        return "calm"
+    }
+
     return "neutral"
+}
+
+// ============================================================
+// emotion_intensity: returns 0-100 measuring distance from
+// neutral state (50, 30, 50). Higher = more emotionally charged.
+// Uses Manhattan distance scaled to 0-100.
+// ============================================================
+fn emotion_intensity() {
+    let dv = abs(emotion_state_v - 50)
+    let da = abs(emotion_state_a - 30)
+    let dd = abs(emotion_state_d - 50)
+    // Max possible distance: 50 + 70 + 50 = 170
+    // Scale to 0-100
+    let raw = dv + da + dd
+    let scaled = raw * 100 / 170
+    if scaled > 100 {
+        scaled = 100
+    }
+    return scaled
+}
+
+// ============================================================
+// emotion_is_positive: returns 1 if valence > 55
+// ============================================================
+fn emotion_is_positive() {
+    if emotion_state_v > 55 {
+        return 1
+    }
+    return 0
+}
+
+// ============================================================
+// emotion_is_negative: returns 1 if valence < 45
+// ============================================================
+fn emotion_is_negative() {
+    if emotion_state_v < 45 {
+        return 1
+    }
+    return 0
+}
+
+// ============================================================
+// emotion_resonance: returns 0-100 measuring how similar the
+// current state is to a given emotion (for empathy/alignment).
+// 100 = identical, 0 = maximally different.
+// ============================================================
+fn emotion_resonance(other_v, other_a) {
+    let dv = abs(emotion_state_v - other_v)
+    let da = abs(emotion_state_a - other_a)
+    // Max distance per dimension is 100, two dimensions = 200
+    let distance = dv + da
+    let similarity = 100 - distance * 100 / 200
+    if similarity < 0 {
+        similarity = 0
+    }
+    return similarity
+}
+
+// ============================================================
+// emotion_color_signal: modify a signal's priority based on
+// emotional state. High arousal boosts priority (more reactive).
+// Low valence adds urgency (negative feelings sharpen attention).
+// Returns the adjusted priority, clamped to 0-100.
+// ============================================================
+fn emotion_color_signal(signal_priority) {
+    let adjusted = signal_priority
+
+    // High arousal boosts priority: up to +20 at max arousal
+    let arousal_boost = (emotion_state_a - 30) * 20 / 70
+    if arousal_boost < 0 { arousal_boost = 0 }
+    adjusted = adjusted + arousal_boost
+
+    // Low valence adds urgency: up to +15 at minimum valence
+    if emotion_state_v < 50 {
+        let urgency = (50 - emotion_state_v) * 15 / 50
+        adjusted = adjusted + urgency
+    }
+
+    // Clamp to 0-100
+    if adjusted < 0 { adjusted = 0 }
+    if adjusted > 100 { adjusted = 100 }
+    return adjusted
+}
+
+// ============================================================
+// emotion_snapshot: returns [v, a, d] list of current state
+// ============================================================
+fn emotion_snapshot() {
+    let snap = list_new()
+    push(snap, emotion_state_v)
+    push(snap, emotion_state_a)
+    push(snap, emotion_state_d)
+    return snap
+}
+
+// ============================================================
+// emotion_trend: returns "rising", "falling", or "stable"
+// based on recent history valence changes. Compares average
+// valence of the first half of history to the second half.
+// ============================================================
+fn emotion_trend() {
+    let count = len(emotion_history)
+    if count < 4 {
+        return "stable"
+    }
+
+    let half = count / 2
+
+    // Average valence of first half
+    let sum_first = 0
+    let i = 0
+    while i < half {
+        let entry = emotion_history[i]
+        sum_first = sum_first + entry[0]
+        i = i + 1
+    }
+    let avg_first = sum_first / half
+
+    // Average valence of second half
+    let sum_second = 0
+    i = half
+    while i < count {
+        let entry = emotion_history[i]
+        sum_second = sum_second + entry[0]
+        i = i + 1
+    }
+    let second_count = count - half
+    let avg_second = sum_second / second_count
+
+    let diff = avg_second - avg_first
+    if diff > 3 {
+        return "rising"
+    }
+    if diff < 0 - 3 {
+        return "falling"
+    }
+    return "stable"
+}
+
+// ============================================================
+// emotion_reset: reset to baseline immediately (no drift)
+// ============================================================
+fn emotion_reset() {
+    emotion_state_v = emotion_baseline_v
+    emotion_state_a = emotion_baseline_a
+    emotion_state_d = emotion_baseline_d
 }

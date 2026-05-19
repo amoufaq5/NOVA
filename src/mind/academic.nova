@@ -1,15 +1,26 @@
 // Nova Mind: Academic Learning Track
-// Stores axioms, rules, and derives new knowledge through logical inference.
-// Knowledge is structured as a semantic graph of concepts and relationships.
+// Structured knowledge storage via axioms, rules, and logical inference.
+// Knowledge is stored as triples: (subject, relation, object)
+// Rules map relations with confidence: if (X, A, Y) then (X, B, Y)
+// Forward chaining derives new facts; backward chaining answers queries.
 
 let AXIOM_TAG = 210
 let RULE_TAG = 211
 let KNOWLEDGE_TAG = 212
 
+// Exclusive relations: having two different objects is a contradiction
+let EXCLUSIVE_IS_A = "is_a"
+let EXCLUSIVE_COLOR = "color"
+let EXCLUSIVE_CAPITAL = "capital_of"
+
 let academic_axioms = 0
 let academic_rules = 0
 let academic_knowledge = 0
 let academic_count = 0
+
+// ──────────────────────────────────────────────
+// Initialization
+// ──────────────────────────────────────────────
 
 fn academic_init() {
     academic_axioms = list_new()
@@ -18,26 +29,57 @@ fn academic_init() {
     academic_count = 0
 }
 
+// ──────────────────────────────────────────────
+// Axiom management (ground truths)
+// ──────────────────────────────────────────────
+
 fn academic_add_axiom(subject, relation, object) {
+    // Avoid duplicate axioms
+    let i = 0
+    while i < len(academic_axioms) {
+        let a = academic_axioms[i]
+        if a[1] == subject {
+            if a[2] == relation {
+                if a[3] == object {
+                    return
+                }
+            }
+        }
+        i = i + 1
+    }
     let axiom = list_new()
     push(axiom, AXIOM_TAG)
     push(axiom, subject)
     push(axiom, relation)
     push(axiom, object)
     push(academic_axioms, axiom)
+    academic_count = academic_count + 1
 }
 
-fn academic_add_rule(if_relation, then_relation) {
+// ──────────────────────────────────────────────
+// Rule management (inference rules with confidence)
+// ──────────────────────────────────────────────
+
+fn academic_add_rule(if_relation, then_relation, confidence) {
+    // Clamp confidence to 0-100
+    if confidence < 0 { confidence = 0 }
+    if confidence > 100 { confidence = 100 }
     let rule = list_new()
     push(rule, RULE_TAG)
     push(rule, if_relation)
     push(rule, then_relation)
+    push(rule, confidence)
     push(academic_rules, rule)
 }
 
+// ──────────────────────────────────────────────
+// Direct query: search axioms for (subject, relation, ?)
+// Returns list of matching objects
+// ──────────────────────────────────────────────
+
 fn academic_query(subject, relation) {
-    // Search axioms for matching subject+relation
     let results = list_new()
+    // Search axioms
     let i = 0
     while i < len(academic_axioms) {
         let axiom = academic_axioms[i]
@@ -48,39 +90,395 @@ fn academic_query(subject, relation) {
         }
         i = i + 1
     }
-    return results
-}
-
-fn academic_derive(subject, relation) {
-    // First check direct knowledge
-    let direct = academic_query(subject, relation)
-    if len(direct) > 0 {
-        return direct
-    }
-    // Then try inference through rules
-    let i = 0
-    while i < len(academic_rules) {
-        let rule = academic_rules[i]
-        if rule[1] == relation {
-            let intermediate = academic_query(subject, rule[1])
-            if len(intermediate) > 0 {
-                return intermediate
+    // Search stored knowledge
+    i = 0
+    while i < len(academic_knowledge) {
+        let k = academic_knowledge[i]
+        if k[1] == subject {
+            if k[2] == relation {
+                // Avoid duplicates
+                if contains(results, k[3]) == 0 {
+                    push(results, k[3])
+                }
             }
         }
         i = i + 1
     }
-    return list_new()
+    return results
 }
 
-fn academic_store(subject, relation, object, source) {
+// ──────────────────────────────────────────────
+// Reverse query: find all subjects with (?, relation, object)
+// Returns list of matching subjects
+// ──────────────────────────────────────────────
+
+fn academic_query_reverse(relation, object) {
+    let results = list_new()
+    // Search axioms
+    let i = 0
+    while i < len(academic_axioms) {
+        let axiom = academic_axioms[i]
+        if axiom[2] == relation {
+            if axiom[3] == object {
+                if contains(results, axiom[1]) == 0 {
+                    push(results, axiom[1])
+                }
+            }
+        }
+        i = i + 1
+    }
+    // Search stored knowledge
+    i = 0
+    while i < len(academic_knowledge) {
+        let k = academic_knowledge[i]
+        if k[2] == relation {
+            if k[3] == object {
+                if contains(results, k[1]) == 0 {
+                    push(results, k[1])
+                }
+            }
+        }
+        i = i + 1
+    }
+    return results
+}
+
+// ──────────────────────────────────────────────
+// Multi-step inference via forward/backward chaining
+// Returns list of [object, confidence] pairs
+// ──────────────────────────────────────────────
+
+fn academic_derive(subject, relation, depth) {
+    let results = list_new()
+
+    // Depth 0: check direct axioms and knowledge
+    let direct = academic_query(subject, relation)
+    let d = 0
+    while d < len(direct) {
+        let pair = list_new()
+        push(pair, direct[d])
+        push(pair, 100)  // direct facts have full confidence
+        push(results, pair)
+        d = d + 1
+    }
+
+    // If depth exhausted or we only wanted direct, return
+    if depth <= 0 {
+        return results
+    }
+
+    // Forward chaining through rules:
+    // For each rule where then_relation matches the query relation,
+    // look for (subject, if_relation, ?) and if found, the result
+    // holds with the rule's confidence (reduced at each step).
+    let r = 0
+    while r < len(academic_rules) {
+        let rule = academic_rules[r]
+        let rule_if = rule[1]
+        let rule_then = rule[2]
+        let rule_conf = rule[3]
+
+        if rule_then == relation {
+            // Recursively derive (subject, if_relation, ?) at depth-1
+            let intermediates = academic_derive(subject, rule_if, depth - 1)
+            let m = 0
+            while m < len(intermediates) {
+                let inter = intermediates[m]
+                let obj = inter[0]
+                let conf = inter[1]
+                // Combined confidence: rule_conf * source_conf / 100
+                let combined = rule_conf * conf / 100
+
+                // Only add if confidence is non-trivial
+                if combined > 0 {
+                    // Check if this object is already in results
+                    let found = 0
+                    let k = 0
+                    while k < len(results) {
+                        let existing = results[k]
+                        if existing[0] == obj {
+                            // Keep the higher confidence
+                            if combined > existing[1] {
+                                existing[1] = combined
+                            }
+                            found = 1
+                            k = len(results)  // break
+                        }
+                        k = k + 1
+                    }
+                    if found == 0 {
+                        let pair = list_new()
+                        push(pair, obj)
+                        push(pair, combined)
+                        push(results, pair)
+                    }
+                }
+                m = m + 1
+            }
+        }
+        r = r + 1
+    }
+
+    return results
+}
+
+// ──────────────────────────────────────────────
+// Store derived or observed knowledge with provenance
+// ──────────────────────────────────────────────
+
+fn academic_store(subject, relation, object, source, confidence) {
+    // Clamp confidence
+    if confidence < 0 { confidence = 0 }
+    if confidence > 100 { confidence = 100 }
+
+    // Check for existing knowledge with same triple — update if new confidence higher
+    let i = 0
+    while i < len(academic_knowledge) {
+        let k = academic_knowledge[i]
+        if k[1] == subject {
+            if k[2] == relation {
+                if k[3] == object {
+                    // Update if new confidence is higher
+                    if confidence > k[5] {
+                        k[4] = source
+                        k[5] = confidence
+                        k[6] = global_time
+                    }
+                    return
+                }
+            }
+        }
+        i = i + 1
+    }
+
     let k = list_new()
     push(k, KNOWLEDGE_TAG)
     push(k, subject)
     push(k, relation)
     push(k, object)
     push(k, source)
+    push(k, confidence)
+    push(k, global_time)
     push(academic_knowledge, k)
     academic_count = academic_count + 1
-    // Also add as axiom for future queries
+
+    // Also register as an axiom for future direct queries
     academic_add_axiom(subject, relation, object)
+}
+
+// ──────────────────────────────────────────────
+// Check existence: returns 1 if triple exists (direct or derived)
+// ──────────────────────────────────────────────
+
+fn academic_has(subject, relation, object) {
+    // Check axioms first (fast path)
+    let i = 0
+    while i < len(academic_axioms) {
+        let a = academic_axioms[i]
+        if a[1] == subject {
+            if a[2] == relation {
+                if a[3] == object {
+                    return 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Check stored knowledge
+    i = 0
+    while i < len(academic_knowledge) {
+        let k = academic_knowledge[i]
+        if k[1] == subject {
+            if k[2] == relation {
+                if k[3] == object {
+                    return 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Try derivation with limited depth
+    let derived = academic_derive(subject, relation, 3)
+    i = 0
+    while i < len(derived) {
+        let pair = derived[i]
+        if pair[0] == object {
+            return 1
+        }
+        i = i + 1
+    }
+
+    return 0
+}
+
+// ──────────────────────────────────────────────
+// All relations: returns list of [relation, object] pairs for a subject
+// ──────────────────────────────────────────────
+
+fn academic_all_relations(subject) {
+    let results = list_new()
+
+    // Gather from axioms
+    let i = 0
+    while i < len(academic_axioms) {
+        let a = academic_axioms[i]
+        if a[1] == subject {
+            let pair = list_new()
+            push(pair, a[2])
+            push(pair, a[3])
+            push(results, pair)
+        }
+        i = i + 1
+    }
+
+    // Gather from stored knowledge (skip duplicates already in axioms)
+    i = 0
+    while i < len(academic_knowledge) {
+        let k = academic_knowledge[i]
+        if k[1] == subject {
+            let dup = 0
+            let j = 0
+            while j < len(results) {
+                let existing = results[j]
+                if existing[0] == k[2] {
+                    if existing[1] == k[3] {
+                        dup = 1
+                        j = len(results)  // break
+                    }
+                }
+                j = j + 1
+            }
+            if dup == 0 {
+                let pair = list_new()
+                push(pair, k[2])
+                push(pair, k[3])
+                push(results, pair)
+            }
+        }
+        i = i + 1
+    }
+
+    return results
+}
+
+// ──────────────────────────────────────────────
+// Concepts: returns list of all unique subjects in the knowledge base
+// ──────────────────────────────────────────────
+
+fn academic_concepts() {
+    let subjects = list_new()
+
+    // Collect from axioms
+    let i = 0
+    while i < len(academic_axioms) {
+        let a = academic_axioms[i]
+        if contains(subjects, a[1]) == 0 {
+            push(subjects, a[1])
+        }
+        i = i + 1
+    }
+
+    // Collect from stored knowledge
+    i = 0
+    while i < len(academic_knowledge) {
+        let k = academic_knowledge[i]
+        if contains(subjects, k[1]) == 0 {
+            push(subjects, k[1])
+        }
+        i = i + 1
+    }
+
+    return subjects
+}
+
+// ──────────────────────────────────────────────
+// Contradiction detection
+// Returns 1 if obj1 and obj2 conflict on an exclusive relation
+// (same subject + relation but different objects where only one can hold)
+// ──────────────────────────────────────────────
+
+fn academic_contradiction(subject, relation, obj1, obj2) {
+    if obj1 == obj2 {
+        return 0  // same object, no contradiction
+    }
+
+    // Check if this relation is exclusive (only one value allowed)
+    let exclusive = 0
+    if relation == EXCLUSIVE_IS_A { exclusive = 1 }
+    if relation == EXCLUSIVE_COLOR { exclusive = 1 }
+    if relation == EXCLUSIVE_CAPITAL { exclusive = 1 }
+
+    if exclusive == 0 {
+        return 0  // non-exclusive relations can have multiple values
+    }
+
+    // Both must actually exist in the knowledge base to be a contradiction
+    let has1 = academic_has(subject, relation, obj1)
+    let has2 = academic_has(subject, relation, obj2)
+
+    if has1 == 1 {
+        if has2 == 1 {
+            return 1
+        }
+    }
+
+    return 0
+}
+
+// ──────────────────────────────────────────────
+// Count: returns total number of axioms + derived knowledge
+// ──────────────────────────────────────────────
+
+fn academic_count_facts() {
+    return len(academic_axioms) + len(academic_knowledge)
+}
+
+// ──────────────────────────────────────────────
+// Forget: remove knowledge matching subject + relation
+// ──────────────────────────────────────────────
+
+fn academic_forget(subject, relation) {
+    // Remove from axioms (iterate backward to safely remove)
+    let i = len(academic_axioms) - 1
+    while i >= 0 {
+        let a = academic_axioms[i]
+        if a[1] == subject {
+            if a[2] == relation {
+                list_remove(academic_axioms, i)
+                academic_count = academic_count - 1
+            }
+        }
+        i = i - 1
+    }
+
+    // Remove from stored knowledge
+    i = len(academic_knowledge) - 1
+    while i >= 0 {
+        let k = academic_knowledge[i]
+        if k[1] == subject {
+            if k[2] == relation {
+                list_remove(academic_knowledge, i)
+                academic_count = academic_count - 1
+            }
+        }
+        i = i - 1
+    }
+}
+
+// ──────────────────────────────────────────────
+// Merge: import axioms from another axiom list
+// ──────────────────────────────────────────────
+
+fn academic_merge_from(other_axioms) {
+    let i = 0
+    while i < len(other_axioms) {
+        let a = other_axioms[i]
+        // Validate that it is an axiom (tag check)
+        if a[0] == AXIOM_TAG {
+            academic_add_axiom(a[1], a[2], a[3])
+        }
+        i = i + 1
+    }
 }

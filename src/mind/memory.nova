@@ -2,24 +2,47 @@
 // Stores episodes (crystallized moments), supports retrieval
 // by similarity, and implements decay/consolidation.
 //
-// Episode layout: [TAG, moment, importance, access_count, last_access, tags]
+// Episode layout: [TAG, moment, importance, access_count, last_access, tags, associations]
+//   moment:       the stored moment object
+//   importance:   0-100, determines survival during decay
+//   access_count: incremented on each recall
+//   last_access:  timestamp of last recall
+//   tags:         list of string tags for categorization
+//   associations: list of episode indices this episode is linked to
 
+// ============================================================
+// Tag and field index constants
+// ============================================================
 let EPISODE_TAG = 200
 let EP_MOMENT = 1
 let EP_IMPORTANCE = 2
 let EP_ACCESS_COUNT = 3
 let EP_LAST_ACCESS = 4
 let EP_TAGS = 5
+let EP_ASSOCIATIONS = 6
 
+// ============================================================
+// Global memory state
+// ============================================================
 let memory_episodes = 0
 let memory_count = 0
 let memory_capacity = 1000
 
+let memory_working = 0
+let memory_working_max = 7
+
+// ============================================================
+// Initialization
+// ============================================================
 fn memory_init() {
     memory_episodes = list_new()
     memory_count = 0
+    memory_working = list_new()
 }
 
+// ============================================================
+// Episode constructor and accessors
+// ============================================================
 fn episode_new(moment, importance) {
     let ep = list_new()
     push(ep, EPISODE_TAG)
@@ -27,6 +50,7 @@ fn episode_new(moment, importance) {
     push(ep, importance)
     push(ep, 0)
     push(ep, global_time)
+    push(ep, list_new())
     push(ep, list_new())
     return ep
 }
@@ -40,7 +64,39 @@ fn episode_add_tag(ep, tag) {
     push(tags, tag)
 }
 
+fn episode_has_tag(ep, tag) {
+    let tags = ep[EP_TAGS]
+    let i = 0
+    while i < len(tags) {
+        if tags[i] == tag {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ============================================================
+// Long-term memory storage
+// ============================================================
 fn memory_store(moment, importance) {
+    // Enforce capacity: if full, evict the least important episode
+    if memory_count >= memory_capacity {
+        let min_imp = 101
+        let min_idx = 0
+        let i = 0
+        while i < memory_count {
+            let ep = memory_episodes[i]
+            let imp = episode_importance(ep)
+            if imp < min_imp {
+                min_imp = imp
+                min_idx = i
+            }
+            i = i + 1
+        }
+        list_remove(memory_episodes, min_idx)
+        memory_count = memory_count - 1
+    }
     let ep = episode_new(moment, importance)
     push(memory_episodes, ep)
     memory_count = memory_count + 1
@@ -56,18 +112,293 @@ fn memory_crystallize(moment) {
     return 0
 }
 
+// ============================================================
+// Working memory (short-term buffer)
+// ============================================================
+fn memory_working_push(moment) {
+    // If at capacity, evict the oldest (first) item
+    if len(memory_working) >= memory_working_max {
+        list_remove(memory_working, 0)
+    }
+    push(memory_working, moment)
+}
+
+fn memory_working_get(idx) {
+    if idx < 0 { return 0 }
+    if idx >= len(memory_working) { return 0 }
+    return memory_working[idx]
+}
+
+fn memory_working_clear() {
+    memory_working = list_new()
+}
+
+fn memory_working_count() {
+    return len(memory_working)
+}
+
+// ============================================================
+// Recall: recent episodes
+// ============================================================
 fn memory_recall_recent(limit) {
     let results = list_new()
     let start = memory_count - limit
     if start < 0 { start = 0 }
     let i = start
     while i < memory_count {
-        push(results, memory_episodes[i])
+        let ep = memory_episodes[i]
+        // Update access metadata
+        ep[EP_ACCESS_COUNT] = ep[EP_ACCESS_COUNT] + 1
+        ep[EP_LAST_ACCESS] = global_time
+        push(results, ep)
         i = i + 1
     }
     return results
 }
 
+// ============================================================
+// Recall: by tag
+// ============================================================
+fn memory_recall_by_tag(tag, limit) {
+    let results = list_new()
+    let found = 0
+    // Search from most recent backward for relevance
+    let i = memory_count - 1
+    while i >= 0 {
+        if found >= limit {
+            return results
+        }
+        let ep = memory_episodes[i]
+        if episode_has_tag(ep, tag) == 1 {
+            ep[EP_ACCESS_COUNT] = ep[EP_ACCESS_COUNT] + 1
+            ep[EP_LAST_ACCESS] = global_time
+            push(results, ep)
+            found = found + 1
+        }
+        i = i - 1
+    }
+    return results
+}
+
+// ============================================================
+// Recall: similarity-based retrieval
+// ============================================================
+// Computes a composite similarity score between a query moment
+// and a stored episode's moment. All scoring uses integer math.
+//
+// Components:
+//   content_score:   100 if what_happened matches, else 0
+//   entity_score:    100 if who matches, else 0
+//   emotion_score:   100 - (|dv| + |da|), clamped to 0
+//   recency_score:   100 - age, clamped to 0
+//   frequency_score: access_count * 5, capped at 50
+//
+// Final score = content * 3 + entity * 2 + emotion * 2 + recency + frequency
+fn memory_recall_similar(query_moment, limit) {
+    let q_what = moment_what(query_moment)
+    let q_who = moment_who(query_moment)
+    let q_val = moment_valence(query_moment)
+    let q_aro = moment_arousal(query_moment)
+
+    // Build scored list: [score, index] pairs
+    let scored = list_new()
+    let i = 0
+    while i < memory_count {
+        let ep = memory_episodes[i]
+        let m = episode_moment(ep)
+
+        // Content similarity
+        let content_score = 0
+        if moment_what(m) == q_what {
+            content_score = 100
+        }
+
+        // Entity overlap
+        let entity_score = 0
+        if moment_who(m) == q_who {
+            entity_score = 100
+        }
+
+        // Emotional resonance: inversely proportional to distance
+        let dv = abs(moment_valence(m) - q_val)
+        let da = abs(moment_arousal(m) - q_aro)
+        let emotion_score = 100 - dv - da
+        if emotion_score < 0 { emotion_score = 0 }
+
+        // Temporal recency
+        let age = global_time - moment_time(m)
+        let recency_score = 100 - age
+        if recency_score < 0 { recency_score = 0 }
+
+        // Access frequency
+        let freq_score = episode_access_count(ep) * 5
+        if freq_score > 50 { freq_score = 50 }
+
+        // Weighted composite
+        let score = content_score * 3 + entity_score * 2 + emotion_score * 2 + recency_score + freq_score
+
+        let pair = list_new()
+        push(pair, score)
+        push(pair, i)
+        push(scored, pair)
+
+        i = i + 1
+    }
+
+    // Selection sort to find top N by score (descending)
+    let n = len(scored)
+    let j = 0
+    while j < n - 1 {
+        let max_idx = j
+        let max_score = scored[j][0]
+        let k = j + 1
+        while k < n {
+            if scored[k][0] > max_score {
+                max_score = scored[k][0]
+                max_idx = k
+            }
+            k = k + 1
+        }
+        if max_idx != j {
+            let tmp = scored[j]
+            list_set(scored, j, scored[max_idx])
+            list_set(scored, max_idx, tmp)
+        }
+        j = j + 1
+    }
+
+    // Collect top results and update access metadata
+    let results = list_new()
+    let count = min(limit, n)
+    i = 0
+    while i < count {
+        let idx = scored[i][1]
+        let ep = memory_episodes[idx]
+        ep[EP_ACCESS_COUNT] = ep[EP_ACCESS_COUNT] + 1
+        ep[EP_LAST_ACCESS] = global_time
+        push(results, ep)
+        i = i + 1
+    }
+    return results
+}
+
+// ============================================================
+// Associative linking
+// ============================================================
+fn memory_associate(idx1, idx2) {
+    if idx1 < 0 { return 0 }
+    if idx2 < 0 { return 0 }
+    if idx1 >= memory_count { return 0 }
+    if idx2 >= memory_count { return 0 }
+    if idx1 == idx2 { return 0 }
+
+    let ep1 = memory_episodes[idx1]
+    let ep2 = memory_episodes[idx2]
+    let assoc1 = ep1[EP_ASSOCIATIONS]
+    let assoc2 = ep2[EP_ASSOCIATIONS]
+
+    // Add bidirectional link if not already present
+    if contains(assoc1, idx2) == 0 {
+        push(assoc1, idx2)
+    }
+    if contains(assoc2, idx1) == 0 {
+        push(assoc2, idx1)
+    }
+    return 1
+}
+
+fn memory_recall_associated(idx, limit) {
+    let results = list_new()
+    if idx < 0 { return results }
+    if idx >= memory_count { return results }
+
+    let ep = memory_episodes[idx]
+    let assoc = ep[EP_ASSOCIATIONS]
+    let count = min(limit, len(assoc))
+    let i = 0
+    while i < count {
+        let linked_idx = assoc[i]
+        if linked_idx >= 0 {
+            if linked_idx < memory_count {
+                let linked_ep = memory_episodes[linked_idx]
+                linked_ep[EP_ACCESS_COUNT] = linked_ep[EP_ACCESS_COUNT] + 1
+                linked_ep[EP_LAST_ACCESS] = global_time
+                push(results, linked_ep)
+            }
+        }
+        i = i + 1
+    }
+    return results
+}
+
+// ============================================================
+// Consolidation
+// ============================================================
+// Merges similar adjacent episodes: if two neighbors share the
+// same what_happened, average their importance, sum access counts,
+// and remove the duplicate.
+fn memory_consolidate() {
+    let i = 0
+    while i < memory_count - 1 {
+        let ep1 = memory_episodes[i]
+        let ep2 = memory_episodes[i + 1]
+        let m1 = episode_moment(ep1)
+        let m2 = episode_moment(ep2)
+
+        if moment_what(m1) == moment_what(m2) {
+            // Average importance
+            let avg_imp = (episode_importance(ep1) + episode_importance(ep2)) / 2
+            ep1[EP_IMPORTANCE] = avg_imp
+
+            // Sum access counts
+            ep1[EP_ACCESS_COUNT] = episode_access_count(ep1) + episode_access_count(ep2)
+
+            // Update last access to the more recent
+            let la1 = ep1[EP_LAST_ACCESS]
+            let la2 = ep2[EP_LAST_ACCESS]
+            if la2 > la1 {
+                ep1[EP_LAST_ACCESS] = la2
+            }
+
+            // Merge tags from ep2 into ep1
+            let tags2 = ep2[EP_TAGS]
+            let t = 0
+            while t < len(tags2) {
+                if episode_has_tag(ep1, tags2[t]) == 0 {
+                    episode_add_tag(ep1, tags2[t])
+                }
+                t = t + 1
+            }
+
+            // Merge associations from ep2 into ep1
+            let assoc2 = ep2[EP_ASSOCIATIONS]
+            let a = 0
+            while a < len(assoc2) {
+                let linked = assoc2[a]
+                if contains(ep1[EP_ASSOCIATIONS], linked) == 0 {
+                    if linked != i {
+                        push(ep1[EP_ASSOCIATIONS], linked)
+                    }
+                }
+                a = a + 1
+            }
+
+            // Remove the duplicate
+            list_remove(memory_episodes, i + 1)
+            memory_count = memory_count - 1
+            // Do not advance i; check new neighbor at same position
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// ============================================================
+// Decay
+// ============================================================
+// Removes episodes whose effective importance falls below threshold.
+//   effective_importance = importance - (age / 10) + (access_count * 5)
+// Returns the count of surviving episodes.
 fn memory_decay(threshold) {
     let surviving = list_new()
     let i = 0
@@ -76,7 +407,8 @@ fn memory_decay(threshold) {
         let imp = episode_importance(ep)
         let age = global_time - ep[EP_LAST_ACCESS]
         let decay = age / 10
-        let effective = imp - decay
+        let boost = episode_access_count(ep) * 5
+        let effective = imp - decay + boost
         if effective >= threshold {
             push(surviving, ep)
         }
@@ -85,4 +417,48 @@ fn memory_decay(threshold) {
     memory_episodes = surviving
     memory_count = len(surviving)
     return memory_count
+}
+
+// ============================================================
+// Strengthen
+// ============================================================
+fn memory_strengthen(idx, amount) {
+    if idx < 0 { return 0 }
+    if idx >= memory_count { return 0 }
+    let ep = memory_episodes[idx]
+    let new_imp = episode_importance(ep) + amount
+    if new_imp > 100 { new_imp = 100 }
+    ep[EP_IMPORTANCE] = new_imp
+    return new_imp
+}
+
+// ============================================================
+// Count and stats
+// ============================================================
+fn memory_count_episodes() {
+    return memory_count
+}
+
+fn memory_stats() {
+    let total = memory_count
+    let working_count = len(memory_working)
+
+    // Compute average importance
+    let sum_imp = 0
+    let i = 0
+    while i < memory_count {
+        let ep = memory_episodes[i]
+        sum_imp = sum_imp + episode_importance(ep)
+        i = i + 1
+    }
+    let avg_imp = 0
+    if memory_count > 0 {
+        avg_imp = sum_imp / memory_count
+    }
+
+    let stats = list_new()
+    push(stats, total)
+    push(stats, working_count)
+    push(stats, avg_imp)
+    return stats
 }

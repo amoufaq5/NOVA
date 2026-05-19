@@ -1,87 +1,234 @@
 // Nova Mind: Experiential Learning Track
 // Forms knowledge from lived experience (moments with high felt intensity).
 // Crystallizes patterns into tendencies when recurrence > threshold.
+//
+// Pattern layout: [PATTERN_TAG, trigger, response_bias, valence_avg, count, tags, last_seen]
+//   trigger:       what situation triggers this pattern
+//   response_bias: "approach" or "avoid"
+//   valence_avg:   running average valence (0-100, integer)
+//   count:         how many times observed
+//   tags:          list of associated tag strings
+//   last_seen:     timestamp of most recent observation
+//
+// Tendency layout: [TENDENCY_TAG, trigger, bias, strength, formation_time]
+//   A crystallized pattern promoted after sufficient recurrence.
+//   Compact: replaces many episodes with one behavioral rule.
+
+let PATTERN_TAG = 230
+let PAT_TRIGGER = 1
+let PAT_BIAS = 2
+let PAT_VALENCE = 3
+let PAT_COUNT = 4
+let PAT_TAGS = 5
+let PAT_LAST_SEEN = 6
 
 let TENDENCY_TAG = 220
 let TEND_TRIGGER = 1
 let TEND_BIAS = 2
 let TEND_STRENGTH = 3
+let TEND_FORMATION = 4
 
 let experiential_tendencies = 0
 let experiential_patterns = 0
 let experiential_threshold = 3
+let experiential_pattern_count = 0
 
+// ---------------------------------------------------------------------------
+// 1. experiential_init  --  initialize all experiential subsystem state
+// ---------------------------------------------------------------------------
 fn experiential_init() {
     experiential_tendencies = list_new()
     experiential_patterns = list_new()
+    experiential_pattern_count = 0
 }
 
+// ---------------------------------------------------------------------------
+// 2. tendency_new  --  create a new tendency tagged-union list
+// ---------------------------------------------------------------------------
 fn tendency_new(trigger, bias, strength) {
     let t = list_new()
     push(t, TENDENCY_TAG)
     push(t, trigger)
     push(t, bias)
     push(t, strength)
+    push(t, global_time)
     return t
 }
 
+// ---------------------------------------------------------------------------
+// 3. tendency accessors
+// ---------------------------------------------------------------------------
 fn tendency_trigger(t) { return t[TEND_TRIGGER] }
 fn tendency_bias(t) { return t[TEND_BIAS] }
 fn tendency_strength(t) { return t[TEND_STRENGTH] }
 
+// ---------------------------------------------------------------------------
+// Helper: create a new pattern tagged-union list
+// ---------------------------------------------------------------------------
+fn pattern_new(trigger, bias, valence) {
+    let p = list_new()
+    push(p, PATTERN_TAG)
+    push(p, trigger)
+    push(p, bias)
+    push(p, valence)
+    push(p, 1)
+    push(p, list_new())
+    push(p, global_time)
+    experiential_pattern_count = experiential_pattern_count + 1
+    return p
+}
+
+// ---------------------------------------------------------------------------
+// Helper: pattern accessors
+// ---------------------------------------------------------------------------
+fn pattern_trigger(p) { return p[PAT_TRIGGER] }
+fn pattern_bias(p) { return p[PAT_BIAS] }
+fn pattern_valence(p) { return p[PAT_VALENCE] }
+fn pattern_count(p) { return p[PAT_COUNT] }
+fn pattern_tags(p) { return p[PAT_TAGS] }
+fn pattern_last_seen(p) { return p[PAT_LAST_SEEN] }
+
+// ---------------------------------------------------------------------------
+// Helper: add a tag to a pattern if not already present
+// ---------------------------------------------------------------------------
+fn pattern_add_tag(p, tag) {
+    let tags = p[PAT_TAGS]
+    if contains(tags, tag) == 0 {
+        push(tags, tag)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5. experiential_find_pattern  --  find a pattern by its trigger
+//    Returns the pattern list, or 0 if not found.
+// ---------------------------------------------------------------------------
+fn experiential_find_pattern(trigger) {
+    let i = 0
+    while i < len(experiential_patterns) {
+        let p = experiential_patterns[i]
+        if p[PAT_TRIGGER] == trigger {
+            return p
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 6. experiential_update_pattern  --  update a pattern with a new moment
+//    Adjusts the running average valence, increments count, merges tags,
+//    and updates last_seen.
+// ---------------------------------------------------------------------------
+fn experiential_update_pattern(pattern, moment) {
+    let old_count = pattern[PAT_COUNT]
+    let old_valence = pattern[PAT_VALENCE]
+    let new_valence = moment_valence(moment)
+
+    // Running average: avg = (avg * count + new) / (count + 1)
+    let total = old_valence * old_count + new_valence
+    let new_count = old_count + 1
+    let avg = total / new_count
+
+    pattern[PAT_VALENCE] = avg
+    pattern[PAT_COUNT] = new_count
+    pattern[PAT_LAST_SEEN] = global_time
+
+    // Update bias based on new average
+    if avg >= 50 {
+        pattern[PAT_BIAS] = "approach"
+    } else {
+        pattern[PAT_BIAS] = "avoid"
+    }
+
+    // Merge tags from this moment
+    let who = moment_who(moment)
+    if who != 0 {
+        let name = entity_name(who)
+        pattern_add_tag(pattern, name)
+    }
+    let what = moment_what(moment)
+    pattern_add_tag(pattern, what)
+}
+
+// ---------------------------------------------------------------------------
+// 7. experiential_promote  --  promote a pattern to a tendency
+//    Creates a tendency from the pattern's accumulated data and adds it to
+//    the tendency list. Returns the new tendency.
+// ---------------------------------------------------------------------------
+fn experiential_promote(pattern) {
+    let trigger = pattern[PAT_TRIGGER]
+    let bias = pattern[PAT_BIAS]
+    let count = pattern[PAT_COUNT]
+
+    // Strength derived from observation count, capped at 100
+    let strength = count * 10
+    if strength > 100 {
+        strength = 100
+    }
+
+    let t = tendency_new(trigger, bias, strength)
+    push(experiential_tendencies, t)
+    return t
+}
+
+// ---------------------------------------------------------------------------
+// 4. experiential_record  --  record a moment if intensity > 30
+//    Extracts trigger, finds or creates pattern, updates, tags with who
+//    and what_happened, and promotes to tendency when recurrence threshold
+//    is met.  Returns the tendency if promoted, 0 otherwise.
+// ---------------------------------------------------------------------------
 fn experiential_record(moment) {
     let intensity = moment_intensity(moment)
     if intensity <= 30 {
         return 0
     }
 
-    // Record pattern
     let what = moment_what(moment)
-    let pattern = list_new()
-    push(pattern, what)
-    push(pattern, moment_valence(moment))
-    push(experiential_patterns, pattern)
+    let existing = experiential_find_pattern(what)
 
-    // Check for recurring patterns
-    let recurrence = 0
-    let i = 0
-    while i < len(experiential_patterns) {
-        let p = experiential_patterns[i]
-        if p[0] == what {
-            recurrence = recurrence + 1
-        }
-        i = i + 1
-    }
+    if existing != 0 {
+        // Update existing pattern with new observation
+        experiential_update_pattern(existing, moment)
 
-    // Promote to tendency if threshold met
-    if recurrence >= experiential_threshold {
-        let avg_valence = 0
-        let count = 0
-        i = 0
-        while i < len(experiential_patterns) {
-            let p = experiential_patterns[i]
-            if p[0] == what {
-                avg_valence = avg_valence + p[1]
-                count = count + 1
+        // Check recurrence threshold for promotion
+        if existing[PAT_COUNT] >= experiential_threshold {
+            // Only promote if not already a tendency
+            let already = experiential_check_tendency(what)
+            if already == 0 {
+                return experiential_promote(existing)
+            } else {
+                // Reinforce existing tendency
+                let reinforce = existing[PAT_COUNT]
+                experiential_strengthen(what, reinforce)
             }
-            i = i + 1
         }
-        if count > 0 {
-            avg_valence = avg_valence / count
-        }
-        let bias = "approach"
-        if avg_valence < 50 {
-            bias = "avoid"
-        }
-        let strength = recurrence * 10
-        if strength > 100 { strength = 100 }
-        let t = tendency_new(what, bias, strength)
-        push(experiential_tendencies, t)
-        return t
+        return 0
     }
+
+    // No existing pattern — create a new one
+    let valence = moment_valence(moment)
+    let bias = "approach"
+    if valence < 50 {
+        bias = "avoid"
+    }
+    let p = pattern_new(what, bias, valence)
+
+    // Tag with who and what_happened
+    let who = moment_who(moment)
+    if who != 0 {
+        let name = entity_name(who)
+        pattern_add_tag(p, name)
+    }
+    pattern_add_tag(p, what)
+
+    push(experiential_patterns, p)
     return 0
 }
 
+// ---------------------------------------------------------------------------
+// 8. experiential_check_tendency  --  look up a tendency by trigger
+//    Returns the tendency list, or 0 if none matches.
+// ---------------------------------------------------------------------------
 fn experiential_check_tendency(trigger) {
     let i = 0
     while i < len(experiential_tendencies) {
@@ -94,10 +241,210 @@ fn experiential_check_tendency(trigger) {
     return 0
 }
 
+// ---------------------------------------------------------------------------
+// 9. experiential_bias_for  --  return signed strength for a trigger
+//    Positive for "approach", negative for "avoid", 0 if no tendency.
+// ---------------------------------------------------------------------------
 fn experiential_bias_for(trigger) {
     let t = experiential_check_tendency(trigger)
     if t == 0 {
         return 0
     }
-    return tendency_strength(t)
+    let strength = tendency_strength(t)
+    let bias = tendency_bias(t)
+    if bias == "avoid" {
+        return 0 - strength
+    }
+    return strength
+}
+
+// ---------------------------------------------------------------------------
+// 10. experiential_strengthen  --  reinforce a tendency by amount
+//     Clamps strength to 100.
+// ---------------------------------------------------------------------------
+fn experiential_strengthen(trigger, amount) {
+    let t = experiential_check_tendency(trigger)
+    if t == 0 {
+        return 0
+    }
+    let s = t[TEND_STRENGTH] + amount
+    if s > 100 {
+        s = 100
+    }
+    t[TEND_STRENGTH] = s
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// 11. experiential_weaken  --  reduce a tendency's strength by amount
+//     Clamps to 0.
+// ---------------------------------------------------------------------------
+fn experiential_weaken(trigger, amount) {
+    let t = experiential_check_tendency(trigger)
+    if t == 0 {
+        return 0
+    }
+    let s = t[TEND_STRENGTH] - amount
+    if s < 0 {
+        s = 0
+    }
+    t[TEND_STRENGTH] = s
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// 12. experiential_decay  --  decay all patterns and tendencies by rate
+//     Patterns: decrement count by rate; remove those that reach 0.
+//     Tendencies: decrement strength by rate; remove those that reach 0.
+//     Returns the number of items removed.
+// ---------------------------------------------------------------------------
+fn experiential_decay(rate) {
+    let removed = 0
+
+    // Decay patterns
+    let surviving_patterns = list_new()
+    let i = 0
+    while i < len(experiential_patterns) {
+        let p = experiential_patterns[i]
+        let c = p[PAT_COUNT] - rate
+        if c > 0 {
+            p[PAT_COUNT] = c
+            push(surviving_patterns, p)
+        } else {
+            removed = removed + 1
+            experiential_pattern_count = experiential_pattern_count - 1
+        }
+        i = i + 1
+    }
+    experiential_patterns = surviving_patterns
+
+    // Decay tendencies
+    let surviving_tendencies = list_new()
+    i = 0
+    while i < len(experiential_tendencies) {
+        let t = experiential_tendencies[i]
+        let s = t[TEND_STRENGTH] - rate
+        if s > 0 {
+            t[TEND_STRENGTH] = s
+            push(surviving_tendencies, t)
+        } else {
+            removed = removed + 1
+        }
+        i = i + 1
+    }
+    experiential_tendencies = surviving_tendencies
+
+    return removed
+}
+
+// ---------------------------------------------------------------------------
+// 13. experiential_recent_patterns  --  return the most recently seen patterns
+//     Returns up to `limit` patterns sorted by last_seen (most recent first).
+// ---------------------------------------------------------------------------
+fn experiential_recent_patterns(limit) {
+    let total = len(experiential_patterns)
+    if total == 0 {
+        return list_new()
+    }
+
+    // Build index list sorted by last_seen descending (simple selection sort)
+    // We work on a copy so we don't mutate the original list order.
+    let sorted = list_new()
+    let used = list_new()
+    let picked = 0
+
+    while picked < limit {
+        if picked >= total {
+            return sorted
+        }
+        let best_time = 0
+        let best_idx = 0
+        let j = 0
+        while j < total {
+            if contains(used, j) == 0 {
+                let p = experiential_patterns[j]
+                let ts = p[PAT_LAST_SEEN]
+                if ts >= best_time {
+                    best_time = ts
+                    best_idx = j
+                }
+            }
+            j = j + 1
+        }
+        push(sorted, experiential_patterns[best_idx])
+        push(used, best_idx)
+        picked = picked + 1
+    }
+
+    return sorted
+}
+
+// ---------------------------------------------------------------------------
+// 14. experiential_extract_lessons  --  find all patterns associated with tag
+//     Returns a list of patterns whose tag list contains the given tag.
+// ---------------------------------------------------------------------------
+fn experiential_extract_lessons(tag) {
+    let results = list_new()
+    let i = 0
+    while i < len(experiential_patterns) {
+        let p = experiential_patterns[i]
+        let tags = p[PAT_TAGS]
+        if contains(tags, tag) != 0 {
+            push(results, p)
+        }
+        i = i + 1
+    }
+    return results
+}
+
+// ---------------------------------------------------------------------------
+// 15. experiential_associate  --  link two patterns as related
+//     Merges the tag lists of the two patterns so they share associations.
+// ---------------------------------------------------------------------------
+fn experiential_associate(trigger1, trigger2) {
+    let p1 = experiential_find_pattern(trigger1)
+    let p2 = experiential_find_pattern(trigger2)
+    if p1 == 0 { return 0 }
+    if p2 == 0 { return 0 }
+
+    // Copy tags from p2 into p1
+    let tags2 = p2[PAT_TAGS]
+    let i = 0
+    while i < len(tags2) {
+        pattern_add_tag(p1, tags2[i])
+        i = i + 1
+    }
+
+    // Copy tags from p1 into p2
+    let tags1 = p1[PAT_TAGS]
+    i = 0
+    while i < len(tags1) {
+        pattern_add_tag(p2, tags1[i])
+        i = i + 1
+    }
+
+    return 1
+}
+
+// ---------------------------------------------------------------------------
+// 16. experiential_describe_tendency  --  return a human-readable description
+// ---------------------------------------------------------------------------
+fn experiential_describe_tendency(t) {
+    if t == 0 {
+        return "no tendency"
+    }
+    let trigger = tendency_trigger(t)
+    let bias = tendency_bias(t)
+    let strength = tendency_strength(t)
+
+    let desc = "tendency: " + trigger + " -> " + bias
+    desc = desc + " (strength " + int_to_str(strength) + ")"
+    return desc
+}
+
+// ---------------------------------------------------------------------------
+// 17. experiential_count  --  return total number of patterns + tendencies
+// ---------------------------------------------------------------------------
+fn experiential_count() {
+    return len(experiential_patterns) + len(experiential_tendencies)
 }

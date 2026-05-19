@@ -1,29 +1,175 @@
-// Nova Mind: Reasoning Engine
-// Multi-strategy inference: deductive, analogical, causal, pattern-match.
-// Strategy selected by signal type and confidence level.
+// Nova Mind: Multi-Strategy Reasoning Engine
+// Selects and applies inference strategies to produce conclusions.
+//
+// Four strategies:
+//   Deductive  — forward chaining through condition->consequence rules
+//   Abductive  — backward chaining from observation to possible causes
+//   Analogical — structure mapping against past episodes
+//   Causal     — trace cause-effect chains forward and backward
+//
+// Data structures (list-based tagged unions):
+//   Rule:       [RULE_TAG, condition, consequence, confidence, category]
+//   CausalLink: [CAUSAL_TAG, cause, effect, strength, observations]
+//   Conclusion: [CONCLUSION_TAG, content, confidence, strategy_used, trace]
+//   Trace step: [step_type, from, to, confidence]
 
+// ---------------------------------------------------------------------------
+// Tags and field indices
+// ---------------------------------------------------------------------------
+
+let RSN_RULE_TAG = 240
+let RULE_CONDITION = 1
+let RULE_CONSEQUENCE = 2
+let RULE_CONFIDENCE = 3
+let RULE_CATEGORY = 4
+
+let CAUSAL_TAG = 241
+let CAUSAL_CAUSE = 1
+let CAUSAL_EFFECT = 2
+let CAUSAL_STRENGTH = 3
+let CAUSAL_OBSERVATIONS = 4
+
+let CONCLUSION_TAG = 242
+let CONCL_CONTENT = 1
+let CONCL_CONFIDENCE = 2
+let CONCL_STRATEGY = 3
+let CONCL_TRACE = 4
+
+// Strategy constants
 let STRATEGY_DEDUCTIVE = 1
-let STRATEGY_ANALOGICAL = 2
-let STRATEGY_CAUSAL = 3
-let STRATEGY_PATTERN = 4
+let STRATEGY_ABDUCTIVE = 2
+let STRATEGY_ANALOGICAL = 3
+let STRATEGY_CAUSAL = 4
+let STRATEGY_PATTERN = 5
+
+// ---------------------------------------------------------------------------
+// Globals
+// ---------------------------------------------------------------------------
 
 let reasoning_rules = 0
 let reasoning_rule_count = 0
+let reasoning_causal_links = 0
+let reasoning_causal_count = 0
+let reasoning_confidence_min = 20
 
-// Rule: [condition_tag, consequence_tag, confidence]
+// ---------------------------------------------------------------------------
+// 1. reasoning_init — initialize all storage
+// ---------------------------------------------------------------------------
+
 fn reasoning_init() {
     reasoning_rules = list_new()
     reasoning_rule_count = 0
+    reasoning_causal_links = list_new()
+    reasoning_causal_count = 0
 }
 
+// ---------------------------------------------------------------------------
+// Conclusion constructors and accessors
+// ---------------------------------------------------------------------------
+
+fn conclusion_new(content, confidence, strategy, trace) {
+    let c = list_new()
+    push(c, CONCLUSION_TAG)
+    push(c, content)
+    push(c, confidence)
+    push(c, strategy)
+    push(c, trace)
+    return c
+}
+
+fn conclusion_content(c) { return c[CONCL_CONTENT] }
+fn conclusion_confidence(c) { return c[CONCL_CONFIDENCE] }
+fn conclusion_strategy(c) { return c[CONCL_STRATEGY] }
+fn conclusion_trace(c) { return c[CONCL_TRACE] }
+
+fn conclusion_describe(c) {
+    if c == 0 {
+        return "no conclusion"
+    }
+    let content = c[CONCL_CONTENT]
+    let conf = c[CONCL_CONFIDENCE]
+    let strat = c[CONCL_STRATEGY]
+    let name = reasoning_strategy_name(strat)
+    let desc = "conclusion: " + content + " (confidence " + int_to_str(conf) + ", via " + name + ")"
+    return desc
+}
+
+// ---------------------------------------------------------------------------
+// Strategy name helper
+// ---------------------------------------------------------------------------
+
+fn reasoning_strategy_name(strategy) {
+    if strategy == STRATEGY_DEDUCTIVE { return "deductive" }
+    if strategy == STRATEGY_ABDUCTIVE { return "abductive" }
+    if strategy == STRATEGY_ANALOGICAL { return "analogical" }
+    if strategy == STRATEGY_CAUSAL { return "causal" }
+    if strategy == STRATEGY_PATTERN { return "pattern" }
+    return "unknown"
+}
+
+// ---------------------------------------------------------------------------
+// 2. reasoning_add_rule — add an inference rule
+// ---------------------------------------------------------------------------
+
 fn reasoning_add_rule(condition, consequence, confidence) {
+    if confidence < 0 { confidence = 0 }
+    if confidence > 100 { confidence = 100 }
     let rule = list_new()
+    push(rule, RSN_RULE_TAG)
     push(rule, condition)
     push(rule, consequence)
     push(rule, confidence)
+    push(rule, "general")
     push(reasoning_rules, rule)
     reasoning_rule_count = reasoning_rule_count + 1
 }
+
+// ---------------------------------------------------------------------------
+// 3. reasoning_add_causal — add a causal link
+// ---------------------------------------------------------------------------
+
+fn reasoning_add_causal(cause, effect, strength) {
+    if strength < 0 { strength = 0 }
+    if strength > 100 { strength = 100 }
+    let link = list_new()
+    push(link, CAUSAL_TAG)
+    push(link, cause)
+    push(link, effect)
+    push(link, strength)
+    push(link, 1)
+    push(reasoning_causal_links, link)
+    reasoning_causal_count = reasoning_causal_count + 1
+}
+
+// ---------------------------------------------------------------------------
+// 4. reasoning_observe_causal — strengthen existing or create new causal link
+// ---------------------------------------------------------------------------
+
+fn reasoning_observe_causal(cause, effect) {
+    let i = 0
+    while i < reasoning_causal_count {
+        let link = reasoning_causal_links[i]
+        if link[CAUSAL_CAUSE] == cause {
+            if link[CAUSAL_EFFECT] == effect {
+                // Strengthen existing link
+                let obs = link[CAUSAL_OBSERVATIONS] + 1
+                link[CAUSAL_OBSERVATIONS] = obs
+                let s = link[CAUSAL_STRENGTH] + 5
+                if s > 100 { s = 100 }
+                link[CAUSAL_STRENGTH] = s
+                return link
+            }
+        }
+        i = i + 1
+    }
+    // No existing link found — create a new one with moderate initial strength
+    reasoning_add_causal(cause, effect, 40)
+    return reasoning_causal_links[reasoning_causal_count - 1]
+}
+
+// ---------------------------------------------------------------------------
+// 5. reasoning_select_strategy — choose strategy based on signal type
+// ---------------------------------------------------------------------------
 
 fn reasoning_select_strategy(signal) {
     let sig_type = signal_type(signal)
@@ -34,60 +180,466 @@ fn reasoning_select_strategy(signal) {
         return STRATEGY_PATTERN
     }
     if sig_type == SIG_REFLECTION {
-        return STRATEGY_ANALOGICAL
+        return STRATEGY_ABDUCTIVE
     }
-    return STRATEGY_CAUSAL
+    if sig_type == SIG_CORRECTION {
+        return STRATEGY_CAUSAL
+    }
+    return STRATEGY_DEDUCTIVE
 }
 
-fn reasoning_deduce(query) {
-    // Forward chaining: find rules whose condition matches query
+// ---------------------------------------------------------------------------
+// Trace step helper
+// ---------------------------------------------------------------------------
+
+fn trace_step_new(step_type, from, to, confidence) {
+    let step = list_new()
+    push(step, step_type)
+    push(step, from)
+    push(step, to)
+    push(step, confidence)
+    return step
+}
+
+// ---------------------------------------------------------------------------
+// 6. reasoning_deduce — multi-step forward chaining
+//    Returns list of Conclusion objects.
+// ---------------------------------------------------------------------------
+
+fn reasoning_deduce(query, depth) {
     let results = list_new()
     let i = 0
     while i < reasoning_rule_count {
         let rule = reasoning_rules[i]
-        let condition = rule[0]
+        let condition = rule[RULE_CONDITION]
         if condition == query {
-            push(results, rule[1])
+            let consequence = rule[RULE_CONSEQUENCE]
+            let conf = rule[RULE_CONFIDENCE]
+
+            // Build trace for this step
+            let trace = list_new()
+            let step = trace_step_new("deduce", query, consequence, conf)
+            push(trace, step)
+
+            // Create conclusion for the direct match
+            let concl = conclusion_new(consequence, conf, STRATEGY_DEDUCTIVE, trace)
+            push(results, concl)
+
+            // Recurse if depth allows — chain forward from consequence
+            if depth > 0 {
+                let deeper = reasoning_deduce(consequence, depth - 1)
+                let j = 0
+                while j < len(deeper) {
+                    let sub = deeper[j]
+                    // Combine confidence: parent * child / 100
+                    let sub_conf = conclusion_confidence(sub)
+                    let combined = conf * sub_conf / 100
+                    if combined >= reasoning_confidence_min {
+                        // Merge traces
+                        let merged_trace = list_new()
+                        push(merged_trace, step)
+                        let sub_trace = conclusion_trace(sub)
+                        let k = 0
+                        while k < len(sub_trace) {
+                            push(merged_trace, sub_trace[k])
+                            k = k + 1
+                        }
+                        let chained = conclusion_new(
+                            conclusion_content(sub),
+                            combined,
+                            STRATEGY_DEDUCTIVE,
+                            merged_trace
+                        )
+                        push(results, chained)
+                    }
+                    j = j + 1
+                }
+            }
         }
         i = i + 1
     }
     return results
 }
 
-fn reasoning_find_analogy(moment, episodes) {
-    // Find most similar past episode
-    let best_score = 0
-    let best_idx = 0
+// ---------------------------------------------------------------------------
+// 7. reasoning_abduce — backward chaining from observation to explanations
+//    Returns list of Conclusion objects (possible explanations).
+// ---------------------------------------------------------------------------
+
+fn reasoning_abduce(observation, depth) {
+    let results = list_new()
     let i = 0
-    while i < len(episodes) {
+    while i < reasoning_rule_count {
+        let rule = reasoning_rules[i]
+        let consequence = rule[RULE_CONSEQUENCE]
+        if consequence == observation {
+            let condition = rule[RULE_CONDITION]
+            let conf = rule[RULE_CONFIDENCE]
+
+            // Build trace for this step
+            let trace = list_new()
+            let step = trace_step_new("abduce", observation, condition, conf)
+            push(trace, step)
+
+            // The condition is a possible explanation
+            let concl = conclusion_new(condition, conf, STRATEGY_ABDUCTIVE, trace)
+            push(results, concl)
+
+            // Recurse if depth allows — find deeper explanations
+            if depth > 0 {
+                let deeper = reasoning_abduce(condition, depth - 1)
+                let j = 0
+                while j < len(deeper) {
+                    let sub = deeper[j]
+                    let sub_conf = conclusion_confidence(sub)
+                    let combined = conf * sub_conf / 100
+                    if combined >= reasoning_confidence_min {
+                        let merged_trace = list_new()
+                        push(merged_trace, step)
+                        let sub_trace = conclusion_trace(sub)
+                        let k = 0
+                        while k < len(sub_trace) {
+                            push(merged_trace, sub_trace[k])
+                            k = k + 1
+                        }
+                        let chained = conclusion_new(
+                            conclusion_content(sub),
+                            combined,
+                            STRATEGY_ABDUCTIVE,
+                            merged_trace
+                        )
+                        push(results, chained)
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return results
+}
+
+// ---------------------------------------------------------------------------
+// 8. reasoning_analogize — find best analogy from episodes
+//    Returns a single Conclusion or 0.
+// ---------------------------------------------------------------------------
+
+fn reasoning_analogize(situation, episodes) {
+    if episodes == 0 { return 0 }
+    let ep_count = len(episodes)
+    if ep_count == 0 { return 0 }
+
+    let best_score = 0
+    let best_idx = 0 - 1
+    let i = 0
+    while i < ep_count {
         let ep = episodes[i]
         let ep_m = episode_moment(ep)
-        let score = moment_salience(ep_m)
+        let ep_what = moment_what(ep_m)
+
+        // Score by content similarity
+        let score = 0
+        if ep_what == situation {
+            // Exact match — highest score
+            score = 100
+        } else {
+            // Try substring containment as a weaker match
+            if contains(ep_what, situation) == 1 {
+                score = 60
+            } else {
+                if contains(situation, ep_what) == 1 {
+                    score = 50
+                }
+            }
+        }
+
+        // Weight by salience of the original moment
+        let salience = moment_salience(ep_m)
+        score = score * salience / 100
+
         if score > best_score {
             best_score = score
             best_idx = i
         }
         i = i + 1
     }
-    if best_score > 0 {
-        return episodes[best_idx]
+
+    if best_idx < 0 {
+        return 0
     }
-    return 0
+
+    // Extract the consequence/outcome from the best matching episode
+    let best_ep = episodes[best_idx]
+    let best_m = episode_moment(best_ep)
+    let conseq = moment_consequence(best_m)
+    let outcome = "unknown"
+    if conseq != 0 {
+        outcome = consequence_desc(conseq)
+    }
+
+    let trace = list_new()
+    let step = trace_step_new("analogize", situation, outcome, best_score)
+    push(trace, step)
+
+    return conclusion_new(outcome, best_score, STRATEGY_ANALOGICAL, trace)
 }
 
-fn reasoning_process(signal) {
+// ---------------------------------------------------------------------------
+// 9a. reasoning_trace_causes — trace backward through causal chain
+//     Returns list of [cause, cumulative_strength] pairs.
+// ---------------------------------------------------------------------------
+
+fn reasoning_trace_causes(effect, depth) {
+    let results = list_new()
+    let i = 0
+    while i < reasoning_causal_count {
+        let link = reasoning_causal_links[i]
+        if link[CAUSAL_EFFECT] == effect {
+            let cause = link[CAUSAL_CAUSE]
+            let strength = link[CAUSAL_STRENGTH]
+
+            let pair = list_new()
+            push(pair, cause)
+            push(pair, strength)
+            push(results, pair)
+
+            // Recurse to find causes of causes
+            if depth > 0 {
+                let deeper = reasoning_trace_causes(cause, depth - 1)
+                let j = 0
+                while j < len(deeper) {
+                    let sub = deeper[j]
+                    let sub_cause = sub[0]
+                    let sub_strength = sub[1]
+                    // Cumulative strength: parent * child / 100
+                    let cumulative = strength * sub_strength / 100
+                    if cumulative >= reasoning_confidence_min {
+                        let deep_pair = list_new()
+                        push(deep_pair, sub_cause)
+                        push(deep_pair, cumulative)
+                        push(results, deep_pair)
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return results
+}
+
+// ---------------------------------------------------------------------------
+// 9b. reasoning_predict_effects — trace forward through causal chain
+//     Returns list of [effect, strength] pairs.
+// ---------------------------------------------------------------------------
+
+fn reasoning_predict_effects(cause, depth) {
+    let results = list_new()
+    let i = 0
+    while i < reasoning_causal_count {
+        let link = reasoning_causal_links[i]
+        if link[CAUSAL_CAUSE] == cause {
+            let effect = link[CAUSAL_EFFECT]
+            let strength = link[CAUSAL_STRENGTH]
+
+            let pair = list_new()
+            push(pair, effect)
+            push(pair, strength)
+            push(results, pair)
+
+            // Recurse to predict downstream effects
+            if depth > 0 {
+                let deeper = reasoning_predict_effects(effect, depth - 1)
+                let j = 0
+                while j < len(deeper) {
+                    let sub = deeper[j]
+                    let sub_effect = sub[0]
+                    let sub_strength = sub[1]
+                    let cumulative = strength * sub_strength / 100
+                    if cumulative >= reasoning_confidence_min {
+                        let deep_pair = list_new()
+                        push(deep_pair, sub_effect)
+                        push(deep_pair, cumulative)
+                        push(results, deep_pair)
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return results
+}
+
+// ---------------------------------------------------------------------------
+// Helper: pick the best conclusion from a list (highest confidence)
+// ---------------------------------------------------------------------------
+
+fn reasoning_best_conclusion(conclusions) {
+    if len(conclusions) == 0 {
+        return 0
+    }
+    let best = conclusions[0]
+    let best_conf = conclusion_confidence(best)
+    let i = 1
+    while i < len(conclusions) {
+        let c = conclusions[i]
+        let conf = conclusion_confidence(c)
+        if conf > best_conf {
+            best = c
+            best_conf = conf
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build a conclusion from causal trace results
+// ---------------------------------------------------------------------------
+
+fn reasoning_causal_conclusion(query, pairs) {
+    if len(pairs) == 0 {
+        return 0
+    }
+    // Pick the strongest causal factor
+    let best_cause = pairs[0][0]
+    let best_strength = pairs[0][1]
+    let i = 1
+    while i < len(pairs) {
+        if pairs[i][1] > best_strength {
+            best_cause = pairs[i][0]
+            best_strength = pairs[i][1]
+        }
+        i = i + 1
+    }
+
+    let trace = list_new()
+    let step = trace_step_new("causal", query, best_cause, best_strength)
+    push(trace, step)
+
+    return conclusion_new(best_cause, best_strength, STRATEGY_CAUSAL, trace)
+}
+
+// ---------------------------------------------------------------------------
+// 10. reasoning_process — main entry point for integrated reasoning
+//     Select strategy, apply it, fall back if confidence too low.
+//     Returns best Conclusion or 0.
+// ---------------------------------------------------------------------------
+
+fn reasoning_process(signal, episodes) {
     let strategy = reasoning_select_strategy(signal)
     let m = signal_moment(signal)
+    let what = moment_what(m)
+
+    let best = 0
+
+    // ---- Apply primary strategy ----
 
     if strategy == STRATEGY_DEDUCTIVE {
-        let what = moment_what(m)
-        let conclusions = reasoning_deduce(what)
-        return conclusions
+        let conclusions = reasoning_deduce(what, 3)
+        best = reasoning_best_conclusion(conclusions)
     }
 
     if strategy == STRATEGY_PATTERN {
-        return list_new()
+        // Pattern strategy uses analogical reasoning over episodes
+        best = reasoning_analogize(what, episodes)
     }
 
-    return list_new()
+    if strategy == STRATEGY_ABDUCTIVE {
+        let conclusions = reasoning_abduce(what, 3)
+        best = reasoning_best_conclusion(conclusions)
+    }
+
+    if strategy == STRATEGY_CAUSAL {
+        let causes = reasoning_trace_causes(what, 3)
+        best = reasoning_causal_conclusion(what, causes)
+    }
+
+    // ---- Fallback: if confidence is below threshold, try alternatives ----
+
+    let dominated = 0
+    if best != 0 {
+        if conclusion_confidence(best) < reasoning_confidence_min {
+            dominated = 1
+        }
+    } else {
+        dominated = 1
+    }
+
+    if dominated == 1 {
+        // Try deductive as first fallback (unless already tried)
+        if strategy != STRATEGY_DEDUCTIVE {
+            let ded = reasoning_deduce(what, 2)
+            let alt = reasoning_best_conclusion(ded)
+            if alt != 0 {
+                if best == 0 {
+                    best = alt
+                } else {
+                    if conclusion_confidence(alt) > conclusion_confidence(best) {
+                        best = alt
+                    }
+                }
+            }
+        }
+
+        // Try analogical as second fallback (unless already tried)
+        if strategy != STRATEGY_PATTERN {
+            if strategy != STRATEGY_ANALOGICAL {
+                let ana = reasoning_analogize(what, episodes)
+                if ana != 0 {
+                    if best == 0 {
+                        best = ana
+                    } else {
+                        if conclusion_confidence(ana) > conclusion_confidence(best) {
+                            best = ana
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try causal as third fallback (unless already tried)
+        if strategy != STRATEGY_CAUSAL {
+            let causes = reasoning_trace_causes(what, 2)
+            let caus = reasoning_causal_conclusion(what, causes)
+            if caus != 0 {
+                if best == 0 {
+                    best = caus
+                } else {
+                    if conclusion_confidence(caus) > conclusion_confidence(best) {
+                        best = caus
+                    }
+                }
+            }
+        }
+    }
+
+    // Discard if still below minimum confidence
+    if best != 0 {
+        if conclusion_confidence(best) < reasoning_confidence_min {
+            return 0
+        }
+    }
+
+    return best
+}
+
+// ---------------------------------------------------------------------------
+// 13. reasoning_count_rules — return total rules
+// ---------------------------------------------------------------------------
+
+fn reasoning_count_rules() {
+    return reasoning_rule_count
+}
+
+// ---------------------------------------------------------------------------
+// 14. reasoning_clear — reset all knowledge
+// ---------------------------------------------------------------------------
+
+fn reasoning_clear() {
+    reasoning_rules = list_new()
+    reasoning_rule_count = 0
+    reasoning_causal_links = list_new()
+    reasoning_causal_count = 0
 }

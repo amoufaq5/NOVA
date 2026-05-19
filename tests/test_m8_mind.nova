@@ -1,0 +1,332 @@
+// M8 Test: Cognitive Systems
+// Tests all five mind modules together with the M7 core
+
+fn test_academic() {
+    println("--- Academic tests ---")
+    academic_init()
+
+    // Add axioms (ground truths)
+    academic_add_axiom("dog", "is_a", "mammal")
+    academic_add_axiom("cat", "is_a", "mammal")
+    academic_add_axiom("mammal", "is_a", "animal")
+    academic_add_axiom("dog", "has", "tail")
+    academic_add_axiom("cat", "has", "whiskers")
+
+    // Direct query
+    let results = academic_query("dog", "is_a")
+    print("dog is_a: ")
+    print_int(len(results))
+    println(" results")
+    if len(results) > 0 {
+        print("  -> ")
+        println(results[0])
+    }
+
+    // Reverse query
+    let subjects = academic_query_reverse("is_a", "mammal")
+    print("is_a mammal: ")
+    print_int(len(subjects))
+    println(" subjects")
+
+    // Store derived knowledge
+    academic_store("dog", "eats", "meat", "observation", 80)
+    print("has: ")
+    print_int(academic_has("dog", "eats", "meat"))
+    println("")
+
+    // Count facts
+    print("total facts: ")
+    print_int(academic_count_facts())
+    println("")
+
+    println("Academic tests OK")
+}
+
+fn test_experiential() {
+    println("--- Experiential tests ---")
+    experiential_init()
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_REWARD, "good outcome", 80)
+
+    // Record several similar moments to trigger tendency
+    let m1 = moment_new("greeting", alice, 70, 60, cons, 80)
+    experiential_record(m1)
+    let m2 = moment_new("greeting", alice, 75, 55, cons, 85)
+    experiential_record(m2)
+    let m3 = moment_new("greeting", alice, 65, 50, cons, 75)
+    experiential_record(m3)
+
+    // Check if tendency formed (threshold is 3)
+    let t = experiential_check_tendency("greeting")
+    if t == 0 {
+        println("no tendency yet")
+    } else {
+        print("tendency: ")
+        print(tendency_trigger(t))
+        print(" -> ")
+        print(tendency_bias(t))
+        print(" strength=")
+        print_int(tendency_strength(t))
+        println("")
+    }
+
+    // Check bias
+    let bias = experiential_bias_for("greeting")
+    print("bias for greeting: ")
+    print_int(bias)
+    println("")
+
+    // Record something different
+    let cons2 = consequence_new(CTYPE_PUNISHMENT, "bad result", 60)
+    let m4 = moment_new("conflict", alice, 20, 80, cons2, 90)
+    experiential_record(m4)
+
+    // Count
+    print("patterns+tendencies: ")
+    print_int(experiential_count())
+    println("")
+
+    println("Experiential tests OK")
+}
+
+fn test_emotion() {
+    println("--- Emotion tests ---")
+    emotion_init()
+
+    // Initial state
+    print("initial: ")
+    println(emotion_describe())
+    print("intensity: ")
+    print_int(emotion_intensity())
+    println("")
+
+    // Appraise a positive excited moment
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_REWARD, "won award", 90)
+    let m = moment_new("won award", alice, 90, 85, cons, 95)
+    emotion_appraise(m)
+    print("after positive: ")
+    println(emotion_describe())
+    print("V=")
+    print_int(emotion_get_valence())
+    print(" A=")
+    print_int(emotion_get_arousal())
+    println("")
+    print("positive: ")
+    print_int(emotion_is_positive())
+    println("")
+
+    // Influence should be high (arousal is up)
+    print("influence: ")
+    print_int(emotion_influence())
+    println("")
+
+    // Decay toward baseline
+    emotion_decay_to_baseline()
+    print("after decay: V=")
+    print_int(emotion_get_valence())
+    print(" A=")
+    print_int(emotion_get_arousal())
+    println("")
+
+    // Snapshot
+    let snap = emotion_snapshot()
+    print("snapshot len: ")
+    print_int(len(snap))
+    println("")
+
+    println("Emotion tests OK")
+}
+
+fn test_memory() {
+    println("--- Memory tests ---")
+    memory_init()
+
+    let alice = entity_new("Alice", "user")
+    let bob = entity_new("Bob", "friend")
+    let cons = consequence_new(CTYPE_INSIGHT, "learned something", 70)
+
+    // Store episodes
+    let m1 = moment_new("met Alice", alice, 70, 50, cons, 80)
+    let m2 = moment_new("talked about code", alice, 60, 40, cons, 60)
+    let m3 = moment_new("met Bob", bob, 50, 30, cons, 50)
+    let m4 = moment_new("met Alice", alice, 75, 55, cons, 85)
+
+    memory_store(m1, 80)
+    memory_store(m2, 60)
+    memory_store(m3, 50)
+    memory_store(m4, 85)
+    print("total episodes: ")
+    print_int(memory_count_episodes())
+    println("")
+
+    // Recall recent
+    let recent = memory_recall_recent(2)
+    print("recent: ")
+    print_int(len(recent))
+    println(" episodes")
+
+    // Working memory
+    memory_working_push(m1)
+    memory_working_push(m2)
+    memory_working_push(m3)
+    print("working memory: ")
+    print_int(memory_working_count())
+    println("")
+
+    // Similarity-based recall
+    let query = moment_new("met Alice", alice, 70, 50, cons, 80)
+    let similar = memory_recall_similar(query, 2)
+    print("similar to 'met Alice': ")
+    print_int(len(similar))
+    println(" episodes")
+
+    // Tag-based recall
+    let ep = memory_episodes[0]
+    episode_add_tag(ep, "social")
+    let tagged = memory_recall_by_tag("social", 5)
+    print("tagged 'social': ")
+    print_int(len(tagged))
+    println("")
+
+    // Stats
+    let stats = memory_stats()
+    print("stats: total=")
+    print_int(stats[0])
+    print(" working=")
+    print_int(stats[1])
+    println("")
+
+    println("Memory tests OK")
+}
+
+fn test_reasoning() {
+    println("--- Reasoning tests ---")
+    reasoning_init()
+
+    // Add rules
+    reasoning_add_rule("is_dog", "is_mammal", 95)
+    reasoning_add_rule("is_mammal", "is_warm_blooded", 99)
+    reasoning_add_rule("is_mammal", "has_vertebrae", 99)
+
+    // Deductive reasoning
+    let conclusions = reasoning_deduce("is_dog", 2)
+    print("deduce 'is_dog': ")
+    print_int(len(conclusions))
+    println(" conclusions")
+    let i = 0
+    while i < len(conclusions) {
+        let c = conclusions[i]
+        print("  -> ")
+        print(conclusion_content(c))
+        print(" (confidence=")
+        print_int(conclusion_confidence(c))
+        println(")")
+        i = i + 1
+    }
+
+    // Abductive reasoning
+    let explanations = reasoning_abduce("is_warm_blooded", 1)
+    print("abduce 'is_warm_blooded': ")
+    print_int(len(explanations))
+    println(" explanations")
+    if len(explanations) > 0 {
+        print("  possible cause: ")
+        println(conclusion_content(explanations[0]))
+    }
+
+    // Causal reasoning
+    reasoning_add_causal("rain", "wet_ground", 80)
+    reasoning_add_causal("wet_ground", "slippery", 70)
+    let effects = reasoning_predict_effects("rain", 2)
+    print("effects of rain: ")
+    print_int(len(effects))
+    println("")
+
+    let causes = reasoning_trace_causes("slippery", 2)
+    print("causes of slippery: ")
+    print_int(len(causes))
+    println("")
+
+    // Strategy name
+    print("strategy 1: ")
+    println(reasoning_strategy_name(STRATEGY_DEDUCTIVE))
+
+    // Count
+    print("total rules: ")
+    print_int(reasoning_count_rules())
+    println("")
+
+    println("Reasoning tests OK")
+}
+
+fn test_integration() {
+    println("--- Integration test ---")
+    // Full cognitive cycle: perception → learning → reasoning → response
+
+    // Initialize all systems
+    academic_init()
+    experiential_init()
+    emotion_init()
+    memory_init()
+    reasoning_init()
+
+    // Load some knowledge
+    academic_add_axiom("greeting", "requires", "response")
+    reasoning_add_rule("greeting", "say_hello", 90)
+
+    // Simulate incoming moment
+    let user = entity_new("User", "human")
+    let cons = consequence_new(CTYPE_EXPECTATION, "expects reply", 80)
+    let moment = moment_new("greeting", user, 70, 50, cons, 80)
+
+    // 1. Emotion: appraise the moment
+    emotion_appraise(moment)
+    print("emotion after greeting: ")
+    println(emotion_describe())
+
+    // 2. Memory: store and check for similar
+    memory_crystallize(moment)
+    let similar = memory_recall_similar(moment, 3)
+    print("similar memories: ")
+    print_int(len(similar))
+    println("")
+
+    // 3. Experiential: record for pattern learning
+    experiential_record(moment)
+
+    // 4. Academic: what do we know about greetings?
+    let knowledge = academic_query("greeting", "requires")
+    if len(knowledge) > 0 {
+        print("academic says greeting requires: ")
+        println(knowledge[0])
+    }
+
+    // 5. Reasoning: what should we do?
+    let conclusions = reasoning_deduce("greeting", 1)
+    if len(conclusions) > 0 {
+        print("reasoning concludes: ")
+        println(conclusion_content(conclusions[0]))
+    }
+
+    println("Integration test OK")
+}
+
+fn main() {
+    test_academic()
+    println("")
+    test_experiential()
+    println("")
+    test_emotion()
+    println("")
+    test_memory()
+    println("")
+    test_reasoning()
+    println("")
+    test_integration()
+    println("")
+    println("All M8 cognitive system tests passed!")
+}
+
+main()
