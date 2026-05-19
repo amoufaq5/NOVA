@@ -5,6 +5,7 @@
 
 let NL = chr(10)
 let DQ = chr(34)
+let cg_target = 0
 let cg_output = ""
 let cg_label_count = 0
 let cg_strings = 0
@@ -64,6 +65,54 @@ fn out(s) {
 
 fn out_label(name) {
     push(cg_output, name + ":")
+}
+
+fn out_globl(name) {
+    out(".globl " + name)
+}
+
+fn out_section(sect) {
+    if cg_target == 1 {
+        if sect == "text" { out(".section __TEXT,__text") }
+        if sect == "rodata" { out(".section __TEXT,__const") }
+        if sect == "bss" { out(".section __DATA,__bss") }
+    } else {
+        if sect == "text" { out(".text") }
+        if sect == "rodata" { out(".section .rodata") }
+        if sect == "bss" { out(".section .bss") }
+    }
+}
+
+fn syscall_num(linux_num) {
+    if cg_target == 0 { return linux_num }
+    // macOS: 0x2000000 + BSD number
+    if linux_num == 0 { return 33554435 }
+    if linux_num == 1 { return 33554436 }
+    if linux_num == 2 { return 33554437 }
+    if linux_num == 3 { return 33554438 }
+    if linux_num == 4 { return 33554620 }
+    if linux_num == 9 { return 33554629 }
+    if linux_num == 22 { return 33554474 }
+    if linux_num == 41 { return 33554529 }
+    if linux_num == 93 { return 33554525 }
+    if linux_num == 42 { return 33554530 }
+    if linux_num == 43 { return 33554462 }
+    if linux_num == 49 { return 33554536 }
+    if linux_num == 50 { return 33554538 }
+    if linux_num == 57 { return 33554434 }
+    if linux_num == 59 { return 33554491 }
+    if linux_num == 60 { return 33554433 }
+    if linux_num == 61 { return 33554439 }
+    if linux_num == 83 { return 33554568 }
+    if linux_num == 87 { return 33554442 }
+    if linux_num == 228 { return 33554548 }
+    return linux_num
+}
+
+fn emit_syscall(linux_num) {
+    let n = syscall_num(linux_num)
+    out("    mov rax, " + int_to_str(n))
+    out("    syscall")
 }
 
 fn new_label() {
@@ -1827,8 +1876,7 @@ fn gen_stmt(nd) {
         if cg_catch_label == "" {
             // No try/catch - exit with error code
             out("    mov rdi, rax")
-            out("    mov rax, 60")
-            out("    syscall")
+            emit_syscall(60)
         } else {
             out("    jmp " + cg_catch_label)
         }
@@ -1968,7 +2016,7 @@ fn gen_function(nd) {
     collect_locals(body)
 
     out("")
-    out(".globl " + name)
+    out_globl(name)
     out_label(name)
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -2087,7 +2135,7 @@ fn gen_program(program) {
     }
 
     out(".intel_syntax noprefix")
-    out(".text")
+    out_section("text")
 
     // Generate functions
     i = 0
@@ -2169,8 +2217,13 @@ fn gen_program(program) {
     }
 
     out("")
-    out(".globl _start")
-    out_label("_start")
+    if cg_target == 1 {
+        out(".globl _main")
+        out("_main:")
+    } else {
+        out(".globl _start")
+        out("_start:")
+    }
     out("    mov rdi, [rsp]")
     out("    lea rsi, [rsp + 8]")
     out("    mov [rip + _g___argc], rdi")
@@ -2206,12 +2259,11 @@ fn gen_program(program) {
     }
 
     out("    mov rdi, 0")
-    out("    mov rax, 60")
-    out("    syscall")
+    emit_syscall(60)
 
     // Emit string data section
     out("")
-    out(".section .rodata")
+    out_section("rodata")
     i = 0
     while i < cg_str_count {
         out_label("_str_" + int_to_str(i))
@@ -2221,7 +2273,7 @@ fn gen_program(program) {
 
     // Emit globals in .bss
     out("")
-    out(".section .bss")
+    out_section("bss")
     // Always add argc/argv globals
     out("    .align 8")
     out_label("_g___argc")
@@ -2250,7 +2302,7 @@ fn gen_program(program) {
 
     // Emit runtime library
     out("")
-    out(".text")
+    out_section("text")
     gen_runtime()
 
     return join(cg_output, chr(10))
@@ -2440,8 +2492,7 @@ fn gen_runtime() {
     out("    mov rsi, rdi")
     out(".pi_write:")
     out("    mov rdi, 1")
-    out("    mov rax, 1")
-    out("    syscall")
+    emit_syscall(1)
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -2460,8 +2511,7 @@ fn gen_runtime() {
     out("    jmp .ps_len")
     out(".ps_write:")
     out("    mov rdi, 1")
-    out("    mov rax, 1")
-    out("    syscall")
+    emit_syscall(1)
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -2478,8 +2528,7 @@ fn gen_runtime() {
     out("    mov rsi, rsp")
     out("    mov rdx, 1")
     out("    mov rdi, 1")
-    out("    mov rax, 1")
-    out("    syscall")
+    emit_syscall(1)
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -2494,14 +2543,27 @@ fn gen_runtime() {
     out("    mov rax, [rip + _heap_ptr]")
     out("    test rax, rax")
     out("    jnz .alloc_have_heap")
-    out("    mov rdi, 0")
-    out("    mov rax, 12")
-    out("    syscall")
+    if cg_target == 1 {
+        // macOS: use mmap (no brk)
+        out("    xor edi, edi")
+        out("    mov rsi, 1048576")
+        out("    mov rdx, 3")
+        out("    mov r10, 4098")
+        out("    mov r8, -1")
+        out("    xor r9d, r9d")
+        emit_syscall(9)
+    } else {
+        out("    mov rdi, 0")
+        emit_syscall(12)
+    }
     out("    mov [rip + _heap_base], rax")
     out("    mov [rip + _heap_ptr], rax")
-    out("    lea rdi, [rax + 1048576]")
-    out("    mov rax, 12")
-    out("    syscall")
+    if cg_target == 1 {
+        out("    lea rax, [rax + 1048576]")
+    } else {
+        out("    lea rdi, [rax + 1048576]")
+        emit_syscall(12)
+    }
     out("    mov [rip + _heap_end], rax")
     out("    mov rax, [rip + _heap_ptr]")
     out(".alloc_have_heap:")
@@ -2509,11 +2571,23 @@ fn gen_runtime() {
     out("    add rcx, rbx")
     out("    cmp rcx, [rip + _heap_end]")
     out("    jle .alloc_ok")
-    out("    lea rdi, [rcx + 1048576]")
-    out("    mov rax, 12")
-    out("    syscall")
-    out("    mov [rip + _heap_end], rax")
-    out("    mov rax, [rip + _heap_ptr]")
+    if cg_target == 1 {
+        out("    xor edi, edi")
+        out("    mov rsi, 1048576")
+        out("    mov rdx, 3")
+        out("    mov r10, 4098")
+        out("    mov r8, -1")
+        out("    xor r9d, r9d")
+        emit_syscall(9)
+        out("    mov [rip + _heap_end], rax")
+        out("    add qword ptr [rip + _heap_end], 1048576")
+        out("    mov rax, [rip + _heap_ptr]")
+    } else {
+        out("    lea rdi, [rcx + 1048576]")
+        emit_syscall(12)
+        out("    mov [rip + _heap_end], rax")
+        out("    mov rax, [rip + _heap_ptr]")
+    }
     out("    mov rcx, rax")
     out("    add rcx, rbx")
     out(".alloc_ok:")
@@ -2747,8 +2821,7 @@ fn gen_runtime() {
     // --- exit(code) ---
     out("")
     out_label("_nova_exit")
-    out("    mov rax, 60")
-    out("    syscall")
+    emit_syscall(60)
 
     // --- read_file(path) -> string ptr or 0 ---
     out("")
@@ -2756,9 +2829,8 @@ fn gen_runtime() {
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    push r12")
-    out("    mov rax, 2")
     out("    mov rsi, 0")
-    out("    syscall")
+    emit_syscall(2)
     out("    cmp rax, 0")
     out("    jl .rf_fail")
     out("    mov r12, rax")
@@ -2768,14 +2840,12 @@ fn gen_runtime() {
     out("    mov rdi, r12")
     out("    mov rsi, rax")
     out("    mov rdx, 262143")
-    out("    mov rax, 0")
-    out("    syscall")
+    emit_syscall(0)
     out("    pop rsi")
     out("    mov byte ptr [rsi+rax], 0")
     out("    mov rdi, r12")
     out("    push rsi")
-    out("    mov rax, 3")
-    out("    syscall")
+    emit_syscall(3)
     out("    pop rax")
     out("    pop r12")
     out("    pop rbp")
@@ -2794,10 +2864,9 @@ fn gen_runtime() {
     out("    push r12")
     out("    push r13")
     out("    mov r13, rsi")
-    out("    mov rax, 2")
     out("    mov rsi, 577")
     out("    mov rdx, 420")
-    out("    syscall")
+    emit_syscall(2)
     out("    cmp rax, 0")
     out("    jl .wf_fail")
     out("    mov r12, rax")
@@ -2806,11 +2875,9 @@ fn gen_runtime() {
     out("    mov rdx, rax")
     out("    mov rdi, r12")
     out("    mov rsi, r13")
-    out("    mov rax, 1")
-    out("    syscall")
+    emit_syscall(1)
     out("    mov rdi, r12")
-    out("    mov rax, 3")
-    out("    syscall")
+    emit_syscall(3)
     out("    mov rax, 1")
     out("    pop r13")
     out("    pop r12")
@@ -2860,8 +2927,7 @@ fn gen_runtime() {
     out("    lea rdi, [rip + _err_null_access]")
     out("    call _nova_println")
     out("    mov rdi, 1")
-    out("    mov rax, 60")
-    out("    syscall")
+    emit_syscall(60)
     out(".idx_oob:")
     out("    push rsi")
     out("    lea rdi, [rip + _err_index_oob]")
@@ -2871,8 +2937,7 @@ fn gen_runtime() {
     out("    lea rdi, [rip + _err_newline]")
     out("    call _nova_print_str")
     out("    mov rdi, 1")
-    out("    mov rax, 60")
-    out("    syscall")
+    emit_syscall(60)
 
     // --- chr(code) -> 1-char string ---
     out("")
@@ -3196,8 +3261,7 @@ fn gen_runtime() {
     out("    sub rsp, 16")
     out("    xor edi, edi")
     out("    lea rsi, [rbp - 16]")
-    out("    mov rax, 228")
-    out("    syscall")
+    emit_syscall(228)
     out("    mov rax, [rbp - 16]")
     out("    mov rsp, rbp")
     out("    pop rbp")
@@ -3213,13 +3277,24 @@ fn gen_runtime() {
     out("    xor edx, edx")
     out("    mov rcx, 1000")
     out("    div rcx")
-    out("    mov [rbp - 16], rax")
-    out("    imul rdx, rdx, 1000000")
-    out("    mov [rbp - 8], rdx")
-    out("    lea rdi, [rbp - 16]")
-    out("    xor esi, esi")
-    out("    mov rax, 35")
-    out("    syscall")
+    if cg_target == 1 {
+        out("    mov [rbp - 16], rax")
+        out("    imul rdx, rdx, 1000")
+        out("    mov [rbp - 8], rdx")
+        out("    xor edi, edi")
+        out("    xor esi, esi")
+        out("    xor edx, edx")
+        out("    xor r10d, r10d")
+        out("    lea r8, [rbp - 16]")
+        emit_syscall(93)
+    } else {
+        out("    mov [rbp - 16], rax")
+        out("    imul rdx, rdx, 1000000")
+        out("    mov [rbp - 8], rdx")
+        out("    lea rdi, [rbp - 16]")
+        out("    xor esi, esi")
+        emit_syscall(35)
+    }
     out("    xor eax, eax")
     out("    mov rsp, rbp")
     out("    pop rbp")
@@ -3228,16 +3303,14 @@ fn gen_runtime() {
     // --- mkdir(path) -> 0 on success, -1 on error ---
     out("")
     out_label("_nova_mkdir")
-    out("    mov rax, 83")
     out("    mov rsi, 493")
-    out("    syscall")
+    emit_syscall(83)
     out("    ret")
 
     // --- unlink(path) -> 0 on success, -1 on error ---
     out("")
     out_label("_nova_unlink")
-    out("    mov rax, 87")
-    out("    syscall")
+    emit_syscall(87)
     out("    ret")
 
     // --- file_size(path) -> size in bytes or -1 ---
@@ -3246,12 +3319,15 @@ fn gen_runtime() {
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    sub rsp, 160")
-    out("    mov rax, 4")
     out("    lea rsi, [rbp - 160]")
-    out("    syscall")
+    emit_syscall(4)
     out("    cmp rax, 0")
     out("    jl .fs_fail")
-    out("    mov rax, [rbp - 160 + 48]")
+    if cg_target == 1 {
+        out("    mov rax, [rbp - 160 + 96]")
+    } else {
+        out("    mov rax, [rbp - 160 + 48]")
+    }
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -3264,57 +3340,49 @@ fn gen_runtime() {
     // --- socket(domain, type, protocol) -> fd ---
     out("")
     out_label("_nova_socket")
-    out("    mov rax, 41")
-    out("    syscall")
+    emit_syscall(41)
     out("    ret")
 
     // --- bind(fd, addr, addrlen) -> 0 or error ---
     out("")
     out_label("_nova_bind")
-    out("    mov rax, 49")
-    out("    syscall")
+    emit_syscall(49)
     out("    ret")
 
     // --- listen(fd, backlog) -> 0 or error ---
     out("")
     out_label("_nova_listen")
-    out("    mov rax, 50")
-    out("    syscall")
+    emit_syscall(50)
     out("    ret")
 
     // --- accept(fd, addr, addrlen) -> new fd ---
     out("")
     out_label("_nova_accept")
-    out("    mov rax, 43")
-    out("    syscall")
+    emit_syscall(43)
     out("    ret")
 
     // --- connect(fd, addr, addrlen) -> 0 or error ---
     out("")
     out_label("_nova_connect")
-    out("    mov rax, 42")
-    out("    syscall")
+    emit_syscall(42)
     out("    ret")
 
     // --- send_data(fd, buf, len) -> bytes sent ---
     out("")
     out_label("_nova_send_data")
-    out("    mov rax, 1")
-    out("    syscall")
+    emit_syscall(1)
     out("    ret")
 
     // --- recv_data(fd, buf, len) -> bytes received ---
     out("")
     out_label("_nova_recv_data")
-    out("    mov rax, 0")
-    out("    syscall")
+    emit_syscall(0)
     out("    ret")
 
     // --- close_fd(fd) -> 0 or error ---
     out("")
     out_label("_nova_close_fd")
-    out("    mov rax, 3")
-    out("    syscall")
+    emit_syscall(3)
     out("    ret")
 
     // --- make_sockaddr_in(port, ip_addr) -> pointer to sockaddr_in struct ---
@@ -3342,8 +3410,7 @@ fn gen_runtime() {
     // --- fork() -> pid (0 in child, >0 in parent) ---
     out("")
     out_label("_nova_fork")
-    out("    mov rax, 57")
-    out("    syscall")
+    emit_syscall(57)
     out("    ret")
 
     // --- waitpid(pid) -> exit status ---
@@ -3354,9 +3421,8 @@ fn gen_runtime() {
     out("    sub rsp, 16")
     out("    lea rsi, [rbp - 8]")
     out("    xor edx, edx")
-    out("    mov rax, 61")
     out("    xor r10d, r10d")
-    out("    syscall")
+    emit_syscall(61)
     out("    mov eax, [rbp - 8]")
     out("    shr eax, 8")
     out("    and eax, 255")
@@ -3368,8 +3434,7 @@ fn gen_runtime() {
     out("")
     out_label("_nova_exec")
     out("    mov rdx, 0")
-    out("    mov rax, 59")
-    out("    syscall")
+    emit_syscall(59)
     out("    ret")
 
     // --- pipe() -> list of [read_fd, write_fd] ---
@@ -3379,8 +3444,7 @@ fn gen_runtime() {
     out("    mov rbp, rsp")
     out("    sub rsp, 16")
     out("    lea rdi, [rbp - 8]")
-    out("    mov rax, 22")
-    out("    syscall")
+    emit_syscall(22)
     out("    call _nova_list_new")
     out("    push rax")
     out("    mov edi, [rbp - 8]")
@@ -3404,8 +3468,7 @@ fn gen_runtime() {
     out("    lea rdi, [rip + _err_div_zero]")
     out("    call _nova_println")
     out("    mov rdi, 1")
-    out("    mov rax, 60")
-    out("    syscall")
+    emit_syscall(60)
 
     // --- assert(condition, message) ---
     out("")
@@ -3418,8 +3481,7 @@ fn gen_runtime() {
     out("    pop rdi")
     out("    call _nova_println")
     out("    mov rdi, 1")
-    out("    mov rax, 60")
-    out("    syscall")
+    emit_syscall(60)
     out(".assert_ok:")
     out("    ret")
 
@@ -3556,8 +3618,7 @@ fn gen_runtime() {
     out("    xor edi, edi")
     out("    lea rsi, [r12 + r13]")
     out("    mov rdx, 1")
-    out("    xor eax, eax")
-    out("    syscall")
+    emit_syscall(0)
     out("    cmp rax, 0")
     out("    jle .rl_done")
     out("    movzx eax, byte ptr [r12 + r13]")
@@ -3588,8 +3649,7 @@ fn gen_runtime() {
     out("    xor edi, edi")
     out("    mov rsi, r12")
     out("    mov rdx, r13")
-    out("    xor eax, eax")
-    out("    syscall")
+    emit_syscall(0)
     out("    cmp rax, 0")
     out("    jl .rs_fail")
     out("    mov byte ptr [r12 + rax], 0")
@@ -3667,8 +3727,7 @@ fn gen_runtime() {
     out("    sub rsp, 16")
     out("    xor edi, edi")
     out("    lea rsi, [rsp]")
-    out("    mov rax, 228")
-    out("    syscall")
+    emit_syscall(228)
     out("    mov rax, [rsp]")
     out("    xor rax, [rsp + 8]")
     out("    add rsp, 16")
@@ -5308,7 +5367,7 @@ fn gen_runtime() {
 
     // --- Data for runtime ---
     out("")
-    out(".section .rodata")
+    out_section("rodata")
     out_label("_empty_str")
     out("    .asciz " + DQ + DQ)
     out_label("_err_null_access")
@@ -5340,7 +5399,7 @@ fn gen_runtime() {
 
     // --- Heap state in .bss ---
     out("")
-    out(".section .bss")
+    out_section("bss")
     out("    .align 8")
     out_label("_heap_base")
     out("    .quad 0")

@@ -155,45 +155,53 @@ fn compile(source) {
 }
 
 fn main() {
-    // For bootstrap: source is passed as first argument
-    // The bootstrap interpreter receives the file to compile
-    // via a special __args builtin or we read it from a known path.
-    //
-    // For now, read from the file specified on command line.
-    // The bootstrap passes argv[2] as the target file (argv[1] is this compiler).
-
-    let input_file = __arg(0)
-    let output_file = ""
+    let input_file = ""
+    let output_file = "output.s"
+    let ai = 0
+    let cur = __arg(ai)
+    while len(cur) > 0 {
+        if cur == "-o" {
+            ai = ai + 1
+            output_file = __arg(ai)
+        } else {
+            if starts_with_str(cur, "--target=") == 1 {
+                let tname = substr(cur, 9, len(cur) - 9)
+                if tname == "macos" {
+                    cg_target = 1
+                    println("Target: macOS (x86-64)")
+                } else {
+                    if tname == "linux" {
+                        cg_target = 0
+                    } else {
+                        println(concat("Unknown target: ", tname))
+                        println("Supported targets: linux, macos")
+                        exit(1)
+                    }
+                }
+            } else {
+                input_file = cur
+            }
+        }
+        ai = ai + 1
+        cur = __arg(ai)
+    }
 
     if input_file == "" {
-        println("Usage: nova <input.nova> [-o output.s]")
+        println("Usage: nova <input.nova> [-o output.s] [--target=linux|macos]")
         exit(1)
     }
 
-    // Check for -o flag
-    let arg1 = __arg(1)
-    if arg1 == "-o" {
-        output_file = __arg(2)
-    } else {
-        // Default output name
-        output_file = "output.s"
-    }
-
-    // Read source
     let source = read_file(input_file)
     if source == 0 {
         println(concat("Error: cannot read file: ", input_file))
         exit(1)
     }
 
-    // Preprocess imports
     let base_dir = extract_dir(input_file)
     source = preprocess_imports(source, base_dir)
 
-    // Compile
     let asm_code = compile(source)
 
-    // Write output
     let ok = write_file(output_file, asm_code)
     if ok == 0 {
         println(concat("Error: cannot write file: ", output_file))

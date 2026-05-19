@@ -13,7 +13,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/compiler/codegen.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos
 
 all: bin/nova
 
@@ -41,6 +41,16 @@ self-host: bin/nova
 	/tmp/nova_stage2 /tmp/nova_combined.nova -o /tmp/nova_stage3.s
 	diff /tmp/nova_stage2.s /tmp/nova_stage3.s
 	@echo "=== SELF-HOSTING VERIFIED ==="
+
+# Cross-compile for macOS (generates .s file; assemble on macOS with: as -o out.o out.s && ld -e _main -o out out.o)
+cross-macos: bin/nova
+	@mkdir -p bin
+	cat $(COMPILER_SRC) > /tmp/nova_combined.nova
+	bin/nova /tmp/nova_combined.nova --target=macos -o bin/nova_macos.s
+	@echo "macOS assembly written to bin/nova_macos.s"
+	@echo "Transfer to macOS and build with:"
+	@echo "  as -o nova.o nova_macos.s"
+	@echo "  ld -e _main -o nova nova.o"
 
 # Compile a .nova file to a binary
 %.out: %.nova bin/nova
