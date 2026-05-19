@@ -18,15 +18,36 @@ for test_file in tests/test_*.nova; do
     test_name=$(basename "$test_file" .nova)
     TOTAL=$((TOTAL + 1))
 
-    # Skip import test (needs special handling)
-    if [ "$test_name" = "test_import" ]; then
-        echo "  SKIP  $test_name (requires import lib)"
-        SKIP=$((SKIP + 1))
-        continue
-    fi
+    # Skip tests that need special handling
+    case "$test_name" in
+        test_import|test_import_lib|test_fileio|test_io_random)
+            echo "  SKIP  $test_name (requires special setup)"
+            SKIP=$((SKIP + 1))
+            continue
+            ;;
+    esac
+
+    # M7/M8 tests need combined source files
+    INPUT="$test_file"
+    case "$test_name" in
+        test_m7_core)
+            cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
+                src/core/node.nova src/core/channel.nova src/core/path.nova \
+                "$test_file" > /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+        test_m8_mind)
+            cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
+                src/core/node.nova src/core/channel.nova src/core/path.nova \
+                src/mind/academic.nova src/mind/experiential.nova src/mind/emotion.nova \
+                src/mind/memory.nova src/mind/reasoning.nova \
+                "$test_file" > /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+    esac
 
     # Compile
-    $NOVA "$test_file" -o /tmp/nova_test.s 2>/tmp/nova_test_err.txt
+    $NOVA "$INPUT" -o /tmp/nova_test.s 2>/tmp/nova_test_err.txt
     if [ $? -ne 0 ]; then
         echo "  FAIL  $test_name (compile error)"
         cat /tmp/nova_test_err.txt

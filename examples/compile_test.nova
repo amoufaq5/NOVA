@@ -1,8 +1,0 @@
-// Simple test program for the Nova compiler
-fn add(a, b) {
-    return a + b
-}
-
-let x = add(3, 4)
-let y = x * 2
-println(int_to_str(y))

@@ -1,4 +1,0 @@
-println("start")
-let r = range(3)
-println("middle")
-println(r[0])

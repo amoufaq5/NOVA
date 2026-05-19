@@ -32,10 +32,14 @@ bin/nova: $(BOOT) $(COMPILER_SRC)
 	$(AS) -o /tmp/nova_stage1.o /tmp/nova_stage1.s
 	$(LD) -o bin/nova /tmp/nova_stage1.o
 
-# Step 3: Verify self-hosting (stage 2 == stage 1)
+# Step 3: Verify self-hosting (stage2 output == stage3 output)
 self-host: bin/nova
+	@cat $(COMPILER_SRC) > /tmp/nova_combined.nova
 	bin/nova /tmp/nova_combined.nova -o /tmp/nova_stage2.s
-	diff /tmp/nova_stage1.s /tmp/nova_stage2.s
+	$(AS) -o /tmp/nova_stage2.o /tmp/nova_stage2.s
+	$(LD) -o /tmp/nova_stage2 /tmp/nova_stage2.o
+	/tmp/nova_stage2 /tmp/nova_combined.nova -o /tmp/nova_stage3.s
+	diff /tmp/nova_stage2.s /tmp/nova_stage3.s
 	@echo "=== SELF-HOSTING VERIFIED ==="
 
 # Compile a .nova file to a binary

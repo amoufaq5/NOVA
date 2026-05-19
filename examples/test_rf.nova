@@ -1,6 +1,0 @@
-let fpath = __arg(0)
-println("fpath: " + fpath)
-println(len(fpath))
-let s = read_file(fpath)
-println("read result:")
-println(s)

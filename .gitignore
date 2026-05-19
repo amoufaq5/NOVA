@@ -1,28 +1,21 @@
 # Build artifacts
-/tmp/
 *.o
 *.s
 !boot/*.s
 a.out
+output.s
 
-# Python (legacy bootstrap)
+# Bootstrap build intermediates
+boot/nova_boot.o
+boot/nova_boot
+
+# Python (removed — Nova is self-hosting)
 __pycache__/
 *.pyc
-*.pyo
 .pytest_cache/
-*.egg-info/
-dist/
-build/
-
-# Nova cache
-.nova-cache/
 
 # Claude Code
 .claude/
-
-# Assembly build artifacts (intermediate)
-boot/nova_boot.o
-boot/nova_boot
 
 # Editor files
 *.swp
