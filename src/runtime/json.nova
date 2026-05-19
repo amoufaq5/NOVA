@@ -1,0 +1,290 @@
+// Nova Standard Library: JSON Parser & Serializer
+// Parses JSON strings into Nova maps/lists/strings/ints.
+// Serializes Nova values back to JSON strings.
+
+let _json_src = ""
+let _json_pos = 0
+let _json_len = 0
+
+fn _json_peek() {
+    if _json_pos >= _json_len { return 0 }
+    return char_at(_json_src, _json_pos)
+}
+
+fn _json_advance() {
+    let c = _json_peek()
+    _json_pos = _json_pos + 1
+    return c
+}
+
+fn _json_skip_ws() {
+    let c = _json_peek()
+    while c == 32 {
+        _json_pos = _json_pos + 1
+        c = _json_peek()
+    }
+    while c == 9 {
+        _json_pos = _json_pos + 1
+        c = _json_peek()
+    }
+    while c == 10 {
+        _json_pos = _json_pos + 1
+        c = _json_peek()
+    }
+    while c == 13 {
+        _json_pos = _json_pos + 1
+        c = _json_peek()
+    }
+}
+
+fn _json_parse_string() {
+    _json_advance()
+    let result = ""
+    let c = _json_peek()
+    while c > 0 {
+        if c == 34 {
+            _json_advance()
+            return result
+        }
+        if c == 92 {
+            _json_advance()
+            let esc = _json_advance()
+            if esc == 110 { result = result + chr(10) }
+            if esc == 116 { result = result + chr(9) }
+            if esc == 114 { result = result + chr(13) }
+            if esc == 34 { result = result + chr(34) }
+            if esc == 92 { result = result + chr(92) }
+            if esc == 47 { result = result + chr(47) }
+        } else {
+            result = result + chr(c)
+            _json_advance()
+        }
+        c = _json_peek()
+    }
+    return result
+}
+
+fn _json_parse_number() {
+    let start = _json_pos
+    let neg = 0
+    if _json_peek() == 45 {
+        neg = 1
+        _json_advance()
+    }
+    while _json_peek() >= 48 {
+        if _json_peek() <= 57 {
+            _json_advance()
+        } else {
+            _json_pos = _json_pos
+            let done = 1
+            if done == 1 {
+                let num_str = substr(_json_src, start, _json_pos - start)
+                return str_to_int(num_str)
+            }
+        }
+    }
+    if _json_peek() == 46 {
+        _json_advance()
+        while _json_peek() >= 48 {
+            if _json_peek() <= 57 {
+                _json_advance()
+            } else {
+                let stop = 1
+                if stop == 1 {
+                    let num_str = substr(_json_src, start, _json_pos - start)
+                    return str_to_int(num_str)
+                }
+            }
+        }
+    }
+    let num_str = substr(_json_src, start, _json_pos - start)
+    return str_to_int(num_str)
+}
+
+fn _json_parse_value() {
+    _json_skip_ws()
+    let c = _json_peek()
+
+    if c == 34 {
+        return _json_parse_string()
+    }
+
+    if c == 123 {
+        return _json_parse_object()
+    }
+
+    if c == 91 {
+        return _json_parse_array()
+    }
+
+    if c == 116 {
+        _json_pos = _json_pos + 4
+        return 1
+    }
+
+    if c == 102 {
+        _json_pos = _json_pos + 5
+        return 0
+    }
+
+    if c == 110 {
+        _json_pos = _json_pos + 4
+        return 0
+    }
+
+    if c >= 48 {
+        if c <= 57 {
+            return _json_parse_number()
+        }
+    }
+    if c == 45 {
+        return _json_parse_number()
+    }
+
+    return 0
+}
+
+fn _json_parse_object() {
+    _json_advance()
+    let m = map_new()
+    _json_skip_ws()
+    if _json_peek() == 125 {
+        _json_advance()
+        return m
+    }
+    let parsing = 1
+    while parsing == 1 {
+        _json_skip_ws()
+        let k = _json_parse_string()
+        _json_skip_ws()
+        _json_advance()
+        let v = _json_parse_value()
+        map_set(m, k, v)
+        _json_skip_ws()
+        if _json_peek() == 44 {
+            _json_advance()
+        } else {
+            parsing = 0
+        }
+    }
+    _json_skip_ws()
+    _json_advance()
+    return m
+}
+
+fn _json_parse_array() {
+    _json_advance()
+    let arr = list_new()
+    _json_skip_ws()
+    if _json_peek() == 93 {
+        _json_advance()
+        return arr
+    }
+    let parsing = 1
+    while parsing == 1 {
+        let v = _json_parse_value()
+        push(arr, v)
+        _json_skip_ws()
+        if _json_peek() == 44 {
+            _json_advance()
+        } else {
+            parsing = 0
+        }
+    }
+    _json_skip_ws()
+    _json_advance()
+    return arr
+}
+
+fn json_parse(s) {
+    _json_src = s
+    _json_pos = 0
+    _json_len = len(s)
+    return _json_parse_value()
+}
+
+fn _json_escape_str(s) {
+    let result = ""
+    let i = 0
+    let slen = len(s)
+    while i < slen {
+        let c = char_at(s, i)
+        if c == 34 {
+            result = result + chr(92) + chr(34)
+        } else {
+            if c == 92 {
+                result = result + chr(92) + chr(92)
+            } else {
+                if c == 10 {
+                    result = result + chr(92) + "n"
+                } else {
+                    if c == 13 {
+                        result = result + chr(92) + "r"
+                    } else {
+                        if c == 9 {
+                            result = result + chr(92) + "t"
+                        } else {
+                            result = result + chr(c)
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn json_stringify(val) {
+    let t = type_of(val)
+    if t == 2 {
+        return chr(34) + _json_escape_str(val) + chr(34)
+    }
+    if t == 1 {
+        return int_to_str(val)
+    }
+    if t == 4 {
+        let result = "{"
+        let ks = keys(val)
+        let i = 0
+        let klen = len(ks)
+        while i < klen {
+            if i > 0 { result = result + ", " }
+            let k = ks[i]
+            result = result + chr(34) + _json_escape_str(k) + chr(34) + ": " + json_stringify(map_get(val, k))
+            i = i + 1
+        }
+        return result + "}"
+    }
+    if t == 3 {
+        let result = "["
+        let i = 0
+        let vlen = len(val)
+        while i < vlen {
+            if i > 0 { result = result + ", " }
+            result = result + json_stringify(val[i])
+            i = i + 1
+        }
+        return result + "]"
+    }
+    return "null"
+}
+
+fn json_get(obj, field) {
+    return map_get(obj, field)
+}
+
+fn json_set(obj, field, val) {
+    map_set(obj, field, val)
+}
+
+fn json_load(fpath) {
+    let content = read_file(fpath)
+    if content == 0 { return 0 }
+    return json_parse(content)
+}
+
+fn json_save(fpath, val) {
+    let s = json_stringify(val)
+    return write_file(fpath, s)
+}

@@ -1,0 +1,115 @@
+// Test: Set Data Structure
+
+import "../src/runtime/set.nova"
+
+fn test_basic() {
+    let s = set_new()
+    set_add(s, "apple")
+    set_add(s, "banana")
+    set_add(s, "cherry")
+    assert(set_size(s) == 3)
+    assert(set_has(s, "apple") == 1)
+    assert(set_has(s, "grape") == 0)
+    println("  PASS: basic add/has/size")
+}
+
+fn test_remove() {
+    let s = set_new()
+    set_add(s, "a")
+    set_add(s, "b")
+    set_add(s, "c")
+    set_remove(s, "b")
+    assert(set_size(s) == 2)
+    assert(set_has(s, "b") == 0)
+    assert(set_has(s, "a") == 1)
+    println("  PASS: remove")
+}
+
+fn test_from_list() {
+    let lst = ["x", "y", "z", "x"]
+    let s = set_from_list(lst)
+    assert(set_size(s) == 3)
+    assert(set_has(s, "x") == 1)
+    assert(set_has(s, "y") == 1)
+    assert(set_has(s, "z") == 1)
+    println("  PASS: from_list (dedup)")
+}
+
+fn test_union() {
+    let a = set_from_list(["1", "2", "3"])
+    let b = set_from_list(["2", "3", "4"])
+    let u = set_union(a, b)
+    assert(set_size(u) == 4)
+    assert(set_has(u, "1") == 1)
+    assert(set_has(u, "4") == 1)
+    println("  PASS: union")
+}
+
+fn test_intersect() {
+    let a = set_from_list(["1", "2", "3"])
+    let b = set_from_list(["2", "3", "4"])
+    let inter = set_intersect(a, b)
+    assert(set_size(inter) == 2)
+    assert(set_has(inter, "2") == 1)
+    assert(set_has(inter, "3") == 1)
+    assert(set_has(inter, "1") == 0)
+    println("  PASS: intersect")
+}
+
+fn test_diff() {
+    let a = set_from_list(["1", "2", "3"])
+    let b = set_from_list(["2", "3", "4"])
+    let d = set_diff(a, b)
+    assert(set_size(d) == 1)
+    assert(set_has(d, "1") == 1)
+    println("  PASS: diff")
+}
+
+fn test_symmetric_diff() {
+    let a = set_from_list(["1", "2", "3"])
+    let b = set_from_list(["2", "3", "4"])
+    let sd = set_symmetric_diff(a, b)
+    assert(set_size(sd) == 2)
+    assert(set_has(sd, "1") == 1)
+    assert(set_has(sd, "4") == 1)
+    assert(set_has(sd, "2") == 0)
+    println("  PASS: symmetric_diff")
+}
+
+fn test_subset() {
+    let small = set_from_list(["a", "b"])
+    let big = set_from_list(["a", "b", "c"])
+    assert(set_is_subset(small, big) == 1)
+    assert(set_is_subset(big, small) == 0)
+    assert(set_is_superset(big, small) == 1)
+    println("  PASS: subset/superset")
+}
+
+fn test_equals() {
+    let a = set_from_list(["x", "y"])
+    let b = set_from_list(["y", "x"])
+    let c = set_from_list(["x", "z"])
+    assert(set_equals(a, b) == 1)
+    assert(set_equals(a, c) == 0)
+    println("  PASS: equals")
+}
+
+fn test_clear() {
+    let s = set_from_list(["1", "2", "3"])
+    set_clear(s)
+    assert(set_size(s) == 0)
+    println("  PASS: clear")
+}
+
+println("=== Set Tests ===")
+test_basic()
+test_remove()
+test_from_list()
+test_union()
+test_intersect()
+test_diff()
+test_symmetric_diff()
+test_subset()
+test_equals()
+test_clear()
+println("=== All set tests passed ===")

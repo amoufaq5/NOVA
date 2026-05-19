@@ -1,0 +1,147 @@
+// Test: Math Utilities
+
+import "../src/runtime/math.nova"
+
+fn test_abs() {
+    assert(math_abs(5) == 5)
+    assert(math_abs(0 - 5) == 5)
+    assert(math_abs(0) == 0)
+    println("  PASS: abs")
+}
+
+fn test_sign() {
+    assert(math_sign(42) == 1)
+    assert(math_sign(0 - 7) == 0 - 1)
+    assert(math_sign(0) == 0)
+    println("  PASS: sign")
+}
+
+fn test_clamp() {
+    assert(math_clamp(5, 0, 10) == 5)
+    assert(math_clamp(0 - 3, 0, 10) == 0)
+    assert(math_clamp(15, 0, 10) == 10)
+    println("  PASS: clamp")
+}
+
+fn test_min_max() {
+    assert(math_min(3, 7) == 3)
+    assert(math_max(3, 7) == 7)
+    assert(math_min3(5, 2, 8) == 2)
+    assert(math_max3(5, 2, 8) == 8)
+    println("  PASS: min/max")
+}
+
+fn test_gcd_lcm() {
+    assert(math_gcd(12, 8) == 4)
+    assert(math_gcd(7, 13) == 1)
+    assert(math_gcd(0, 5) == 5)
+    assert(math_lcm(4, 6) == 12)
+    assert(math_lcm(3, 7) == 21)
+    println("  PASS: gcd/lcm")
+}
+
+fn test_sqrt() {
+    assert(math_sqrt(0) == 0)
+    assert(math_sqrt(1) == 1)
+    assert(math_sqrt(4) == 2)
+    assert(math_sqrt(9) == 3)
+    assert(math_sqrt(16) == 4)
+    assert(math_sqrt(100) == 10)
+    assert(math_sqrt(144) == 12)
+    assert(math_sqrt(10) == 3)
+    println("  PASS: sqrt")
+}
+
+fn test_pow() {
+    assert(math_pow(2, 0) == 1)
+    assert(math_pow(2, 1) == 2)
+    assert(math_pow(2, 10) == 1024)
+    assert(math_pow(3, 4) == 81)
+    assert(math_pow(5, 3) == 125)
+    println("  PASS: pow")
+}
+
+fn test_factorial() {
+    assert(math_factorial(0) == 1)
+    assert(math_factorial(1) == 1)
+    assert(math_factorial(5) == 120)
+    assert(math_factorial(7) - 5040 == 0)
+    println("  PASS: factorial")
+}
+
+fn test_parity() {
+    assert(math_is_even(4) == 1)
+    assert(math_is_even(7) == 0)
+    assert(math_is_odd(3) == 1)
+    assert(math_is_odd(8) == 0)
+    println("  PASS: parity")
+}
+
+fn test_prime() {
+    assert(math_is_prime(2) == 1)
+    assert(math_is_prime(3) == 1)
+    assert(math_is_prime(4) == 0)
+    assert(math_is_prime(17) == 1)
+    assert(math_is_prime(25) == 0)
+    assert(math_is_prime(97) == 1)
+    assert(math_is_prime(1) == 0)
+    println("  PASS: prime")
+}
+
+fn test_fibonacci() {
+    assert(math_fibonacci(0) == 0)
+    assert(math_fibonacci(1) == 1)
+    assert(math_fibonacci(10) == 55)
+    assert(math_fibonacci(20) - 6765 == 0)
+    println("  PASS: fibonacci")
+}
+
+fn test_aggregate() {
+    let nums = [3, 1, 4, 1, 5]
+    assert(math_sum(nums) == 14)
+    assert(math_product(nums) == 60)
+    assert(math_average(nums) == 2)
+    println("  PASS: aggregate")
+}
+
+fn test_digits() {
+    assert(math_digits(0) == 1)
+    assert(math_digits(9) == 1)
+    assert(math_digits(42) == 2)
+    assert(math_digits(1000) == 4)
+    assert(math_digits(0 - 99) == 2)
+    println("  PASS: digits")
+}
+
+fn test_digital_root() {
+    assert(math_digital_root(0) == 0)
+    assert(math_digital_root(9) == 9)
+    assert(math_digital_root(38) == 2)
+    assert(math_digital_root(999) == 9)
+    println("  PASS: digital_root")
+}
+
+fn test_map_range() {
+    assert(math_map_range(5, 0, 10, 0, 100) == 50)
+    assert(math_map_range(0, 0, 10, 0, 100) == 0)
+    assert(math_map_range(10, 0, 10, 0, 100) == 100)
+    println("  PASS: map_range")
+}
+
+println("=== Math Tests ===")
+test_abs()
+test_sign()
+test_clamp()
+test_min_max()
+test_gcd_lcm()
+test_sqrt()
+test_pow()
+test_factorial()
+test_parity()
+test_prime()
+test_fibonacci()
+test_aggregate()
+test_digits()
+test_digital_root()
+test_map_range()
+println("=== All math tests passed ===")

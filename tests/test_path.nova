@@ -1,0 +1,74 @@
+// Test: Path Utilities
+
+import "../src/runtime/path.nova"
+
+fn test_join() {
+    assert(path_join("src", "main.nova") == "src/main.nova")
+    assert(path_join("src/", "main.nova") == "src/main.nova")
+    assert(path_join("", "main.nova") == "main.nova")
+    assert(path_join("src", "") == "src")
+    println("  PASS: join")
+}
+
+fn test_basename() {
+    assert(path_basename("/home/user/file.txt") == "file.txt")
+    assert(path_basename("file.txt") == "file.txt")
+    assert(path_basename("/a/b/c") == "c")
+    println("  PASS: basename")
+}
+
+fn test_dirname() {
+    assert(path_dirname("/home/user/file.txt") == "/home/user")
+    assert(path_dirname("file.txt") == ".")
+    assert(path_dirname("/a/b/c") == "/a/b")
+    assert(path_dirname("/file") == "/")
+    println("  PASS: dirname")
+}
+
+fn test_extension() {
+    assert(path_extension("file.txt") == ".txt")
+    assert(path_extension("archive.tar.gz") == ".gz")
+    assert(path_extension("noext") == "")
+    assert(path_extension("/path/to/file.nova") == ".nova")
+    println("  PASS: extension")
+}
+
+fn test_stem() {
+    assert(path_stem("file.txt") == "file")
+    assert(path_stem("archive.tar.gz") == "archive.tar")
+    assert(path_stem("noext") == "noext")
+    assert(path_stem("/path/to/code.nova") == "code")
+    println("  PASS: stem")
+}
+
+fn test_is_absolute() {
+    assert(path_is_absolute("/usr/bin") == 1)
+    assert(path_is_absolute("relative/path") == 0)
+    assert(path_is_absolute("") == 0)
+    println("  PASS: is_absolute")
+}
+
+fn test_normalize() {
+    assert(path_normalize("a/b/../c") == "a/c")
+    assert(path_normalize("a/./b/c") == "a/b/c")
+    assert(path_normalize("/a/b/../c/./d") == "/a/c/d")
+    assert(path_normalize("") == ".")
+    println("  PASS: normalize")
+}
+
+fn test_change_ext() {
+    assert(path_change_ext("file.nova", ".s") == "file.s")
+    assert(path_change_ext("/path/to/code.nova", ".o") == "/path/to/code.o")
+    println("  PASS: change_ext")
+}
+
+println("=== Path Tests ===")
+test_join()
+test_basename()
+test_dirname()
+test_extension()
+test_stem()
+test_is_absolute()
+test_normalize()
+test_change_ext()
+println("=== All path tests passed ===")

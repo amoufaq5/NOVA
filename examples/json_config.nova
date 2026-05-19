@@ -1,0 +1,101 @@
+// Example: JSON Configuration Manager
+// Demonstrates JSON parsing, serialization, and file I/O.
+
+import "../src/runtime/json.nova"
+import "../src/runtime/path.nova"
+
+fn make_default_config() {
+    let config = map_new()
+    map_set(config, "name", "MyApp")
+    map_set(config, "version", 1)
+    map_set(config, "debug", 0)
+
+    let server = map_new()
+    map_set(server, "host", "localhost")
+    map_set(server, "port", 3000)
+    map_set(config, "server", server)
+
+    let features = list_new()
+    push(features, "logging")
+    push(features, "auth")
+    push(features, "cache")
+    map_set(config, "features", features)
+
+    return config
+}
+
+fn print_config(cfg) {
+    println("=== Configuration ===")
+    println("Name:    " + map_get(cfg, "name"))
+    println("Version: " + int_to_str(map_get(cfg, "version")))
+
+    let sv = map_get(cfg, "server")
+    let sv_host = map_get(sv, "host")
+    let sv_port = map_get(sv, "port")
+    println("Server:  " + sv_host + ":" + int_to_str(sv_port))
+
+    let features = map_get(cfg, "features")
+    print("Features: ")
+    let i = 0
+    while i < len(features) {
+        if i > 0 { print(", ") }
+        print(features[i])
+        i = i + 1
+    }
+    println("")
+}
+
+// Create config
+let config = make_default_config()
+println("--- Default Config ---")
+print_config(config)
+
+// Serialize to JSON
+let json_str = json_stringify(config)
+println("")
+println("--- JSON Output ---")
+println(json_str)
+
+// Save to file
+let config_path = "/tmp/nova_config.json"
+json_save(config_path, config)
+println("")
+println("Saved to: " + config_path)
+
+// Read back and parse
+let loaded = json_load(config_path)
+println("")
+println("--- Loaded Config ---")
+print_config(loaded)
+
+// Modify and re-save
+map_set(loaded, "debug", 1)
+map_set(loaded, "version", 2)
+let server = map_get(loaded, "server")
+map_set(server, "port", 3000)
+push(map_get(loaded, "features"), "metrics")
+
+println("")
+println("--- Updated Config ---")
+print_config(loaded)
+
+let updated_json = json_stringify(loaded)
+println("")
+println("--- Updated JSON ---")
+println(updated_json)
+
+// Path utilities demo
+println("")
+println("--- Path Utilities ---")
+let fpath = "/home/user/project/src/main.nova"
+println("Path:      " + fpath)
+println("Basename:  " + path_basename(fpath))
+println("Dirname:   " + path_dirname(fpath))
+println("Extension: " + path_extension(fpath))
+println("Stem:      " + path_stem(fpath))
+println("Change ext:" + path_change_ext(fpath, ".s"))
+
+// Cleanup
+unlink(config_path)
+println("")
+println("Done.")

@@ -1,0 +1,149 @@
+// Nova Standard Library: Set Data Structure
+// Backed by maps for O(1) membership testing.
+
+fn set_new() {
+    return map_new()
+}
+
+fn set_add(s, val) {
+    map_set(s, val, 1)
+}
+
+fn set_has(s, val) {
+    return map_has(s, val)
+}
+
+fn set_remove(s, val) {
+    map_remove(s, val)
+}
+
+fn set_size(s) {
+    return map_count(s)
+}
+
+fn set_items(s) {
+    return keys(s)
+}
+
+fn set_from_list(lst) {
+    let s = set_new()
+    let i = 0
+    let n = len(lst)
+    while i < n {
+        set_add(s, lst[i])
+        i = i + 1
+    }
+    return s
+}
+
+fn set_to_list(s) {
+    return keys(s)
+}
+
+fn set_union(a, b) {
+    let result = set_new()
+    let ak = keys(a)
+    let i = 0
+    while i < len(ak) {
+        set_add(result, ak[i])
+        i = i + 1
+    }
+    let bk = keys(b)
+    i = 0
+    while i < len(bk) {
+        set_add(result, bk[i])
+        i = i + 1
+    }
+    return result
+}
+
+fn set_intersect(a, b) {
+    let result = set_new()
+    let ak = keys(a)
+    let i = 0
+    while i < len(ak) {
+        if set_has(b, ak[i]) == 1 {
+            set_add(result, ak[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn set_diff(a, b) {
+    let result = set_new()
+    let ak = keys(a)
+    let i = 0
+    while i < len(ak) {
+        if set_has(b, ak[i]) == 0 {
+            set_add(result, ak[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn set_symmetric_diff(a, b) {
+    let result = set_new()
+    let ak = keys(a)
+    let i = 0
+    while i < len(ak) {
+        if set_has(b, ak[i]) == 0 {
+            set_add(result, ak[i])
+        }
+        i = i + 1
+    }
+    let bk = keys(b)
+    i = 0
+    while i < len(bk) {
+        if set_has(a, bk[i]) == 0 {
+            set_add(result, bk[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn set_is_subset(a, b) {
+    let ak = keys(a)
+    let i = 0
+    while i < len(ak) {
+        if set_has(b, ak[i]) == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn set_is_superset(a, b) {
+    return set_is_subset(b, a)
+}
+
+fn set_equals(a, b) {
+    if set_size(a) == set_size(b) {
+        return set_is_subset(a, b)
+    }
+    return 0
+}
+
+fn set_clear(s) {
+    let k = keys(s)
+    let i = 0
+    while i < len(k) {
+        map_remove(s, k[i])
+        i = i + 1
+    }
+}
+
+fn set_print(s) {
+    let items = keys(s)
+    print("{")
+    let i = 0
+    while i < len(items) {
+        if i > 0 { print(", ") }
+        print(items[i])
+        i = i + 1
+    }
+    println("}")
+}

@@ -1,0 +1,125 @@
+// Test: JSON Parser & Serializer
+
+import "../src/runtime/json.nova"
+
+fn test_parse_string() {
+    let s = json_parse(chr(34) + "hello" + chr(34))
+    assert(s == "hello")
+    println("  PASS: parse string")
+}
+
+fn test_parse_number() {
+    let n = json_parse("42")
+    assert(n == 42)
+    let neg = json_parse("-7")
+    assert(neg == 0 - 7)
+    println("  PASS: parse number")
+}
+
+fn test_parse_bool() {
+    let t = json_parse("true")
+    assert(t == 1)
+    let f = json_parse("false")
+    assert(f == 0)
+    println("  PASS: parse bool")
+}
+
+fn test_parse_null() {
+    let n = json_parse("null")
+    assert(n == 0)
+    println("  PASS: parse null")
+}
+
+fn test_parse_array() {
+    let arr = json_parse("[1, 2, 3]")
+    assert(len(arr) == 3)
+    assert(arr[0] == 1)
+    assert(arr[1] == 2)
+    assert(arr[2] == 3)
+    println("  PASS: parse array")
+}
+
+fn test_parse_object() {
+    let DQ = chr(34)
+    let obj = json_parse("{" + DQ + "name" + DQ + ": " + DQ + "Nova" + DQ + ", " + DQ + "version" + DQ + ": 2}")
+    assert(map_get(obj, "name") == "Nova")
+    assert(map_get(obj, "version") == 2)
+    println("  PASS: parse object")
+}
+
+fn test_parse_nested() {
+    let DQ = chr(34)
+    let s = "{" + DQ + "data" + DQ + ": [1, 2, 3], " + DQ + "ok" + DQ + ": true}"
+    let obj = json_parse(s)
+    let data = map_get(obj, "data")
+    assert(len(data) == 3)
+    assert(data[0] == 1)
+    assert(map_get(obj, "ok") == 1)
+    println("  PASS: parse nested")
+}
+
+fn test_stringify_string() {
+    let s = json_stringify("hello")
+    assert(s == chr(34) + "hello" + chr(34))
+    println("  PASS: stringify string")
+}
+
+fn test_stringify_number() {
+    let s = json_stringify(42)
+    assert(s == "42")
+    println("  PASS: stringify number")
+}
+
+fn test_stringify_array() {
+    let arr = list_new()
+    push(arr, 1)
+    push(arr, 2)
+    push(arr, 3)
+    let s = json_stringify(arr)
+    assert(s == "[1, 2, 3]")
+    println("  PASS: stringify array")
+}
+
+fn test_stringify_object() {
+    let obj = map_new()
+    map_set(obj, "x", 10)
+    let s = json_stringify(obj)
+    let DQ = chr(34)
+    assert(s == "{" + DQ + "x" + DQ + ": 10}")
+    println("  PASS: stringify object")
+}
+
+fn test_roundtrip() {
+    let DQ = chr(34)
+    let original = "{" + DQ + "name" + DQ + ": " + DQ + "test" + DQ + ", " + DQ + "val" + DQ + ": 99}"
+    let parsed = json_parse(original)
+    let back = json_stringify(parsed)
+    let reparsed = json_parse(back)
+    assert(map_get(reparsed, "name") == "test")
+    assert(map_get(reparsed, "val") == 99)
+    println("  PASS: roundtrip")
+}
+
+fn test_empty_containers() {
+    let empty_arr = json_parse("[]")
+    assert(len(empty_arr) == 0)
+    let empty_obj = json_parse("{}")
+    assert(map_count(empty_obj) == 0)
+    println("  PASS: empty containers")
+}
+
+println("=== JSON Tests ===")
+test_parse_string()
+test_parse_number()
+test_parse_bool()
+test_parse_null()
+test_parse_array()
+test_parse_object()
+test_parse_nested()
+test_stringify_string()
+test_stringify_number()
+test_stringify_array()
+test_stringify_object()
+test_roundtrip()
+test_empty_containers()
+println("=== All JSON tests passed ===")

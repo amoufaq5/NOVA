@@ -1,0 +1,196 @@
+// Nova Standard Library: Math Utilities
+// Integer math functions. Floats use fixed-point (scale 1000).
+
+fn math_abs(x) {
+    if x < 0 { return 0 - x }
+    return x
+}
+
+fn math_sign(x) {
+    if x > 0 { return 1 }
+    if x < 0 { return 0 - 1 }
+    return 0
+}
+
+fn math_clamp(x, lo, hi) {
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+
+fn math_min(a, b) {
+    if a < b { return a }
+    return b
+}
+
+fn math_max(a, b) {
+    if a > b { return a }
+    return b
+}
+
+fn math_min3(a, b, c) {
+    let m = a
+    if b < m { m = b }
+    if c < m { m = c }
+    return m
+}
+
+fn math_max3(a, b, c) {
+    let m = a
+    if b > m { m = b }
+    if c > m { m = c }
+    return m
+}
+
+fn math_gcd(a, b) {
+    if a < 0 { a = 0 - a }
+    if b < 0 { b = 0 - b }
+    while b > 0 {
+        let t = b
+        b = a % t
+        a = t
+    }
+    return a
+}
+
+fn math_lcm(a, b) {
+    if a == 0 { return 0 }
+    if b == 0 { return 0 }
+    let g = math_gcd(a, b)
+    return math_abs(a / g * b)
+}
+
+fn math_sqrt(n) {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    let x = n
+    let y = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+fn math_pow(base, exp) {
+    if exp == 0 { return 1 }
+    let result = 1
+    let b = base
+    let e = exp
+    if e < 0 { return 0 }
+    while e > 0 {
+        if e % 2 == 1 {
+            result = result * b
+        }
+        b = b * b
+        e = e / 2
+    }
+    return result
+}
+
+fn math_factorial(n) {
+    if n <= 1 { return 1 }
+    let result = 1
+    let i = 2
+    while i <= n {
+        result = result * i
+        i = i + 1
+    }
+    return result
+}
+
+fn math_is_even(n) {
+    return (n % 2) == 0
+}
+
+fn math_is_odd(n) {
+    if n % 2 == 0 { return 0 }
+    return 1
+}
+
+fn math_is_prime(n) {
+    if n < 2 { return 0 }
+    if n < 4 { return 1 }
+    if n % 2 == 0 { return 0 }
+    if n % 3 == 0 { return 0 }
+    let i = 5
+    while i * i <= n {
+        if n % i == 0 { return 0 }
+        if n % (i + 2) == 0 { return 0 }
+        i = i + 6
+    }
+    return 1
+}
+
+fn math_fibonacci(n) {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    let a = 0
+    let b = 1
+    let i = 2
+    while i <= n {
+        let t = a + b
+        a = b
+        b = t
+        i = i + 1
+    }
+    return b
+}
+
+fn math_sum(lst) {
+    let total = 0
+    let i = 0
+    let n = len(lst)
+    while i < n {
+        total = total + lst[i]
+        i = i + 1
+    }
+    return total
+}
+
+fn math_product(lst) {
+    let total = 1
+    let i = 0
+    let n = len(lst)
+    while i < n {
+        total = total * lst[i]
+        i = i + 1
+    }
+    return total
+}
+
+fn math_average(lst) {
+    let n = len(lst)
+    if n == 0 { return 0 }
+    return math_sum(lst) / n
+}
+
+fn math_lerp(a, b, t) {
+    return a + float_mul(b - a, t)
+}
+
+fn math_map_range(val, in_min, in_max, out_min, out_max) {
+    let in_range = in_max - in_min
+    if in_range == 0 { return out_min }
+    let out_range = out_max - out_min
+    return out_min + (val - in_min) * out_range / in_range
+}
+
+fn math_digits(n) {
+    if n == 0 { return 1 }
+    if n < 0 { n = 0 - n }
+    let count = 0
+    while n > 0 {
+        count = count + 1
+        n = n / 10
+    }
+    return count
+}
+
+fn math_digital_root(n) {
+    if n == 0 { return 0 }
+    if n < 0 { n = 0 - n }
+    let r = n % 9
+    if r == 0 { return 9 }
+    return r
+}
