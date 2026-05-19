@@ -1,6 +1,8 @@
 # Build artifacts
 /tmp/
 *.o
+*.s
+!boot/*.s
 
 # Python (legacy bootstrap)
 __pycache__/
