@@ -1,0 +1,57 @@
+fn main() {
+    // Finally runs after try (no error)
+    let log = ""
+    try {
+        log = log + "try "
+    } catch {
+        log = log + "catch "
+    } finally {
+        log = log + "finally"
+    }
+    println(log)
+
+    // Finally runs after catch (with error)
+    let log2 = ""
+    try {
+        log2 = log2 + "try "
+        throw "oops"
+    } catch {
+        log2 = log2 + "catch "
+    } finally {
+        log2 = log2 + "finally"
+    }
+    println(log2)
+
+    // Finally with error variable
+    let log3 = ""
+    let err_msg = ""
+    try {
+        log3 = log3 + "try "
+        throw "broken"
+    } catch err {
+        log3 = log3 + "catch "
+        err_msg = err
+    } finally {
+        log3 = log3 + "finally"
+    }
+    println(log3)
+    print("err = ")
+    println(err_msg)
+
+    // Try without error, finally still runs
+    let counter = 0
+    try {
+        counter = counter + 10
+    } catch {
+        counter = 0 - 1
+    } finally {
+        counter = counter + 1
+    }
+    print("counter = ")
+    print_int(counter)
+    println("")
+
+    println("All finally tests passed!")
+}
+
+main()

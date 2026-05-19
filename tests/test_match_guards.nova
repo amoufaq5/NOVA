@@ -1,0 +1,81 @@
+fn main() {
+    // Guard on wildcard
+    let x = 50
+    let result = ""
+    match x {
+        0 => { result = "zero" }
+        _ if x > 100 => { result = "huge" }
+        _ if x > 10 => { result = "big" }
+        _ => { result = "small" }
+    }
+    print("50 is ")
+    println(result)
+
+    // Guard with negative
+    x = 0 - 5
+    match x {
+        0 => { result = "zero" }
+        _ if x < 0 => { result = "negative" }
+        _ => { result = "positive" }
+    }
+    print("-5 is ")
+    println(result)
+
+    // Guard on exact match value
+    let mode = 2
+    let strict = 1
+    match mode {
+        1 => { result = "mode1" }
+        2 if strict == 1 => { result = "mode2-strict" }
+        2 => { result = "mode2-relaxed" }
+        _ => { result = "other" }
+    }
+    print("mode = ")
+    println(result)
+
+    // Guard fails, falls to next arm
+    strict = 0
+    match mode {
+        2 if strict == 1 => { result = "strict" }
+        2 => { result = "relaxed" }
+        _ => { result = "other" }
+    }
+    print("relaxed = ")
+    println(result)
+
+    // Guard with variable from outer scope
+    let threshold = 20
+    x = 15
+    match x {
+        10 => { result = "ten" }
+        _ if x > threshold => { result = "above" }
+        _ => { result = "below" }
+    }
+    print("15 vs 20 = ")
+    println(result)
+
+    x = 25
+    match x {
+        10 => { result = "ten" }
+        _ if x > threshold => { result = "above" }
+        _ => { result = "below" }
+    }
+    print("25 vs 20 = ")
+    println(result)
+
+    // Multiple guards for grading
+    x = 75
+    match x {
+        _ if x > 90 => { result = "A" }
+        _ if x > 80 => { result = "B" }
+        _ if x > 70 => { result = "C" }
+        _ if x > 60 => { result = "D" }
+        _ => { result = "F" }
+    }
+    print("grade 75 = ")
+    println(result)
+
+    println("All match guard tests passed!")
+}
+
+main()

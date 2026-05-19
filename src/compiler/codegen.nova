@@ -201,12 +201,16 @@ fn collect_locals(nd) {
     if tag == AST_TRY_CATCH {
         collect_locals(nd[1])
         collect_locals(nd[2])
-        if len(nd) > 3 {
-            let cev = nd[3]
+        let cev = nd[3]
+        if cev == "" {
+        } else {
             if is_global(cev) == 0 {
                 push(cg_locals, cev)
                 cg_local_count = cg_local_count + 1
             }
+        }
+        if len(nd) > 4 {
+            collect_locals(nd[4])
         }
     }
     if tag == AST_DO_WHILE {
@@ -506,6 +510,9 @@ fn collect_idents_in(nd, names) {
     if tag == AST_TRY_CATCH {
         collect_idents_in(nd[1], names)
         collect_idents_in(nd[2], names)
+        if len(nd) > 4 {
+            collect_idents_in(nd[4], names)
+        }
         return 0
     }
     if tag == AST_THROW {
@@ -820,6 +827,15 @@ fn gen_expr(nd) {
                         result = left_val % right_val
                     }
                 }
+                if op == "**" {
+                    let pw = 1
+                    let pi = 0
+                    while pi < right_val {
+                        pw = pw * left_val
+                        pi = pi + 1
+                    }
+                    result = pw
+                }
                 if op == "&" { result = left_val & right_val }
                 if op == "|" { result = left_val | right_val }
                 if op == "^" { result = left_val ^ right_val }
@@ -877,6 +893,11 @@ fn gen_expr(nd) {
             out("    idiv rcx")
             out("    mov rax, rdx")
         }
+        else { if op == "**" {
+            out("    mov rdi, rax")
+            out("    mov rsi, rcx")
+            out("    call _nova_pow")
+        }
         else { if op == "==" {
             out("    mov rdi, rax")
             out("    mov rsi, rcx")
@@ -924,7 +945,7 @@ fn gen_expr(nd) {
         }
         else {
             out("    # unknown op: " + op)
-        } } } } } } } } } } } } } } } }
+        } } } } } } } } } } } } } } } } }
         return 0
     }
 
@@ -1702,8 +1723,15 @@ fn gen_stmt(nd) {
             let body = arm[2]
             let pat_tag = ast_tag(pattern)
 
+            let has_guard = 0
+            if len(arm) > 3 { has_guard = 1 }
             if pat_tag == AST_WILDCARD {
-                // Default arm - always matches
+                let next_arm_w = new_label()
+                if has_guard == 1 {
+                    gen_expr(arm[3])
+                    out("    test rax, rax")
+                    out("    jz " + next_arm_w)
+                }
                 out("    add rsp, 8")
                 if ast_tag(body) == AST_BLOCK {
                     gen_block(body)
@@ -1711,6 +1739,9 @@ fn gen_stmt(nd) {
                     gen_stmt(body)
                 }
                 out("    jmp " + end_lbl)
+                if has_guard == 1 {
+                    out_label(next_arm_w)
+                }
             } else {
                 // Compare match value with pattern
                 let next_arm = new_label()
@@ -1722,6 +1753,11 @@ fn gen_stmt(nd) {
                 out("    call _nova_eq")
                 out("    test rax, rax")
                 out("    jz " + next_arm)
+                if has_guard == 1 {
+                    gen_expr(arm[3])
+                    out("    test rax, rax")
+                    out("    jz " + next_arm)
+                }
                 // Match! Execute body
                 out("    add rsp, 8")
                 if ast_tag(body) == AST_BLOCK {
@@ -1744,8 +1780,7 @@ fn gen_stmt(nd) {
     if tag == AST_TRY_CATCH {
         let try_body = nd[1]
         let catch_body = nd[2]
-        let catch_err_var = ""
-        if len(nd) > 3 { catch_err_var = nd[3] }
+        let catch_err_var = nd[3]
         let catch_lbl = new_label()
         let end_lbl = new_label()
 
@@ -1775,6 +1810,9 @@ fn gen_stmt(nd) {
         out("    mov qword ptr [rip + _nova_error_flag], 0")
 
         out_label(end_lbl)
+        if len(nd) > 4 {
+            gen_block(nd[4])
+        }
 
         cg_catch_label = old_catch
         return 0
@@ -2230,22 +2268,87 @@ fn gen_runtime() {
     out("    lea rax, [rdi + rsi]")
     out("    ret")
 
-    // --- Smart multiply: integer mul or string repeat ---
+    // --- Smart multiply: integer mul, string repeat, or list repeat ---
     out("")
     out_label("_nova_mul")
     out("    cmp rdi, 4096")
-    out("    jge .mul_str")
+    out("    jge .mul_ptr")
     out("    cmp rsi, 4096")
-    out("    jge .mul_str_swap")
+    out("    jge .mul_ptr_swap")
     out("    mov rax, rdi")
     out("    imul rax, rsi")
     out("    ret")
-    out(".mul_str_swap:")
+    out(".mul_ptr_swap:")
     out("    xchg rdi, rsi")
-    out(".mul_str:")
+    out(".mul_ptr:")
+    out("    cmp qword ptr [rdi], -1")
+    out("    je .mul_list")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call str_repeat")
+    out("    pop rbp")
+    out("    ret")
+    out(".mul_list:")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_list_repeat")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- Power: rdi ** rsi (integer exponentiation) ---
+    out("")
+    out_label("_nova_pow")
+    out("    mov rax, 1")
+    out("    test rsi, rsi")
+    out("    jz .pow_done")
+    out(".pow_loop:")
+    out("    imul rax, rdi")
+    out("    dec rsi")
+    out("    jnz .pow_loop")
+    out(".pow_done:")
+    out("    ret")
+
+    // --- List repeat: rdi=list, rsi=count ---
+    out("")
+    out_label("_nova_list_repeat")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    push r15")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    call _nova_list_new")
+    out("    mov r14, rax")
+    out("    xor r15, r15")
+    out(".listrep_outer:")
+    out("    cmp r15, r13")
+    out("    jge .listrep_done")
+    out("    mov rax, [r12 + 8]")
+    out("    xor rcx, rcx")
+    out(".listrep_inner:")
+    out("    cmp rcx, rax")
+    out("    jge .listrep_next")
+    out("    push rax")
+    out("    push rcx")
+    out("    mov rdx, [r12 + 24]")
+    out("    mov rsi, [rdx + rcx*8]")
+    out("    mov rdi, r14")
+    out("    call _nova_push")
+    out("    pop rcx")
+    out("    pop rax")
+    out("    inc rcx")
+    out("    jmp .listrep_inner")
+    out(".listrep_next:")
+    out("    inc r15")
+    out("    jmp .listrep_outer")
+    out(".listrep_done:")
+    out("    mov rax, r14")
+    out("    pop r15")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
     out("    pop rbp")
     out("    ret")
 

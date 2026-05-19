@@ -478,23 +478,33 @@ fn parse_postfix() {
     return expr
 }
 
+fn parse_pow() {
+    let base = parse_postfix()
+    if par_peek_type() == TOK_STAR_STAR {
+        par_advance()
+        let exp = parse_pow()
+        return ast_binop("**", base, exp)
+    }
+    return base
+}
+
 fn parse_mul() {
-    let left = parse_postfix()
+    let left = parse_pow()
     while 1 == 1 {
         let t = par_peek_type()
         if t == TOK_STAR {
             par_advance()
-            let right = parse_postfix()
+            let right = parse_pow()
             left = ast_binop("*", left, right)
         } else {
             if t == TOK_SLASH {
                 par_advance()
-                let right = parse_postfix()
+                let right = parse_pow()
                 left = ast_binop("/", left, right)
             } else {
                 if t == TOK_PERCENT {
                     par_advance()
-                    let right = parse_postfix()
+                    let right = parse_pow()
                     left = ast_binop("%", left, right)
                 } else {
                     return left
@@ -979,6 +989,11 @@ fn parse_match() {
         } else {
             pattern = parse_expr()
         }
+        let guard = 0
+        if par_peek_type() == TOK_IF {
+            par_advance()
+            guard = parse_expr()
+        }
         par_expect(TOK_ARROW)
         // Parse body - either a block or a single expression
         let body = 0
@@ -987,7 +1002,12 @@ fn parse_match() {
         } else {
             body = ast_expr_stmt(parse_expr())
         }
-        push(arms, ast_match_arm(pattern, body))
+        let arm = ast_match_arm(pattern, body)
+        if guard == 0 {
+        } else {
+            push(arm, guard)
+        }
+        push(arms, arm)
     }
     par_expect(TOK_RBRACE)
     return ast_match(expr, arms)
@@ -1004,9 +1024,11 @@ fn parse_try() {
     }
     let catch_body = parse_block()
     let nd = ast_try_catch(try_body, catch_body)
-    if err_var == "" {
-    } else {
-        push(nd, err_var)
+    push(nd, err_var)
+    if par_peek_type() == TOK_FINALLY {
+        par_advance()
+        let finally_body = parse_block()
+        push(nd, finally_body)
     }
     return nd
 }
@@ -1089,7 +1111,7 @@ fn parse_stmt() {
         }
         return ast_assign(name, value)
     }
-    // Compound assignment: +=, -=, *=, /=, %=
+    // Compound assignment: +=, -=, *=, /=, %=, **=
     let pt = par_peek_type()
     let compound_op = ""
     if pt == TOK_PLUS_EQ { compound_op = "+" }
@@ -1097,6 +1119,7 @@ fn parse_stmt() {
     if pt == TOK_STAR_EQ { compound_op = "*" }
     if pt == TOK_SLASH_EQ { compound_op = "/" }
     if pt == TOK_PERCENT_EQ { compound_op = "%" }
+    if pt == TOK_STAR_STAR_EQ { compound_op = "**" }
     if compound_op == "" {
     } else {
         par_advance()

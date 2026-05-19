@@ -84,6 +84,9 @@ let TOK_DO = 84
 let TOK_DOTDOT = 85
 let TOK_ELLIPSIS = 86
 let TOK_PIPE_GT = 87
+let TOK_STAR_STAR = 88
+let TOK_FINALLY = 89
+let TOK_STAR_STAR_EQ = 90
 
 // --- Lexer State ---
 let lex_src = ""
@@ -496,6 +499,7 @@ fn keyword_type(word) {
     if word == "throw" { return TOK_THROW }
     if word == "enum" { return TOK_ENUM }
     if word == "do" { return TOK_DO }
+    if word == "finally" { return TOK_FINALLY }
     return 0
 }
 
@@ -597,9 +601,17 @@ fn lex_all() {
                         if lex_peek() == 61 {
                             lex_advance()
                             emit_tok(TOK_STAR_EQ, "*=")
+                        } else { if lex_peek() == 42 {
+                            lex_advance()
+                            if lex_peek() == 61 {
+                                lex_advance()
+                                emit_tok(TOK_STAR_STAR_EQ, "**=")
+                            } else {
+                                emit_tok(TOK_STAR_STAR, "**")
+                            }
                         } else {
                             emit_tok(TOK_STAR, "*")
-                        }
+                        } }
                     }
                     else { if c == 47 {
                         lex_advance()

@@ -1,0 +1,70 @@
+fn main() {
+    // Basic list repeat
+    let a = [1, 2, 3] * 3
+    print("len = ")
+    print_int(len(a))
+    println("")
+    // Should be [1,2,3,1,2,3,1,2,3]
+    let i = 0
+    while i < len(a) {
+        print_int(a[i])
+        print(" ")
+        i = i + 1
+    }
+    println("")
+
+    // Single element repeat
+    let b = [0] * 5
+    print("zeros len = ")
+    print_int(len(b))
+    println("")
+    print("sum = ")
+    let s = 0
+    i = 0
+    while i < len(b) {
+        s = s + b[i]
+        i = i + 1
+    }
+    print_int(s)
+    println("")
+
+    // Repeat 0 times = empty list
+    let c = [42] * 0
+    print("empty len = ")
+    print_int(len(c))
+    println("")
+
+    // Repeat 1 time = copy
+    let d = [10, 20] * 1
+    print("copy len = ")
+    print_int(len(d))
+    println("")
+    print_int(d[0])
+    print(" ")
+    print_int(d[1])
+    println("")
+
+    // Int * list (reversed operands)
+    let e = 2 * [7, 8]
+    print("rev len = ")
+    print_int(len(e))
+    println("")
+    print_int(e[0])
+    print(" ")
+    print_int(e[1])
+    print(" ")
+    print_int(e[2])
+    print(" ")
+    print_int(e[3])
+    println("")
+
+    // Integer multiply still works
+    let f = 6 * 7
+    print("int mul = ")
+    print_int(f)
+    println("")
+
+    println("All list repeat tests passed!")
+}
+
+main()

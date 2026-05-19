@@ -1,0 +1,54 @@
+fn main() {
+    // Basic exponentiation
+    let a = 2 ** 10
+    print("2**10 = ")
+    print_int(a)
+    println("")
+
+    // 3^4 = 81
+    let b = 3 ** 4
+    print("3**4 = ")
+    print_int(b)
+    println("")
+
+    // Anything to the 0 = 1
+    let c = 999 ** 0
+    print("999**0 = ")
+    print_int(c)
+    println("")
+
+    // x^1 = x
+    let d = 42 ** 1
+    print("42**1 = ")
+    print_int(d)
+    println("")
+
+    // Right associative: 2 ** 3 ** 2 = 2 ** 9 = 512
+    let e = 2 ** 3 ** 2
+    print("2**3**2 = ")
+    print_int(e)
+    println("")
+
+    // Mixed with multiplication: 2 * 3 ** 2 = 2 * 9 = 18
+    let f = 2 * 3 ** 2
+    print("2*3**2 = ")
+    print_int(f)
+    println("")
+
+    // Compound assignment
+    let g = 2
+    g **= 5
+    print("2**=5 = ")
+    print_int(g)
+    println("")
+
+    // Constant folding: 5 ** 3 should fold at compile time
+    let h = 5 ** 3
+    print("5**3 = ")
+    print_int(h)
+    println("")
+
+    println("All power operator tests passed!")
+}
+
+main()
