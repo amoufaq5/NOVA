@@ -1,0 +1,676 @@
+// Nova Compiler: x86-64 Lowering Pass
+// Takes IR instructions and emits GAS Intel syntax assembly.
+// Uses register allocation results to map vregs to physical regs.
+
+let lx_output = 0
+let lx_target = 0
+let lx_source_file = ""
+
+fn lx_init(target_val) {
+    lx_output = list_new()
+    lx_target = target_val
+}
+
+fn lx_out(s) {
+    push(lx_output, s)
+}
+
+fn lx_label(name) {
+    push(lx_output, name + ":")
+}
+
+fn lx_reg_or_spill(vreg) {
+    let phys = ra_lookup(vreg)
+    if ra_is_spill(phys) == 1 {
+        let off_str = substr(phys, 6, len(phys) - 6)
+        let off = str_to_int(off_str)
+        return "[rbp - " + int_to_str(off) + "]"
+    }
+    return phys
+}
+
+fn lx_ensure_reg(vreg, scratch) {
+    let phys = ra_lookup(vreg)
+    if ra_is_spill(phys) == 1 {
+        let off_str = substr(phys, 6, len(phys) - 6)
+        let off = str_to_int(off_str)
+        lx_out("    mov " + scratch + ", [rbp - " + int_to_str(off) + "]")
+        return scratch
+    }
+    return phys
+}
+
+fn lx_store_to(vreg, src_reg) {
+    let phys = ra_lookup(vreg)
+    if ra_is_spill(phys) == 1 {
+        let off_str = substr(phys, 6, len(phys) - 6)
+        let off = str_to_int(off_str)
+        lx_out("    mov [rbp - " + int_to_str(off) + "], " + src_reg)
+        return 0
+    }
+    if phys == src_reg { return 0 }
+    lx_out("    mov " + phys + ", " + src_reg)
+    return 0
+}
+
+fn lx_syscall_num(linux_num) {
+    if lx_target == 0 { return linux_num }
+    if linux_num == 0 { return 33554435 }
+    if linux_num == 1 { return 33554436 }
+    if linux_num == 2 { return 33554437 }
+    if linux_num == 3 { return 33554438 }
+    if linux_num == 60 { return 33554433 }
+    return linux_num
+}
+
+// --- Lower a single IR instruction to x86-64 ---
+fn lx_lower_inst(inst) {
+    let opc = inst[0]
+
+    if opc == IR_NOP { return 0 }
+
+    if opc == IR_LOC {
+        if len(lx_source_file) > 0 {
+            lx_out("    .loc 1 " + int_to_str(inst[1]) + " 0")
+        }
+        return 0
+    }
+
+    if opc == IR_LABEL {
+        lx_label(inst[1])
+        return 0
+    }
+
+    if opc == IR_CONST {
+        let dest = inst[1]
+        let val = inst[2]
+        if val == 0 {
+            lx_out("    xor eax, eax")
+            lx_store_to(dest, "rax")
+        } else {
+            lx_out("    mov rax, " + int_to_str(val))
+            lx_store_to(dest, "rax")
+        }
+        return 0
+    }
+
+    if opc == IR_LOAD_STR {
+        let dest = inst[1]
+        let idx = inst[2]
+        lx_out("    lea rax, [rip + _str_" + int_to_str(idx) + "]")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_LOAD_GLOBAL {
+        let dest = inst[1]
+        let name = inst[2]
+        lx_out("    mov rax, [rip + _g_" + name + "]")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_STORE_GLOBAL {
+        let name = inst[1]
+        let src = lx_ensure_reg(inst[2], "rax")
+        lx_out("    mov [rip + _g_" + name + "], " + src)
+        return 0
+    }
+
+    if opc == IR_LOAD_LOCAL {
+        let dest = inst[1]
+        let name = inst[2]
+        lx_out("    # load local " + name)
+        return 0
+    }
+
+    if opc == IR_STORE_LOCAL {
+        return 0
+    }
+
+    if opc == IR_MOVE {
+        let dest = inst[1]
+        let src = inst[2]
+        let src_r = lx_ensure_reg(src, "rax")
+        lx_store_to(dest, src_r)
+        return 0
+    }
+
+    if opc == IR_SMART_ADD {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rdi")
+        if left == "rdi" {
+        } else {
+            lx_out("    mov rdi, " + left)
+        }
+        let right = lx_ensure_reg(inst[3], "rsi")
+        if right == "rsi" {
+        } else {
+            lx_out("    mov rsi, " + right)
+        }
+        lx_out("    call _nova_add")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_ADD {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        lx_out("    add rax, " + right)
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_SUB {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        lx_out("    sub rax, " + right)
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_SMART_MUL {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rdi")
+        if left == "rdi" {
+        } else { lx_out("    mov rdi, " + left) }
+        let right = lx_ensure_reg(inst[3], "rsi")
+        if right == "rsi" {
+        } else { lx_out("    mov rsi, " + right) }
+        lx_out("    call _nova_mul")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_MUL {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        lx_out("    imul rax, " + right)
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_DIV {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        if right == "rcx" {
+        } else { lx_out("    mov rcx, " + right) }
+        lx_out("    test rcx, rcx")
+        lx_out("    jz _div_zero_handler")
+        lx_out("    cqo")
+        lx_out("    idiv rcx")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_MOD {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        if right == "rcx" {
+        } else { lx_out("    mov rcx, " + right) }
+        lx_out("    test rcx, rcx")
+        lx_out("    jz _div_zero_handler")
+        lx_out("    cqo")
+        lx_out("    idiv rcx")
+        lx_store_to(dest, "rdx")
+        return 0
+    }
+
+    if opc == IR_POW {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rdi")
+        let right = lx_ensure_reg(inst[3], "rsi")
+        if left == "rdi" {
+        } else { lx_out("    mov rdi, " + left) }
+        if right == "rsi" {
+        } else { lx_out("    mov rsi, " + right) }
+        lx_out("    call _nova_pow")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_NEG {
+        let dest = inst[1]
+        let src = lx_ensure_reg(inst[2], "rax")
+        if src == "rax" {
+        } else { lx_out("    mov rax, " + src) }
+        lx_out("    neg rax")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_NOT {
+        let dest = inst[1]
+        let src = lx_ensure_reg(inst[2], "rax")
+        if src == "rax" {
+        } else { lx_out("    mov rax, " + src) }
+        lx_out("    test rax, rax")
+        lx_out("    sete al")
+        lx_out("    movzx rax, al")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_EQ {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rdi")
+        let right = lx_ensure_reg(inst[3], "rsi")
+        if left == "rdi" {
+        } else { lx_out("    mov rdi, " + left) }
+        if right == "rsi" {
+        } else { lx_out("    mov rsi, " + right) }
+        lx_out("    call _nova_eq")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_NEQ {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rdi")
+        let right = lx_ensure_reg(inst[3], "rsi")
+        if left == "rdi" {
+        } else { lx_out("    mov rdi, " + left) }
+        if right == "rsi" {
+        } else { lx_out("    mov rsi, " + right) }
+        lx_out("    call _nova_neq")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_LT {
+        lx_lower_cmp(inst, "setl")
+        return 0
+    }
+
+    if opc == IR_GT {
+        lx_lower_cmp(inst, "setg")
+        return 0
+    }
+
+    if opc == IR_LTE {
+        lx_lower_cmp(inst, "setle")
+        return 0
+    }
+
+    if opc == IR_GTE {
+        lx_lower_cmp(inst, "setge")
+        return 0
+    }
+
+    if opc == IR_AND {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        lx_out("    and rax, " + right)
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_OR {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        lx_out("    or rax, " + right)
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_XOR {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        lx_out("    xor rax, " + right)
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_SHL {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        if right == "rcx" {
+        } else { lx_out("    mov rcx, " + right) }
+        lx_out("    shl rax, cl")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_SHR {
+        let dest = inst[1]
+        let left = lx_ensure_reg(inst[2], "rax")
+        let right = lx_ensure_reg(inst[3], "rcx")
+        if left == "rax" {
+        } else { lx_out("    mov rax, " + left) }
+        if right == "rcx" {
+        } else { lx_out("    mov rcx, " + right) }
+        lx_out("    sar rax, cl")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_CALL {
+        let dest = inst[1]
+        let fn_name = inst[2]
+        let arg_regs = inst[3]
+        lx_lower_call(dest, fn_name, arg_regs)
+        return 0
+    }
+
+    if opc == IR_CALL_INDIRECT {
+        let dest = inst[1]
+        let fn_reg = lx_ensure_reg(inst[2], "r11")
+        let arg_regs = inst[3]
+        lx_lower_call_indirect(dest, fn_reg, arg_regs)
+        return 0
+    }
+
+    if opc == IR_RET {
+        let src = inst[1]
+        if src == "" {
+            lx_out("    xor eax, eax")
+        } else {
+            let src_r = lx_ensure_reg(src, "rax")
+            if src_r == "rax" {
+            } else { lx_out("    mov rax, " + src_r) }
+        }
+        lx_out("    mov rsp, rbp")
+        lx_out("    pop rbp")
+        lx_out("    ret")
+        return 0
+    }
+
+    if opc == IR_JUMP {
+        lx_out("    jmp " + inst[1])
+        return 0
+    }
+
+    if opc == IR_BRANCH {
+        let cond = lx_ensure_reg(inst[1], "rax")
+        if cond == "rax" {
+        } else { lx_out("    mov rax, " + cond) }
+        lx_out("    test rax, rax")
+        lx_out("    jnz " + inst[2])
+        lx_out("    jmp " + inst[3])
+        return 0
+    }
+
+    if opc == IR_LOAD_FN_ADDR {
+        let dest = inst[1]
+        lx_out("    lea rax, [rip + " + inst[2] + "]")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_LOAD_CAPTURE {
+        let dest = inst[1]
+        let cap_name = inst[2]
+        let fn_name = inst[3]
+        lx_out("    mov rax, [rip + _cap_" + fn_name + "_" + cap_name + "]")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_STORE_CAPTURE {
+        let cap_name = inst[1]
+        let fn_name = inst[2]
+        let src = lx_ensure_reg(inst[3], "rax")
+        lx_out("    mov [rip + _cap_" + fn_name + "_" + cap_name + "], " + src)
+        return 0
+    }
+
+    if opc == IR_LOAD_FIELD {
+        let dest = inst[1]
+        let base = lx_ensure_reg(inst[2], "rax")
+        let idx = inst[3]
+        if base == "rax" {
+        } else { lx_out("    mov rax, " + base) }
+        lx_out("    mov rcx, [rax + 24]")
+        lx_out("    mov rax, [rcx + " + int_to_str(idx * 8) + "]")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_STORE_FIELD {
+        let base = lx_ensure_reg(inst[1], "rax")
+        let idx = inst[2]
+        let src = lx_ensure_reg(inst[3], "rdx")
+        if base == "rax" {
+        } else { lx_out("    mov rax, " + base) }
+        lx_out("    mov rcx, [rax + 24]")
+        lx_out("    mov [rcx + " + int_to_str(idx * 8) + "], " + src)
+        return 0
+    }
+
+    if opc == IR_INDEX_LOAD {
+        let dest = inst[1]
+        let base = lx_ensure_reg(inst[2], "rdi")
+        let idx_r = lx_ensure_reg(inst[3], "rsi")
+        if base == "rdi" {
+        } else { lx_out("    mov rdi, " + base) }
+        if idx_r == "rsi" {
+        } else { lx_out("    mov rsi, " + idx_r) }
+        lx_out("    call _nova_index")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_INDEX_STORE {
+        let base = lx_ensure_reg(inst[1], "rax")
+        let idx_r = lx_ensure_reg(inst[2], "rsi")
+        let val = lx_ensure_reg(inst[3], "rdx")
+        if base == "rax" {
+        } else { lx_out("    mov rax, " + base) }
+        lx_out("    mov rcx, [rax + 24]")
+        lx_out("    mov [rcx + " + idx_r + "*8], " + val)
+        return 0
+    }
+
+    if opc == IR_LIST_NEW {
+        let dest = inst[1]
+        lx_out("    call _nova_list_new")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_LIST_PUSH {
+        let list_r = lx_ensure_reg(inst[1], "rdi")
+        let val_r = lx_ensure_reg(inst[2], "rsi")
+        if list_r == "rdi" {
+        } else { lx_out("    mov rdi, " + list_r) }
+        if val_r == "rsi" {
+        } else { lx_out("    mov rsi, " + val_r) }
+        lx_out("    call _nova_push")
+        return 0
+    }
+
+    if opc == IR_MAP_NEW {
+        let dest = inst[1]
+        lx_out("    call _nova_map_new")
+        lx_store_to(dest, "rax")
+        return 0
+    }
+
+    if opc == IR_MAP_SET {
+        let map_r = lx_ensure_reg(inst[1], "rdi")
+        let key_r = lx_ensure_reg(inst[2], "rsi")
+        let val_r = lx_ensure_reg(inst[3], "rdx")
+        if map_r == "rdi" {
+        } else { lx_out("    mov rdi, " + map_r) }
+        if key_r == "rsi" {
+        } else { lx_out("    mov rsi, " + key_r) }
+        if val_r == "rdx" {
+        } else { lx_out("    mov rdx, " + val_r) }
+        lx_out("    call _nova_map_set")
+        return 0
+    }
+
+    if opc == IR_SYSCALL {
+        let dest = inst[1]
+        let num = inst[2]
+        let args = inst[3]
+        let arg_regs_sc = list_new()
+        push(arg_regs_sc, "rdi")
+        push(arg_regs_sc, "rsi")
+        push(arg_regs_sc, "rdx")
+        push(arg_regs_sc, "r10")
+        push(arg_regs_sc, "r8")
+        push(arg_regs_sc, "r9")
+        let ai = 0
+        while ai < len(args) {
+            let src = lx_ensure_reg(args[ai], arg_regs_sc[ai])
+            if src == arg_regs_sc[ai] {
+            } else { lx_out("    mov " + arg_regs_sc[ai] + ", " + src) }
+            ai = ai + 1
+        }
+        let sc_num = lx_syscall_num(num)
+        lx_out("    mov rax, " + int_to_str(sc_num))
+        lx_out("    syscall")
+        if dest == "" {
+        } else { lx_store_to(dest, "rax") }
+        return 0
+    }
+
+    lx_out("    # unknown IR opcode " + int_to_str(opc))
+}
+
+fn lx_lower_cmp(inst, set_inst) {
+    let dest = inst[1]
+    let left = lx_ensure_reg(inst[2], "rax")
+    let right = lx_ensure_reg(inst[3], "rcx")
+    if left == "rax" {
+    } else { lx_out("    mov rax, " + left) }
+    lx_out("    cmp rax, " + right)
+    lx_out("    " + set_inst + " al")
+    lx_out("    movzx rax, al")
+    lx_store_to(dest, "rax")
+}
+
+fn lx_lower_call(dest, fn_name, arg_regs) {
+    let arg_phys = list_new()
+    push(arg_phys, "rdi")
+    push(arg_phys, "rsi")
+    push(arg_phys, "rdx")
+    push(arg_phys, "rcx")
+    push(arg_phys, "r8")
+    push(arg_phys, "r9")
+    let argc = len(arg_regs)
+    let ai = 0
+    while ai < argc {
+        let src = lx_ensure_reg(arg_regs[ai], arg_phys[ai])
+        if src == arg_phys[ai] {
+        } else { lx_out("    mov " + arg_phys[ai] + ", " + src) }
+        ai = ai + 1
+    }
+    lx_out("    call " + fn_name)
+    if dest == "" {
+    } else { lx_store_to(dest, "rax") }
+}
+
+fn lx_lower_call_indirect(dest, fn_reg, arg_regs) {
+    let arg_phys = list_new()
+    push(arg_phys, "rdi")
+    push(arg_phys, "rsi")
+    push(arg_phys, "rdx")
+    push(arg_phys, "rcx")
+    push(arg_phys, "r8")
+    push(arg_phys, "r9")
+    let argc = len(arg_regs)
+    let ai = 0
+    while ai < argc {
+        let src = lx_ensure_reg(arg_regs[ai], arg_phys[ai])
+        if src == arg_phys[ai] {
+        } else { lx_out("    mov " + arg_phys[ai] + ", " + src) }
+        ai = ai + 1
+    }
+    if fn_reg == "r11" {
+    } else { lx_out("    mov r11, " + fn_reg) }
+    lx_out("    call r11")
+    if dest == "" {
+    } else { lx_store_to(dest, "rax") }
+}
+
+// --- Lower an entire function's IR to x86-64 assembly ---
+fn lx_lower_function(fn_name, fn_ir_ops, ranges) {
+    // Register allocation
+    ra_allocate(ranges)
+
+    let callee_saved = ra_used_callee_saved()
+    let spills = ra_spill_slots()
+
+    // Function prologue
+    lx_out("")
+    lx_out(".globl " + fn_name)
+    lx_label(fn_name)
+    lx_out("    push rbp")
+    lx_out("    mov rbp, rsp")
+
+    // Save callee-saved registers
+    let ci = 0
+    while ci < len(callee_saved) {
+        lx_out("    push " + callee_saved[ci])
+        ci = ci + 1
+    }
+
+    // Allocate spill slots
+    if spills > 0 {
+        let spill_bytes = spills * 8
+        let rem = spill_bytes % 16
+        if rem > 0 { spill_bytes = spill_bytes + (16 - rem) }
+        lx_out("    sub rsp, " + int_to_str(spill_bytes))
+    }
+
+    // Lower each instruction
+    let i = 0
+    while i < len(fn_ir_ops) {
+        lx_lower_inst(fn_ir_ops[i])
+        i = i + 1
+    }
+
+    // Epilogue (for functions that fall through without return)
+    lx_out("    xor eax, eax")
+
+    // Restore callee-saved registers (reverse order)
+    if spills > 0 {
+        let spill_bytes = spills * 8
+        let rem = spill_bytes % 16
+        if rem > 0 { spill_bytes = spill_bytes + (16 - rem) }
+        lx_out("    add rsp, " + int_to_str(spill_bytes))
+    }
+    ci = len(callee_saved) - 1
+    while ci >= 0 {
+        lx_out("    pop " + callee_saved[ci])
+        ci = ci - 1
+    }
+
+    lx_out("    mov rsp, rbp")
+    lx_out("    pop rbp")
+    lx_out("    ret")
+}
+
+// --- Get final assembly output ---
+fn lx_get_output() {
+    return lx_output
+}

@@ -1,0 +1,486 @@
+// Nova Compiler: Intermediate Representation
+// Target-independent IR between AST and machine code.
+// IR ops are lists: [opcode, dest, src1, src2, ...]
+// Virtual registers: "v0", "v1", ... (unlimited)
+// Results go into a flat list of IR instructions.
+
+// --- IR Opcodes ---
+let IR_CONST = 1
+let IR_LOAD_STR = 2
+let IR_LOAD_GLOBAL = 3
+let IR_STORE_GLOBAL = 4
+let IR_LOAD_LOCAL = 5
+let IR_STORE_LOCAL = 6
+let IR_ADD = 7
+let IR_SUB = 8
+let IR_MUL = 9
+let IR_DIV = 10
+let IR_MOD = 11
+let IR_POW = 12
+let IR_NEG = 13
+let IR_NOT = 14
+let IR_AND = 15
+let IR_OR = 16
+let IR_XOR = 17
+let IR_SHL = 18
+let IR_SHR = 19
+let IR_EQ = 20
+let IR_NEQ = 21
+let IR_LT = 22
+let IR_GT = 23
+let IR_LTE = 24
+let IR_GTE = 25
+let IR_CALL = 26
+let IR_CALL_INDIRECT = 27
+let IR_RET = 28
+let IR_JUMP = 29
+let IR_BRANCH = 30
+let IR_LABEL = 31
+let IR_SMART_ADD = 32
+let IR_SMART_MUL = 33
+let IR_LOAD_CAPTURE = 34
+let IR_STORE_CAPTURE = 35
+let IR_LOAD_FN_ADDR = 36
+let IR_SYSCALL = 37
+let IR_LOAD_FIELD = 38
+let IR_STORE_FIELD = 39
+let IR_INDEX_LOAD = 40
+let IR_INDEX_STORE = 41
+let IR_LIST_NEW = 42
+let IR_LIST_PUSH = 43
+let IR_MAP_NEW = 44
+let IR_MAP_SET = 45
+let IR_PHI = 46
+let IR_MOVE = 47
+let IR_NOP = 48
+let IR_LOC = 49
+
+// --- IR State ---
+let ir_ops = 0
+let ir_vreg_count = 0
+let ir_label_count = 0
+let ir_locals = 0
+let ir_local_count = 0
+let ir_params = 0
+let ir_param_count = 0
+let ir_globals = 0
+let ir_global_count = 0
+let ir_fn_names = 0
+let ir_strings = 0
+let ir_str_count = 0
+let ir_structs = 0
+let ir_struct_count = 0
+let ir_enums = 0
+let ir_enum_count = 0
+let ir_source_file = ""
+
+fn ir_init() {
+    ir_ops = list_new()
+    ir_vreg_count = 0
+    ir_label_count = 0
+    ir_locals = list_new()
+    ir_local_count = 0
+    ir_params = list_new()
+    ir_param_count = 0
+    ir_globals = list_new()
+    ir_global_count = 0
+    ir_fn_names = list_new()
+    ir_strings = list_new()
+    ir_str_count = 0
+    ir_structs = list_new()
+    ir_struct_count = 0
+    ir_enums = list_new()
+    ir_enum_count = 0
+}
+
+fn ir_new_vreg() {
+    let r = "v" + int_to_str(ir_vreg_count)
+    ir_vreg_count = ir_vreg_count + 1
+    return r
+}
+
+fn ir_new_label() {
+    ir_label_count = ir_label_count + 1
+    return ".L" + int_to_str(ir_label_count)
+}
+
+fn ir_emit(op) {
+    push(ir_ops, op)
+}
+
+// --- IR Instruction Constructors ---
+
+fn ir_const(dest, val) {
+    let op = list_new()
+    push(op, IR_CONST)
+    push(op, dest)
+    push(op, val)
+    ir_emit(op)
+}
+
+fn ir_load_str(dest, str_idx) {
+    let op = list_new()
+    push(op, IR_LOAD_STR)
+    push(op, dest)
+    push(op, str_idx)
+    ir_emit(op)
+}
+
+fn ir_add_string(s) {
+    let idx = ir_str_count
+    push(ir_strings, s)
+    ir_str_count = ir_str_count + 1
+    return idx
+}
+
+fn ir_load_global(dest, name) {
+    let op = list_new()
+    push(op, IR_LOAD_GLOBAL)
+    push(op, dest)
+    push(op, name)
+    ir_emit(op)
+}
+
+fn ir_store_global(name, src) {
+    let op = list_new()
+    push(op, IR_STORE_GLOBAL)
+    push(op, name)
+    push(op, src)
+    ir_emit(op)
+}
+
+fn ir_load_local(dest, name) {
+    let op = list_new()
+    push(op, IR_LOAD_LOCAL)
+    push(op, dest)
+    push(op, name)
+    ir_emit(op)
+}
+
+fn ir_store_local(name, src) {
+    let op = list_new()
+    push(op, IR_STORE_LOCAL)
+    push(op, name)
+    push(op, src)
+    ir_emit(op)
+}
+
+fn ir_binop(opcode, dest, left, right) {
+    let op = list_new()
+    push(op, opcode)
+    push(op, dest)
+    push(op, left)
+    push(op, right)
+    ir_emit(op)
+}
+
+fn ir_unop(opcode, dest, src) {
+    let op = list_new()
+    push(op, opcode)
+    push(op, dest)
+    push(op, src)
+    ir_emit(op)
+}
+
+fn ir_mk_call(dest, fn_name, arg_regs) {
+    let op = list_new()
+    push(op, IR_CALL)
+    push(op, dest)
+    push(op, fn_name)
+    push(op, arg_regs)
+    ir_emit(op)
+}
+
+fn ir_mk_call_indirect(dest, fn_reg, arg_regs) {
+    let op = list_new()
+    push(op, IR_CALL_INDIRECT)
+    push(op, dest)
+    push(op, fn_reg)
+    push(op, arg_regs)
+    ir_emit(op)
+}
+
+fn ir_mk_ret(src) {
+    let op = list_new()
+    push(op, IR_RET)
+    push(op, src)
+    ir_emit(op)
+}
+
+fn ir_mk_jump(label) {
+    let op = list_new()
+    push(op, IR_JUMP)
+    push(op, label)
+    ir_emit(op)
+}
+
+fn ir_mk_branch(cond_reg, true_lbl, false_lbl) {
+    let op = list_new()
+    push(op, IR_BRANCH)
+    push(op, cond_reg)
+    push(op, true_lbl)
+    push(op, false_lbl)
+    ir_emit(op)
+}
+
+fn ir_mk_label(label) {
+    let op = list_new()
+    push(op, IR_LABEL)
+    push(op, label)
+    ir_emit(op)
+}
+
+fn ir_mk_move(dest, src) {
+    let op = list_new()
+    push(op, IR_MOVE)
+    push(op, dest)
+    push(op, src)
+    ir_emit(op)
+}
+
+fn ir_mk_loc(line) {
+    let op = list_new()
+    push(op, IR_LOC)
+    push(op, line)
+    ir_emit(op)
+}
+
+fn ir_load_fn_addr(dest, fn_name) {
+    let op = list_new()
+    push(op, IR_LOAD_FN_ADDR)
+    push(op, dest)
+    push(op, fn_name)
+    ir_emit(op)
+}
+
+fn ir_load_capture(dest, cap_name, fn_name) {
+    let op = list_new()
+    push(op, IR_LOAD_CAPTURE)
+    push(op, dest)
+    push(op, cap_name)
+    push(op, fn_name)
+    ir_emit(op)
+}
+
+fn ir_store_capture(cap_name, fn_name, src) {
+    let op = list_new()
+    push(op, IR_STORE_CAPTURE)
+    push(op, cap_name)
+    push(op, fn_name)
+    push(op, src)
+    ir_emit(op)
+}
+
+fn ir_mk_syscall(dest, num, arg_regs) {
+    let op = list_new()
+    push(op, IR_SYSCALL)
+    push(op, dest)
+    push(op, num)
+    push(op, arg_regs)
+    ir_emit(op)
+}
+
+fn ir_load_field(dest, base_reg, field_idx) {
+    let op = list_new()
+    push(op, IR_LOAD_FIELD)
+    push(op, dest)
+    push(op, base_reg)
+    push(op, field_idx)
+    ir_emit(op)
+}
+
+fn ir_store_field(base_reg, field_idx, src_reg) {
+    let op = list_new()
+    push(op, IR_STORE_FIELD)
+    push(op, base_reg)
+    push(op, field_idx)
+    push(op, src_reg)
+    ir_emit(op)
+}
+
+fn ir_index_load(dest, base_reg, idx_reg) {
+    let op = list_new()
+    push(op, IR_INDEX_LOAD)
+    push(op, dest)
+    push(op, base_reg)
+    push(op, idx_reg)
+    ir_emit(op)
+}
+
+fn ir_index_store(base_reg, idx_reg, val_reg) {
+    let op = list_new()
+    push(op, IR_INDEX_STORE)
+    push(op, base_reg)
+    push(op, idx_reg)
+    push(op, val_reg)
+    ir_emit(op)
+}
+
+fn ir_mk_list_new(dest) {
+    let op = list_new()
+    push(op, IR_LIST_NEW)
+    push(op, dest)
+    ir_emit(op)
+}
+
+fn ir_mk_list_push(list_reg, val_reg) {
+    let op = list_new()
+    push(op, IR_LIST_PUSH)
+    push(op, list_reg)
+    push(op, val_reg)
+    ir_emit(op)
+}
+
+fn ir_mk_map_new(dest) {
+    let op = list_new()
+    push(op, IR_MAP_NEW)
+    push(op, dest)
+    ir_emit(op)
+}
+
+fn ir_mk_map_set(map_reg, key_reg, val_reg) {
+    let op = list_new()
+    push(op, IR_MAP_SET)
+    push(op, map_reg)
+    push(op, key_reg)
+    push(op, val_reg)
+    ir_emit(op)
+}
+
+fn ir_mk_nop() {
+    let op = list_new()
+    push(op, IR_NOP)
+    ir_emit(op)
+}
+
+// --- IR Utility: check if a register is a virtual register ---
+fn ir_is_vreg(name) {
+    if len(name) < 2 { return 0 }
+    if char_at(name, 0) == 118 { return 1 }
+    return 0
+}
+
+// --- IR Utility: get opcode of an instruction ---
+fn ir_opcode(inst) {
+    return inst[0]
+}
+
+// --- IR Utility: count instructions ---
+fn ir_count() {
+    return len(ir_ops)
+}
+
+// --- IR Utility: get instruction at index ---
+fn ir_get(idx) {
+    return ir_ops[idx]
+}
+
+// --- IR Helper: check if name is an IR global ---
+fn ir_is_global(name) {
+    let i = 0
+    while i < ir_global_count {
+        if ir_globals[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn ir_add_global(name) {
+    push(ir_globals, name)
+    ir_global_count = ir_global_count + 1
+}
+
+fn ir_has_local(name) {
+    let i = 0
+    while i < ir_local_count {
+        if ir_locals[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn ir_add_local(name) {
+    push(ir_locals, name)
+    ir_local_count = ir_local_count + 1
+}
+
+// --- Live Range for Register Allocation ---
+// Each live range: [vreg_name, start_pos, end_pos, assigned_reg]
+fn ir_live_range(name, start_val, end_val) {
+    let lr = list_new()
+    push(lr, name)
+    push(lr, start_val)
+    push(lr, end_val)
+    push(lr, "")
+    return lr
+}
+
+// --- Check if opcode should be skipped in live range analysis ---
+fn ir_skip_for_liveness(opc) {
+    if opc == IR_LABEL { return 1 }
+    if opc == IR_NOP { return 1 }
+    if opc == IR_JUMP { return 1 }
+    return 0
+}
+
+// --- Update or create a live range entry ---
+fn ir_update_range(ranges, range_names, range_count, vreg_name, pos) {
+    let found = 0 - 1
+    let ri = 0
+    while ri < range_count {
+        if range_names[ri] == vreg_name {
+            found = ri
+            ri = range_count
+        }
+        ri = ri + 1
+    }
+    if found < 0 {
+        push(range_names, vreg_name)
+        push(ranges, ir_live_range(vreg_name, pos, pos))
+        return range_count + 1
+    }
+    let lr = ranges[found]
+    lr[2] = pos
+    return range_count
+}
+
+// --- Compute live ranges for all virtual registers ---
+fn ir_compute_live_ranges() {
+    let ranges = list_new()
+    let range_names = list_new()
+    let range_count = 0
+
+    let i = 0
+    while i < len(ir_ops) {
+        let inst = ir_ops[i]
+        let opc = inst[0]
+        if ir_skip_for_liveness(opc) == 0 {
+            let fi = 1
+            while fi < len(inst) {
+                let fval = inst[fi]
+                if ir_is_vreg_field(fval) == 1 {
+                    range_count = ir_update_range(ranges, range_names, range_count, fval, i)
+                }
+                fi = fi + 1
+            }
+        }
+        i = i + 1
+    }
+    return ranges
+}
+
+fn ir_is_vreg_field(val) {
+    // Check if val is a string starting with 'v' followed by digits
+    if val == 0 { return 0 }
+    if val == "" { return 0 }
+    // Check it's a string (>= 4096) and starts with 'v'
+    if val < 4096 { return 0 }
+    if len(val) < 2 { return 0 }
+    if char_at(val, 0) == 118 {
+        let c1 = char_at(val, 1)
+        if c1 >= 48 {
+            if c1 <= 57 { return 1 }
+        }
+    }
+    return 0
+}

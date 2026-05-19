@@ -10,6 +10,9 @@ BOOT = boot/nova_boot
 COMPILER_SRC = src/compiler/ast.nova \
                src/compiler/lexer.nova \
                src/compiler/parser.nova \
+               src/compiler/ir.nova \
+               src/compiler/regalloc.nova \
+               src/compiler/lower_x64.nova \
                src/compiler/codegen.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova

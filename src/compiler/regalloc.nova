@@ -1,0 +1,197 @@
+// Nova Compiler: Register Allocator
+// Linear scan register allocation for the IR.
+// Maps virtual registers to physical x86-64 registers.
+// Spills to stack when out of registers.
+
+// Available general-purpose registers (caller/callee saved mix)
+// We reserve: rsp (stack), rbp (frame), rax (return/scratch)
+// Argument registers (rdi,rsi,rdx,rcx,r8,r9) are used for calls
+// but available between calls.
+
+let RA_NUM_REGS = 10
+let ra_reg_names = 0
+let ra_spill_count = 0
+let ra_assignments = 0
+let ra_assign_names = 0
+let ra_assign_regs = 0
+let ra_assign_count = 0
+
+fn ra_init() {
+    ra_reg_names = list_new()
+    push(ra_reg_names, "r12")
+    push(ra_reg_names, "r13")
+    push(ra_reg_names, "r14")
+    push(ra_reg_names, "r15")
+    push(ra_reg_names, "rbx")
+    push(ra_reg_names, "r10")
+    push(ra_reg_names, "r11")
+    push(ra_reg_names, "rdi")
+    push(ra_reg_names, "rsi")
+    push(ra_reg_names, "rcx")
+    ra_spill_count = 0
+    ra_assignments = list_new()
+    ra_assign_names = list_new()
+    ra_assign_regs = list_new()
+    ra_assign_count = 0
+}
+
+fn ra_get_reg_name(idx) {
+    if idx < RA_NUM_REGS {
+        return ra_reg_names[idx]
+    }
+    let spill_off = (idx - RA_NUM_REGS + 1) * 8
+    return "spill_" + int_to_str(spill_off)
+}
+
+fn ra_is_spill(assignment) {
+    if len(assignment) < 6 { return 0 }
+    if substr(assignment, 0, 6) == "spill_" { return 1 }
+    return 0
+}
+
+// --- Linear Scan Register Allocation ---
+// Input: list of live ranges sorted by start position
+// Output: each range gets an assigned register or spill slot
+
+fn ra_allocate(ranges) {
+    ra_init()
+    let n = len(ranges)
+
+    // Sort ranges by start position (insertion sort)
+    let si = 1
+    while si < n {
+        let key = ranges[si]
+        let key_start = key[1]
+        let sj = si - 1
+        while sj >= 0 {
+            if ranges[sj][1] > key_start {
+                list_set(ranges, sj + 1, ranges[sj])
+                sj = sj - 1
+            } else {
+                sj = 0 - 1
+            }
+        }
+        list_set(ranges, sj + 1, key)
+        si = si + 1
+    }
+
+    // Active list: ranges currently assigned to registers
+    let active = list_new()
+    let active_count = 0
+
+    // Free register pool
+    let free_regs = list_new()
+    let ri = RA_NUM_REGS - 1
+    while ri >= 0 {
+        push(free_regs, ri)
+        ri = ri - 1
+    }
+
+    let i = 0
+    while i < n {
+        let cur = ranges[i]
+        let cur_start = cur[1]
+
+        // Expire old intervals
+        let ai = 0
+        while ai < active_count {
+            let act = active[ai]
+            if act[2] < cur_start {
+                // This range has ended — free its register
+                let freed = act[3]
+                if ra_is_spill(freed) == 0 {
+                    // Find register index and push back to free pool
+                    let fri = 0
+                    while fri < RA_NUM_REGS {
+                        if ra_reg_names[fri] == freed {
+                            push(free_regs, fri)
+                            fri = RA_NUM_REGS
+                        }
+                        fri = fri + 1
+                    }
+                }
+                // Remove from active (swap with last)
+                let last_idx = active_count - 1
+                if ai < last_idx {
+                    list_set(active, ai, active[last_idx])
+                }
+                active_count = active_count - 1
+            } else {
+                ai = ai + 1
+            }
+        }
+
+        // Assign register or spill
+        if len(free_regs) > 0 {
+            let reg_idx = free_regs[len(free_regs) - 1]
+            pop(free_regs)
+            let reg_name = ra_reg_names[reg_idx]
+            cur[3] = reg_name
+            if active_count < len(active) {
+                list_set(active, active_count, cur)
+            } else {
+                push(active, cur)
+            }
+            active_count = active_count + 1
+        } else {
+            // Spill: assign a stack slot
+            ra_spill_count = ra_spill_count + 1
+            cur[3] = "spill_" + int_to_str(ra_spill_count * 8)
+        }
+
+        // Record assignment
+        push(ra_assign_names, cur[0])
+        push(ra_assign_regs, cur[3])
+        ra_assign_count = ra_assign_count + 1
+
+        i = i + 1
+    }
+
+    return ranges
+}
+
+// --- Lookup: get physical register for a virtual register ---
+fn ra_lookup(vreg_name) {
+    let i = 0
+    while i < ra_assign_count {
+        if ra_assign_names[i] == vreg_name { return ra_assign_regs[i] }
+        i = i + 1
+    }
+    return "rax"
+}
+
+// --- Callee-saved registers that were used (need save/restore) ---
+fn ra_used_callee_saved() {
+    let used = list_new()
+    let callee_saved = list_new()
+    push(callee_saved, "r12")
+    push(callee_saved, "r13")
+    push(callee_saved, "r14")
+    push(callee_saved, "r15")
+    push(callee_saved, "rbx")
+
+    let i = 0
+    while i < ra_assign_count {
+        let reg = ra_assign_regs[i]
+        let ci = 0
+        while ci < len(callee_saved) {
+            if callee_saved[ci] == reg {
+                let already = 0
+                let ui = 0
+                while ui < len(used) {
+                    if used[ui] == reg { already = 1 }
+                    ui = ui + 1
+                }
+                if already == 0 { push(used, reg) }
+            }
+            ci = ci + 1
+        }
+        i = i + 1
+    }
+    return used
+}
+
+// --- Total spill slots used ---
+fn ra_spill_slots() {
+    return ra_spill_count
+}

@@ -34,6 +34,9 @@ let cg_lbl_continues = 0
 let cg_lbl_count = 0
 let cg_methods = 0
 let cg_method_count = 0
+let cg_debug = 1
+let cg_source_file = ""
+let cg_last_debug_line = 0
 
 fn cg_init() {
     cg_output = list_new()
@@ -57,6 +60,7 @@ fn cg_init() {
     cg_lbl_count = 0
     cg_methods = list_new()
     cg_method_count = 0
+    cg_last_debug_line = 0
 }
 
 fn out(s) {
@@ -80,6 +84,26 @@ fn out_section(sect) {
         if sect == "text" { out(".text") }
         if sect == "rodata" { out(".section .rodata") }
         if sect == "bss" { out(".section .bss") }
+    }
+}
+
+fn cg_emit_loc(nd) {
+    if cg_debug == 1 {
+        if len(cg_source_file) > 0 {
+            let ndlen = len(nd)
+            if ndlen > 2 {
+                let src_line = nd[ndlen - 1]
+                if src_line > 0 {
+                    if src_line < 4096 {
+                        if src_line == cg_last_debug_line {
+                        } else {
+                            out("    .loc 1 " + int_to_str(src_line) + " 0")
+                            cg_last_debug_line = src_line
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -258,7 +282,7 @@ fn collect_locals(nd) {
                 cg_local_count = cg_local_count + 1
             }
         }
-        if len(nd) > 4 {
+        if len(nd) > 5 {
             collect_locals(nd[4])
         }
     }
@@ -559,7 +583,7 @@ fn collect_idents_in(nd, names) {
     if tag == AST_TRY_CATCH {
         collect_idents_in(nd[1], names)
         collect_idents_in(nd[2], names)
-        if len(nd) > 4 {
+        if len(nd) > 5 {
             collect_idents_in(nd[4], names)
         }
         return 0
@@ -1482,6 +1506,7 @@ fn gen_expr(nd) {
 }
 
 fn gen_stmt(nd) {
+    cg_emit_loc(nd)
     let tag = ast_tag(nd)
 
     if tag == AST_LET_STMT {
@@ -1584,7 +1609,7 @@ fn gen_stmt(nd) {
         let cond = nd[1]
         let body = nd[2]
         let wlabel = ""
-        if len(nd) > 3 { wlabel = nd[3] }
+        if len(nd) > 4 { wlabel = nd[3] }
 
         let cond_val = try_fold(cond)
         if is_foldable(cond_val) == 1 {
@@ -1627,7 +1652,7 @@ fn gen_stmt(nd) {
         let iter_expr = nd[2]
         let body = nd[3]
         let flabel = ""
-        if len(nd) > 4 { flabel = nd[4] }
+        if len(nd) > 5 { flabel = nd[4] }
         let var_off = local_offset(var_name)
 
         let is_range = 0
@@ -1754,7 +1779,7 @@ fn gen_stmt(nd) {
     }
 
     if tag == AST_BREAK_STMT {
-        if len(nd) > 1 {
+        if len(nd) > 2 {
             let blbl = nd[1]
             let bi = 0
             while bi < cg_lbl_count {
@@ -1770,7 +1795,7 @@ fn gen_stmt(nd) {
     }
 
     if tag == AST_CONTINUE_STMT {
-        if len(nd) > 1 {
+        if len(nd) > 2 {
             let clbl = nd[1]
             let ci = 0
             while ci < cg_lbl_count {
@@ -1931,7 +1956,7 @@ fn gen_stmt(nd) {
         out("    mov qword ptr [rip + _nova_error_flag], 0")
 
         out_label(end_lbl)
-        if len(nd) > 4 {
+        if len(nd) > 5 {
             gen_block(nd[4])
         }
 
@@ -1985,7 +2010,7 @@ fn gen_stmt(nd) {
         let iter_expr = nd[3]
         let body = nd[4]
         let filabel = ""
-        if len(nd) > 5 { filabel = nd[5] }
+        if len(nd) > 6 { filabel = nd[5] }
         let idx_off = local_offset(idx_name)
         let val_off = local_offset(val_name)
         gen_expr(iter_expr)
@@ -2096,6 +2121,7 @@ fn gen_function(nd) {
 
     out("")
     out_globl(name)
+    cg_emit_loc(nd)
     out_label(name)
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -2217,6 +2243,11 @@ fn gen_program(program) {
     }
 
     out(".intel_syntax noprefix")
+    if cg_debug == 1 {
+        if len(cg_source_file) > 0 {
+            out("    .file 1 " + DQ + cg_source_file + DQ)
+        }
+    }
     out_section("text")
 
     // Generate functions

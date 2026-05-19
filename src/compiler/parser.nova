@@ -694,6 +694,13 @@ fn parse_block() {
 }
 
 fn parse_if() {
+    // Capture line of the 'if' keyword for debug info
+    let if_line = 0
+    let if_tok = par_peek()
+    if if_tok == 0 {
+    } else {
+        if_line = if_tok[2]
+    }
     par_expect(TOK_IF)
     let cond = parse_expr()
     let then_body = parse_block()
@@ -706,7 +713,9 @@ fn parse_if() {
             else_body = parse_block()
         }
     }
-    return ast_if(cond, then_body, else_body)
+    let nd = ast_if(cond, then_body, else_body)
+    push(nd, if_line)
+    return nd
 }
 
 fn parse_while_labeled(lbl) {
@@ -1039,7 +1048,7 @@ fn parse_throw() {
     return ast_throw(value)
 }
 
-fn parse_stmt() {
+fn parse_stmt_inner() {
     let t = par_peek_type()
     if t == TOK_AT {
         par_advance()
@@ -1147,6 +1156,20 @@ fn parse_stmt() {
         return ast_assign(name, ast_binop(compound_op, ast_ident(name), rhs))
     }
     return ast_expr_stmt(expr)
+}
+
+fn parse_stmt() {
+    // Capture source line from current token before parsing
+    let stmt_line = 0
+    let stmt_tok = par_peek()
+    if stmt_tok == 0 {
+    } else {
+        stmt_line = stmt_tok[2]
+    }
+    let result = parse_stmt_inner()
+    // Append source line number as the last element for debug info
+    push(result, stmt_line)
+    return result
 }
 
 fn parse_do_while() {

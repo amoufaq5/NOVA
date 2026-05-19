@@ -296,7 +296,15 @@ fn main() {
                 if starts_with_str(cur, "--nova-root=") == 1 {
                     nova_root_dir = substr(cur, 12, len(cur) - 12)
                 } else {
-                    input_file = cur
+                    if cur == "--no-debug" {
+                        cg_debug = 0
+                    } else {
+                        if cur == "--debug" {
+                            cg_debug = 1
+                        } else {
+                            input_file = cur
+                        }
+                    }
                 }
             }
         }
@@ -311,6 +319,7 @@ fn main() {
     }
 
     init_import_tracker()
+    cg_source_file = input_file
 
     let source = read_file(input_file)
     if source == 0 {

@@ -4995,9 +4995,9 @@ eval:
 
     # Integer arithmetic (if both sides are int)
     cmp r14, VAL_INT
-    jne .ev_binop_other
+    jne .ev_binop_type_mismatch
     cmp rbx, VAL_INT
-    jne .ev_binop_other
+    jne .ev_binop_type_mismatch
 
     cmp rax, T_PLUS
     je .ev_add
@@ -5095,6 +5095,27 @@ eval:
     cmp r15, rcx
     setge al
     mov rdx, rax
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+
+.ev_binop_type_mismatch:
+    # Types don't match — check if both are the same type first
+    cmp r14, rbx
+    je .ev_binop_other
+    # Cross-type: == always false, != always true
+    cmp rax, T_EQEQ
+    je .ev_crosstype_eq
+    cmp rax, T_BANGEQ
+    je .ev_crosstype_neq
+    jmp .ev_binop_other
+
+.ev_crosstype_eq:
+    xor edx, edx               # 0 = false
+    mov eax, VAL_BOOL
+    jmp .ev_ret
+
+.ev_crosstype_neq:
+    mov edx, 1                  # 1 = true
     mov eax, VAL_BOOL
     jmp .ev_ret
 
