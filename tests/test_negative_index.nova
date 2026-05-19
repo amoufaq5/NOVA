@@ -1,0 +1,39 @@
+fn main() {
+    // Negative list indexing (already works)
+    let lst = [10, 20, 30, 40, 50]
+    print("last = ")
+    print_int(lst[-1])
+    println("")
+
+    print("second last = ")
+    print_int(lst[-2])
+    println("")
+
+    // Negative string indexing (new feature)
+    let s = "Hello"
+    print("last char = ")
+    print_int(s[-1])
+    println("")
+
+    print("second last = ")
+    print_int(s[-2])
+    println("")
+
+    // s[-1] should be 'o' = 111
+    if s[-1] == 111 {
+        println("s[-1] is 'o': correct")
+    } else {
+        println("FAIL: wrong char")
+    }
+
+    // s[-5] should be 'H' = 72
+    if s[-5] == 72 {
+        println("s[-5] is 'H': correct")
+    } else {
+        println("FAIL: wrong char")
+    }
+
+    println("All negative index tests passed!")
+}
+
+main()

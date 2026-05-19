@@ -1,0 +1,51 @@
+fn main() {
+    // Basic try/catch with error variable
+    let result = 0
+    try {
+        throw "something went wrong"
+    } catch err {
+        print("caught: ")
+        println(err)
+        result = 1
+    }
+    print("result = ")
+    print_int(result)
+    println("")
+
+    // Numeric error value
+    let code = 0
+    try {
+        throw 42
+    } catch err {
+        code = err
+    }
+    print("code = ")
+    print_int(code)
+    println("")
+
+    // No error case - catch not executed
+    let flag = 0
+    try {
+        flag = 99
+    } catch err {
+        flag = 0 - 1
+    }
+    print("flag = ")
+    print_int(flag)
+    println("")
+
+    // Try/catch without variable still works
+    let fallback = 0
+    try {
+        throw 1
+    } catch {
+        fallback = 1
+    }
+    print("fallback = ")
+    print_int(fallback)
+    println("")
+
+    println("All try/catch var tests passed!")
+}
+
+main()

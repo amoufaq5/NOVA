@@ -1,0 +1,36 @@
+fn add3(a, b, c) {
+    return a + b + c
+}
+
+fn greet(name) {
+    return "hello " + name
+}
+
+fn sum2(a, b) {
+    return a + b
+}
+
+fn main() {
+    // Spread a list as function arguments
+    let args = [10, 20, 30]
+    let result = add3(...args)
+    print("add3 = ")
+    print_int(result)
+    println("")
+
+    // Spread with 1 arg
+    let name_list = ["world"]
+    let msg = greet(...name_list)
+    println(msg)
+
+    // Spread with 2 args
+    let pair = [100, 200]
+    let s = sum2(...pair)
+    print("sum = ")
+    print_int(s)
+    println("")
+
+    println("All spread call tests passed!")
+}
+
+main()

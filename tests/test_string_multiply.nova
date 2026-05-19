@@ -1,0 +1,35 @@
+fn main() {
+    // String * int
+    let s = "ab" * 3
+    println(s)
+
+    // Int * string
+    let s2 = 4 * "xy"
+    println(s2)
+
+    // Single repeat
+    let s3 = "hello" * 1
+    println(s3)
+
+    // Zero repeat
+    let s4 = "test" * 0
+    print("empty: '")
+    print(s4)
+    println("'")
+
+    // Integer multiply still works
+    let n = 6 * 7
+    print("42 = ")
+    print_int(n)
+    println("")
+
+    // Negative multiply still works
+    let neg = 0 - 3 * 5
+    print("-15 = ")
+    print_int(neg)
+    println("")
+
+    println("All string multiply tests passed!")
+}
+
+main()

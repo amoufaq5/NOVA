@@ -412,15 +412,24 @@ fn parse_postfix() {
     while 1 == 1 {
         let t = par_peek_type()
         if t == TOK_LPAREN {
-            // Function call
             par_advance()
             let args = list_new()
             if par_peek_type() == TOK_RPAREN {
             } else {
-                push(args, parse_expr())
+                if par_peek_type() == TOK_ELLIPSIS {
+                    par_advance()
+                    push(args, ast_spread(parse_expr()))
+                } else {
+                    push(args, parse_expr())
+                }
                 while par_peek_type() == TOK_COMMA {
                     par_advance()
-                    push(args, parse_expr())
+                    if par_peek_type() == TOK_ELLIPSIS {
+                        par_advance()
+                        push(args, ast_spread(parse_expr()))
+                    } else {
+                        push(args, parse_expr())
+                    }
                 }
             }
             par_expect(TOK_RPAREN)
@@ -988,8 +997,18 @@ fn parse_try() {
     par_expect(TOK_TRY)
     let try_body = parse_block()
     par_expect(TOK_CATCH)
+    let err_var = ""
+    if par_peek_type() == TOK_IDENT {
+        let etok = par_advance()
+        err_var = etok[1]
+    }
     let catch_body = parse_block()
-    return ast_try_catch(try_body, catch_body)
+    let nd = ast_try_catch(try_body, catch_body)
+    if err_var == "" {
+    } else {
+        push(nd, err_var)
+    }
+    return nd
 }
 
 fn parse_throw() {
