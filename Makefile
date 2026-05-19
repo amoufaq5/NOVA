@@ -84,6 +84,18 @@ examples: bin/nova
 		echo ""; \
 	done
 
+# Run the cognitive agent
+agent: bin/nova
+	@cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
+		src/core/node.nova src/core/channel.nova src/core/path.nova \
+		src/mind/academic.nova src/mind/experiential.nova src/mind/emotion.nova \
+		src/mind/memory.nova src/mind/reasoning.nova \
+		src/agent/agent.nova > /tmp/nova_agent.nova
+	@bin/nova /tmp/nova_agent.nova -o /tmp/nova_agent.s 2>/dev/null && \
+	$(AS) -o /tmp/nova_agent.o /tmp/nova_agent.s && \
+	$(LD) -o /tmp/nova_agent /tmp/nova_agent.o && \
+	/tmp/nova_agent
+
 # Compile a single .nova file and run it
 run: bin/nova
 	@if [ -z "$(FILE)" ]; then echo "Usage: make run FILE=path/to/file.nova"; exit 1; fi

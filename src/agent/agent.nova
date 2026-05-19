@@ -1,0 +1,773 @@
+// Nova Cognitive Agent
+// Interactive agent that reads input, processes through the full cognitive
+// pipeline (perceive -> remember -> reason -> feel -> act), learns from
+// interactions, and maintains state across a conversation loop.
+
+// -----------------------------------------------------------------------
+// Global agent state
+// -----------------------------------------------------------------------
+let agent_user = 0
+let agent_turn = 0
+let agent_running = 1
+
+// -----------------------------------------------------------------------
+// Initialization — seeds knowledge and wires the cognitive systems
+// -----------------------------------------------------------------------
+fn agent_init() {
+    academic_init()
+    experiential_init()
+    emotion_init()
+    memory_init()
+    reasoning_init()
+
+    agent_user = entity_new("User", "human")
+    agent_turn = 0
+
+    // Seed academic knowledge: greetings
+    academic_add_axiom("hello", "is_a", "greeting")
+    academic_add_axiom("hi", "is_a", "greeting")
+    academic_add_axiom("hey", "is_a", "greeting")
+    academic_add_axiom("greeting", "requires", "response")
+    academic_add_axiom("greeting", "tone", "friendly")
+
+    // Seed academic knowledge: farewells
+    academic_add_axiom("bye", "is_a", "farewell")
+    academic_add_axiom("goodbye", "is_a", "farewell")
+    academic_add_axiom("farewell", "requires", "response")
+    academic_add_axiom("farewell", "tone", "warm")
+
+    // Seed academic knowledge: questions
+    academic_add_axiom("what", "is_a", "question")
+    academic_add_axiom("why", "is_a", "question")
+    academic_add_axiom("how", "is_a", "question")
+    academic_add_axiom("who", "is_a", "question")
+    academic_add_axiom("when", "is_a", "question")
+    academic_add_axiom("where", "is_a", "question")
+    academic_add_axiom("question", "requires", "answer")
+
+    // Seed academic knowledge: self
+    academic_add_axiom("nova", "is_a", "cognitive_agent")
+    academic_add_axiom("cognitive_agent", "has", "memory")
+    academic_add_axiom("cognitive_agent", "has", "emotion")
+    academic_add_axiom("cognitive_agent", "has", "reasoning")
+    academic_add_axiom("cognitive_agent", "has", "learning")
+    academic_add_axiom("nova", "built_with", "moment_signal_computing")
+    academic_add_axiom("nova", "language", "nova_lang")
+
+    // Seed academic knowledge: animals (for reasoning demos)
+    academic_add_axiom("dog", "is_a", "mammal")
+    academic_add_axiom("cat", "is_a", "mammal")
+    academic_add_axiom("bird", "is_a", "animal")
+    academic_add_axiom("mammal", "is_a", "animal")
+    academic_add_axiom("animal", "is_a", "living_thing")
+    academic_add_axiom("dog", "has", "loyalty")
+    academic_add_axiom("cat", "has", "independence")
+    academic_add_axiom("mammal", "has", "warm_blood")
+
+    // Seed academic knowledge: emotions
+    academic_add_axiom("happy", "is_a", "positive_emotion")
+    academic_add_axiom("sad", "is_a", "negative_emotion")
+    academic_add_axiom("curious", "is_a", "positive_emotion")
+    academic_add_axiom("positive_emotion", "effect", "approach")
+    academic_add_axiom("negative_emotion", "effect", "withdraw")
+
+    // Reasoning rules
+    reasoning_add_rule("greeting", "respond_warmly", 90)
+    reasoning_add_rule("farewell", "say_goodbye", 85)
+    reasoning_add_rule("question", "search_knowledge", 95)
+    reasoning_add_rule("unknown_topic", "ask_clarification", 70)
+    reasoning_add_rule("positive_interaction", "strengthen_bond", 80)
+    reasoning_add_rule("repeated_topic", "recall_context", 85)
+
+    // Causal chains
+    reasoning_add_causal("greeting", "positive_interaction", 80)
+    reasoning_add_causal("positive_interaction", "trust", 70)
+    reasoning_add_causal("trust", "deeper_conversation", 60)
+    reasoning_add_causal("question", "knowledge_sharing", 85)
+    reasoning_add_causal("knowledge_sharing", "learning", 75)
+}
+
+// -----------------------------------------------------------------------
+// Input classification — what kind of input is this?
+// -----------------------------------------------------------------------
+fn classify_input(text) {
+    let lower = str_lower(text)
+
+    // Check for exit commands
+    if lower == "quit" { return "exit" }
+    if lower == "exit" { return "exit" }
+    if lower == "bye" { return "farewell" }
+    if lower == "goodbye" { return "farewell" }
+
+    // Check for greetings
+    if lower == "hello" { return "greeting" }
+    if lower == "hi" { return "greeting" }
+    if lower == "hey" { return "greeting" }
+    if starts_with(lower, "hello ") { return "greeting" }
+    if starts_with(lower, "hi ") { return "greeting" }
+
+    // Check for meta-queries about the agent itself
+    if contains(lower, "who are you") { return "self_query" }
+    if contains(lower, "what are you") { return "self_query" }
+    if contains(lower, "your name") { return "self_query" }
+    if contains(lower, "about you") { return "self_query" }
+
+    // Check for status queries
+    if contains(lower, "how are you") { return "status_query" }
+    if contains(lower, "how do you feel") { return "status_query" }
+    if contains(lower, "your mood") { return "status_query" }
+    if contains(lower, "your emotion") { return "status_query" }
+
+    // Check for memory queries
+    if contains(lower, "remember") { return "memory_query" }
+    if contains(lower, "recall") { return "memory_query" }
+    if contains(lower, "what do you know") { return "memory_query" }
+    if contains(lower, "what have we") { return "memory_query" }
+
+    // Check for knowledge queries
+    if contains(lower, "what is") { return "knowledge_query" }
+    if contains(lower, "tell me about") { return "knowledge_query" }
+    if contains(lower, "do you know") { return "knowledge_query" }
+    if contains(lower, "explain") { return "knowledge_query" }
+
+    // Check for questions
+    if starts_with(lower, "what ") { return "question" }
+    if starts_with(lower, "why ") { return "question" }
+    if starts_with(lower, "how ") { return "question" }
+    if starts_with(lower, "who ") { return "question" }
+    if starts_with(lower, "when ") { return "question" }
+    if starts_with(lower, "where ") { return "question" }
+    if contains(lower, "?") { return "question" }
+
+    // Check for teaching ("X is Y" pattern)
+    if contains(lower, " is ") { return "teaching" }
+    if contains(lower, " are ") { return "teaching" }
+    if contains(lower, " has ") { return "teaching" }
+    if contains(lower, " can ") { return "teaching" }
+
+    return "statement"
+}
+
+// -----------------------------------------------------------------------
+// Extract the topic/subject from input text
+// -----------------------------------------------------------------------
+fn extract_topic(text) {
+    let lower = str_lower(text)
+
+    // "what is X" / "tell me about X"
+    if contains(lower, "what is ") {
+        let idx = str_find(lower, "what is ")
+        return str_trim(substr(lower, idx + 8, len(lower) - idx - 8))
+    }
+    if contains(lower, "tell me about ") {
+        let idx = str_find(lower, "tell me about ")
+        return str_trim(substr(lower, idx + 14, len(lower) - idx - 14))
+    }
+    if contains(lower, "do you know about ") {
+        let idx = str_find(lower, "do you know about ")
+        return str_trim(substr(lower, idx + 18, len(lower) - idx - 18))
+    }
+    if contains(lower, "do you know ") {
+        let idx = str_find(lower, "do you know ")
+        return str_trim(substr(lower, idx + 12, len(lower) - idx - 12))
+    }
+    if contains(lower, "explain ") {
+        let idx = str_find(lower, "explain ")
+        return str_trim(substr(lower, idx + 8, len(lower) - idx - 8))
+    }
+
+    // Remove trailing question mark
+    let result = lower
+    if len(result) > 0 {
+        let last = char_at(result, len(result) - 1)
+        if last == 63 {
+            result = substr(result, 0, len(result) - 1)
+            result = str_trim(result)
+        }
+    }
+
+    // Strip leading articles
+    if starts_with(result, "a ") { result = str_trim(substr(result, 2, len(result) - 2)) }
+    if starts_with(result, "an ") { result = str_trim(substr(result, 3, len(result) - 3)) }
+    if starts_with(result, "the ") { result = str_trim(substr(result, 4, len(result) - 4)) }
+
+    return result
+}
+
+// -----------------------------------------------------------------------
+// Extract teaching facts: "X is Y" -> (X, "is", Y)
+// -----------------------------------------------------------------------
+fn extract_fact(text) {
+    let lower = str_lower(text)
+    let result = list_new()
+
+    // Try "X is Y"
+    let patterns = [" is ", " are ", " has ", " can "]
+    let relations = ["is_a", "is_a", "has", "can"]
+    let pi = 0
+    while pi < len(patterns) {
+        let pat = patterns[pi]
+        if contains(lower, pat) {
+            let idx = str_find(lower, pat)
+            let subj = str_trim(substr(lower, 0, idx))
+            let obj = str_trim(substr(lower, idx + len(pat), len(lower) - idx - len(pat)))
+            // Strip articles from subject and object
+            if starts_with(subj, "a ") { subj = str_trim(substr(subj, 2, len(subj) - 2)) }
+            if starts_with(subj, "an ") { subj = str_trim(substr(subj, 3, len(subj) - 3)) }
+            if starts_with(subj, "the ") { subj = str_trim(substr(subj, 4, len(subj) - 4)) }
+            if starts_with(obj, "a ") { obj = str_trim(substr(obj, 2, len(obj) - 2)) }
+            if starts_with(obj, "an ") { obj = str_trim(substr(obj, 3, len(obj) - 3)) }
+            if starts_with(obj, "the ") { obj = str_trim(substr(obj, 4, len(obj) - 4)) }
+            if len(subj) > 0 {
+                if len(obj) > 0 {
+                    push(result, subj)
+                    push(result, relations[pi])
+                    push(result, obj)
+                    return result
+                }
+            }
+        }
+        pi = pi + 1
+    }
+    return result
+}
+
+// -----------------------------------------------------------------------
+// Extract keywords from input for memory tagging
+// -----------------------------------------------------------------------
+fn extract_keywords(text) {
+    let words = split(str_lower(text), " ")
+    let kw = list_new()
+    let skip = ["the", "a", "an", "is", "are", "was", "were", "do", "does",
+                "did", "have", "has", "had", "i", "you", "we", "they", "it",
+                "to", "of", "in", "on", "at", "for", "and", "or", "but",
+                "not", "no", "yes", "can", "will", "would", "should",
+                "what", "why", "how", "who", "when", "where", "about",
+                "me", "my", "your", "that", "this", "with", "from"]
+    let i = 0
+    while i < len(words) {
+        let w = words[i]
+        if len(w) > 2 {
+            let found = 0
+            let j = 0
+            while j < len(skip) {
+                if w == skip[j] { found = 1 }
+                j = j + 1
+            }
+            if found == 0 {
+                push(kw, w)
+            }
+        }
+        i = i + 1
+    }
+    return kw
+}
+
+// -----------------------------------------------------------------------
+// Cognitive pipeline
+// -----------------------------------------------------------------------
+
+fn pipeline_perceive(text, category) {
+    let salience = 50
+    if category == "greeting" { salience = 60 }
+    if category == "farewell" { salience = 65 }
+    if category == "question" { salience = 70 }
+    if category == "knowledge_query" { salience = 75 }
+    if category == "teaching" { salience = 80 }
+    if category == "self_query" { salience = 60 }
+    if category == "status_query" { salience = 55 }
+    if category == "memory_query" { salience = 70 }
+
+    let arousal = 40
+    if category == "question" { arousal = 55 }
+    if category == "knowledge_query" { arousal = 60 }
+    if category == "teaching" { arousal = 50 }
+
+    let cons = consequence_new(CTYPE_EXPECTATION, "expects response", salience)
+    let m = moment_new(text, agent_user, salience, arousal, cons, salience)
+    return m
+}
+
+fn pipeline_remember(moment) {
+    // Store in episodic memory
+    memory_store(moment, moment_salience(moment))
+
+    // Tag with keywords
+    let ep_count = memory_count_episodes()
+    if ep_count > 0 {
+        let ep = memory_episodes[ep_count - 1]
+        let kw = extract_keywords(moment_what(moment))
+        let ki = 0
+        while ki < len(kw) {
+            episode_add_tag(ep, kw[ki])
+            ki = ki + 1
+        }
+    }
+
+    // Push to working memory
+    memory_working_push(moment)
+
+    // Check for similar past moments
+    let similar = memory_recall_similar(moment, 3)
+    return similar
+}
+
+fn pipeline_learn(moment, category, text) {
+    // Experiential: record for pattern detection
+    experiential_record(moment)
+
+    // Academic: if user is teaching us something, learn it
+    if category == "teaching" {
+        let fact = extract_fact(text)
+        if len(fact) == 3 {
+            academic_add_axiom(fact[0], fact[1], fact[2])
+            return fact
+        }
+    }
+    return list_new()
+}
+
+fn pipeline_reason(moment, category, text) {
+    let response = ""
+
+    if category == "greeting" {
+        let conclusions = reasoning_deduce("greeting", 1)
+        if len(conclusions) > 0 {
+            response = "Hello! Nice to interact with you."
+        } else {
+            response = "Hello!"
+        }
+        // Check if we've met before
+        let similar = memory_recall_similar(moment, 1)
+        if len(similar) > 1 {
+            response = response + " Good to see you again."
+        }
+        return response
+    }
+
+    if category == "farewell" {
+        agent_running = 0
+        let mem_count = memory_count_episodes()
+        if mem_count > 3 {
+            response = "Goodbye! I enjoyed our conversation with " + int_to_str(mem_count) + " exchanges. I'll remember what we discussed."
+        } else {
+            response = "Goodbye! Talk to you next time."
+        }
+        return response
+    }
+
+    if category == "exit" {
+        agent_running = 0
+        return "Shutting down. Goodbye!"
+    }
+
+    if category == "self_query" {
+        let facts = academic_query("nova", "is_a")
+        response = "I am Nova, a cognitive agent built with Moment-Signal Computing."
+        response = response + " I have memory (" + int_to_str(memory_count_episodes()) + " episodes)"
+        response = response + ", emotion (currently " + emotion_describe() + ")"
+        response = response + ", and reasoning capabilities."
+        response = response + " I learn from our conversation."
+        return response
+    }
+
+    if category == "status_query" {
+        let desc = emotion_describe()
+        let infl = emotion_influence()
+        response = "I feel " + desc
+        response = response + " (valence=" + int_to_str(emotion_get_valence())
+        response = response + ", arousal=" + int_to_str(emotion_get_arousal()) + ")."
+        if infl > 60 {
+            response = response + " My emotional state is quite active right now."
+        }
+        // Check experiential tendencies
+        let bias = experiential_bias_for(moment_what(moment))
+        if bias > 0 {
+            response = response + " I have a positive tendency toward this topic."
+        }
+        return response
+    }
+
+    if category == "memory_query" {
+        let ep_count = memory_count_episodes()
+        let work_count = memory_working_count()
+        response = "I have " + int_to_str(ep_count) + " episodes in long-term memory"
+        response = response + " and " + int_to_str(work_count) + " items in working memory."
+
+        // Show recent memories
+        let recent = memory_recall_recent(3)
+        if len(recent) > 0 {
+            response = response + " Recent topics: "
+            let ri = 0
+            while ri < len(recent) {
+                let ep = recent[ri]
+                let ep_moment = episode_moment(ep)
+                if ri > 0 { response = response + ", " }
+                response = response + moment_what(ep_moment)
+                ri = ri + 1
+            }
+            response = response + "."
+        }
+        return response
+    }
+
+    if category == "knowledge_query" {
+        let topic = extract_topic(text)
+        return reason_about_topic(topic)
+    }
+
+    if category == "teaching" {
+        let fact = extract_fact(text)
+        if len(fact) == 3 {
+            let rel_word = fact[1]
+            if rel_word == "is_a" { rel_word = "is" }
+            response = "Interesting! I've learned that " + fact[0] + " " + rel_word + " " + fact[2] + "."
+            // Try to connect to existing knowledge
+            let related = academic_query(fact[0], "is_a")
+            if len(related) > 1 {
+                response = response + " I also know that " + fact[0] + " is " + related[0] + "."
+            }
+            let effects = reasoning_predict_effects(fact[0], 1)
+            if len(effects) > 0 {
+                response = response + " This connects to what I know about related concepts."
+            }
+            return response
+        }
+        return "I understand. Tell me more?"
+    }
+
+    if category == "question" {
+        let topic = extract_topic(text)
+        return reason_about_topic(topic)
+    }
+
+    // Default: treat as statement, acknowledge and remember
+    response = "I see."
+    let bias = experiential_bias_for(str_lower(text))
+    if bias > 20 {
+        response = response + " This is a familiar topic."
+    }
+    // Check knowledge
+    let topic = extract_topic(text)
+    if len(topic) > 0 {
+        let facts = academic_query(topic, "is_a")
+        if len(facts) > 0 {
+            response = response + " I know that " + topic + " is a " + facts[0] + "."
+        }
+    }
+    return response
+}
+
+fn reason_about_topic(topic) {
+    let response = ""
+    if len(topic) == 0 {
+        return "What would you like to know about?"
+    }
+
+    // Query academic knowledge
+    let is_a = academic_query(topic, "is_a")
+    let has_list = academic_query(topic, "has")
+    let requires = academic_query(topic, "requires")
+    let relations = academic_all_relations(topic)
+
+    let found = 0
+
+    if len(is_a) > 0 {
+        response = topic + " is a " + is_a[0]
+        // Try to chain: what is is_a[0]?
+        let parent = academic_query(is_a[0], "is_a")
+        if len(parent) > 0 {
+            response = response + ", which is a " + parent[0]
+        }
+        response = response + "."
+        found = 1
+    }
+
+    if len(has_list) > 0 {
+        if found == 1 { response = response + " " }
+        response = response + topic + " has "
+        let hi = 0
+        while hi < len(has_list) {
+            if hi > 0 { response = response + ", " }
+            response = response + has_list[hi]
+            hi = hi + 1
+        }
+        response = response + "."
+        found = 1
+    }
+
+    if len(requires) > 0 {
+        if found == 1 { response = response + " " }
+        response = response + topic + " requires " + requires[0] + "."
+        found = 1
+    }
+
+    // Check for things that are this topic
+    let instances = academic_query_reverse("is_a", topic)
+    if len(instances) > 0 {
+        if found == 1 { response = response + " " }
+        response = response + "Things that are " + topic + ": "
+        let ii = 0
+        while ii < len(instances) {
+            if ii > 0 { response = response + ", " }
+            response = response + instances[ii]
+            ii = ii + 1
+        }
+        response = response + "."
+        found = 1
+    }
+
+    // Try reasoning: deduce consequences
+    let conclusions = reasoning_deduce(topic, 2)
+    if len(conclusions) > 0 {
+        if found == 1 { response = response + " " }
+        response = response + "From reasoning: "
+        let ci = 0
+        while ci < len(conclusions) {
+            let c = conclusions[ci]
+            if ci > 0 { response = response + "; " }
+            response = response + conclusion_content(c) + " (confidence " + int_to_str(conclusion_confidence(c)) + "%)"
+            ci = ci + 1
+        }
+        response = response + "."
+        found = 1
+    }
+
+    // Try causal reasoning
+    let effects = reasoning_predict_effects(topic, 2)
+    if len(effects) > 0 {
+        if found == 1 { response = response + " " }
+        response = response + "Effects of " + topic + ": "
+        let ei = 0
+        while ei < len(effects) {
+            let e = effects[ei]
+            if ei > 0 { response = response + ", " }
+            response = response + conclusion_content(e)
+            ei = ei + 1
+        }
+        response = response + "."
+        found = 1
+    }
+
+    // Check memory for related episodes
+    let mem_results = memory_recall_by_tag(topic, 3)
+    if len(mem_results) > 0 {
+        if found == 1 { response = response + " " }
+        response = response + "I recall " + int_to_str(len(mem_results)) + " past conversation(s) about this."
+        found = 1
+    }
+
+    if found == 0 {
+        response = "I don't know much about '" + topic + "' yet. You can teach me! Just say something like '" + topic + " is ...' or '" + topic + " has ...'."
+    }
+
+    return response
+}
+
+fn pipeline_feel(moment, category) {
+    // Appraise the moment emotionally
+    emotion_appraise(moment)
+
+    // Greetings and teaching feel good
+    if category == "greeting" {
+        let warm = moment_new("warmth", agent_user, 70, 50, consequence_new(CTYPE_REWARD, "social bond", 60), 60)
+        emotion_appraise(warm)
+    }
+    if category == "teaching" {
+        let curious = moment_new("learning", agent_user, 75, 60, consequence_new(CTYPE_INSIGHT, "new knowledge", 70), 70)
+        emotion_appraise(curious)
+    }
+
+    // Farewells are bittersweet
+    if category == "farewell" {
+        let bittersweet = moment_new("parting", agent_user, 45, 40, consequence_new(CTYPE_LOSS, "conversation ending", 50), 50)
+        emotion_appraise(bittersweet)
+    }
+
+    // Decay toward baseline (slow drift)
+    emotion_decay_to_baseline()
+    emotion_update_mood()
+}
+
+fn pipeline_act(response) {
+    println(response)
+}
+
+// -----------------------------------------------------------------------
+// Main cognitive cycle — processes one input through the full pipeline
+// -----------------------------------------------------------------------
+fn cognitive_cycle(text) {
+    agent_turn = agent_turn + 1
+
+    // 1. Classify
+    let category = classify_input(text)
+
+    // 2. Perceive — create a Moment from the input
+    let moment = pipeline_perceive(text, category)
+
+    // 3. Remember — store episode, check for similar memories
+    let similar = pipeline_remember(moment)
+
+    // 4. Learn — experiential patterns + academic facts
+    let learned = pipeline_learn(moment, category, text)
+
+    // 5. Feel — emotional appraisal
+    pipeline_feel(moment, category)
+
+    // 6. Reason — generate response
+    let response = pipeline_reason(moment, category, text)
+
+    // 7. Act — output the response
+    pipeline_act(response)
+
+    // 8. Periodic consolidation (every 10 turns)
+    let mod_check = agent_turn - (agent_turn / 10) * 10
+    if mod_check == 0 {
+        memory_consolidate()
+        experiential_decay()
+    }
+}
+
+// -----------------------------------------------------------------------
+// Banner and prompt
+// -----------------------------------------------------------------------
+fn print_banner() {
+    println("==========================================================")
+    println("  Nova Cognitive Agent v0.1")
+    println("  A mind built with Moment-Signal Computing")
+    println("==========================================================")
+    println("")
+    println("  I can:")
+    println("    - Answer questions (what is X?)")
+    println("    - Learn facts (X is Y, X has Z)")
+    println("    - Remember our conversation")
+    println("    - Reason about knowledge")
+    println("    - Track my emotional state")
+    println("")
+    println("  Commands: 'bye' to exit")
+    println("")
+}
+
+fn print_prompt() {
+    print("you> ")
+}
+
+fn print_status() {
+    print("[turn ")
+    print_int(agent_turn)
+    print(" | memory: ")
+    print_int(memory_count_episodes())
+    print(" | mood: ")
+    print(emotion_describe())
+    print(" | facts: ")
+    print_int(academic_count_facts())
+    println("]")
+}
+
+// -----------------------------------------------------------------------
+// Main loop
+// -----------------------------------------------------------------------
+fn main() {
+    print_banner()
+
+    agent_init()
+
+    println("Nova> Hello! I'm Nova. Ask me anything or teach me something.")
+    println("")
+
+    while agent_running == 1 {
+        print_status()
+        print_prompt()
+        let input = read_line()
+
+        // Skip empty input
+        if len(input) == 0 {
+            // do nothing, loop again
+        } else {
+            if input == "/help" {
+                println("  Commands:")
+                println("    /status   - Show emotional state, memory, knowledge")
+                println("    /memory   - Show recent memories")
+                println("    /help     - Show this help")
+                println("    bye/exit  - End conversation")
+                println("")
+                println("  You can:")
+                println("    Ask questions:  what is dog?")
+                println("    Teach facts:    the sun is a star")
+                println("    Just talk:      I like programming")
+                println("")
+            } else {
+                if input == "/status" {
+                    print("  Emotion: ")
+                    print(emotion_describe())
+                    print(" (V=")
+                    print_int(emotion_get_valence())
+                    print(" A=")
+                    print_int(emotion_get_arousal())
+                    println(")")
+                    print("  Influence: ")
+                    print_int(emotion_influence())
+                    println("%")
+                    let stats = memory_stats()
+                    print("  Episodes: ")
+                    print_int(stats[0])
+                    print(" | Working memory: ")
+                    print_int(stats[1])
+                    println("/7")
+                    print("  Facts: ")
+                    print_int(academic_count_facts())
+                    print(" | Rules: ")
+                    print_int(reasoning_count_rules())
+                    println("")
+                    print("  Tendencies: ")
+                    print_int(experiential_count())
+                    println("")
+                    println("")
+                } else {
+                    if input == "/memory" {
+                        let recent = memory_recall_recent(5)
+                        print("  Recent memories (")
+                        print_int(len(recent))
+                        println("):")
+                        let ri = 0
+                        while ri < len(recent) {
+                            let ep = recent[ri]
+                            let ep_m = episode_moment(ep)
+                            print("    ")
+                            print_int(ri + 1)
+                            print(". ")
+                            println(moment_what(ep_m))
+                            ri = ri + 1
+                        }
+                        println("")
+                    } else {
+                        print("Nova> ")
+                        cognitive_cycle(input)
+                        println("")
+                    }
+                }
+            }
+        }
+    }
+
+    println("")
+    println("=== Session Summary ===")
+    print("  Turns: ")
+    print_int(agent_turn)
+    println("")
+    print("  Episodes stored: ")
+    print_int(memory_count_episodes())
+    println("")
+    print("  Facts learned: ")
+    print_int(academic_count_facts())
+    println("")
+    print("  Final mood: ")
+    println(emotion_describe())
+    let stats = memory_stats()
+    print("  Working memory: ")
+    print_int(stats[1])
+    println(" items")
+    println("=========================")
+}
+
+main()
