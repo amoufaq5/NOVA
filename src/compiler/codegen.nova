@@ -785,7 +785,61 @@ fn try_fold(nd) {
     if tag == AST_INT_LIT { return nd[1] }
     if tag == AST_FLOAT_LIT { return nd[1] }
     if tag == AST_BOOL_LIT { return nd[1] }
-    // Can't fold
+    if tag == AST_NONE_LIT { return 0 }
+    if tag == AST_UNARY_OP {
+        let inner = try_fold(nd[2])
+        if inner == FOLD_SENTINEL { return FOLD_SENTINEL }
+        if nd[1] == "-" { return 0 - inner }
+        if nd[1] == "!" {
+            if inner == 0 { return 1 }
+            return 0
+        }
+        return FOLD_SENTINEL
+    }
+    if tag == AST_BIN_OP {
+        let lv = try_fold(nd[2])
+        if lv == FOLD_SENTINEL { return FOLD_SENTINEL }
+        let rv = try_fold(nd[3])
+        if rv == FOLD_SENTINEL { return FOLD_SENTINEL }
+        let op = nd[1]
+        if op == "+" { return lv + rv }
+        if op == "-" { return lv - rv }
+        if op == "*" { return lv * rv }
+        if op == "/" {
+            if rv == 0 { return FOLD_SENTINEL }
+            return lv / rv
+        }
+        if op == "%" {
+            if rv == 0 { return FOLD_SENTINEL }
+            return lv % rv
+        }
+        if op == "&" { return lv & rv }
+        if op == "|" { return lv | rv }
+        if op == "^" { return lv ^ rv }
+        if op == "<<" { return lv << rv }
+        if op == ">>" { return lv >> rv }
+        if op == "==" {
+            if lv == rv { return 1 }
+            return 0
+        }
+        if op == "<" {
+            if lv < rv { return 1 }
+            return 0
+        }
+        if op == ">" {
+            if lv > rv { return 1 }
+            return 0
+        }
+        if op == "<=" {
+            if lv <= rv { return 1 }
+            return 0
+        }
+        if op == ">=" {
+            if lv >= rv { return 1 }
+            return 0
+        }
+        return FOLD_SENTINEL
+    }
     return FOLD_SENTINEL
 }
 
@@ -914,10 +968,22 @@ fn gen_expr(nd) {
         }
 
         // Non-constant path: generate code for both operands
-        gen_expr(nd[3])
-        out("    push rax")
-        gen_expr(nd[2])
-        out("    pop rcx")
+        let rtag = ast_tag(nd[3])
+        let right_simple = 0
+        if rtag == AST_INT_LIT { right_simple = 1 }
+        if rtag == AST_BOOL_LIT { right_simple = 1 }
+        if rtag == AST_NONE_LIT { right_simple = 1 }
+        if right_simple == 1 {
+            gen_expr(nd[2])
+            out("    mov rcx, rax")
+            gen_expr(nd[3])
+            out("    xchg rax, rcx")
+        } else {
+            gen_expr(nd[3])
+            out("    push rax")
+            gen_expr(nd[2])
+            out("    pop rcx")
+        }
         if op == "+" {
             out("    mov rdi, rax")
             out("    mov rsi, rcx")
@@ -1982,7 +2048,14 @@ fn gen_block(nd) {
     let stmts = nd[1]
     let i = 0
     while i < len(stmts) {
-        gen_stmt(stmts[i])
+        let s = stmts[i]
+        gen_stmt(s)
+        if ast_tag(s) == AST_RETURN_STMT {
+            return 0
+        }
+        if ast_tag(s) == AST_THROW {
+            return 0
+        }
         i = i + 1
     }
 }
@@ -2305,7 +2378,29 @@ fn gen_program(program) {
     out_section("text")
     gen_runtime()
 
+    peephole_optimize()
+
     return join(cg_output, chr(10))
+}
+
+fn peephole_optimize() {
+    let n = len(cg_output)
+    let i = 0
+    while i < n - 1 {
+        let cur = cg_output[i]
+        let nxt = cg_output[i + 1]
+        if cur == "    push rax" {
+            if nxt == "    pop rax" {
+                list_set(cg_output, i, "")
+                list_set(cg_output, i + 1, "")
+            }
+            if nxt == "    pop rcx" {
+                list_set(cg_output, i, "")
+                list_set(cg_output, i + 1, "    mov rcx, rax")
+            }
+        }
+        i = i + 1
+    }
 }
 
 fn gen_runtime() {
