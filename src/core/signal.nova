@@ -1,8 +1,9 @@
 // Nova Core: Signal
 // Signals carry Moments between Nodes through Channels.
-// Each signal has a type, payload (moment), origin, priority, and trace.
+// Each signal has a type, payload (moment), origin, priority, trace,
+// and metadata for context enrichment.
 //
-// Layout: [TAG, type, moment, origin, destination, priority, trace]
+// Layout: [TAG, type, moment, origin, destination, priority, trace, metadata]
 
 let SIGNAL_TAG = 110
 let SIG_TYPE = 1
@@ -11,6 +12,7 @@ let SIG_ORIGIN = 3
 let SIG_DEST = 4
 let SIG_PRIORITY = 5
 let SIG_TRACE = 6
+let SIG_META = 7
 
 // Signal types
 let SIG_EVENT = 1
@@ -22,6 +24,10 @@ let SIG_RESPONSE = 6
 let SIG_CORRECTION = 7
 let SIG_REFLECTION = 8
 
+// ---------------------------------------------------------------------------
+// Constructors
+// ---------------------------------------------------------------------------
+
 fn signal_new(sig_type, moment, origin, dest, priority) {
     let s = list_new()
     push(s, SIGNAL_TAG)
@@ -31,31 +37,8 @@ fn signal_new(sig_type, moment, origin, dest, priority) {
     push(s, dest)
     push(s, priority)
     push(s, list_new())
+    push(s, map_new())
     return s
-}
-
-fn signal_type(s) { return s[SIG_TYPE] }
-fn signal_moment(s) { return s[SIG_MOMENT] }
-fn signal_origin(s) { return s[SIG_ORIGIN] }
-fn signal_dest(s) { return s[SIG_DEST] }
-fn signal_priority(s) { return s[SIG_PRIORITY] }
-fn signal_trace(s) { return s[SIG_TRACE] }
-
-fn signal_add_trace(s, node_name) {
-    let trace = signal_trace(s)
-    push(trace, node_name)
-}
-
-fn signal_has_visited(s, node_name) {
-    let trace = signal_trace(s)
-    let i = 0
-    while i < len(trace) {
-        if trace[i] == node_name {
-            return 1
-        }
-        i = i + 1
-    }
-    return 0
 }
 
 fn signal_event(moment, origin, dest) {
@@ -76,4 +59,232 @@ fn signal_response(moment, origin, dest) {
 
 fn signal_reflection(moment, origin, dest) {
     return signal_new(SIG_REFLECTION, moment, origin, dest, 40)
+}
+
+fn signal_correction(moment, origin, dest) {
+    return signal_new(SIG_CORRECTION, moment, origin, dest, 80)
+}
+
+// ---------------------------------------------------------------------------
+// Accessors
+// ---------------------------------------------------------------------------
+
+fn signal_type(s) { return s[SIG_TYPE] }
+fn signal_moment(s) { return s[SIG_MOMENT] }
+fn signal_origin(s) { return s[SIG_ORIGIN] }
+fn signal_dest(s) { return s[SIG_DEST] }
+fn signal_priority(s) { return s[SIG_PRIORITY] }
+fn signal_trace(s) { return s[SIG_TRACE] }
+
+// ---------------------------------------------------------------------------
+// Trace management
+// ---------------------------------------------------------------------------
+
+fn signal_add_trace(s, nname) {
+    let trace = signal_trace(s)
+    push(trace, nname)
+}
+
+fn signal_has_visited(s, nname) {
+    let trace = signal_trace(s)
+    let i = 0
+    while i < len(trace) {
+        if trace[i] == nname {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn signal_trace_depth(s) {
+    let trace = signal_trace(s)
+    return len(trace)
+}
+
+// ---------------------------------------------------------------------------
+// Transformation
+// ---------------------------------------------------------------------------
+
+// Create a new signal carrying a different moment but preserving the
+// origin, destination, priority, and metadata of the original.
+fn signal_transform(s, new_moment) {
+    let ns = signal_new(
+        signal_type(s),
+        new_moment,
+        signal_origin(s),
+        signal_dest(s),
+        signal_priority(s)
+    )
+    // Copy metadata from original
+    ns[SIG_META] = s[SIG_META]
+    return ns
+}
+
+// Return a copy of the signal aimed at a different destination.
+fn signal_redirect(s, new_dest) {
+    let ns = signal_new(
+        signal_type(s),
+        signal_moment(s),
+        signal_origin(s),
+        new_dest,
+        signal_priority(s)
+    )
+    ns[SIG_META] = s[SIG_META]
+    // Carry forward the existing trace
+    let old_trace = signal_trace(s)
+    let i = 0
+    while i < len(old_trace) {
+        signal_add_trace(ns, old_trace[i])
+        i = i + 1
+    }
+    return ns
+}
+
+// Return a copy of the signal with an updated priority level.
+fn signal_elevate(s, new_priority) {
+    let ns = signal_new(
+        signal_type(s),
+        signal_moment(s),
+        signal_origin(s),
+        signal_dest(s),
+        new_priority
+    )
+    ns[SIG_META] = s[SIG_META]
+    let old_trace = signal_trace(s)
+    let i = 0
+    while i < len(old_trace) {
+        signal_add_trace(ns, old_trace[i])
+        i = i + 1
+    }
+    return ns
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment (metadata)
+// ---------------------------------------------------------------------------
+
+fn signal_enrich(s, context_key, context_val) {
+    let meta = s[SIG_META]
+    map_set(meta, context_key, context_val)
+}
+
+fn signal_get_context(s, key) {
+    let meta = s[SIG_META]
+    if map_has(meta, key) {
+        return map_get(meta, key)
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Comparison
+// ---------------------------------------------------------------------------
+
+// Returns 1 if signal a has strictly higher priority than signal b.
+fn signal_higher_priority(a, b) {
+    if signal_priority(a) > signal_priority(b) {
+        return 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Cloning
+// ---------------------------------------------------------------------------
+
+// Deep copy a signal with a fresh (empty) trace.
+fn signal_clone(s) {
+    let ns = signal_new(
+        signal_type(s),
+        signal_moment(s),
+        signal_origin(s),
+        signal_dest(s),
+        signal_priority(s)
+    )
+    // Deep-copy metadata: iterate is not available, so share the map.
+    // Metadata is a map — copy it by reference, which is the standard
+    // Nova behaviour for map values.
+    ns[SIG_META] = s[SIG_META]
+    return ns
+}
+
+// ---------------------------------------------------------------------------
+// Type checking
+// ---------------------------------------------------------------------------
+
+fn signal_type_name(s) {
+    let t = signal_type(s)
+    if t == SIG_EVENT { return "event" }
+    if t == SIG_QUESTION { return "question" }
+    if t == SIG_ORDER { return "order" }
+    if t == SIG_COMMAND { return "command" }
+    if t == SIG_REQUEST { return "request" }
+    if t == SIG_RESPONSE { return "response" }
+    if t == SIG_CORRECTION { return "correction" }
+    if t == SIG_REFLECTION { return "reflection" }
+    return "unknown"
+}
+
+// ---------------------------------------------------------------------------
+// Priority queue helpers
+// ---------------------------------------------------------------------------
+
+// A signal queue is simply a list kept sorted by descending priority
+// so that the highest-priority signal is always at the front.
+
+fn signal_queue_new() {
+    return list_new()
+}
+
+// Insert a signal into the queue at the correct position (sorted insertion,
+// highest priority first).
+fn signal_queue_push(q, sig) {
+    let p = signal_priority(sig)
+    let i = 0
+    let placed = 0
+    // Walk the queue to find the insertion point
+    let new_q = list_new()
+    while i < len(q) {
+        if placed == 0 {
+            if p > signal_priority(q[i]) {
+                push(new_q, sig)
+                placed = 1
+            }
+        }
+        push(new_q, q[i])
+        i = i + 1
+    }
+    if placed == 0 {
+        push(new_q, sig)
+    }
+    // Copy back into the original queue (mutate in place)
+    // Reset q by overwriting its contents
+    let j = 0
+    while j < len(q) {
+        q[j] = new_q[j]
+        j = j + 1
+    }
+    // If new_q is longer (it always is by exactly one), push the tail
+    while j < len(new_q) {
+        push(q, new_q[j])
+        j = j + 1
+    }
+}
+
+// Remove and return the highest-priority signal from the front of the queue.
+// Returns 0 if the queue is empty.
+fn signal_queue_pop(q) {
+    if len(q) == 0 {
+        return 0
+    }
+    let top = q[0]
+    // Shift all elements left by one
+    let i = 1
+    while i < len(q) {
+        q[i - 1] = q[i]
+        i = i + 1
+    }
+    pop(q)
+    return top
 }

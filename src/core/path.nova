@@ -1,19 +1,30 @@
 // Nova Core: Path
-// Paths define signal flow routes through a network of nodes.
-// Forward path: perceiver -> knower -> reasoner -> actor
-// Backward path: actor -> reasoner (reflection)
-// Reflex path: perceiver -> actor (fast bypass)
+// Paths define predefined signal flow routes through a network of Nodes.
+// Forward path: perceiver -> knower -> reasoner -> actor (standard processing)
+// Backward path: actor -> reasoner -> feeler (reflection/evaluation)
+// Reflex path: perceiver -> actor (fast bypass for urgent signals)
+// Enrichment path: includes memory lookup during forward flow
 //
-// Layout: [TAG, name, type, steps]
+// Layout: [TAG, name, path_type, steps, enrichment_sources]
 
 let PATH_TAG = 140
 let PATH_NAME = 1
 let PATH_TYPE = 2
 let PATH_STEPS = 3
+let PATH_ENRICHMENT = 4
 
+// Path types
 let PATH_FORWARD = 1
 let PATH_BACKWARD = 2
 let PATH_REFLEX = 3
+let PATH_ENRICHMENT_TYPE = 4
+
+// Urgency threshold for reflex skipping
+let REFLEX_URGENCY_THRESHOLD = 70
+
+// ================================================================
+// Constructors
+// ================================================================
 
 fn path_new(name, ptype) {
     let p = list_new()
@@ -21,18 +32,61 @@ fn path_new(name, ptype) {
     push(p, name)
     push(p, ptype)
     push(p, list_new())
+    push(p, list_new())
     return p
 }
+
+fn path_forward(name) {
+    return path_new(name, PATH_FORWARD)
+}
+
+fn path_backward(name) {
+    return path_new(name, PATH_BACKWARD)
+}
+
+fn path_reflex(name) {
+    return path_new(name, PATH_REFLEX)
+}
+
+fn path_enrichment(name) {
+    return path_new(name, PATH_ENRICHMENT_TYPE)
+}
+
+// ================================================================
+// Accessors
+// ================================================================
 
 fn path_name(p) { return p[PATH_NAME] }
 fn path_type(p) { return p[PATH_TYPE] }
 fn path_steps(p) { return p[PATH_STEPS] }
+
+fn path_step_count(p) {
+    let steps = path_steps(p)
+    return len(steps)
+}
+
+// ================================================================
+// Building
+// ================================================================
 
 fn path_add_step(p, node) {
     let steps = path_steps(p)
     push(steps, node)
 }
 
+fn path_add_enrichment(p, rememberer_node) {
+    let sources = p[PATH_ENRICHMENT]
+    push(sources, rememberer_node)
+}
+
+// ================================================================
+// Execution
+// ================================================================
+
+// Standard execution: push signal through each step sequentially.
+// At each step: receive, process, drain outbox.
+// If outbox has signals, use first as input to next step.
+// If outbox empty, path terminates early. Returns final signal or 0.
 fn path_execute(p, signal) {
     let steps = path_steps(p)
     let current_signal = signal
@@ -50,4 +104,192 @@ fn path_execute(p, signal) {
         i = i + 1
     }
     return current_signal
+}
+
+// Enriched execution: like execute but at each step, also send
+// the signal to all enrichment sources and collect their outputs
+// as additional context signals fed back into the current step node.
+fn path_execute_enriched(p, signal) {
+    let steps = path_steps(p)
+    let sources = p[PATH_ENRICHMENT]
+    let current_signal = signal
+    let i = 0
+    while i < len(steps) {
+        let node = steps[i]
+
+        // Send signal to each enrichment source and collect context
+        let ei = 0
+        while ei < len(sources) {
+            let enricher = sources[ei]
+            node_receive(enricher, current_signal)
+            node_process(enricher)
+            let enriched = node_drain_outbox(enricher)
+            // Feed enrichment outputs into the current step node
+            let ej = 0
+            while ej < len(enriched) {
+                node_receive(node, enriched[ej])
+                ej = ej + 1
+            }
+            ei = ei + 1
+        }
+
+        // Now process the main step with original + enrichment signals
+        node_receive(node, current_signal)
+        node_process(node)
+        let out_signals = node_drain_outbox(node)
+        if len(out_signals) > 0 {
+            current_signal = out_signals[0]
+        } else {
+            return 0
+        }
+        i = i + 1
+    }
+    return current_signal
+}
+
+// Reflex execution: fast path that skips nodes when signal urgency
+// exceeds the threshold. Only the first and last steps are guaranteed
+// to run; intermediate steps are skipped if urgency is high enough.
+fn path_execute_reflex(p, signal) {
+    let steps = path_steps(p)
+    let step_count = len(steps)
+    if step_count == 0 {
+        return 0
+    }
+
+    let m = signal_moment(signal)
+    let urgency = moment_urgency(m)
+    let current_signal = signal
+
+    let i = 0
+    while i < step_count {
+        let node = steps[i]
+
+        // Skip intermediate nodes if urgency exceeds threshold
+        let is_first = 0
+        if i == 0 { is_first = 1 }
+        let is_last = 0
+        if i == step_count - 1 { is_last = 1 }
+
+        if urgency > REFLEX_URGENCY_THRESHOLD {
+            // Only process first and last steps in high urgency
+            if is_first == 1 {
+                node_receive(node, current_signal)
+                node_process(node)
+                let out = node_drain_outbox(node)
+                if len(out) > 0 {
+                    current_signal = out[0]
+                } else {
+                    return 0
+                }
+            }
+            if is_last == 1 {
+                if is_first == 0 {
+                    node_receive(node, current_signal)
+                    node_process(node)
+                    let out = node_drain_outbox(node)
+                    if len(out) > 0 {
+                        current_signal = out[0]
+                    } else {
+                        return 0
+                    }
+                }
+            }
+        } else {
+            // Normal processing when urgency is below threshold
+            node_receive(node, current_signal)
+            node_process(node)
+            let out = node_drain_outbox(node)
+            if len(out) > 0 {
+                current_signal = out[0]
+            } else {
+                return 0
+            }
+        }
+
+        i = i + 1
+    }
+    return current_signal
+}
+
+// ================================================================
+// Path composition
+// ================================================================
+
+// Chain two paths: create a new path whose steps are p1's steps
+// followed by p2's steps. Inherits p1's path type.
+fn path_chain(p1, p2) {
+    let name1 = path_name(p1)
+    let ptype = path_type(p1)
+    let chained = path_new(name1, ptype)
+
+    // Copy steps from p1
+    let steps1 = path_steps(p1)
+    let i = 0
+    while i < len(steps1) {
+        path_add_step(chained, steps1[i])
+        i = i + 1
+    }
+
+    // Copy steps from p2
+    let steps2 = path_steps(p2)
+    let j = 0
+    while j < len(steps2) {
+        path_add_step(chained, steps2[j])
+        j = j + 1
+    }
+
+    // Copy enrichment sources from both paths
+    let e1 = p1[PATH_ENRICHMENT]
+    let k = 0
+    while k < len(e1) {
+        path_add_enrichment(chained, e1[k])
+        k = k + 1
+    }
+    let e2 = p2[PATH_ENRICHMENT]
+    let l = 0
+    while l < len(e2) {
+        path_add_enrichment(chained, e2[l])
+        l = l + 1
+    }
+
+    return chained
+}
+
+// ================================================================
+// Branching
+// ================================================================
+
+// Execute path but collect ALL output signals from every step,
+// not just the first. Returns a list of all signals produced
+// across the entire path execution.
+fn path_branch(p, signal) {
+    let steps = path_steps(p)
+    let all_signals = list_new()
+    let current_signal = signal
+    let i = 0
+    while i < len(steps) {
+        let node = steps[i]
+        node_receive(node, current_signal)
+        node_process(node)
+        let out_signals = node_drain_outbox(node)
+
+        // Collect all output signals
+        let j = 0
+        while j < len(out_signals) {
+            push(all_signals, out_signals[j])
+            j = j + 1
+        }
+
+        // Continue with the first signal if available
+        if len(out_signals) > 0 {
+            current_signal = out_signals[0]
+        } else {
+            // Path terminated; return what we have so far
+            return all_signals
+        }
+
+        i = i + 1
+    }
+    return all_signals
 }

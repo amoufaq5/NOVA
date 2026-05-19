@@ -1,10 +1,21 @@
 // Nova Core: Similarity
-// Scoring functions for memory retrieval and pattern matching.
+// Scoring functions for memory retrieval and pattern matching
+// in a Moment-Signal Computing system.
 // All scores are integers 0-100 (percentage-like).
+// No floating point — all arithmetic is integer (multiply first, then divide).
 
-// Composite similarity: weighted combination of factors
-// score = 0.35*content + 0.20*entity + 0.15*emotion + 0.15*recency
-//       + 0.10*frequency + 0.05*consequence
+// ============================================================
+// Composite similarity: the main scoring function for memory retrieval
+// ============================================================
+// Weighted combination of six factors:
+//   score = 0.35 * content_similarity
+//         + 0.20 * entity_overlap
+//         + 0.15 * emotional_resonance
+//         + 0.15 * temporal_recency
+//         + 0.10 * access_frequency
+//         + 0.05 * consequence_relevance
+//
+// Uses integer math: factor * weight / 100
 fn similarity_score(content_sim, entity_sim, emotion_sim, recency, frequency, consequence_sim) {
     let score = content_sim * 35 / 100
     score = score + entity_sim * 20 / 100
@@ -12,10 +23,15 @@ fn similarity_score(content_sim, entity_sim, emotion_sim, recency, frequency, co
     score = score + recency * 15 / 100
     score = score + frequency * 10 / 100
     score = score + consequence_sim * 5 / 100
+    if score > 100 { score = 100 }
+    if score < 0 { score = 0 }
     return score
 }
 
-// Jaccard similarity between two lists (as sets)
+// ============================================================
+// Jaccard similarity between two lists treated as sets
+// ============================================================
+// |intersection| / |union| * 100
 // Returns 0-100
 fn jaccard(list_a, list_b) {
     let len_a = len(list_a)
@@ -26,72 +42,235 @@ fn jaccard(list_a, list_b) {
     }
     if len_b == 0 { return 0 }
 
+    // Count intersection: for each element in list_a, check if it
+    // appears in list_b. Use contains() to treat lists as sets.
     let intersection = 0
     let i = 0
     while i < len_a {
-        let j = 0
-        while j < len_b {
-            if list_a[i] == list_b[j] {
-                intersection = intersection + 1
-            }
-            j = j + 1
+        if contains(list_b, list_a[i]) {
+            intersection = intersection + 1
         }
         i = i + 1
     }
 
+    // |union| = |A| + |B| - |intersection|
+    // But we need the true set union, so we must also account for
+    // duplicates within each list. For simplicity we assume lists
+    // have unique elements (set semantics).
     let union_size = len_a + len_b - intersection
     if union_size == 0 { return 0 }
     return intersection * 100 / union_size
 }
 
-// Emotional similarity: distance in valence-arousal space
-// Returns 0-100 (100 = identical)
+// ============================================================
+// Emotional similarity: Manhattan distance in V-A-D space
+// ============================================================
+// Uses valence, arousal, and dominance dimensions.
+// Max distance = 300 (each dimension 0-100, three dimensions).
+// Returns 0-100 where 100 = identical emotions.
 fn emotion_similarity(em1, em2) {
     let dv = emotion_valence(em1) - emotion_valence(em2)
     let da = emotion_arousal(em1) - emotion_arousal(em2)
+    let dd = emotion_dominance(em1) - emotion_dominance(em2)
     if dv < 0 { dv = 0 - dv }
     if da < 0 { da = 0 - da }
-    let dist = dv + da
-    if dist > 200 { return 0 }
-    return 100 - dist / 2
+    if dd < 0 { dd = 0 - dd }
+    let dist = dv + da + dd
+    // dist ranges 0-300; map to similarity 0-100
+    // similarity = 100 - (dist * 100 / 300)
+    //            = 100 - dist / 3
+    if dist > 300 { dist = 300 }
+    let sim = 100 - dist * 100 / 300
+    if sim < 0 { sim = 0 }
+    return sim
 }
 
-// Temporal recency score: decays with time distance
-// Returns 0-100
+// ============================================================
+// Temporal recency score
+// ============================================================
+// Linear decay over a time window of 1000 ticks.
+// At age 0 => 100, at age >= 1000 => 0.
+// recency = 100 - age * 100 / 1000
 fn recency_score(moment_time, current_time) {
     let age = current_time - moment_time
     if age <= 0 { return 100 }
     if age >= 1000 { return 0 }
-    return 100 - age / 10
+    return 100 - age * 100 / 1000
 }
 
-// Activation spreading: propagate energy from seed nodes
-// Returns list of activated node indices with their activation levels
+// ============================================================
+// Content similarity: keyword overlap between two string lists
+// ============================================================
+// Delegates to Jaccard similarity on keyword lists.
+fn content_similarity(keywords_a, keywords_b) {
+    return jaccard(keywords_a, keywords_b)
+}
+
+// ============================================================
+// Consequence relevance
+// ============================================================
+// Compares two consequences by type and description.
+// Same type = 80 base; if descriptions also match => 100.
+// Different type = 20 base.
+fn consequence_relevance(c1, c2) {
+    let t1 = consequence_type(c1)
+    let t2 = consequence_type(c2)
+    if t1 == t2 {
+        let d1 = consequence_desc(c1)
+        let d2 = consequence_desc(c2)
+        if d1 == d2 {
+            return 100
+        }
+        return 80
+    }
+    return 20
+}
+
+// ============================================================
+// Spreading activation on a graph
+// ============================================================
+// Propagates activation energy from a seed node through an
+// adjacency-list graph.
+//
+// graph_edges: list of lists (adjacency list), graph_edges[i]
+//              is the list of neighbor indices for node i
+// seed_idx:    starting node index (activation = 100)
+// max_depth:   how many hops to propagate
+// decay_rate:  percentage of parent activation passed to neighbors
+//              (e.g., 50 means neighbors get half)
+//
+// Returns a list of [node_idx, activation_level] pairs for all
+// nodes activated above threshold (5).
 fn spread_activation(graph_edges, seed_idx, max_depth, decay_rate) {
-    let activations = list_new()
+    // Result: list of [node_idx, activation_level] pairs
+    let result = list_new()
+
+    // Track visited nodes to avoid cycles
+    let visited = list_new()
+    push(visited, seed_idx)
+
+    // Frontier: list of [node_idx, activation_level] pairs
     let frontier = list_new()
-    push(frontier, seed_idx)
-    push(activations, 100)
+    let seed_pair = list_new()
+    push(seed_pair, seed_idx)
+    push(seed_pair, 100)
+    push(frontier, seed_pair)
+
+    // Add seed to result
+    let seed_result = list_new()
+    push(seed_result, seed_idx)
+    push(seed_result, 100)
+    push(result, seed_result)
 
     let depth = 0
     while depth < max_depth {
         let next_frontier = list_new()
         let fi = 0
         while fi < len(frontier) {
-            let node_idx = frontier[fi]
-            let edges = graph_edges[node_idx]
-            let ei = 0
-            while ei < len(edges) {
-                let neighbor = edges[ei]
-                let energy = 100 * decay_rate / 100
-                push(next_frontier, neighbor)
-                push(activations, energy)
-                ei = ei + 1
+            let current = frontier[fi]
+            let node_idx = current[0]
+            let parent_activation = current[1]
+
+            // Calculate child activation level
+            let child_activation = parent_activation * decay_rate / 100
+
+            // Skip if activation too low
+            if child_activation >= 5 {
+                let edges = graph_edges[node_idx]
+                let ei = 0
+                while ei < len(edges) {
+                    let neighbor = edges[ei]
+
+                    // Only visit unvisited nodes to avoid cycles
+                    if contains(visited, neighbor) == 0 {
+                        push(visited, neighbor)
+
+                        // Add to result
+                        let pair = list_new()
+                        push(pair, neighbor)
+                        push(pair, child_activation)
+                        push(result, pair)
+
+                        // Add to next frontier for further propagation
+                        let frontier_pair = list_new()
+                        push(frontier_pair, neighbor)
+                        push(frontier_pair, child_activation)
+                        push(next_frontier, frontier_pair)
+                    }
+                    ei = ei + 1
+                }
             }
             fi = fi + 1
         }
         frontier = next_frontier
         depth = depth + 1
     }
-    return activations
+
+    return result
+}
+
+// ============================================================
+// Pattern matching score
+// ============================================================
+// Weighted overlap where earlier tags (lower index) carry more
+// weight than later tags. This reflects the convention that
+// patterns list their most important tags first.
+//
+// Each tag in the pattern gets a weight proportional to its
+// reverse position: weight_i = (pattern_len - i).
+// Total possible weight = sum of 1..pattern_len.
+// Score = matched_weight * 100 / total_weight.
+fn pattern_score(pattern_tags, candidate_tags) {
+    let plen = len(pattern_tags)
+    if plen == 0 { return 0 }
+
+    // total_weight = plen + (plen-1) + ... + 1 = plen * (plen + 1) / 2
+    let total_weight = plen * (plen + 1) / 2
+    let matched_weight = 0
+
+    let i = 0
+    while i < plen {
+        let tag = pattern_tags[i]
+        if contains(candidate_tags, tag) {
+            // Weight for position i: (plen - i)
+            // First tag gets weight plen, last tag gets weight 1
+            matched_weight = matched_weight + (plen - i)
+        }
+        i = i + 1
+    }
+
+    if total_weight == 0 { return 0 }
+    return matched_weight * 100 / total_weight
+}
+
+// ============================================================
+// Frequency score
+// ============================================================
+// Logarithmic scaling of access frequency.
+// Uses an integer approximation of log: counts the number of
+// times we can halve the value before it reaches zero.
+// score = log2(access_count + 1) * 100 / log2(max_count + 1)
+// Clamped to 0-100.
+fn frequency_score(access_count, max_count) {
+    if max_count <= 0 { return 0 }
+    if access_count <= 0 { return 0 }
+    if access_count >= max_count { return 100 }
+
+    // Integer log2 approximation: count bit-shifts
+    let log_access = 0
+    let tmp = access_count + 1
+    while tmp > 1 {
+        tmp = tmp / 2
+        log_access = log_access + 1
+    }
+
+    let log_max = 0
+    tmp = max_count + 1
+    while tmp > 1 {
+        tmp = tmp / 2
+        log_max = log_max + 1
+    }
+
+    if log_max == 0 { return 0 }
+    return log_access * 100 / log_max
 }

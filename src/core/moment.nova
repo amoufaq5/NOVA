@@ -1,11 +1,35 @@
 // Nova Core: Moment
+// The Moment-Signal Computing foundation types.
+//
 // A Moment captures what happened, who was involved, what was felt,
 // and what the consequences were. It is the atomic unit of experience.
 //
 // Layout: [TAG, what_happened, who, felt_valence, felt_arousal,
 //          consequence, salience, urgency, timestamp]
+//
+// Entity: a participant in a moment.
+// Layout: [TAG, name, role, attributes_map]
+//
+// Emotion: a 3D emotional state (valence, arousal, dominance).
+// Layout: [TAG, valence, arousal, dominance]
+// Convention: valence 50 = neutral, >50 = positive, <50 = negative
+//             arousal 0 = calm, 100 = excited
+//             dominance 0 = submissive, 100 = dominant
+//
+// Consequence: an outcome or expectation from a moment.
+// Layout: [TAG, type, description, certainty]
 
+// ============================================================
+// Tag constants — unique identifier per type
+// ============================================================
 let MOMENT_TAG = 100
+let ENTITY_TAG = 101
+let EMOTION_TAG = 102
+let CONSEQUENCE_TAG = 103
+
+// ============================================================
+// Moment field indices
+// ============================================================
 let MOMENT_WHAT = 1
 let MOMENT_WHO = 2
 let MOMENT_VALENCE = 3
@@ -15,23 +39,46 @@ let MOMENT_SALIENCE = 6
 let MOMENT_URGENCY = 7
 let MOMENT_TIME = 8
 
-let ENTITY_TAG = 101
+// ============================================================
+// Entity field indices
+// ============================================================
 let ENTITY_NAME = 1
 let ENTITY_ROLE = 2
 let ENTITY_ATTRS = 3
 
-let EMOTION_TAG = 102
+// ============================================================
+// Emotion field indices
+// ============================================================
 let EMOTION_VALENCE = 1
 let EMOTION_AROUSAL = 2
 let EMOTION_DOMINANCE = 3
 
-let CONSEQUENCE_TAG = 103
+// ============================================================
+// Consequence field indices
+// ============================================================
 let CONSEQUENCE_TYPE = 1
 let CONSEQUENCE_DESC = 2
 let CONSEQUENCE_CERTAINTY = 3
 
+// ============================================================
+// Consequence type constants
+// ============================================================
+let CTYPE_REWARD = 1
+let CTYPE_PUNISHMENT = 2
+let CTYPE_EXPECTATION = 3
+let CTYPE_INSIGHT = 4
+let CTYPE_LOSS = 5
+let CTYPE_GAIN = 6
+let CTYPE_NEUTRAL = 7
+
+// ============================================================
+// Global time counter — auto-increments on moment creation
+// ============================================================
 let global_time = 0
 
+// ============================================================
+// Moment constructor and accessors
+// ============================================================
 fn moment_new(what, who, valence, arousal, consequence, salience) {
     global_time = global_time + 1
     let m = list_new()
@@ -56,25 +103,106 @@ fn moment_salience(m) { return m[MOMENT_SALIENCE] }
 fn moment_urgency(m) { return m[MOMENT_URGENCY] }
 fn moment_time(m) { return m[MOMENT_TIME] }
 
+// ============================================================
+// Moment utility functions
+// ============================================================
+
+// moment_intensity: average of |valence - 50| and arousal.
+// Higher values mean the moment is more emotionally charged.
+// Valence is centered at 50 (neutral), so distance from 50
+// measures how strongly positive or negative.
 fn moment_intensity(m) {
     let v = moment_valence(m)
     let a = moment_arousal(m)
-    if v < 0 { v = 0 - v }
-    return (v + a) / 2
+    let vdist = abs(v - 50)
+    return (vdist + a) / 2
 }
 
+// moment_describe: returns a human-readable string description
+// of the moment including what happened, who, emotion, and time.
+fn moment_describe(m) {
+    let s = concat("Moment[", int_to_str(moment_time(m)))
+    s = concat(s, "]: ")
+    s = concat(s, moment_what(m))
+    s = concat(s, " | valence=")
+    s = concat(s, int_to_str(moment_valence(m)))
+    s = concat(s, " arousal=")
+    s = concat(s, int_to_str(moment_arousal(m)))
+    s = concat(s, " salience=")
+    s = concat(s, int_to_str(moment_salience(m)))
+    return s
+}
+
+// moment_is_significant: returns 1 if the moment's intensity
+// exceeds the given threshold, 0 otherwise.
+fn moment_is_significant(m, threshold) {
+    let intensity = moment_intensity(m)
+    if intensity > threshold {
+        return 1
+    }
+    return 0
+}
+
+// moment_merge: combine two moments by averaging their emotional
+// values, concatenating descriptions, merging consequences, and
+// taking the higher salience.
+fn moment_merge(m1, m2) {
+    let what = concat(moment_what(m1), concat(" + ", moment_what(m2)))
+    let who = moment_who(m1)
+    let avg_v = (moment_valence(m1) + moment_valence(m2)) / 2
+    let avg_a = (moment_arousal(m1) + moment_arousal(m2)) / 2
+    // Keep the consequence with higher certainty
+    let c1 = moment_consequence(m1)
+    let c2 = moment_consequence(m2)
+    let merged_c = c1
+    if consequence_certainty(c2) > consequence_certainty(c1) {
+        merged_c = c2
+    }
+    // Take the higher salience
+    let sal1 = moment_salience(m1)
+    let sal2 = moment_salience(m2)
+    let sal = sal1
+    if sal2 > sal1 {
+        sal = sal2
+    }
+    return moment_new(what, who, avg_v, avg_a, merged_c, sal)
+}
+
+// ============================================================
+// Entity constructor and accessors
+// ============================================================
 fn entity_new(name, role) {
     let e = list_new()
     push(e, ENTITY_TAG)
     push(e, name)
     push(e, role)
-    push(e, list_new())
+    push(e, map_new())
     return e
 }
 
 fn entity_name(e) { return e[ENTITY_NAME] }
 fn entity_role(e) { return e[ENTITY_ROLE] }
+fn entity_attrs(e) { return e[ENTITY_ATTRS] }
 
+// entity_set_attr: set an attribute key-value pair on the entity.
+fn entity_set_attr(e, key, val) {
+    let attrs = entity_attrs(e)
+    map_set(attrs, key, val)
+}
+
+// entity_get_attr: retrieve an attribute value by key.
+// Returns 0 if the key is not found.
+fn entity_get_attr(e, key) {
+    let attrs = entity_attrs(e)
+    if map_has(attrs, key) {
+        return map_get(attrs, key)
+    }
+    return 0
+}
+
+// ============================================================
+// Emotion constructor and accessors
+// ============================================================
 fn emotion_new(valence, arousal, dominance) {
     let em = list_new()
     push(em, EMOTION_TAG)
@@ -88,6 +216,13 @@ fn emotion_valence(em) { return em[EMOTION_VALENCE] }
 fn emotion_arousal(em) { return em[EMOTION_AROUSAL] }
 fn emotion_dominance(em) { return em[EMOTION_DOMINANCE] }
 
+// ============================================================
+// Emotion utility functions
+// ============================================================
+
+// emotion_drift: interpolate the current emotion toward a target
+// emotion at the given rate (0-100 percentage).
+// rate=0 means no change, rate=100 means jump to target.
 fn emotion_drift(current, target, rate) {
     let cv = emotion_valence(current)
     let ca = emotion_arousal(current)
@@ -101,6 +236,19 @@ fn emotion_drift(current, target, rate) {
     return emotion_new(nv, na, nd)
 }
 
+// emotion_distance: Manhattan distance in V-A-D space between
+// two emotions. Returns a value 0-300 (sum of absolute diffs
+// across all three dimensions).
+fn emotion_distance(em1, em2) {
+    let dv = abs(emotion_valence(em1) - emotion_valence(em2))
+    let da = abs(emotion_arousal(em1) - emotion_arousal(em2))
+    let dd = abs(emotion_dominance(em1) - emotion_dominance(em2))
+    return dv + da + dd
+}
+
+// ============================================================
+// Consequence constructor and accessors
+// ============================================================
 fn consequence_new(typ, desc, certainty) {
     let c = list_new()
     push(c, CONSEQUENCE_TAG)
@@ -113,3 +261,15 @@ fn consequence_new(typ, desc, certainty) {
 fn consequence_type(c) { return c[CONSEQUENCE_TYPE] }
 fn consequence_desc(c) { return c[CONSEQUENCE_DESC] }
 fn consequence_certainty(c) { return c[CONSEQUENCE_CERTAINTY] }
+
+// consequence_is_positive: returns 1 if the consequence type
+// indicates a positive outcome (reward, expectation, insight,
+// or gain), 0 otherwise.
+fn consequence_is_positive(c) {
+    let t = consequence_type(c)
+    if t == CTYPE_REWARD { return 1 }
+    if t == CTYPE_EXPECTATION { return 1 }
+    if t == CTYPE_INSIGHT { return 1 }
+    if t == CTYPE_GAIN { return 1 }
+    return 0
+}

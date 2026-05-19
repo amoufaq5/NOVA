@@ -1,19 +1,27 @@
 // Nova Core: Channel
-// Channels connect nodes and route signals between them.
-// Types: direct (1:1), broadcast (1:N), filtered.
+// Channels are the routing infrastructure connecting Nodes in a
+// Moment-Signal Computing system. Each channel has a type that
+// determines how signals are delivered to destinations.
 //
-// Layout: [TAG, name, source, destinations, filter_fn]
+// Layout: [TAG, name, source, destinations, chan_type, filter_min_salience, message_count]
 
 let CHANNEL_TAG = 130
 let CHAN_NAME = 1
 let CHAN_SOURCE = 2
 let CHAN_DESTS = 3
-let CHAN_FILTER = 4
+let CHAN_TYPE = 4
+let CHAN_FILTER_MIN = 5
+let CHAN_MSG_COUNT = 6
 
 // Channel types
 let CHAN_DIRECT = 1
 let CHAN_BROADCAST = 2
 let CHAN_FILTERED = 3
+let CHAN_WEIGHTED = 4
+
+// =========================================================
+// Constructors
+// =========================================================
 
 fn channel_new(name, source) {
     let ch = list_new()
@@ -21,35 +29,198 @@ fn channel_new(name, source) {
     push(ch, name)
     push(ch, source)
     push(ch, list_new())
+    push(ch, CHAN_BROADCAST)
+    push(ch, 0)
     push(ch, 0)
     return ch
 }
 
+fn channel_direct(name, source, dest) {
+    let ch = list_new()
+    push(ch, CHANNEL_TAG)
+    push(ch, name)
+    push(ch, source)
+    let dests = list_new()
+    push(dests, dest)
+    push(ch, dests)
+    push(ch, CHAN_DIRECT)
+    push(ch, 0)
+    push(ch, 0)
+    return ch
+}
+
+fn channel_broadcast(name, source) {
+    let ch = list_new()
+    push(ch, CHANNEL_TAG)
+    push(ch, name)
+    push(ch, source)
+    push(ch, list_new())
+    push(ch, CHAN_BROADCAST)
+    push(ch, 0)
+    push(ch, 0)
+    return ch
+}
+
+fn channel_filtered(name, source, min_salience) {
+    let ch = list_new()
+    push(ch, CHANNEL_TAG)
+    push(ch, name)
+    push(ch, source)
+    push(ch, list_new())
+    push(ch, CHAN_FILTERED)
+    push(ch, min_salience)
+    push(ch, 0)
+    return ch
+}
+
+fn channel_weighted(name, source, weight) {
+    let ch = list_new()
+    push(ch, CHANNEL_TAG)
+    push(ch, name)
+    push(ch, source)
+    push(ch, list_new())
+    push(ch, CHAN_WEIGHTED)
+    push(ch, weight)
+    push(ch, 0)
+    return ch
+}
+
+// =========================================================
+// Accessors
+// =========================================================
+
 fn channel_name(ch) { return ch[CHAN_NAME] }
 fn channel_source(ch) { return ch[CHAN_SOURCE] }
 fn channel_dests(ch) { return ch[CHAN_DESTS] }
+fn channel_type(ch) { return ch[CHAN_TYPE] }
+fn channel_count(ch) { return ch[CHAN_MSG_COUNT] }
+
+// =========================================================
+// Destination management
+// =========================================================
 
 fn channel_add_dest(ch, dest_node) {
     let dests = channel_dests(ch)
     push(dests, dest_node)
 }
 
+fn channel_remove_dest(ch, dest_name) {
+    let dests = channel_dests(ch)
+    let i = 0
+    while i < len(dests) {
+        let d = dests[i]
+        if node_name(d) == dest_name {
+            list_remove(dests, i)
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// =========================================================
+// Routing
+// =========================================================
+
 fn channel_route(ch, signal) {
     let dests = channel_dests(ch)
+    let count = 0
     let i = 0
     while i < len(dests) {
         let dest = dests[i]
         node_receive(dest, signal)
+        count = count + 1
         i = i + 1
     }
-    return len(dests)
+    ch[CHAN_MSG_COUNT] = ch[CHAN_MSG_COUNT] + count
+    return count
 }
 
-fn channel_route_filtered(ch, signal, min_salience) {
+fn channel_route_filtered(ch, signal) {
+    let min_sal = ch[CHAN_FILTER_MIN]
     let m = signal_moment(signal)
     let sal = moment_salience(m)
-    if sal < min_salience {
+    if sal < min_sal {
         return 0
     }
     return channel_route(ch, signal)
+}
+
+fn channel_route_weighted(ch, signal, weight) {
+    let dests = channel_dests(ch)
+    let old_priority = signal_priority(signal)
+    let new_priority = old_priority * weight / 100
+    signal[SIG_PRIORITY] = new_priority
+    let count = 0
+    let i = 0
+    while i < len(dests) {
+        let dest = dests[i]
+        node_receive(dest, signal)
+        count = count + 1
+        i = i + 1
+    }
+    signal[SIG_PRIORITY] = old_priority
+    ch[CHAN_MSG_COUNT] = ch[CHAN_MSG_COUNT] + count
+    return count
+}
+
+// =========================================================
+// Statistics
+// =========================================================
+
+fn channel_reset_count(ch) {
+    ch[CHAN_MSG_COUNT] = 0
+}
+
+fn channel_describe(ch) {
+    let name = channel_name(ch)
+    let ctype = channel_type(ch)
+    let type_str = "unknown"
+    if ctype == CHAN_DIRECT { type_str = "direct" }
+    if ctype == CHAN_BROADCAST { type_str = "broadcast" }
+    if ctype == CHAN_FILTERED { type_str = "filtered" }
+    if ctype == CHAN_WEIGHTED { type_str = "weighted" }
+    let dests = channel_dests(ch)
+    let dest_count = len(dests)
+    let msg_count = channel_count(ch)
+    let desc = "Channel<" + name + " type=" + type_str + " dests=" + int_to_str(dest_count) + " msgs=" + int_to_str(msg_count) + ">"
+    return desc
+}
+
+// =========================================================
+// Network helpers
+// =========================================================
+
+fn channel_network_new() {
+    return list_new()
+}
+
+fn channel_network_add(net, ch) {
+    push(net, ch)
+}
+
+fn channel_network_route_all(net, source_name, signal) {
+    let total = 0
+    let i = 0
+    while i < len(net) {
+        let ch = net[i]
+        if channel_source(ch) == source_name {
+            let ctype = channel_type(ch)
+            if ctype == CHAN_FILTERED {
+                total = total + channel_route_filtered(ch, signal)
+            }
+            if ctype == CHAN_WEIGHTED {
+                let weight = ch[CHAN_FILTER_MIN]
+                total = total + channel_route_weighted(ch, signal, weight)
+            }
+            if ctype == CHAN_DIRECT {
+                total = total + channel_route(ch, signal)
+            }
+            if ctype == CHAN_BROADCAST {
+                total = total + channel_route(ch, signal)
+            }
+        }
+        i = i + 1
+    }
+    return total
 }

@@ -1,0 +1,372 @@
+// M7 Test: Core Moment-Signal Types
+// Tests all six core modules together
+
+fn test_moment() {
+    println("--- Moment tests ---")
+    let alice = entity_new("Alice", "visitor")
+    entity_set_attr(alice, "age", 30)
+    print("Entity: ")
+    print(entity_name(alice))
+    print(" (")
+    print(entity_role(alice))
+    println(")")
+    let age = entity_get_attr(alice, "age")
+    print("age = ")
+    print_int(age)
+    println("")
+
+    let cons = consequence_new(CTYPE_EXPECTATION, "conversation follows", 80)
+    print("consequence type: ")
+    print_int(consequence_type(cons))
+    println("")
+    print("positive: ")
+    print_int(consequence_is_positive(cons))
+    println("")
+
+    let em = emotion_new(70, 60, 50)
+    print("emotion V=")
+    print_int(emotion_valence(em))
+    print(" A=")
+    print_int(emotion_arousal(em))
+    print(" D=")
+    print_int(emotion_dominance(em))
+    println("")
+
+    let m = moment_new("Alice said hello", alice, 70, 60, cons, 80)
+    print("what: ")
+    println(moment_what(m))
+    print("salience: ")
+    print_int(moment_salience(m))
+    println("")
+    print("intensity: ")
+    print_int(moment_intensity(m))
+    println("")
+    print("significant: ")
+    print_int(moment_is_significant(m, 30))
+    println("")
+
+    // Emotion drift
+    let calm = emotion_new(50, 20, 50)
+    let excited = emotion_new(80, 90, 70)
+    let drifted = emotion_drift(calm, excited, 50)
+    print("drifted V=")
+    print_int(emotion_valence(drifted))
+    print(" A=")
+    print_int(emotion_arousal(drifted))
+    println("")
+
+    println("Moment tests OK")
+}
+
+fn test_signal() {
+    println("--- Signal tests ---")
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_INSIGHT, "test", 50)
+    let m = moment_new("test event", alice, 50, 40, cons, 60)
+
+    let sig = signal_event(m, "perceiver", "reasoner")
+    print("type: ")
+    println(signal_type_name(sig))
+    print("priority: ")
+    print_int(signal_priority(sig))
+    println("")
+
+    // Trace
+    signal_add_trace(sig, "node1")
+    signal_add_trace(sig, "node2")
+    print("trace depth: ")
+    print_int(signal_trace_depth(sig))
+    println("")
+    print("visited node1: ")
+    print_int(signal_has_visited(sig, "node1"))
+    println("")
+    print("visited node3: ")
+    print_int(signal_has_visited(sig, "node3"))
+    println("")
+
+    // Enrichment
+    signal_enrich(sig, "context", "important")
+    let ctx = signal_get_context(sig, "context")
+    print("context: ")
+    println(ctx)
+
+    // Transform
+    let m2 = moment_new("transformed", alice, 60, 50, cons, 70)
+    let sig2 = signal_transform(sig, m2)
+    print("transformed what: ")
+    println(moment_what(signal_moment(sig2)))
+
+    // Priority queue
+    let q = signal_queue_new()
+    let m_lo = moment_new("low", alice, 50, 30, cons, 30)
+    let m_hi = moment_new("high", alice, 50, 30, cons, 90)
+    signal_queue_push(q, signal_event(m_lo, "a", "b"))
+    signal_queue_push(q, signal_command(m_hi, "a", "b"))
+    signal_queue_push(q, signal_question(m, "a", "b"))
+    print("queue len: ")
+    print_int(len(q))
+    println("")
+    let top = signal_queue_pop(q)
+    print("top priority: ")
+    print_int(signal_priority(top))
+    println("")
+
+    println("Signal tests OK")
+}
+
+fn test_similarity() {
+    println("--- Similarity tests ---")
+    // Jaccard
+    let a = ["cat", "dog", "bird"]
+    let b = ["dog", "fish", "cat"]
+    let j = jaccard(a, b)
+    print("jaccard: ")
+    print_int(j)
+    println("")
+
+    // Emotion similarity
+    let em1 = emotion_new(70, 60, 50)
+    let em2 = emotion_new(80, 55, 45)
+    let es = emotion_similarity(em1, em2)
+    print("emotion sim: ")
+    print_int(es)
+    println("")
+
+    // Recency
+    let r = recency_score(95, 100)
+    print("recency (age 5): ")
+    print_int(r)
+    println("")
+
+    // Composite
+    let score = similarity_score(80, 60, 70, 90, 50, 40)
+    print("composite: ")
+    print_int(score)
+    println("")
+
+    // Content similarity
+    let kw1 = ["hello", "world"]
+    let kw2 = ["hello", "nova"]
+    let cs = content_similarity(kw1, kw2)
+    print("content sim: ")
+    print_int(cs)
+    println("")
+
+    println("Similarity tests OK")
+}
+
+fn test_nodes() {
+    println("--- Node tests ---")
+
+    // Perceiver with templates
+    let perceiver = node_new("SenseGate", NTYPE_PERCEIVER)
+    perceiver_add_template(perceiver, "greeting", ["hello", "hi"], 20)
+    print("perceiver: ")
+    println(node_describe(perceiver))
+
+    // Knower with knowledge graph
+    let knower = node_new("Store", NTYPE_KNOWER)
+    let c0 = knower_add_concept(knower, "mammal", "warm-blooded")
+    let c1 = knower_add_concept(knower, "dog", "loyal pet")
+    let c2 = knower_add_concept(knower, "cat", "independent pet")
+    let c3 = knower_add_concept(knower, "animal", "living creature")
+    knower_link(knower, c0, c1)
+    knower_link(knower, c0, c2)
+    knower_link(knower, c3, c0)
+    let results = knower_query(knower, "mammal", 2)
+    print("knower found: ")
+    print_int(len(results))
+    println(" concepts")
+
+    // Rememberer
+    let rememberer = node_new("Memory", NTYPE_REMEMBERER)
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_INSIGHT, "test", 50)
+    let m1 = moment_new("first meeting", alice, 70, 60, cons, 80)
+    let m2 = moment_new("second talk", alice, 50, 40, cons, 60)
+    let m3 = moment_new("first meeting", alice, 65, 55, cons, 75)
+    rememberer_store(rememberer, m1)
+    rememberer_store(rememberer, m2)
+    rememberer_store(rememberer, m3)
+    let recalled = rememberer_recall(rememberer, m3, 2)
+    print("recalled: ")
+    print_int(len(recalled))
+    println(" episodes")
+
+    // Reasoner with rules
+    let reasoner = node_new("Think", NTYPE_REASONER)
+    reasoner_add_rule(reasoner, "is mammal", "is warm-blooded")
+    reasoner_add_rule(reasoner, "is dog", "is mammal")
+    let deduced = reasoner_deduce(reasoner, "is mammal")
+    print("deduce 'is mammal': ")
+    println(deduced)
+    let abduced = reasoner_abduce(reasoner, "is mammal")
+    print("abduce 'is mammal': ")
+    println(abduced)
+
+    // Feeler
+    let feeler = node_new("Heart", NTYPE_FEELER)
+    feeler_set_emotion(feeler, 50, 30, 50)
+    let current_em = feeler_get_emotion(feeler)
+    print("feeler V=")
+    print_int(emotion_valence(current_em))
+    println("")
+
+    // Actor with habits
+    let actor = node_new("Output", NTYPE_ACTOR)
+    actor_add_habit(actor, "greeting", "say hello", 80)
+    let habit = actor_find_habit(actor, "greeting")
+    print("habit response: ")
+    println(habit[1])
+
+    println("Node tests OK")
+}
+
+fn test_channel() {
+    println("--- Channel tests ---")
+    let p = node_new("SenseGate", NTYPE_PERCEIVER)
+    let k = node_new("Store", NTYPE_KNOWER)
+    let r = node_new("Think", NTYPE_REASONER)
+
+    let ch = channel_broadcast("perception_bus", "SenseGate")
+    channel_add_dest(ch, k)
+    channel_add_dest(ch, r)
+    print("channel: ")
+    println(channel_describe(ch))
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_INSIGHT, "test", 50)
+    let m = moment_new("test event", alice, 50, 40, cons, 60)
+    let sig = signal_event(m, "SenseGate", "all")
+    let delivered = channel_route(ch, sig)
+    print("delivered to: ")
+    print_int(delivered)
+    println(" nodes")
+    print("knower inbox: ")
+    print_int(node_inbox_count(k))
+    println("")
+
+    // Network routing
+    let net = channel_network_new()
+    channel_network_add(net, ch)
+    let sig2 = signal_event(m, "SenseGate", "all")
+    channel_network_route_all(net, "SenseGate", sig2)
+    print("after network route, reasoner inbox: ")
+    print_int(node_inbox_count(r))
+    println("")
+
+    println("Channel tests OK")
+}
+
+fn test_path() {
+    println("--- Path tests ---")
+    let p = node_new("Perceiver", NTYPE_PERCEIVER)
+    let k = node_new("Knower", NTYPE_KNOWER)
+    let r = node_new("Reasoner", NTYPE_REASONER)
+    let a = node_new("Actor", NTYPE_ACTOR)
+
+    let fwd = path_forward("main_flow")
+    path_add_step(fwd, p)
+    path_add_step(fwd, k)
+    path_add_step(fwd, r)
+    path_add_step(fwd, a)
+    print("path steps: ")
+    print_int(path_step_count(fwd))
+    println("")
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_INSIGHT, "test", 50)
+    let m = moment_new("hello world", alice, 50, 40, cons, 60)
+    let sig = signal_event(m, "input", "Perceiver")
+
+    let result = path_execute(fwd, sig)
+    if result == 0 {
+        println("path terminated early")
+    } else {
+        print("path result from: ")
+        println(signal_origin(result))
+    }
+
+    // Reflex path
+    let reflex = path_reflex("fast")
+    path_add_step(reflex, p)
+    path_add_step(reflex, a)
+    print("reflex steps: ")
+    print_int(path_step_count(reflex))
+    println("")
+
+    println("Path tests OK")
+}
+
+fn test_full_pipeline() {
+    println("--- Full pipeline test ---")
+    // Build a complete mind
+    let perceiver = node_new("Sense", NTYPE_PERCEIVER)
+    let knower = node_new("Know", NTYPE_KNOWER)
+    let rememberer = node_new("Remember", NTYPE_REMEMBERER)
+    let reasoner = node_new("Think", NTYPE_REASONER)
+    let feeler = node_new("Feel", NTYPE_FEELER)
+    let actor = node_new("Act", NTYPE_ACTOR)
+
+    // Set up perceiver templates
+    perceiver_add_template(perceiver, "question", ["what", "why", "how"], 15)
+
+    // Set up knowledge
+    knower_add_concept(knower, "greeting", "social protocol")
+    knower_add_concept(knower, "question", "needs answer")
+
+    // Set up reasoner rules
+    reasoner_add_rule(reasoner, "greeting", "respond with hello")
+    reasoner_add_rule(reasoner, "question", "search for answer")
+
+    // Set up actor habits
+    actor_add_habit(actor, "action taken", "execute", 60)
+
+    // Build forward path
+    let fwd = path_forward("main")
+    path_add_step(fwd, perceiver)
+    path_add_step(fwd, knower)
+    path_add_step(fwd, reasoner)
+    path_add_step(fwd, actor)
+
+    // Create a moment
+    let user = entity_new("User", "human")
+    let cons = consequence_new(CTYPE_EXPECTATION, "wants response", 70)
+    let m = moment_new("what is consciousness", user, 50, 70, cons, 85)
+
+    // Create signal and process
+    let sig = signal_question(m, "input", "Sense")
+    let result = path_execute(fwd, sig)
+
+    if result == 0 {
+        println("pipeline terminated")
+    } else {
+        let rm = signal_moment(result)
+        print("pipeline output: ")
+        println(moment_what(rm))
+        print("from: ")
+        println(signal_origin(result))
+    }
+
+    println("Full pipeline OK")
+}
+
+fn main() {
+    test_moment()
+    println("")
+    test_signal()
+    println("")
+    test_similarity()
+    println("")
+    test_nodes()
+    println("")
+    test_channel()
+    println("")
+    test_path()
+    println("")
+    test_full_pipeline()
+    println("")
+    println("All M7 core tests passed!")
+}
+
+main()

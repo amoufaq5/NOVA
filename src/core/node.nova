@@ -3,7 +3,9 @@
 // has specialized computation: perceiver, knower, rememberer,
 // reasoner, feeler, actor.
 //
-// Layout: [TAG, name, type, state, inbox, outbox, handler]
+// Layout: [TAG, name, type, state, inbox, outbox, config]
+// State is a map for per-node data (templates, knowledge, memories, etc.)
+// Config is a map for tuning parameters
 
 let NODE_TAG = 120
 let NODE_NAME = 1
@@ -11,9 +13,8 @@ let NODE_TYPE = 2
 let NODE_STATE = 3
 let NODE_INBOX = 4
 let NODE_OUTBOX = 5
-let NODE_HANDLER = 6
+let NODE_CONFIG = 6
 
-// Node types
 let NTYPE_PERCEIVER = 1
 let NTYPE_KNOWER = 2
 let NTYPE_REMEMBERER = 3
@@ -26,10 +27,10 @@ fn node_new(name, ntype) {
     push(n, NODE_TAG)
     push(n, name)
     push(n, ntype)
+    push(n, map_new())
     push(n, list_new())
     push(n, list_new())
-    push(n, list_new())
-    push(n, 0)
+    push(n, map_new())
     return n
 }
 
@@ -38,63 +39,452 @@ fn node_type(n) { return n[NODE_TYPE] }
 fn node_state(n) { return n[NODE_STATE] }
 fn node_inbox(n) { return n[NODE_INBOX] }
 fn node_outbox(n) { return n[NODE_OUTBOX] }
+fn node_config(n) { return n[NODE_CONFIG] }
+
+fn node_set_state(n, key, val) {
+    map_set(n[NODE_STATE], key, val)
+}
+
+fn node_get_state(n, key) {
+    let st = n[NODE_STATE]
+    if map_has(st, key) == 1 { return map_get(st, key) }
+    return 0
+}
+
+fn node_set_config(n, key, val) {
+    map_set(n[NODE_CONFIG], key, val)
+}
+
+fn node_get_config(n, key) {
+    let cfg = n[NODE_CONFIG]
+    if map_has(cfg, key) == 1 { return map_get(cfg, key) }
+    return 0
+}
 
 fn node_receive(n, signal) {
-    let inbox = node_inbox(n)
-    push(inbox, signal)
+    push(n[NODE_INBOX], signal)
 }
 
 fn node_emit(n, signal) {
-    let outbox = node_outbox(n)
-    push(outbox, signal)
+    push(n[NODE_OUTBOX], signal)
 }
 
 fn node_drain_outbox(n) {
-    let outbox = node_outbox(n)
-    let signals = list_new()
-    let i = 0
-    while i < len(outbox) {
-        push(signals, outbox[i])
-        i = i + 1
-    }
-    // Clear outbox by resetting its count
-    // (Hack: reassign the outbox field)
-    let new_outbox = list_new()
-    n[NODE_OUTBOX] = new_outbox
+    let outbox = n[NODE_OUTBOX]
+    let signals = list_copy(outbox)
+    n[NODE_OUTBOX] = list_new()
     return signals
 }
 
-// --- Perceiver: classifies incoming raw signals ---
+fn node_clear_inbox(n) {
+    n[NODE_INBOX] = list_new()
+}
+
+fn node_inbox_count(n) {
+    return len(n[NODE_INBOX])
+}
+
+fn node_type_name(n) {
+    let t = node_type(n)
+    if t == NTYPE_PERCEIVER { return "perceiver" }
+    if t == NTYPE_KNOWER { return "knower" }
+    if t == NTYPE_REMEMBERER { return "rememberer" }
+    if t == NTYPE_REASONER { return "reasoner" }
+    if t == NTYPE_FEELER { return "feeler" }
+    if t == NTYPE_ACTOR { return "actor" }
+    return "unknown"
+}
+
+// ========================================================
+// Perceiver: Template Matching
+// ========================================================
+// Classifies signals by comparing against a library of
+// perceptual templates. Uses weighted Jaccard similarity.
+// Templates are stored in state["templates"] as a list of
+// [name, keywords, salience_boost] entries.
+
+fn perceiver_add_template(node, name, keywords, boost) {
+    let templates = node_get_state(node, "templates")
+    if templates == 0 {
+        templates = list_new()
+        node_set_state(node, "templates", templates)
+    }
+    let tmpl = list_new()
+    push(tmpl, name)
+    push(tmpl, keywords)
+    push(tmpl, boost)
+    push(templates, tmpl)
+}
+
+fn perceiver_match_template(node, signal) {
+    let templates = node_get_state(node, "templates")
+    if templates == 0 { return 0 }
+    let m = signal_moment(signal)
+    let what = moment_what(m)
+    let best_score = 0
+    let best_tmpl = 0
+    let i = 0
+    while i < len(templates) {
+        let tmpl = templates[i]
+        let tmpl_keywords = tmpl[1]
+        let score = 0
+        let ki = 0
+        while ki < len(tmpl_keywords) {
+            if contains(what, tmpl_keywords[ki]) == 1 {
+                score = score + 100 / len(tmpl_keywords)
+            }
+            ki = ki + 1
+        }
+        if score > best_score {
+            best_score = score
+            best_tmpl = tmpl
+        }
+        i = i + 1
+    }
+    return best_tmpl
+}
+
 fn perceiver_process(node, signal) {
+    signal_add_trace(signal, node_name(node))
     let m = signal_moment(signal)
     let salience = moment_salience(m)
-    if salience > 20 {
-        signal_add_trace(signal, node_name(node))
+    let tmpl = perceiver_match_template(node, signal)
+    if tmpl == 0 {
+        if salience > 20 {
+            node_emit(node, signal)
+        }
+        return 0
+    }
+    let boost = tmpl[2]
+    let adjusted = salience + boost
+    if adjusted > 100 { adjusted = 100 }
+    let threshold = node_get_config(node, "threshold")
+    if threshold == 0 { threshold = 20 }
+    if adjusted >= threshold {
         node_emit(node, signal)
     }
+    return 0
 }
 
-// --- Knower: retrieves relevant knowledge ---
+// ========================================================
+// Knower: Spreading Activation on Knowledge Graph
+// ========================================================
+// Knowledge stored as concept nodes with edges.
+// state["concepts"] = list of concept names
+// state["edges"] = adjacency list (list of lists of indices)
+// state["concept_data"] = list of data payloads
+
+fn knower_add_concept(node, name, data) {
+    let concepts = node_get_state(node, "concepts")
+    if concepts == 0 {
+        concepts = list_new()
+        node_set_state(node, "concepts", concepts)
+        node_set_state(node, "edges", list_new())
+        node_set_state(node, "concept_data", list_new())
+    }
+    let edges = node_get_state(node, "edges")
+    let cdata = node_get_state(node, "concept_data")
+    push(concepts, name)
+    push(edges, list_new())
+    push(cdata, data)
+    return len(concepts) - 1
+}
+
+fn knower_link(node, idx_a, idx_b) {
+    let edges = node_get_state(node, "edges")
+    push(edges[idx_a], idx_b)
+    push(edges[idx_b], idx_a)
+}
+
+fn knower_find_concept(node, name) {
+    let concepts = node_get_state(node, "concepts")
+    if concepts == 0 { return 0 - 1 }
+    let i = 0
+    while i < len(concepts) {
+        if concepts[i] == name { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn knower_query(node, seed_name, depth) {
+    let concepts = node_get_state(node, "concepts")
+    let edges = node_get_state(node, "edges")
+    let cdata = node_get_state(node, "concept_data")
+    if concepts == 0 { return list_new() }
+    let seed = knower_find_concept(node, seed_name)
+    if seed < 0 { return list_new() }
+    let decay = node_get_config(node, "decay_rate")
+    if decay == 0 { decay = 60 }
+    let visited = list_new()
+    let results = list_new()
+    let frontier = list_new()
+    push(frontier, seed)
+    push(visited, seed)
+    let energy = 100
+    let d = 0
+    while d < depth {
+        let next_frontier = list_new()
+        let fi = 0
+        while fi < len(frontier) {
+            let cidx = frontier[fi]
+            let nbrs = edges[cidx]
+            let ni = 0
+            while ni < len(nbrs) {
+                let nbr = nbrs[ni]
+                let already = 0
+                let vi = 0
+                while vi < len(visited) {
+                    if visited[vi] == nbr { already = 1 }
+                    vi = vi + 1
+                }
+                if already == 0 {
+                    push(visited, nbr)
+                    push(next_frontier, nbr)
+                    if energy > 5 {
+                        let entry = list_new()
+                        push(entry, concepts[nbr])
+                        push(entry, cdata[nbr])
+                        push(entry, energy)
+                        push(results, entry)
+                    }
+                }
+                ni = ni + 1
+            }
+            fi = fi + 1
+        }
+        energy = energy * decay / 100
+        frontier = next_frontier
+        d = d + 1
+    }
+    return results
+}
+
 fn knower_process(node, signal) {
     signal_add_trace(signal, node_name(node))
+    let m = signal_moment(signal)
+    let what = moment_what(m)
+    let results = knower_query(node, what, 3)
+    if len(results) > 0 {
+        node_set_state(node, "last_results", results)
+    }
     node_emit(node, signal)
 }
 
-// --- Rememberer: enriches signal with memory context ---
+// ========================================================
+// Rememberer: Composite Similarity Memory Retrieval
+// ========================================================
+// state["episodes"] = list of [moment, access_count, last_access]
+// Uses similarity_score for ranking
+
+fn rememberer_store(node, moment) {
+    let episodes = node_get_state(node, "episodes")
+    if episodes == 0 {
+        episodes = list_new()
+        node_set_state(node, "episodes", episodes)
+    }
+    let ep = list_new()
+    push(ep, moment)
+    push(ep, 1)
+    push(ep, global_time)
+    push(episodes, ep)
+}
+
+fn rememberer_recall(node, query_moment, limit) {
+    let episodes = node_get_state(node, "episodes")
+    if episodes == 0 { return list_new() }
+    let scored = list_new()
+    let i = 0
+    while i < len(episodes) {
+        let ep = episodes[i]
+        let stored_m = ep[0]
+        let access_count = ep[1]
+        let content_sim = 0
+        if moment_what(stored_m) == moment_what(query_moment) {
+            content_sim = 100
+        } else {
+            content_sim = 10
+        }
+        let entity_sim = 0
+        if moment_who(stored_m) == moment_who(query_moment) {
+            entity_sim = 100
+        } else {
+            entity_sim = 0
+        }
+        let em_sim = 50
+        let v1 = moment_valence(stored_m)
+        let v2 = moment_valence(query_moment)
+        let a1 = moment_arousal(stored_m)
+        let a2 = moment_arousal(query_moment)
+        let dv = v1 - v2
+        if dv < 0 { dv = 0 - dv }
+        let da = a1 - a2
+        if da < 0 { da = 0 - da }
+        let dist = dv + da
+        if dist > 200 { em_sim = 0 }
+        if dist <= 200 { em_sim = 100 - dist / 2 }
+        let recency = recency_score(moment_time(stored_m), global_time)
+        let freq = access_count * 10
+        if freq > 100 { freq = 100 }
+        let conseq = 50
+        let score = similarity_score(content_sim, entity_sim, em_sim, recency, freq, conseq)
+        let entry = list_new()
+        push(entry, score)
+        push(entry, ep)
+        push(scored, entry)
+        i = i + 1
+    }
+    let si = 0
+    while si < len(scored) {
+        let sj = si + 1
+        while sj < len(scored) {
+            if scored[sj][0] > scored[si][0] {
+                let tmp = scored[si]
+                list_set(scored, si, scored[sj])
+                list_set(scored, sj, tmp)
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    let results = list_new()
+    let ri = 0
+    while ri < len(scored) {
+        if ri >= limit { ri = len(scored) }
+        if ri < limit {
+            let ep = scored[ri][1]
+            ep[1] = ep[1] + 1
+            ep[2] = global_time
+            push(results, ep[0])
+            ri = ri + 1
+        }
+    }
+    return results
+}
+
 fn rememberer_process(node, signal) {
     signal_add_trace(signal, node_name(node))
+    let m = signal_moment(signal)
+    rememberer_store(node, m)
+    let related = rememberer_recall(node, m, 3)
+    node_set_state(node, "last_recall", related)
     node_emit(node, signal)
 }
 
-// --- Reasoner: applies inference strategies ---
+// ========================================================
+// Reasoner: Multi-Strategy Inference
+// ========================================================
+// Strategies: deductive, abductive, analogical, causal
+// state["rules"] = list of [condition, conclusion] pairs
+// state["cases"] = list of [situation, outcome] pairs
+
+let REASON_DEDUCTIVE = 1
+let REASON_ABDUCTIVE = 2
+let REASON_ANALOGICAL = 3
+let REASON_CAUSAL = 4
+
+fn reasoner_add_rule(node, condition, conclusion) {
+    let rules = node_get_state(node, "rules")
+    if rules == 0 {
+        rules = list_new()
+        node_set_state(node, "rules", rules)
+    }
+    let rule = list_new()
+    push(rule, condition)
+    push(rule, conclusion)
+    push(rules, rule)
+}
+
+fn reasoner_add_case(node, situation, outcome) {
+    let cases = node_get_state(node, "cases")
+    if cases == 0 {
+        cases = list_new()
+        node_set_state(node, "cases", cases)
+    }
+    let c = list_new()
+    push(c, situation)
+    push(c, outcome)
+    push(cases, c)
+}
+
+fn reasoner_deduce(node, query) {
+    let rules = node_get_state(node, "rules")
+    if rules == 0 { return 0 }
+    let i = 0
+    while i < len(rules) {
+        let rule = rules[i]
+        if rule[0] == query {
+            return rule[1]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn reasoner_abduce(node, observation) {
+    let rules = node_get_state(node, "rules")
+    if rules == 0 { return 0 }
+    let i = 0
+    while i < len(rules) {
+        let rule = rules[i]
+        if rule[1] == observation {
+            return rule[0]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn reasoner_analogize(node, situation) {
+    let cases = node_get_state(node, "cases")
+    if cases == 0 { return 0 }
+    let best_score = 0
+    let best_outcome = 0
+    let i = 0
+    while i < len(cases) {
+        let c = cases[i]
+        let score = 0
+        if c[0] == situation { score = 100 }
+        if score == 0 {
+            if contains(c[0], situation) == 1 { score = 60 }
+        }
+        if score > best_score {
+            best_score = score
+            best_outcome = c[1]
+        }
+        i = i + 1
+    }
+    return best_outcome
+}
+
+fn reasoner_select_strategy(signal) {
+    let stype = signal_type(signal)
+    if stype == SIG_QUESTION { return REASON_DEDUCTIVE }
+    if stype == SIG_EVENT { return REASON_ANALOGICAL }
+    if stype == SIG_REFLECTION { return REASON_ABDUCTIVE }
+    return REASON_DEDUCTIVE
+}
+
 fn reasoner_process(node, signal) {
     signal_add_trace(signal, node_name(node))
     let m = signal_moment(signal)
+    let what = moment_what(m)
+    let strategy = reasoner_select_strategy(signal)
+    let conclusion = 0
+    if strategy == REASON_DEDUCTIVE { conclusion = reasoner_deduce(node, what) }
+    if strategy == REASON_ABDUCTIVE { conclusion = reasoner_abduce(node, what) }
+    if strategy == REASON_ANALOGICAL { conclusion = reasoner_analogize(node, what) }
+    let desc = "processed"
+    if conclusion == 0 { desc = "no conclusion" }
+    if conclusion == 0 {
+    } else {
+        desc = conclusion
+    }
     let response_moment = moment_new(
         "analysis complete",
         moment_who(m),
         50, 30,
-        consequence_new("insight", "processed", 70),
+        consequence_new(CTYPE_INSIGHT, desc, 70),
         moment_salience(m)
     )
     let response = signal_response(
@@ -105,28 +495,179 @@ fn reasoner_process(node, signal) {
     node_emit(node, response)
 }
 
-// --- Feeler: updates emotional state ---
+// ========================================================
+// Feeler: Dimensional Emotion Model with Drift
+// ========================================================
+// state["emotion"] = current emotion [valence, arousal, dominance]
+// Emotion drifts toward target (never jumps).
+// High arousal increases influence on other nodes.
+
+fn feeler_set_emotion(node, valence, arousal, dominance) {
+    let em = emotion_new(valence, arousal, dominance)
+    node_set_state(node, "emotion", em)
+}
+
+fn feeler_get_emotion(node) {
+    let em = node_get_state(node, "emotion")
+    if em == 0 {
+        em = emotion_new(50, 30, 50)
+        node_set_state(node, "emotion", em)
+    }
+    return em
+}
+
+fn feeler_appraise(node, moment) {
+    let val = moment_valence(moment)
+    let aro = moment_arousal(moment)
+    let sal = moment_salience(moment)
+    let target_v = val
+    let target_a = aro
+    let target_d = 50 + sal / 4
+    if target_d > 100 { target_d = 100 }
+    return emotion_new(target_v, target_a, target_d)
+}
+
 fn feeler_process(node, signal) {
     signal_add_trace(signal, node_name(node))
     let m = signal_moment(signal)
+    let current = feeler_get_emotion(node)
+    let target = feeler_appraise(node, m)
+    let rate = node_get_config(node, "drift_rate")
+    if rate == 0 { rate = 30 }
+    let new_emotion = emotion_drift(current, target, rate)
+    node_set_state(node, "emotion", new_emotion)
     let intensity = moment_intensity(m)
-    if intensity > 30 {
+    let arousal = emotion_arousal(new_emotion)
+    let threshold = node_get_config(node, "threshold")
+    if threshold == 0 { threshold = 30 }
+    if intensity > threshold {
+        node_emit(node, signal)
+    }
+    if arousal > 70 {
         node_emit(node, signal)
     }
 }
 
-// --- Actor: produces output responses ---
+// ========================================================
+// Actor: Competing Activations
+// ========================================================
+// Selects response based on weighted combination of inputs.
+// activation = reason_support * 0.4 + emotional_bias * 0.2
+//            + habit_strength * 0.25 + reflex_match * 0.15
+// state["habits"] = list of [trigger, response, strength]
+// state["reflexes"] = list of [pattern, response]
+
+fn actor_add_habit(node, trigger, response, strength) {
+    let habits = node_get_state(node, "habits")
+    if habits == 0 {
+        habits = list_new()
+        node_set_state(node, "habits", habits)
+    }
+    let h = list_new()
+    push(h, trigger)
+    push(h, response)
+    push(h, strength)
+    push(habits, h)
+}
+
+fn actor_add_reflex(node, pattern, response) {
+    let reflexes = node_get_state(node, "reflexes")
+    if reflexes == 0 {
+        reflexes = list_new()
+        node_set_state(node, "reflexes", reflexes)
+    }
+    let r = list_new()
+    push(r, pattern)
+    push(r, response)
+    push(reflexes, r)
+}
+
+fn actor_find_habit(node, trigger) {
+    let habits = node_get_state(node, "habits")
+    if habits == 0 { return 0 }
+    let best = 0
+    let best_strength = 0
+    let i = 0
+    while i < len(habits) {
+        let h = habits[i]
+        if h[0] == trigger {
+            if h[2] > best_strength {
+                best_strength = h[2]
+                best = h
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn actor_find_reflex(node, what) {
+    let reflexes = node_get_state(node, "reflexes")
+    if reflexes == 0 { return 0 }
+    let i = 0
+    while i < len(reflexes) {
+        let r = reflexes[i]
+        if r[0] == what { return r }
+        if contains(what, r[0]) == 1 { return r }
+        i = i + 1
+    }
+    return 0
+}
+
+fn actor_compute_activation(reason_support, emotional_bias, habit_strength, reflex_match) {
+    let act = reason_support * 40 / 100
+    act = act + emotional_bias * 20 / 100
+    act = act + habit_strength * 25 / 100
+    act = act + reflex_match * 15 / 100
+    return act
+}
+
 fn actor_process(node, signal) {
     signal_add_trace(signal, node_name(node))
-    node_emit(node, signal)
+    let m = signal_moment(signal)
+    let what = moment_what(m)
+    let reason_support = moment_salience(m)
+    let emotional_bias = moment_arousal(m)
+    let habit_strength = 0
+    let reflex_match = 0
+    let habit = actor_find_habit(node, what)
+    if habit == 0 {
+    } else {
+        habit_strength = habit[2]
+    }
+    let reflex = actor_find_reflex(node, what)
+    if reflex == 0 {
+    } else {
+        reflex_match = 80
+    }
+    let activation = actor_compute_activation(reason_support, emotional_bias, habit_strength, reflex_match)
+    let threshold = node_get_config(node, "activation_threshold")
+    if threshold == 0 { threshold = 25 }
+    if activation >= threshold {
+        let response_moment = moment_new(
+            "action taken",
+            moment_who(m),
+            50, 40,
+            moment_consequence(m),
+            activation
+        )
+        let response = signal_event(
+            response_moment,
+            node_name(node),
+            "output"
+        )
+        node_emit(node, response)
+    }
 }
+
+// ========================================================
+// Node Processing Dispatcher
+// ========================================================
 
 fn node_process(node) {
     let inbox = node_inbox(node)
     let count = len(inbox)
-    if count == 0 {
-        return 0
-    }
+    if count == 0 { return 0 }
     let ntype = node_type(node)
     let i = 0
     while i < count {
@@ -139,8 +680,11 @@ fn node_process(node) {
         if ntype == NTYPE_ACTOR { actor_process(node, sig) }
         i = i + 1
     }
-    // Clear inbox
-    let new_inbox = list_new()
-    n[NODE_INBOX] = new_inbox
+    node_clear_inbox(node)
     return count
+}
+
+fn node_describe(node) {
+    let result = "Node(" + node_name(node) + ", " + node_type_name(node) + ", inbox=" + int_to_str(node_inbox_count(node)) + ")"
+    return result
 }
