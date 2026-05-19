@@ -11,6 +11,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/compiler/lexer.nova \
                src/compiler/parser.nova \
                src/compiler/codegen.nova \
+               src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
 .PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos

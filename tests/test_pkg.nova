@@ -1,0 +1,32 @@
+// Test: Package management system
+// Tests package manifest parsing, std imports, and import deduplication
+
+import "std/math"
+import "std/set"
+
+// Test math package
+assert(math_sqrt(25) == 5, "math_sqrt")
+assert(math_pow(3, 4) == 81, "math_pow")
+assert(math_gcd(24, 36) == 12, "math_gcd")
+assert(math_min(10, 20) == 10, "math_min")
+assert(math_max(10, 20) == 20, "math_max")
+assert(math_abs(0 - 7) == 7, "math_abs")
+assert(math_is_prime(17) == 1, "is_prime_17")
+assert(math_is_prime(4) == 0, "is_prime_4")
+assert(math_factorial(5) == 120, "math_factorial")
+println("Math package: OK")
+
+// Test set package
+let s1 = set_new()
+set_add(s1, 10)
+set_add(s1, 20)
+set_add(s1, 30)
+set_add(s1, 10)
+assert(set_size(s1) == 3, "set_size")
+assert(set_has(s1, 20) == 1, "set_has_20")
+assert(set_has(s1, 99) == 0, "set_has_99")
+set_remove(s1, 20)
+assert(set_size(s1) == 2, "set_remove")
+println("Set package: OK")
+
+println("All package tests passed!")

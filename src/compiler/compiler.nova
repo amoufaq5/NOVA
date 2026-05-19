@@ -28,6 +28,131 @@ fn starts_with_str(s, prefix) {
     return 0
 }
 
+let nova_root_dir = ""
+let imported_files = 0
+
+fn init_import_tracker() {
+    imported_files = list_new()
+}
+
+fn already_imported(fpath) {
+    let i = 0
+    while i < len(imported_files) {
+        if imported_files[i] == fpath { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn extract_import_path(line) {
+    let q1 = 0 - 1
+    let i = 7
+    while i < len(line) {
+        if char_at(line, i) == 34 {
+            q1 = i
+            i = len(line)
+        } else {
+            i = i + 1
+        }
+    }
+    if q1 < 0 { return "" }
+    let q2 = 0 - 1
+    let j = q1 + 1
+    while j < len(line) {
+        if char_at(line, j) == 34 {
+            q2 = j
+            j = len(line)
+        } else {
+            j = j + 1
+        }
+    }
+    if q2 < 0 { return "" }
+    return substr(line, q1 + 1, q2 - q1 - 1)
+}
+
+fn resolve_import(imp_path, base_dir) {
+    if len(imp_path) > 4 {
+        if substr(imp_path, 0, 4) == "std/" {
+            let pkg_name = substr(imp_path, 4, len(imp_path) - 4)
+            pkg_init_std()
+            if is_std_package(pkg_name) == 1 {
+                let local_path = "nova_packages/" + pkg_name + ".nova"
+                let local_content = read_file(local_path)
+                if local_content == 0 {
+                } else {
+                    if already_imported(local_path) == 0 {
+                        push(imported_files, local_path)
+                        return local_content
+                    }
+                    return ""
+                }
+                if len(nova_root_dir) > 0 {
+                    let std_path = nova_root_dir + "/src/runtime/" + pkg_name + ".nova"
+                    let std_content = read_file(std_path)
+                    if std_content == 0 {
+                    } else {
+                        if already_imported(std_path) == 0 {
+                            push(imported_files, std_path)
+                            return std_content
+                        }
+                        return ""
+                    }
+                }
+                let fallback = "src/runtime/" + pkg_name + ".nova"
+                let fb_content = read_file(fallback)
+                if fb_content == 0 {
+                } else {
+                    if already_imported(fallback) == 0 {
+                        push(imported_files, fallback)
+                        return fb_content
+                    }
+                    return ""
+                }
+                print("Error: std package '")
+                print(pkg_name)
+                println("' not found")
+                exit(1)
+            }
+        }
+    }
+    let pkg_path = "nova_packages/" + imp_path
+    if len(imp_path) < 6 {
+        pkg_path = "nova_packages/" + imp_path + ".nova"
+    } else {
+        let ext = substr(imp_path, len(imp_path) - 5, 5)
+        if ext == ".nova" {
+            pkg_path = "nova_packages/" + imp_path
+        } else {
+            pkg_path = "nova_packages/" + imp_path + ".nova"
+        }
+    }
+    let pkg_content = read_file(pkg_path)
+    if pkg_content == 0 {
+    } else {
+        if already_imported(pkg_path) == 0 {
+            push(imported_files, pkg_path)
+            return pkg_content
+        }
+        return ""
+    }
+    let imp_full = concat(base_dir, concat("/", imp_path))
+    if already_imported(imp_full) == 0 {
+        let content = read_file(imp_full)
+        if content == 0 {
+            print("Error: cannot import '")
+            print(imp_path)
+            println("'")
+            println("  Searched:")
+            println("    " + pkg_path)
+            println("    " + imp_full)
+            exit(1)
+        }
+        push(imported_files, imp_full)
+        return content
+    }
+    return ""
+}
+
 fn process_line(line, base_dir) {
     if len(line) < 9 {
         return line
@@ -35,40 +160,9 @@ fn process_line(line, base_dir) {
     if starts_with_str(line, "import ") == 0 {
         return line
     }
-    // Find the first double quote
-    let q1 = 0 - 1
-    let i = 7
-    while i < len(line) {
-        if char_at(line, i) == 34 {
-            q1 = i
-            i = len(line)  // break
-        } else {
-            i = i + 1
-        }
-    }
-    if q1 < 0 { return line }
-    // Find the closing double quote
-    let q2 = 0 - 1
-    let j = q1 + 1
-    while j < len(line) {
-        if char_at(line, j) == 34 {
-            q2 = j
-            j = len(line)  // break
-        } else {
-            j = j + 1
-        }
-    }
-    if q2 < 0 { return line }
-    let imp_path = substr(line, q1 + 1, q2 - q1 - 1)
-    let imp_full = concat(base_dir, concat("/", imp_path))
-    let content = read_file(imp_full)
-    if content == 0 {
-        print("Error: cannot import '")
-        print(imp_full)
-        println("'")
-        exit(1)
-    }
-    return content
+    let imp_path = extract_import_path(line)
+    if len(imp_path) == 0 { return line }
+    return resolve_import(imp_path, base_dir)
 }
 
 fn has_imports(source) {
@@ -159,6 +253,21 @@ fn main() {
     let output_file = "output.s"
     let ai = 0
     let cur = __arg(ai)
+
+    // Check for pkg subcommand
+    if cur == "pkg" {
+        let pkg_args = list_new()
+        ai = ai + 1
+        cur = __arg(ai)
+        while len(cur) > 0 {
+            push(pkg_args, cur)
+            ai = ai + 1
+            cur = __arg(ai)
+        }
+        pkg_run(pkg_args)
+        return 0
+    }
+
     while len(cur) > 0 {
         if cur == "-o" {
             ai = ai + 1
@@ -184,7 +293,11 @@ fn main() {
                     }
                 }
             } else {
-                input_file = cur
+                if starts_with_str(cur, "--nova-root=") == 1 {
+                    nova_root_dir = substr(cur, 12, len(cur) - 12)
+                } else {
+                    input_file = cur
+                }
             }
         }
         ai = ai + 1
@@ -193,8 +306,11 @@ fn main() {
 
     if input_file == "" {
         println("Usage: nova <input.nova> [-o output.s] [--target=linux|macos|wasm]")
+        println("       nova pkg <init|add|remove|list|install>")
         exit(1)
     }
+
+    init_import_tracker()
 
     let source = read_file(input_file)
     if source == 0 {

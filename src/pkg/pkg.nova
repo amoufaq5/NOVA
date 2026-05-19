@@ -1,0 +1,466 @@
+// Nova Package Manager
+// Handles nova.pkg manifests, dependency resolution, and package commands.
+//
+// Package manifest format (nova.pkg):
+//   name = "my-project"
+//   version = "1.0.0"
+//   description = "A Nova project"
+//   [dependencies]
+//   json = "std"
+//   math = "std"
+//   mylib = "github.com/user/mylib"
+//
+// Standard library packages (import "std/json"):
+//   std/json, std/math, std/set, std/path, std/chan, std/coroutine,
+//   std/taskpool, std/io, std/string, std/list, std/map
+
+let PKG_FILE = "nova.pkg"
+let PKG_DIR = "nova_packages"
+
+let STD_PACKAGES = list_new()
+
+fn pkg_init_std() {
+    push(STD_PACKAGES, "json")
+    push(STD_PACKAGES, "math")
+    push(STD_PACKAGES, "set")
+    push(STD_PACKAGES, "path")
+    push(STD_PACKAGES, "chan")
+    push(STD_PACKAGES, "coroutine")
+    push(STD_PACKAGES, "taskpool")
+    push(STD_PACKAGES, "io")
+    push(STD_PACKAGES, "string")
+    push(STD_PACKAGES, "list")
+    push(STD_PACKAGES, "map")
+    push(STD_PACKAGES, "alloc")
+    push(STD_PACKAGES, "syscall")
+    push(STD_PACKAGES, "scheduler")
+}
+
+fn is_std_package(name) {
+    let i = 0
+    while i < len(STD_PACKAGES) {
+        if STD_PACKAGES[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn pkg_find_nova_root() {
+    let check = read_file("nova.pkg")
+    if check == 0 { return "" }
+    return "."
+}
+
+// --- Manifest parsing ---
+
+fn pkg_strip(s) {
+    let start = 0
+    let slen = len(s)
+    let keep_going = 1
+    while keep_going == 1 {
+        if start >= slen { keep_going = 0 }
+        if keep_going == 1 {
+            let c = char_at(s, start)
+            if c == 32 { start = start + 1 }
+            else { if c == 9 { start = start + 1 }
+            else { if c == 34 { start = start + 1 }
+            else { keep_going = 0 } } }
+        }
+    }
+    let vend = slen - 1
+    keep_going = 1
+    while keep_going == 1 {
+        if vend < start { keep_going = 0 }
+        if keep_going == 1 {
+            let c = char_at(s, vend)
+            if c == 32 { vend = vend - 1 }
+            else { if c == 9 { vend = vend - 1 }
+            else { if c == 34 { vend = vend - 1 }
+            else { keep_going = 0 } } }
+        }
+    }
+    if vend < start { return "" }
+    return substr(s, start, vend - start + 1)
+}
+
+fn pkg_parse_value(line) {
+    let eq_pos = 0 - 1
+    let i = 0
+    while i < len(line) {
+        if char_at(line, i) == 61 {
+            eq_pos = i
+            i = len(line)
+        }
+        i = i + 1
+    }
+    if eq_pos < 0 { return "" }
+    let rest = substr(line, eq_pos + 1, len(line) - eq_pos - 1)
+    return pkg_strip(rest)
+}
+
+fn pkg_parse_key(line) {
+    let eq_pos = 0 - 1
+    let i = 0
+    while i < len(line) {
+        if char_at(line, i) == 61 {
+            eq_pos = i
+            i = len(line)
+        }
+        i = i + 1
+    }
+    if eq_pos < 0 { return "" }
+    let key = substr(line, 0, eq_pos)
+    return pkg_strip(key)
+}
+
+fn pkg_read_manifest() {
+    let content = read_file(PKG_FILE)
+    if content == 0 { return 0 }
+    let manifest = map_new()
+    let deps = map_new()
+    let in_deps = 0
+    let i = 0
+    let line_start = 0
+    let clen = len(content)
+    while i <= clen {
+        let at_end = 0
+        if i == clen { at_end = 1 }
+        let is_nl = 0
+        if at_end == 0 {
+            if char_at(content, i) == 10 { is_nl = 1 }
+        }
+        if is_nl == 1 {
+            let line = substr(content, line_start, i - line_start)
+            if len(line) > 0 {
+                if char_at(line, 0) == 35 {
+                    // comment, skip
+                } else {
+                    if line == "[dependencies]" {
+                        in_deps = 1
+                    } else {
+                        if char_at(line, 0) == 91 {
+                            in_deps = 0
+                        } else {
+                            let key = pkg_parse_key(line)
+                            let val = pkg_parse_value(line)
+                            if len(key) > 0 {
+                                if in_deps == 1 {
+                                    map_set(deps, key, val)
+                                } else {
+                                    map_set(manifest, key, val)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            line_start = i + 1
+        }
+        if at_end == 1 {
+            if i > line_start {
+                let line = substr(content, line_start, i - line_start)
+                if len(line) > 0 {
+                    if char_at(line, 0) == 35 {
+                    } else {
+                        if line == "[dependencies]" {
+                            in_deps = 1
+                        } else {
+                            let key = pkg_parse_key(line)
+                            let val = pkg_parse_value(line)
+                            if len(key) > 0 {
+                                if in_deps == 1 {
+                                    map_set(deps, key, val)
+                                } else {
+                                    map_set(manifest, key, val)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    map_set(manifest, "_deps", deps)
+    return manifest
+}
+
+// --- Package commands ---
+
+fn pkg_cmd_init() {
+    let existing = read_file(PKG_FILE)
+    if existing == 0 {
+    } else {
+        println("nova.pkg already exists")
+        return 0
+    }
+    let content = "name = " + chr(34) + "my-project" + chr(34) + chr(10)
+    content = content + "version = " + chr(34) + "0.1.0" + chr(34) + chr(10)
+    content = content + "description = " + chr(34) + "A Nova project" + chr(34) + chr(10)
+    content = content + chr(10)
+    content = content + "[dependencies]" + chr(10)
+    let ok = write_file(PKG_FILE, content)
+    if ok == 0 {
+        println("Error: could not create nova.pkg")
+        return 0
+    }
+    println("Created nova.pkg")
+    println("Edit the file to set your project name and add dependencies.")
+    println("")
+    println("Available standard library packages:")
+    println("  std/json      - JSON parsing and generation")
+    println("  std/math      - Math functions (sqrt, pow, min, max)")
+    println("  std/set       - Set data structure")
+    println("  std/path      - File path manipulation")
+    println("  std/chan       - Go-style buffered channels")
+    println("  std/coroutine - Coroutines and generators")
+    println("  std/taskpool  - Process-based parallelism")
+    println("")
+    println("Add a dependency:  nova pkg add json")
+    println("Use in code:       import " + chr(34) + "std/json" + chr(34))
+    return 1
+}
+
+fn pkg_cmd_add(pkg_name) {
+    let manifest = pkg_read_manifest()
+    if manifest == 0 {
+        println("Error: no nova.pkg found. Run 'nova pkg init' first.")
+        return 0
+    }
+    let deps = map_get(manifest, "_deps")
+    if is_std_package(pkg_name) == 1 {
+        map_set(deps, pkg_name, "std")
+        let content = pkg_write_manifest(manifest)
+        write_file(PKG_FILE, content)
+        println("Added std/" + pkg_name + " to dependencies")
+    } else {
+        map_set(deps, pkg_name, "local")
+        let content = pkg_write_manifest(manifest)
+        write_file(PKG_FILE, content)
+        println("Added " + pkg_name + " to dependencies")
+    }
+    return 1
+}
+
+fn pkg_cmd_remove(pkg_name) {
+    let manifest = pkg_read_manifest()
+    if manifest == 0 {
+        println("Error: no nova.pkg found.")
+        return 0
+    }
+    let deps = map_get(manifest, "_deps")
+    map_set(deps, pkg_name, 0)
+    let content = pkg_write_manifest(manifest)
+    write_file(PKG_FILE, content)
+    println("Removed " + pkg_name + " from dependencies")
+    return 1
+}
+
+fn pkg_write_manifest(manifest) {
+    let Q = chr(34)
+    let NL = chr(10)
+    let result = ""
+    let name = map_get(manifest, "name")
+    if name == 0 { name = "my-project" }
+    result = result + "name = " + Q + name + Q + NL
+    let ver = map_get(manifest, "version")
+    if ver == 0 { ver = "0.1.0" }
+    result = result + "version = " + Q + ver + Q + NL
+    let desc = map_get(manifest, "description")
+    if desc == 0 { desc = "" }
+    if len(desc) > 0 {
+        result = result + "description = " + Q + desc + Q + NL
+    }
+    result = result + NL
+    result = result + "[dependencies]" + NL
+    let deps = map_get(manifest, "_deps")
+    if deps == 0 { return result }
+    let dep_keys = keys(deps)
+    let i = 0
+    while i < len(dep_keys) {
+        let dk = dep_keys[i]
+        if dk == "_deps" {
+        } else {
+            let dv = map_get(deps, dk)
+            if dv == 0 {
+            } else {
+                result = result + dk + " = " + Q + dv + Q + NL
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn pkg_cmd_list() {
+    let manifest = pkg_read_manifest()
+    if manifest == 0 {
+        println("Error: no nova.pkg found.")
+        return 0
+    }
+    let name = map_get(manifest, "name")
+    let ver = map_get(manifest, "version")
+    if name == 0 { name = "unknown" }
+    if ver == 0 { ver = "0.0.0" }
+    println(name + " v" + ver)
+    println("")
+    let deps = map_get(manifest, "_deps")
+    if deps == 0 {
+        println("No dependencies.")
+        return 0
+    }
+    let dep_keys = keys(deps)
+    if len(dep_keys) == 0 {
+        println("No dependencies.")
+        return 0
+    }
+    println("Dependencies:")
+    let i = 0
+    while i < len(dep_keys) {
+        let dk = dep_keys[i]
+        if dk == "_deps" {
+        } else {
+            let dv = map_get(deps, dk)
+            if dv == 0 {
+            } else {
+                println("  " + dk + " = " + chr(34) + dv + chr(34))
+            }
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn pkg_cmd_install(nova_root) {
+    let manifest = pkg_read_manifest()
+    if manifest == 0 {
+        println("Error: no nova.pkg found.")
+        return 0
+    }
+    let deps = map_get(manifest, "_deps")
+    if deps == 0 {
+        println("No dependencies to install.")
+        return 0
+    }
+    mkdir(PKG_DIR)
+    let dep_keys = keys(deps)
+    let installed = 0
+    let i = 0
+    while i < len(dep_keys) {
+        let dk = dep_keys[i]
+        if dk == "_deps" {
+        } else {
+            let dv = map_get(deps, dk)
+            if dv == 0 {
+            } else {
+                if dv == "std" {
+                    let src_path = nova_root + "/src/runtime/" + dk + ".nova"
+                    let dst_path = PKG_DIR + "/" + dk + ".nova"
+                    let src_content = read_file(src_path)
+                    if src_content == 0 {
+                        println("  Warning: std package '" + dk + "' not found at " + src_path)
+                    } else {
+                        write_file(dst_path, src_content)
+                        println("  Installed std/" + dk)
+                        installed = installed + 1
+                    }
+                } else {
+                    if dv == "local" {
+                        println("  Skipped " + dk + " (local package)")
+                    } else {
+                        println("  Skipped " + dk + " (remote packages not yet supported)")
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if installed > 0 {
+        println("Installed " + int_to_str(installed) + " package(s) to " + PKG_DIR + "/")
+    } else {
+        println("Nothing to install.")
+    }
+    return 1
+}
+
+// --- Import resolution ---
+
+fn resolve_std_import(import_path, nova_root) {
+    if len(import_path) < 5 { return "" }
+    if substr(import_path, 0, 4) == "std/" {
+        let pkg_name = substr(import_path, 4, len(import_path) - 4)
+        if is_std_package(pkg_name) == 1 {
+            let local_path = PKG_DIR + "/" + pkg_name + ".nova"
+            let local_content = read_file(local_path)
+            if local_content == 0 {
+            } else {
+                return local_content
+            }
+            let std_path = nova_root + "/src/runtime/" + pkg_name + ".nova"
+            let std_content = read_file(std_path)
+            if std_content == 0 {
+                return ""
+            }
+            return std_content
+        }
+    }
+    let pkg_path = PKG_DIR + "/" + import_path + ".nova"
+    let pkg_content = read_file(pkg_path)
+    if pkg_content == 0 {
+    } else {
+        return pkg_content
+    }
+    let pkg_path2 = PKG_DIR + "/" + import_path
+    let pkg_content2 = read_file(pkg_path2)
+    if pkg_content2 == 0 { return "" }
+    return pkg_content2
+}
+
+fn pkg_run(args) {
+    pkg_init_std()
+    if len(args) == 0 {
+        println("Nova Package Manager")
+        println("")
+        println("Commands:")
+        println("  nova pkg init             Create a new nova.pkg manifest")
+        println("  nova pkg add <name>       Add a dependency")
+        println("  nova pkg remove <name>    Remove a dependency")
+        println("  nova pkg list             List dependencies")
+        println("  nova pkg install          Install dependencies")
+        println("")
+        println("Standard library packages: json, math, set, path, chan,")
+        println("  coroutine, taskpool, io, string, list, map")
+        return 0
+    }
+    let cmd = args[0]
+    if cmd == "init" {
+        return pkg_cmd_init()
+    }
+    if cmd == "add" {
+        if len(args) < 2 {
+            println("Usage: nova pkg add <package-name>")
+            return 0
+        }
+        return pkg_cmd_add(args[1])
+    }
+    if cmd == "remove" {
+        if len(args) < 2 {
+            println("Usage: nova pkg remove <package-name>")
+            return 0
+        }
+        return pkg_cmd_remove(args[1])
+    }
+    if cmd == "list" {
+        return pkg_cmd_list()
+    }
+    if cmd == "install" {
+        let nova_root = "."
+        if len(args) > 1 {
+            nova_root = args[1]
+        }
+        return pkg_cmd_install(nova_root)
+    }
+    println("Unknown package command: " + cmd)
+    println("Run 'nova pkg' for usage.")
+    return 0
+}
