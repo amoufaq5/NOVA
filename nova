@@ -59,6 +59,16 @@ case "$1" in
         shift
         "$NOVA_COMPILER" pkg "$@"
         ;;
+    test)
+        shift
+        cd "$NOVA_ROOT"
+        make test-all
+        ;;
+    self-host)
+        shift
+        cd "$NOVA_ROOT"
+        make self-host
+        ;;
     version)
         echo "Nova Programming Language v0.9.0"
         echo "Self-hosting compiler for x86-64 Linux"
@@ -71,8 +81,10 @@ case "$1" in
         echo "  nova run <file.nova> [args...]   Compile and run a program"
         echo "  nova build <file.nova> [-o out]   Compile to binary"
         echo "  nova pkg <command>                Package manager"
-        echo "  nova version                      Show version info"
-        echo "  nova help                         Show this help"
+        echo "  nova test                          Run test suite"
+        echo "  nova self-host                     Verify self-hosting"
+        echo "  nova version                       Show version info"
+        echo "  nova help                          Show this help"
         ;;
     *)
         if [ -f "$1" ]; then

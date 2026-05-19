@@ -1,0 +1,69 @@
+// FFI Demo: Combining Nova with inline assembly
+// Demonstrates extern fn declarations and inline asm for
+// performance-critical code and hardware access.
+
+// Declare external functions (implementations via inline asm)
+extern fn fast_sum(arr, count)
+extern fn rdtsc_cycles()
+
+// Inline assembly implementations
+asm {
+    ".globl fast_sum"
+    "fast_sum:"
+    "    xor eax, eax"
+    "    test rsi, rsi"
+    "    jz .fsum_done"
+    "    mov rcx, [rdi + 24]"
+    ".fsum_loop:"
+    "    add rax, [rcx]"
+    "    add rcx, 8"
+    "    dec rsi"
+    "    jnz .fsum_loop"
+    ".fsum_done:"
+    "    ret"
+}
+
+asm {
+    ".globl rdtsc_cycles"
+    "rdtsc_cycles:"
+    "    rdtsc"
+    "    shl rdx, 32"
+    "    or rax, rdx"
+    "    ret"
+}
+
+// Build a list of numbers
+let numbers = []
+let i = 1
+while i <= 100 {
+    push(numbers, i)
+    i = i + 1
+}
+
+// Sum using the fast assembly implementation
+let sum = fast_sum(numbers, len(numbers))
+print("Sum of 1..100 = ")
+println(int_to_str(sum))
+
+if sum == 5050 {
+    println("PASS: fast_sum correct")
+} else {
+    println("FAIL: fast_sum incorrect")
+}
+
+// Read CPU timestamp counter
+let t1 = rdtsc_cycles()
+let dummy = 0
+let j = 0
+while j < 1000 {
+    dummy = dummy + j
+    j = j + 1
+}
+let t2 = rdtsc_cycles()
+let elapsed = t2 - t1
+
+print("Loop of 1000 iterations took ~")
+print(int_to_str(elapsed))
+println(" CPU cycles")
+
+println("FFI demo complete!")
