@@ -1,0 +1,13 @@
+// Test that --stats flag works (basic program)
+fn add(x, y) {
+    return x + y
+}
+
+let result = add(20, 22)
+if result == 42 {
+    println("PASS: basic function")
+} else {
+    println("FAIL: basic function")
+}
+
+println("Stats test passed")

@@ -1,0 +1,48 @@
+// Test extern fn declaration and C FFI
+
+// Declare external function
+extern fn ext_multiply(a, b)
+
+// Provide implementation via inline asm
+asm {
+    ".globl ext_multiply"
+    "ext_multiply:"
+    "    mov rax, rdi"
+    "    imul rax, rsi"
+    "    ret"
+}
+
+// Test calling extern function
+let result = ext_multiply(6, 7)
+if result == 42 {
+    println("PASS: extern fn call")
+} else {
+    print("FAIL: expected 42 got ")
+    println(int_to_str(result))
+}
+
+// Test with larger values
+let big = ext_multiply(1000, 1000)
+if big == 1000000 {
+    println("PASS: extern fn large multiply")
+} else {
+    println("FAIL: extern fn large multiply")
+}
+
+// Extern fn with no args
+extern fn ext_get_magic()
+asm {
+    ".globl ext_get_magic"
+    "ext_get_magic:"
+    "    mov rax, 12345"
+    "    ret"
+}
+
+let magic = ext_get_magic()
+if magic == 12345 {
+    println("PASS: extern fn no args")
+} else {
+    println("FAIL: extern fn no args")
+}
+
+println("All extern fn tests passed")
