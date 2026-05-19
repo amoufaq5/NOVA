@@ -690,14 +690,23 @@ fn parse_if() {
     return ast_if(cond, then_body, else_body)
 }
 
-fn parse_while() {
+fn parse_while_labeled(lbl) {
     par_expect(TOK_WHILE)
     let cond = parse_expr()
     let body = parse_block()
-    return ast_while(cond, body)
+    let nd = ast_while(cond, body)
+    if lbl == "" {
+    } else {
+        push(nd, lbl)
+    }
+    return nd
 }
 
-fn parse_for() {
+fn parse_while() {
+    return parse_while_labeled("")
+}
+
+fn parse_for_labeled(lbl) {
     par_expect(TOK_FOR)
     let var_tok = par_expect(TOK_IDENT)
     let var_name = var_tok[1]
@@ -708,12 +717,26 @@ fn parse_for() {
         par_expect(TOK_IN)
         let iter = parse_expr()
         let body = parse_block()
-        return ast_for_indexed(var_name, val_name, iter, body)
+        let nd = ast_for_indexed(var_name, val_name, iter, body)
+        if lbl == "" {
+        } else {
+            push(nd, lbl)
+        }
+        return nd
     }
     par_expect(TOK_IN)
     let iter = parse_expr()
     let body = parse_block()
-    return ast_for(var_name, iter, body)
+    let nd = ast_for(var_name, iter, body)
+    if lbl == "" {
+    } else {
+        push(nd, lbl)
+    }
+    return nd
+}
+
+fn parse_for() {
+    return parse_for_labeled("")
 }
 
 fn parse_let() {
@@ -861,6 +884,23 @@ fn parse_fn() {
     par_expect(TOK_FN)
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
+    if par_peek_type() == TOK_DOT {
+        par_advance()
+        let mtok = par_expect(TOK_IDENT)
+        let meth = mtok[1]
+        par_expect(TOK_LPAREN)
+        let pinfo = parse_param_list()
+        let params = pinfo[0]
+        let defaults = pinfo[1]
+        par_expect(TOK_RPAREN)
+        if par_peek_type() == TOK_COLON {
+            par_advance()
+            par_skip_type()
+        }
+        let body = parse_block()
+        body = inject_defaults(body, defaults)
+        return ast_method_decl(name, meth, params, body)
+    }
     par_expect(TOK_LPAREN)
     let pinfo = parse_param_list()
     let params = pinfo[0]
@@ -960,6 +1000,19 @@ fn parse_throw() {
 
 fn parse_stmt() {
     let t = par_peek_type()
+    if t == TOK_AT {
+        par_advance()
+        let ltok = par_expect(TOK_IDENT)
+        let loop_lbl = ltok[1]
+        if par_peek_type() == TOK_WHILE {
+            return parse_while_labeled(loop_lbl)
+        }
+        if par_peek_type() == TOK_FOR {
+            return parse_for_labeled(loop_lbl)
+        }
+        print("Error: @label must be followed by while or for")
+        exit(1)
+    }
     if t == TOK_LET { return parse_let() }
     if t == TOK_CONST { return parse_let() }
     if t == TOK_FN { return parse_fn() }
@@ -967,8 +1020,26 @@ fn parse_stmt() {
     if t == TOK_WHILE { return parse_while() }
     if t == TOK_FOR { return parse_for() }
     if t == TOK_RETURN { return parse_return() }
-    if t == TOK_BREAK { par_advance(); return ast_break() }
-    if t == TOK_CONTINUE { par_advance(); return ast_continue() }
+    if t == TOK_BREAK {
+        par_advance()
+        let brk = ast_break()
+        if par_peek_type() == TOK_AT {
+            par_advance()
+            let blbl = par_expect(TOK_IDENT)
+            push(brk, blbl[1])
+        }
+        return brk
+    }
+    if t == TOK_CONTINUE {
+        par_advance()
+        let cnt = ast_continue()
+        if par_peek_type() == TOK_AT {
+            par_advance()
+            let clbl = par_expect(TOK_IDENT)
+            push(cnt, clbl[1])
+        }
+        return cnt
+    }
     if t == TOK_STRUCT { return parse_struct_decl() }
     if t == TOK_MATCH { return parse_match() }
     if t == TOK_TRY { return parse_try() }

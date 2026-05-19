@@ -379,32 +379,97 @@ fn lex_number() {
 }
 
 fn lex_string() {
-    lex_advance()  // consume opening quote
+    lex_advance()
+    // Check for triple-quote
+    if lex_pos + 1 < lex_len {
+        if lex_peek() == 34 {
+            if char_at(lex_src, lex_pos + 1) == 34 {
+                lex_advance()
+                lex_advance()
+                let ml_result = ""
+                while lex_pos < lex_len {
+                    let mc = lex_peek()
+                    if mc == 34 {
+                        if lex_pos + 2 < lex_len {
+                            if char_at(lex_src, lex_pos + 1) == 34 {
+                                if char_at(lex_src, lex_pos + 2) == 34 {
+                                    lex_advance()
+                                    lex_advance()
+                                    lex_advance()
+                                    emit_tok(TOK_STRING, ml_result)
+                                    return 0
+                                }
+                            }
+                        }
+                        ml_result = ml_result + chr(mc)
+                        lex_advance()
+                    } else {
+                        if mc == 10 { lex_line = lex_line + 1 }
+                        ml_result = ml_result + chr(mc)
+                        lex_advance()
+                    }
+                }
+                emit_tok(TOK_STRING, ml_result)
+                return 0
+            }
+        }
+    }
     let result = ""
     while lex_pos < lex_len {
         let c = lex_peek()
         if c == 34 {
-            lex_advance()  // consume closing quote
+            lex_advance()
             emit_tok(TOK_STRING, result)
             return 0
         }
         if c == 92 {
-            lex_advance()  // consume backslash
-            let next = lex_peek()
-            if next == 110 { result = result + chr(10) }
-            else { if next == 116 { result = result + chr(9) }
-            else { if next == 92 { result = result + chr(92) }
-            else { if next == 34 { result = result + chr(34) }
-            else { if next == 48 { result = result + chr(0) }
-            else { result = result + chr(next) }
-            } } } }
             lex_advance()
+            let next = lex_peek()
+            let esc_handled = 0
+            if next == 110 { result = result + chr(10); esc_handled = 1 }
+            if next == 116 { if esc_handled == 0 { result = result + chr(9); esc_handled = 1 } }
+            if next == 114 { if esc_handled == 0 { result = result + chr(13); esc_handled = 1 } }
+            if next == 92 { if esc_handled == 0 { result = result + chr(92); esc_handled = 1 } }
+            if next == 34 { if esc_handled == 0 { result = result + chr(34); esc_handled = 1 } }
+            if next == 48 { if esc_handled == 0 { result = result + chr(0); esc_handled = 1 } }
+            if next == 120 {
+                if esc_handled == 0 {
+                    esc_handled = 1
+                    lex_advance()
+                    let h1 = lex_peek()
+                    let v1 = 0
+                    let hex_ok = 0
+                    if h1 >= 48 { if h1 <= 57 { v1 = h1 - 48; hex_ok = 1 } }
+                    if h1 >= 65 { if h1 <= 70 { v1 = h1 - 55; hex_ok = 1 } }
+                    if h1 >= 97 { if h1 <= 102 { v1 = h1 - 87; hex_ok = 1 } }
+                    if hex_ok == 1 {
+                        lex_advance()
+                        let h2 = lex_peek()
+                        let v2 = 0
+                        let hex_ok2 = 0
+                        if h2 >= 48 { if h2 <= 57 { v2 = h2 - 48; hex_ok2 = 1 } }
+                        if h2 >= 65 { if h2 <= 70 { v2 = h2 - 55; hex_ok2 = 1 } }
+                        if h2 >= 97 { if h2 <= 102 { v2 = h2 - 87; hex_ok2 = 1 } }
+                        if hex_ok2 == 1 {
+                            result = result + chr(v1 * 16 + v2)
+                            lex_advance()
+                        } else {
+                            result = result + chr(v1)
+                        }
+                    } else {
+                        result = result + "x"
+                    }
+                }
+            }
+            if esc_handled == 0 { result = result + chr(next) }
+            if next == 120 { } else {
+                lex_advance()
+            }
         } else {
             result = result + chr(c)
             lex_advance()
         }
     }
-    // Unterminated string
     emit_tok(TOK_STRING, result)
 }
 

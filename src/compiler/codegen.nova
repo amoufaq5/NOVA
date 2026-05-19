@@ -27,6 +27,12 @@ let cg_lambda_caps = 0
 let cg_capture_slots = 0
 let cg_current_caps = 0
 let cg_current_cap_name = ""
+let cg_lbl_names = 0
+let cg_lbl_breaks = 0
+let cg_lbl_continues = 0
+let cg_lbl_count = 0
+let cg_methods = 0
+let cg_method_count = 0
 
 fn cg_init() {
     cg_output = list_new()
@@ -44,6 +50,12 @@ fn cg_init() {
     cg_capture_slots = list_new()
     cg_current_caps = 0
     cg_current_cap_name = ""
+    cg_lbl_names = list_new()
+    cg_lbl_breaks = list_new()
+    cg_lbl_continues = list_new()
+    cg_lbl_count = 0
+    cg_methods = list_new()
+    cg_method_count = 0
 }
 
 fn out(s) {
@@ -949,7 +961,22 @@ fn gen_expr(nd) {
         if ast_tag(callee) == AST_FIELD_ACCESS {
             let mbase = callee[1]
             let mname = callee[2]
-            if is_known_function(mname) == 1 {
+            let resolved_method = ""
+            let mi = 0
+            while mi < cg_method_count {
+                if cg_methods[mi][1] == mname {
+                    resolved_method = cg_methods[mi][0] + "_" + mname
+                    mi = cg_method_count
+                }
+                mi = mi + 1
+            }
+            if resolved_method == "" {
+                if is_known_function(mname) == 1 {
+                    resolved_method = mname
+                }
+            }
+            if resolved_method == "" {
+            } else {
                 let mai = argc - 1
                 while mai >= 0 {
                     gen_expr(args[mai])
@@ -965,7 +992,7 @@ fn gen_expr(nd) {
                 if mtotal > 3 { out("    pop rcx") }
                 if mtotal > 4 { out("    pop r8") }
                 if mtotal > 5 { out("    pop r9") }
-                out("    call " + mname)
+                out("    call " + resolved_method)
                 return 0
             }
         }
@@ -1344,23 +1371,29 @@ fn gen_stmt(nd) {
     if tag == AST_WHILE_STMT {
         let cond = nd[1]
         let body = nd[2]
+        let wlabel = ""
+        if len(nd) > 3 { wlabel = nd[3] }
 
-        // --- Optimization: Dead Code Elimination for constant false while ---
         let cond_val = try_fold(cond)
         if is_foldable(cond_val) == 1 {
             if cond_val == 0 {
-                // while false: skip entire loop body
                 return 0
             }
         }
 
-        // Non-constant (or constant true) condition: generate normal loop
         let loop_lbl = new_label()
         let end_lbl = new_label()
         let prev_break = cg_break_label
         let prev_continue = cg_continue_label
         cg_break_label = end_lbl
         cg_continue_label = loop_lbl
+        if wlabel == "" {
+        } else {
+            push(cg_lbl_names, wlabel)
+            push(cg_lbl_breaks, end_lbl)
+            push(cg_lbl_continues, loop_lbl)
+            cg_lbl_count = cg_lbl_count + 1
+        }
         out_label(loop_lbl)
         gen_expr(cond)
         out("    test rax, rax")
@@ -1370,6 +1403,10 @@ fn gen_stmt(nd) {
         out_label(end_lbl)
         cg_break_label = prev_break
         cg_continue_label = prev_continue
+        if wlabel == "" {
+        } else {
+            cg_lbl_count = cg_lbl_count - 1
+        }
         return 0
     }
 
@@ -1377,9 +1414,10 @@ fn gen_stmt(nd) {
         let var_name = nd[1]
         let iter_expr = nd[2]
         let body = nd[3]
+        let flabel = ""
+        if len(nd) > 4 { flabel = nd[4] }
         let var_off = local_offset(var_name)
 
-        // Check if iterator is range() call
         let is_range = 0
         if ast_tag(iter_expr) == AST_CALL {
             let callee = iter_expr[1]
@@ -1394,12 +1432,10 @@ fn gen_stmt(nd) {
             let args = iter_expr[2]
             let argc = len(args)
             if argc == 1 {
-                // range(end) - start=0
                 out("    mov qword ptr [rbp - " + int_to_str(var_off) + "], 0")
                 gen_expr(args[0])
                 out("    push rax")
             } else {
-                // range(start, end)
                 gen_expr(args[0])
                 out("    mov [rbp - " + int_to_str(var_off) + "], rax")
                 gen_expr(args[1])
@@ -1412,6 +1448,13 @@ fn gen_stmt(nd) {
             let prev_continue = cg_continue_label
             cg_break_label = end_lbl
             cg_continue_label = cont_lbl
+            if flabel == "" {
+            } else {
+                push(cg_lbl_names, flabel)
+                push(cg_lbl_breaks, end_lbl)
+                push(cg_lbl_continues, cont_lbl)
+                cg_lbl_count = cg_lbl_count + 1
+            }
             out_label(loop_lbl)
             out("    mov rax, [rbp - " + int_to_str(var_off) + "]")
             out("    cmp rax, [rsp]")
@@ -1424,6 +1467,10 @@ fn gen_stmt(nd) {
             out("    add rsp, 8")
             cg_break_label = prev_break
             cg_continue_label = prev_continue
+            if flabel == "" {
+            } else {
+                cg_lbl_count = cg_lbl_count - 1
+            }
             return 0
         } else {
             gen_expr(iter_expr)
@@ -1436,6 +1483,13 @@ fn gen_stmt(nd) {
             let prev_continue = cg_continue_label
             cg_break_label = end_lbl
             cg_continue_label = cont_lbl
+            if flabel == "" {
+            } else {
+                push(cg_lbl_names, flabel)
+                push(cg_lbl_breaks, end_lbl)
+                push(cg_lbl_continues, cont_lbl)
+                cg_lbl_count = cg_lbl_count + 1
+            }
             out_label(loop_lbl)
             out("    mov rcx, [rsp]")
             out("    mov rdi, [rsp+8]")
@@ -1452,6 +1506,10 @@ fn gen_stmt(nd) {
             out("    add rsp, 16")
             cg_break_label = prev_break
             cg_continue_label = prev_continue
+            if flabel == "" {
+            } else {
+                cg_lbl_count = cg_lbl_count - 1
+            }
             return 0
         }
     }
@@ -1484,11 +1542,33 @@ fn gen_stmt(nd) {
     }
 
     if tag == AST_BREAK_STMT {
+        if len(nd) > 1 {
+            let blbl = nd[1]
+            let bi = 0
+            while bi < cg_lbl_count {
+                if cg_lbl_names[bi] == blbl {
+                    out("    jmp " + cg_lbl_breaks[bi])
+                    return 0
+                }
+                bi = bi + 1
+            }
+        }
         out("    jmp " + cg_break_label)
         return 0
     }
 
     if tag == AST_CONTINUE_STMT {
+        if len(nd) > 1 {
+            let clbl = nd[1]
+            let ci = 0
+            while ci < cg_lbl_count {
+                if cg_lbl_names[ci] == clbl {
+                    out("    jmp " + cg_lbl_continues[ci])
+                    return 0
+                }
+                ci = ci + 1
+            }
+        }
         out("    jmp " + cg_continue_label)
         return 0
     }
@@ -1671,6 +1751,8 @@ fn gen_stmt(nd) {
         let val_name = nd[2]
         let iter_expr = nd[3]
         let body = nd[4]
+        let filabel = ""
+        if len(nd) > 5 { filabel = nd[5] }
         let idx_off = local_offset(idx_name)
         let val_off = local_offset(val_name)
         gen_expr(iter_expr)
@@ -1683,6 +1765,13 @@ fn gen_stmt(nd) {
         let prev_continue = cg_continue_label
         cg_break_label = fi_end
         cg_continue_label = fi_cont
+        if filabel == "" {
+        } else {
+            push(cg_lbl_names, filabel)
+            push(cg_lbl_breaks, fi_end)
+            push(cg_lbl_continues, fi_cont)
+            cg_lbl_count = cg_lbl_count + 1
+        }
         out_label(fi_loop)
         out("    mov rcx, [rbp - " + int_to_str(idx_off) + "]")
         out("    mov rdi, [rsp]")
@@ -1699,6 +1788,10 @@ fn gen_stmt(nd) {
         out("    add rsp, 8")
         cg_break_label = prev_break
         cg_continue_label = prev_continue
+        if filabel == "" {
+        } else {
+            cg_lbl_count = cg_lbl_count - 1
+        }
         return 0
     }
 
@@ -1706,17 +1799,19 @@ fn gen_stmt(nd) {
 }
 
 fn escape_for_asm(s) {
+    let bs = chr(92)
     let result = ""
     let i = 0
     while i < len(s) {
         let c = char_at(s, i)
-        if c == 10 { result = result + "\\n" }
-        else { if c == 9 { result = result + "\\t" }
-        else { if c == 92 { result = result + "\\\\" }
-        else { if c == 34 { result = result + "\\\"" }
-        else { if c == 0 { result = result + "\\0" }
-        else { result = result + chr(c) }
-        } } } }
+        let esc_done = 0
+        if c == 10 { result = result + bs + "n"; esc_done = 1 }
+        if c == 9 { if esc_done == 0 { result = result + bs + "t"; esc_done = 1 } }
+        if c == 13 { if esc_done == 0 { result = result + bs + "r"; esc_done = 1 } }
+        if c == 92 { if esc_done == 0 { result = result + bs + bs; esc_done = 1 } }
+        if c == 34 { if esc_done == 0 { result = result + bs + chr(34); esc_done = 1 } }
+        if c == 0 { if esc_done == 0 { result = result + bs + "0"; esc_done = 1 } }
+        if esc_done == 0 { result = result + chr(c) }
         i = i + 1
     }
     return result
@@ -1823,6 +1918,22 @@ fn gen_program(program) {
         i = i + 1
     }
 
+    // Collect methods
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_METHOD_DECL {
+            let mentry = list_new()
+            push(mentry, d[1])
+            push(mentry, d[2])
+            push(cg_methods, mentry)
+            cg_method_count = cg_method_count + 1
+            let mfn_name = d[1] + "_" + d[2]
+            push(cg_fns, mfn_name)
+        }
+        i = i + 1
+    }
+
     // Collect function names (including lambdas from parser)
     i = 0
     while i < len(decls) {
@@ -1871,6 +1982,21 @@ fn gen_program(program) {
         let d = decls[i]
         if ast_tag(d) == AST_FN_DECL {
             gen_function(d)
+        }
+        i = i + 1
+    }
+
+    // Generate method functions
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_METHOD_DECL {
+            let mfn = list_new()
+            push(mfn, AST_FN_DECL)
+            push(mfn, d[1] + "_" + d[2])
+            push(mfn, d[3])
+            push(mfn, d[4])
+            gen_function(mfn)
         }
         i = i + 1
     }
@@ -1953,12 +2079,14 @@ fn gen_program(program) {
         out("    sub rsp, " + int_to_str(frame_size))
     }
 
-    // Generate top-level statements (skip function declarations)
+    // Generate top-level statements (skip function and method declarations)
     i = 0
     while i < len(decls) {
         let d = decls[i]
-        if ast_tag(d) == AST_FN_DECL {
-        } else {
+        let skip_top = 0
+        if ast_tag(d) == AST_FN_DECL { skip_top = 1 }
+        if ast_tag(d) == AST_METHOD_DECL { skip_top = 1 }
+        if skip_top == 0 {
             gen_stmt(d)
         }
         i = i + 1

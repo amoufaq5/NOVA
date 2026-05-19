@@ -1,0 +1,42 @@
+struct Point {
+    x
+    y
+}
+
+fn Point.translate(self, dx, dy) {
+    self.x = self.x + dx
+    self.y = self.y + dy
+}
+
+fn Point.magnitude(self) {
+    return self.x * self.x + self.y * self.y
+}
+
+fn Point.to_string(self) {
+    return "(" + int_to_str(self.x) + ", " + int_to_str(self.y) + ")"
+}
+
+fn main() {
+    let p = Point(3, 4)
+    print("initial: ")
+    println(p.to_string())
+
+    p.translate(2, 1)
+    print("after translate(2,1): ")
+    println(p.to_string())
+
+    let mag = p.magnitude()
+    print("magnitude^2 = ")
+    print_int(mag)
+    println("")
+
+    // Multiple struct types
+    let p2 = Point(0, 0)
+    p2.translate(10, 20)
+    print("p2: ")
+    println(p2.to_string())
+
+    println("All struct method tests passed!")
+}
+
+main()

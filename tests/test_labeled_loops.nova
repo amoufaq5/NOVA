@@ -1,0 +1,49 @@
+fn main() {
+    // Labeled break
+    let found = 0
+    @outer while found == 0 {
+        let j = 0
+        while j < 5 {
+            if j == 3 {
+                found = 1
+                break @outer
+            }
+            j = j + 1
+        }
+    }
+    print("found = ")
+    print_int(found)
+    println("")
+
+    // Labeled continue
+    let total = 0
+    @rows for i in range(3) {
+        @cols for j in range(3) {
+            if j == 1 {
+                continue @cols
+            }
+            if i == 2 {
+                break @rows
+            }
+            total = total + 1
+        }
+    }
+    print("total = ")
+    print_int(total)
+    println("")
+
+    // Unlabeled break/continue still work
+    let count = 0
+    for i in range(10) {
+        if i == 5 { break }
+        if i % 2 == 0 { continue }
+        count = count + 1
+    }
+    print("count = ")
+    print_int(count)
+    println("")
+
+    println("All labeled loop tests passed!")
+}
+
+main()

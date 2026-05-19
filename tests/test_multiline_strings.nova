@@ -1,0 +1,36 @@
+fn main() {
+    // Multi-line string
+    let ml = """Hello
+World"""
+    println(ml)
+
+    // Multi-line preserves content
+    let ml2 = """line1
+line2
+line3"""
+    println(ml2)
+
+    // Hex escape
+    let hex_str = "\x48\x65\x6C\x6C\x6F"
+    println(hex_str)
+
+    // Carriage return escape
+    let cr = "before\rafter"
+    print("cr test: ")
+    println(cr)
+
+    // Tab escape (already worked)
+    let tab = "a\tb"
+    print("tab: ")
+    println(tab)
+
+    // Empty multi-line
+    let empty = """"""
+    print("empty len: ")
+    print_int(len(empty))
+    println("")
+
+    println("All string tests passed!")
+}
+
+main()

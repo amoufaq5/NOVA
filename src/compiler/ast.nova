@@ -51,6 +51,7 @@ let AST_DEFAULT_PARAM = 46
 let AST_LIST_COMP = 47
 let AST_MAP_LIT = 48
 let AST_SPREAD = 49
+let AST_METHOD_DECL = 50
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -413,6 +414,16 @@ fn ast_spread(name) {
     let n = list_new()
     push(n, AST_SPREAD)
     push(n, name)
+    return n
+}
+
+fn ast_method_decl(sname, mname, params, body) {
+    let n = list_new()
+    push(n, AST_METHOD_DECL)
+    push(n, sname)
+    push(n, mname)
+    push(n, params)
+    push(n, body)
     return n
 }
 
