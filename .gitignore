@@ -3,6 +3,7 @@
 *.o
 *.s
 !boot/*.s
+a.out
 
 # Python (legacy bootstrap)
 __pycache__/
