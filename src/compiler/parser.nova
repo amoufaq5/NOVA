@@ -699,14 +699,18 @@ fn parse_block() {
 }
 
 fn parse_if() {
-    // Capture line of the 'if' keyword for debug info
     let if_line = 0
     let if_tok = par_peek()
     if if_tok == 0 {
     } else {
         if_line = if_tok[2]
     }
-    par_expect(TOK_IF)
+    let pt = par_peek_type()
+    if pt == TOK_ELIF {
+        par_advance()
+    } else {
+        par_expect(TOK_IF)
+    }
     let cond = parse_expr()
     let then_body = parse_block()
     let else_body = 0
@@ -716,6 +720,11 @@ fn parse_if() {
             else_body = parse_if()
         } else {
             else_body = parse_block()
+        }
+    }
+    if else_body == 0 {
+        if par_peek_type() == TOK_ELIF {
+            else_body = parse_if()
         }
     }
     let nd = ast_if(cond, then_body, else_body)

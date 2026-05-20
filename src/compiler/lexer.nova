@@ -94,6 +94,7 @@ let TOK_PIPE_EQ = 94
 let TOK_CARET_EQ = 95
 let TOK_SHL_EQ = 96
 let TOK_SHR_EQ = 97
+let TOK_ELIF = 98
 
 // --- Lexer State ---
 let lex_src = ""
@@ -442,6 +443,11 @@ fn lex_string() {
             if next == 92 { if esc_handled == 0 { result = result + chr(92); esc_handled = 1 } }
             if next == 34 { if esc_handled == 0 { result = result + chr(34); esc_handled = 1 } }
             if next == 48 { if esc_handled == 0 { result = result + chr(0); esc_handled = 1 } }
+            if next == 98 { if esc_handled == 0 { result = result + chr(8); esc_handled = 1 } }
+            if next == 102 { if esc_handled == 0 { result = result + chr(12); esc_handled = 1 } }
+            if next == 118 { if esc_handled == 0 { result = result + chr(11); esc_handled = 1 } }
+            if next == 97 { if esc_handled == 0 { result = result + chr(7); esc_handled = 1 } }
+            if next == 101 { if esc_handled == 0 { result = result + chr(27); esc_handled = 1 } }
             if next == 120 {
                 if esc_handled == 0 {
                     esc_handled = 1
@@ -509,6 +515,10 @@ fn keyword_type(word) {
     if word == "finally" { return TOK_FINALLY }
     if word == "asm" { return TOK_ASM }
     if word == "extern" { return TOK_EXTERN }
+    if word == "elif" { return TOK_ELIF }
+    if word == "not" { return TOK_BANG }
+    if word == "and" { return TOK_AND }
+    if word == "or" { return TOK_OR }
     return 0
 }
 

@@ -1,0 +1,51 @@
+fn test_not_keyword() {
+    assert(not false)
+    assert(not 0)
+    let x = 5
+    assert(not (x == 3))
+    assert(not not true)
+    let y = not false
+    assert(y == 1)
+}
+
+fn test_and_keyword() {
+    assert(true and true)
+    assert(not (true and false))
+    assert(not (false and true))
+    let x = 5
+    let y = 10
+    assert(x > 0 and y > 0)
+    assert(not (x > 10 and y > 0))
+}
+
+fn test_or_keyword() {
+    assert(true or false)
+    assert(false or true)
+    assert(not (false or false))
+    let x = 5
+    assert(x == 5 or x == 10)
+    assert(x == 3 or x == 5)
+    assert(not (x == 3 or x == 10))
+}
+
+fn test_combined() {
+    let a = 5
+    let b = 10
+    if a > 0 and b > 0 {
+        if a < b or a == b {
+            if not (a == b) {
+                print("PASS")
+                return 0
+            }
+        }
+    }
+    print("FAIL")
+}
+
+fn main() {
+    test_not_keyword()
+    test_and_keyword()
+    test_or_keyword()
+    test_combined()
+}
+main()

@@ -1,0 +1,50 @@
+fn test_elif() {
+    let x = 5
+    let result = ""
+    if x == 1 {
+        result = "one"
+    } elif x == 5 {
+        result = "five"
+    } elif x == 10 {
+        result = "ten"
+    } else {
+        result = "other"
+    }
+    assert(result == "five")
+
+    let y = 10
+    let r2 = ""
+    if y == 1 {
+        r2 = "one"
+    } elif y == 5 {
+        r2 = "five"
+    } elif y == 10 {
+        r2 = "ten"
+    } else {
+        r2 = "other"
+    }
+    assert(r2 == "ten")
+
+    let z = 99
+    let r3 = ""
+    if z == 1 {
+        r3 = "one"
+    } elif z == 5 {
+        r3 = "five"
+    } else {
+        r3 = "other"
+    }
+    assert(r3 == "other")
+
+    let w = 1
+    let r4 = ""
+    if w == 1 {
+        r4 = "one"
+    } elif w == 2 {
+        r4 = "two"
+    }
+    assert(r4 == "one")
+
+    print("PASS")
+}
+test_elif()
