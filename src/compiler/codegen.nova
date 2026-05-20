@@ -39,6 +39,8 @@ let cg_extern_count = 0
 let cg_debug = 1
 let cg_source_file = ""
 let cg_last_debug_line = 0
+let cg_current_fn = ""
+let cg_tco_label = ""
 
 fn cg_init() {
     cg_output = list_new()
@@ -776,6 +778,8 @@ fn is_builtin_fn(name) {
     if name == "str_lower" { return 1 }
     if name == "str_trim" { return 1 }
     if name == "strcmp" { return 1 }
+    if name == "int_mul" { return 1 }
+    if name == "int_add" { return 1 }
     if name == "str_replace" { return 1 }
     if name == "str_repeat" { return 1 }
     if name == "char_code" { return 1 }
@@ -1560,9 +1564,27 @@ fn gen_stmt(nd) {
         let value = nd[1]
         if value == 0 {
             out("    xor eax, eax")
-        } else {
-            gen_expr(value)
+            out("    mov rsp, rbp")
+            out("    pop rbp")
+            out("    ret")
+            return 0
         }
+        if len(cg_current_fn) > 0 {
+            if ast_tag(value) == AST_CALL {
+                let tc_callee = value[1]
+                if ast_tag(tc_callee) == AST_IDENT {
+                    if tc_callee[1] == cg_current_fn {
+                        let tc_args = value[2]
+                        let tc_argc = len(tc_args)
+                        if tc_argc <= 6 {
+                            gen_tco_call(tc_args, tc_argc)
+                            return 0
+                        }
+                    }
+                }
+            }
+        }
+        gen_expr(value)
         out("    mov rsp, rbp")
         out("    pop rbp")
         out("    ret")
@@ -2113,6 +2135,23 @@ fn gen_block(nd) {
     }
 }
 
+fn gen_tco_call(tc_args, tc_argc) {
+    let ti = 0
+    while ti < tc_argc {
+        gen_expr(tc_args[ti])
+        out("    push rax")
+        ti = ti + 1
+    }
+    ti = tc_argc - 1
+    while ti >= 0 {
+        out("    pop rax")
+        let toff = (ti + 1) * 8
+        out("    mov [rbp - " + int_to_str(toff) + "], rax")
+        ti = ti - 1
+    }
+    out("    jmp " + cg_tco_label)
+}
+
 fn gen_function(nd) {
     let name = nd[1]
     let params = nd[2]
@@ -2164,8 +2203,15 @@ fn gen_function(nd) {
     if cg_param_count > 4 { out("    mov [rbp - 40], r8") }
     if cg_param_count > 5 { out("    mov [rbp - 48], r9") }
 
+    let tco_lbl = new_label()
+    cg_current_fn = name
+    cg_tco_label = tco_lbl
+    out_label(tco_lbl)
+
     gen_block(body)
 
+    cg_current_fn = ""
+    cg_tco_label = ""
     out("    xor eax, eax")
     out("    mov rsp, rbp")
     out("    pop rbp")
@@ -7481,6 +7527,13 @@ fn gen_runtime() {
     out("    jmp _nova_str_trim")
     out_label("strcmp")
     out("    jmp _nova_strcmp")
+    out_label("int_mul")
+    out("    mov rax, rdi")
+    out("    imul rax, rsi")
+    out("    ret")
+    out_label("int_add")
+    out("    lea rax, [rdi + rsi]")
+    out("    ret")
     out_label("str_replace")
     out("    jmp _nova_str_replace")
     out_label("str_repeat")
