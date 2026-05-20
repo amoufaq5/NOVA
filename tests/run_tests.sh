@@ -27,16 +27,26 @@ for test_file in tests/test_*.nova; do
             ;;
     esac
 
-    # M7/M8 tests need combined source files
+    # M7/M8/M9 tests need combined source files (strip import lines to avoid double-include)
     INPUT="$test_file"
     case "$test_name" in
         test_m7_core)
             cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
                 src/core/node.nova src/core/channel.nova src/core/path.nova \
-                "$test_file" > /tmp/nova_combined_test.nova
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"
             ;;
         test_m8_mind)
+            cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
+                src/core/node.nova src/core/channel.nova src/core/path.nova \
+                src/mind/academic.nova src/mind/experiential.nova src/mind/emotion.nova \
+                src/mind/memory.nova src/mind/reasoning.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+        test_m9_fullsystem)
             cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
                 src/core/node.nova src/core/channel.nova src/core/path.nova \
                 src/mind/academic.nova src/mind/experiential.nova src/mind/emotion.nova \

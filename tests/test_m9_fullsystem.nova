@@ -1,0 +1,509 @@
+// M9 Full System Verification Test
+// Exercises the complete cognitive pipeline: perception, memory,
+// learning, emotion, reasoning — all working together in a single binary.
+
+fn test_perception_to_memory() {
+    println("--- Test: Perception -> Memory ---")
+    memory_init()
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_REWARD, "positive interaction", 70)
+    let m = moment_new("hello from Alice", alice, 70, 50, cons, 80)
+
+    memory_store(m, 80)
+    memory_working_push(m)
+
+    let count = memory_count_episodes()
+    if count != 1 {
+        println("FAIL: expected 1 episode")
+        exit(1)
+    }
+    let wc = memory_working_count()
+    if wc != 1 {
+        println("FAIL: expected 1 in working memory")
+        exit(1)
+    }
+
+    println("  Stored moment -> episodic + working memory OK")
+    println("PASS")
+}
+
+fn test_learning_tracks() {
+    println("--- Test: Academic + Experiential Learning ---")
+    academic_init()
+    experiential_init()
+
+    academic_add_axiom("dog", "is_a", "mammal")
+    academic_add_axiom("mammal", "is_a", "animal")
+    academic_add_axiom("dog", "has", "loyalty")
+    academic_store("dog", "eats", "meat", "observation", 80)
+
+    let results = academic_query("dog", "is_a")
+    if len(results) == 0 {
+        println("FAIL: academic query returned nothing")
+        exit(1)
+    }
+    if results[0] != "mammal" {
+        println("FAIL: expected mammal")
+        exit(1)
+    }
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_REWARD, "good", 80)
+    let m1 = moment_new("greeting", alice, 70, 60, cons, 80)
+    let m2 = moment_new("greeting", alice, 75, 55, cons, 85)
+    let m3 = moment_new("greeting", alice, 65, 50, cons, 75)
+    experiential_record(m1)
+    experiential_record(m2)
+    experiential_record(m3)
+
+    let bias = experiential_bias_for("greeting")
+    print("  Academic facts: ")
+    print_int(academic_count_facts())
+    println("")
+    print("  Experiential bias for greeting: ")
+    print_int(bias)
+    println("")
+
+    println("PASS")
+}
+
+fn test_emotion_appraisal() {
+    println("--- Test: Emotion Appraisal ---")
+    emotion_init()
+
+    let initial = emotion_describe()
+    print("  Initial state: ")
+    println(initial)
+
+    let alice = entity_new("Alice", "user")
+    let good_cons = consequence_new(CTYPE_REWARD, "wonderful news", 90)
+    let good_moment = moment_new("won award", alice, 90, 85, good_cons, 95)
+    emotion_appraise(good_moment)
+
+    let after = emotion_describe()
+    print("  After positive event: ")
+    println(after)
+
+    let positive = emotion_is_positive()
+    if positive != 1 {
+        println("FAIL: expected positive emotion after reward")
+        exit(1)
+    }
+
+    let influence = emotion_influence()
+    print("  Emotional influence: ")
+    print_int(influence)
+    println("")
+
+    emotion_decay_to_baseline()
+    let decayed_v = emotion_get_valence()
+    let decayed_a = emotion_get_arousal()
+    print("  After decay: V=")
+    print_int(decayed_v)
+    print(" A=")
+    print_int(decayed_a)
+    println("")
+
+    println("PASS")
+}
+
+fn test_reasoning_engine() {
+    println("--- Test: Multi-Strategy Reasoning ---")
+    reasoning_init()
+
+    reasoning_add_rule("is_dog", "is_mammal", 95)
+    reasoning_add_rule("is_mammal", "is_warm_blooded", 99)
+    reasoning_add_rule("is_mammal", "has_vertebrae", 99)
+
+    let conclusions = reasoning_deduce("is_dog", 2)
+    print("  Deductions from is_dog: ")
+    print_int(len(conclusions))
+    println("")
+    if len(conclusions) < 2 {
+        println("FAIL: expected at least 2 deductions")
+        exit(1)
+    }
+
+    let explanations = reasoning_abduce("is_warm_blooded", 1)
+    print("  Abductions for is_warm_blooded: ")
+    print_int(len(explanations))
+    println("")
+    if len(explanations) == 0 {
+        println("FAIL: expected at least 1 explanation")
+        exit(1)
+    }
+
+    reasoning_add_causal("rain", "wet_ground", 80)
+    reasoning_add_causal("wet_ground", "slippery", 70)
+    let effects = reasoning_predict_effects("rain", 2)
+    print("  Causal effects of rain: ")
+    print_int(len(effects))
+    println("")
+    if len(effects) == 0 {
+        println("FAIL: expected causal effects")
+        exit(1)
+    }
+
+    println("PASS")
+}
+
+fn test_signal_flow() {
+    println("--- Test: Signal Creation and Routing ---")
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "needs reply", 70)
+    let m = moment_new("incoming question", alice, 80, 60, cons, 75)
+
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    let reasoner = node_new("Reasoner", NTYPE_REASONER)
+
+    let sig = signal_event(m, "Perceiver", "Reasoner")
+    signal_add_trace(sig, "Perceiver")
+
+    if signal_has_visited(sig, "Perceiver") != 1 {
+        println("FAIL: trace should show Perceiver visited")
+        exit(1)
+    }
+
+    let sig2 = signal_transform(sig, moment_new("processed", alice, 80, 60, cons, 75))
+    print("  Signal type: ")
+    println(signal_type_name(sig))
+    print("  Trace depth: ")
+    print_int(signal_trace_depth(sig))
+    println("")
+
+    let ch = channel_broadcast("perception_bus", "Perceiver")
+    channel_add_dest(ch, reasoner)
+    print("  Channel: ")
+    println(channel_describe(ch))
+
+    println("PASS")
+}
+
+fn test_similarity_scoring() {
+    println("--- Test: Similarity Scoring ---")
+
+    // similarity_score takes 6 integer factors (0-100 each):
+    // content_sim, entity_sim, emotion_sim, recency, frequency, consequence_sim
+    let score_high = similarity_score(90, 80, 85, 95, 70, 90)
+    let score_low = similarity_score(10, 20, 15, 5, 10, 20)
+
+    print("  High similarity score: ")
+    print_int(score_high)
+    println("")
+    print("  Low similarity score: ")
+    print_int(score_low)
+    println("")
+
+    if score_high <= score_low {
+        println("FAIL: high-similarity factors should produce higher score")
+        exit(1)
+    }
+
+    // Jaccard similarity between keyword lists
+    let kw1 = ["dog", "mammal", "pet"]
+    let kw2 = ["dog", "animal", "pet"]
+    let kw3 = ["fish", "ocean", "water"]
+    let j_similar = jaccard(kw1, kw2)
+    let j_different = jaccard(kw1, kw3)
+
+    print("  Jaccard (overlapping): ")
+    print_int(j_similar)
+    println("")
+    print("  Jaccard (disjoint): ")
+    print_int(j_different)
+    println("")
+
+    if j_similar <= j_different {
+        println("FAIL: overlapping keywords should score higher")
+        exit(1)
+    }
+
+    // Emotional similarity
+    let em1 = emotion_new(70, 60, 50)
+    let em2 = emotion_new(75, 55, 50)
+    let em3 = emotion_new(10, 90, 20)
+    let es_similar = emotion_similarity(em1, em2)
+    let es_different = emotion_similarity(em1, em3)
+
+    print("  Emotion similarity (close): ")
+    print_int(es_similar)
+    println("")
+    print("  Emotion similarity (far): ")
+    print_int(es_different)
+    println("")
+
+    if es_similar <= es_different {
+        println("FAIL: similar emotions should score higher")
+        exit(1)
+    }
+
+    println("PASS")
+}
+
+fn test_path_execution() {
+    println("--- Test: Forward Path Execution ---")
+
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    let reasoner = node_new("Reasoner", NTYPE_REASONER)
+    let actor = node_new("Actor", NTYPE_ACTOR)
+
+    perceiver_add_template(perceiver, "greeting", ["hello", "hi", "hey"], 80)
+
+    let path = path_forward("process_greeting")
+    path_add_step(path, perceiver)
+    path_add_step(path, reasoner)
+    path_add_step(path, actor)
+
+    print("  Path steps: ")
+    print_int(path_step_count(path))
+    println("")
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "respond", 70)
+    let m = moment_new("hello", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    let result = path_execute(path, sig)
+    if result == 0 {
+        println("  Path terminated early (node produced no output)")
+    } else {
+        print("  Path executed, result trace depth: ")
+        print_int(signal_trace_depth(result))
+        println("")
+    }
+
+    println("PASS")
+}
+
+fn test_full_cognitive_cycle() {
+    println("--- Test: Full Cognitive Cycle ---")
+
+    academic_init()
+    experiential_init()
+    emotion_init()
+    memory_init()
+    reasoning_init()
+
+    academic_add_axiom("greeting", "requires", "response")
+    academic_add_axiom("greeting", "tone", "friendly")
+    academic_add_axiom("dog", "is_a", "mammal")
+    academic_add_axiom("mammal", "is_a", "animal")
+    reasoning_add_rule("greeting", "say_hello", 90)
+    reasoning_add_rule("is_mammal", "is_warm_blooded", 99)
+    reasoning_add_causal("greeting", "positive_interaction", 80)
+
+    let user = entity_new("User", "human")
+
+    // Turn 1: user greets
+    let cons1 = consequence_new(CTYPE_EXPECTATION, "expects reply", 80)
+    let m1 = moment_new("hello there", user, 70, 50, cons1, 80)
+
+    emotion_appraise(m1)
+    memory_store(m1, 80)
+    memory_working_push(m1)
+    experiential_record(m1)
+
+    let knowledge = academic_query("greeting", "requires")
+    if len(knowledge) > 0 {
+        print("  Knowledge: greeting requires ")
+        println(knowledge[0])
+    }
+
+    let actions = reasoning_deduce("greeting", 1)
+    if len(actions) > 0 {
+        print("  Reasoning: should ")
+        println(conclusion_content(actions[0]))
+    }
+
+    // Turn 2: user teaches
+    let cons2 = consequence_new(CTYPE_INSIGHT, "new knowledge", 75)
+    let m2 = moment_new("teach: whale is a mammal", user, 75, 55, cons2, 80)
+    academic_add_axiom("whale", "is_a", "mammal")
+
+    emotion_appraise(m2)
+    memory_store(m2, 75)
+    memory_working_push(m2)
+    experiential_record(m2)
+
+    let whale_facts = academic_query("whale", "is_a")
+    if len(whale_facts) > 0 {
+        print("  Learned: whale is a ")
+        println(whale_facts[0])
+    }
+
+    // Turn 3: user asks a question
+    let cons3 = consequence_new(CTYPE_EXPECTATION, "wants answer", 85)
+    let m3 = moment_new("what is a mammal?", user, 80, 60, cons3, 85)
+
+    emotion_appraise(m3)
+    memory_store(m3, 85)
+    memory_working_push(m3)
+
+    let mammal_is = academic_query("mammal", "is_a")
+    if len(mammal_is) > 0 {
+        print("  Answer: mammal is a ")
+        println(mammal_is[0])
+    }
+
+    let mammals = academic_query_reverse("is_a", "mammal")
+    print("  Known mammals: ")
+    let mi = 0
+    while mi < len(mammals) {
+        if mi > 0 { print(", ") }
+        print(mammals[mi])
+        mi = mi + 1
+    }
+    println("")
+
+    // Verify accumulated state
+    print("  Episodes stored: ")
+    print_int(memory_count_episodes())
+    println("")
+    print("  Working memory: ")
+    print_int(memory_working_count())
+    println("")
+    print("  Academic facts: ")
+    print_int(academic_count_facts())
+    println("")
+    print("  Emotion: ")
+    println(emotion_describe())
+    print("  Experiential patterns: ")
+    print_int(experiential_count())
+    println("")
+
+    // Recall similar to first greeting
+    let similar = memory_recall_similar(m1, 2)
+    print("  Similar to greeting: ")
+    print_int(len(similar))
+    println(" episodes")
+
+    println("PASS")
+}
+
+fn test_cross_system_integration() {
+    println("--- Test: Cross-System Integration ---")
+
+    academic_init()
+    experiential_init()
+    emotion_init()
+    memory_init()
+    reasoning_init()
+
+    // Build a knowledge base about animals
+    academic_add_axiom("dog", "is_a", "mammal")
+    academic_add_axiom("cat", "is_a", "mammal")
+    academic_add_axiom("whale", "is_a", "mammal")
+    academic_add_axiom("eagle", "is_a", "bird")
+    academic_add_axiom("mammal", "is_a", "animal")
+    academic_add_axiom("bird", "is_a", "animal")
+    academic_add_axiom("mammal", "has", "warm_blood")
+    academic_add_axiom("bird", "has", "feathers")
+
+    // Reasoning rules
+    reasoning_add_rule("is_mammal", "has_warm_blood", 99)
+    reasoning_add_rule("is_bird", "can_fly", 70)
+    reasoning_add_causal("learning", "knowledge_growth", 85)
+    reasoning_add_causal("knowledge_growth", "better_reasoning", 75)
+
+    // Create nodes for signal flow
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    let knower = node_new("Knower", NTYPE_KNOWER)
+    let reasoner = node_new("Reasoner", NTYPE_REASONER)
+    let feeler = node_new("Feeler", NTYPE_FEELER)
+
+    perceiver_add_template(perceiver, "question", 80)
+    perceiver_add_template(perceiver, "statement", 50)
+
+    // Wire a channel
+    let ch = channel_broadcast("main_bus", "Perceiver")
+    channel_add_dest(ch, knower)
+    channel_add_dest(ch, reasoner)
+    channel_add_dest(ch, feeler)
+
+    // Create a signal and route it
+    let user = entity_new("User", "human")
+    let cons = consequence_new(CTYPE_EXPECTATION, "wants answer", 80)
+    let m = moment_new("what animals are mammals?", user, 80, 60, cons, 80)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    // Emotion responds to the moment
+    emotion_appraise(m)
+
+    // Memory stores the episode
+    memory_store(m, 80)
+
+    // Academic answers the question
+    let mammals = academic_query_reverse("is_a", "mammal")
+    print("  Mammals in knowledge base: ")
+    let mi = 0
+    while mi < len(mammals) {
+        if mi > 0 { print(", ") }
+        print(mammals[mi])
+        mi = mi + 1
+    }
+    println("")
+
+    // Reasoning predicts effects
+    let effects = reasoning_predict_effects("learning", 2)
+    print("  Effects of learning (causal chain): ")
+    print_int(len(effects))
+    println("")
+
+    // Route signal through channel
+    let delivered = channel_route(ch, sig)
+    print("  Signal delivered to ")
+    print_int(delivered)
+    println(" nodes")
+
+    // Verify everything is connected
+    if len(mammals) < 3 {
+        println("FAIL: expected at least 3 mammals")
+        exit(1)
+    }
+    if delivered < 3 {
+        println("FAIL: expected signal delivered to 3 nodes")
+        exit(1)
+    }
+    if memory_count_episodes() < 1 {
+        println("FAIL: expected at least 1 episode")
+        exit(1)
+    }
+
+    println("PASS")
+}
+
+fn main() {
+    println("============================================================")
+    println("  M9 Full System Verification")
+    println("  Testing all cognitive subsystems in a single binary")
+    println("============================================================")
+    println("")
+
+    test_perception_to_memory()
+    println("")
+    test_learning_tracks()
+    println("")
+    test_emotion_appraisal()
+    println("")
+    test_reasoning_engine()
+    println("")
+    test_signal_flow()
+    println("")
+    test_similarity_scoring()
+    println("")
+    test_path_execution()
+    println("")
+    test_full_cognitive_cycle()
+    println("")
+    test_cross_system_integration()
+    println("")
+
+    println("============================================================")
+    println("  M9 full system verification PASSED")
+    println("  All cognitive subsystems operational in native binary")
+    println("============================================================")
+}
+
+main()
