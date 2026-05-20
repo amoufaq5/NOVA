@@ -1847,11 +1847,25 @@ fn gen_expr(nd) {
         let tend_lbl = new_label()
         let old_catch = cg_catch_label
         cg_catch_label = tcatch_lbl
+
+        out("    mov rdi, 32")
+        out("    call _nova_alloc")
+        out("    mov rcx, [rip + _nova_catch_stack]")
+        out("    mov [rax], rcx")
+        out("    mov [rax + 8], rbp")
+        out("    mov [rax + 16], rsp")
+        out("    lea rcx, [rip + " + tcatch_lbl + "]")
+        out("    mov [rax + 24], rcx")
+        out("    mov [rip + _nova_catch_stack], rax")
         out("    mov qword ptr [rip + _nova_error_flag], 0")
+
         gen_block(try_body)
-        out("    cmp qword ptr [rip + _nova_error_flag], 0")
-        out("    jne " + tcatch_lbl)
+
+        out("    mov rcx, [rip + _nova_catch_stack]")
+        out("    mov rcx, [rcx]")
+        out("    mov [rip + _nova_catch_stack], rcx")
         out("    jmp " + tend_lbl)
+
         out_label(tcatch_lbl)
         if catch_err_var == "" {
         } else {
@@ -2420,12 +2434,22 @@ fn gen_stmt(nd) {
         let old_catch = cg_catch_label
         cg_catch_label = catch_lbl
 
+        out("    mov rdi, 32")
+        out("    call _nova_alloc")
+        out("    mov rcx, [rip + _nova_catch_stack]")
+        out("    mov [rax], rcx")
+        out("    mov [rax + 8], rbp")
+        out("    mov [rax + 16], rsp")
+        out("    lea rcx, [rip + " + catch_lbl + "]")
+        out("    mov [rax + 24], rcx")
+        out("    mov [rip + _nova_catch_stack], rax")
         out("    mov qword ptr [rip + _nova_error_flag], 0")
 
         gen_block(try_body)
 
-        out("    cmp qword ptr [rip + _nova_error_flag], 0")
-        out("    jne " + catch_lbl)
+        out("    mov rcx, [rip + _nova_catch_stack]")
+        out("    mov rcx, [rcx]")
+        out("    mov [rip + _nova_catch_stack], rcx")
         out("    jmp " + end_lbl)
 
         out_label(catch_lbl)
@@ -2454,16 +2478,8 @@ fn gen_stmt(nd) {
     if tag == AST_THROW {
         let value = nd[1]
         gen_expr(value)
-        out("    mov [rip + _nova_error_flag], rax")
-        out("    mov [rip + _nova_error_value], rax")
-        // Jump to current catch handler if available
-        if cg_catch_label == "" {
-            // No try/catch - exit with error code
-            out("    mov rdi, rax")
-            emit_syscall(60)
-        } else {
-            out("    jmp " + cg_catch_label)
-        }
+        out("    mov rdi, rax")
+        out("    call _nova_throw_impl")
         return 0
     }
 
@@ -6261,6 +6277,26 @@ fn gen_runtime() {
     out("    mov rdi, 1")
     emit_syscall(60)
 
+    // --- _nova_throw_impl: dynamic exception dispatch ---
+    out("")
+    out_label("_nova_throw_impl")
+    out("    mov [rip + _nova_error_value], rdi")
+    out("    mov qword ptr [rip + _nova_error_flag], 1")
+    out("    mov rcx, [rip + _nova_catch_stack]")
+    out("    test rcx, rcx")
+    out("    jz .throw_no_handler")
+    out("    mov rbp, [rcx + 8]")
+    out("    mov rsp, [rcx + 16]")
+    out("    mov rax, [rcx + 24]")
+    out("    mov rcx, [rcx]")
+    out("    mov [rip + _nova_catch_stack], rcx")
+    out("    jmp rax")
+    out(".throw_no_handler:")
+    out("    lea rdi, [rip + _err_uncaught]")
+    out("    call _nova_println")
+    out("    mov rdi, 1")
+    emit_syscall(60)
+
     // --- assert(condition, message) ---
     out("")
     out_label("_nova_assert")
@@ -8830,6 +8866,8 @@ fn gen_runtime() {
     out("    .asciz " + DQ + "\\n" + DQ)
     out_label("_err_assert_prefix")
     out("    .asciz " + DQ + "Assertion failed: " + DQ)
+    out_label("_err_uncaught")
+    out("    .asciz " + DQ + "Uncaught exception" + DQ)
     out_label("_debug_sep")
     out("    .asciz " + DQ + ": " + DQ)
     out_label("_debug_null")
@@ -8870,6 +8908,8 @@ fn gen_runtime() {
     out_label("_nova_error_flag")
     out("    .quad 0")
     out_label("_nova_error_value")
+    out("    .quad 0")
+    out_label("_nova_catch_stack")
     out("    .quad 0")
     out_label("_main_coro_ctx")
     out("    .space 56")

@@ -1,0 +1,65 @@
+fn divide(a, b) {
+    if b == 0 {
+        throw "division by zero"
+    }
+    return a / b
+}
+
+fn nested_throw() {
+    divide(10, 0)
+}
+
+fn deep_call() {
+    nested_throw()
+}
+
+fn main() {
+    # Cross-function throw - success path
+    let result = 0
+    try {
+        result = divide(10, 2)
+    } catch {
+        result = -1
+    }
+    assert(result == 5)
+
+    # Cross-function throw - error path
+    try {
+        result = divide(10, 0)
+    } catch {
+        result = -1
+    }
+    assert(result == -1)
+
+    # Deeply nested throw
+    try {
+        deep_call()
+        result = 0
+    } catch {
+        result = 42
+    }
+    assert(result == 42)
+
+    # try-as-expression with cross-function throw
+    let val = try { divide(20, 4) } catch { -1 }
+    assert(val == 5)
+
+    let val2 = try { divide(20, 0) } catch { -1 }
+    assert(val2 == -1)
+
+    # Normal execution after caught exception
+    let final_val = divide(100, 10)
+    assert(final_val == 10)
+
+    # Catch error value from cross-function throw
+    let err_msg = ""
+    try {
+        divide(5, 0)
+    } catch e {
+        err_msg = e
+    }
+    assert(err_msg == "division by zero")
+
+    print("PASS")
+}
+main()
