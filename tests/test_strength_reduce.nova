@@ -1,0 +1,63 @@
+// Test compiler optimizations: identity elimination, division strength reduction
+
+fn check(name, got, expected) {
+    if got != expected {
+        print("FAIL: ")
+        print(name)
+        print(" expected ")
+        print(int_to_str(expected))
+        print(" got ")
+        println(int_to_str(got))
+        exit(1)
+    }
+}
+
+let x = 7
+
+// Identity elimination: x - 0 = x
+check("x-0", x - 0, 7)
+
+// Identity: x | 0 = x
+check("x|0", x | 0, 7)
+
+// Identity: x ^ 0 = x
+check("x^0", x ^ 0, 7)
+
+// Identity: x << 0 = x
+check("x<<0", x << 0, 7)
+
+// Identity: x >> 0 = x
+check("x>>0", x >> 0, 7)
+
+// Identity: x / 1 = x
+check("x/1", x / 1, 7)
+
+// Division by power of 2
+check("1024/2", 1024 / 2, 512)
+check("1024/4", 1024 / 4, 256)
+check("1024/8", 1024 / 8, 128)
+check("1024/16", 1024 / 16, 64)
+check("256/256", 256 / 256, 1)
+
+// Division of variable by power of 2
+let y = 1024
+check("y/2", y / 2, 512)
+check("y/4", y / 4, 256)
+
+// Non-power-of-2 division still works
+check("21/7", 21 / 7, 3)
+check("y/3", y / 3, 341)
+
+// Multiply still works normally
+check("x*3", x * 3, 21)
+check("x*5", x * 5, 35)
+
+// String repeat still works with *
+let s = "ab" * 3
+if s != "ababab" {
+    print("FAIL: string repeat, got: ")
+    println(s)
+    exit(1)
+}
+
+println("All optimization tests passed")

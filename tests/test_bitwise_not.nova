@@ -1,0 +1,38 @@
+// Test bitwise NOT operator (~)
+
+let x = 0
+let y = ~x
+// ~0 = -1 (all bits set)
+if y != 0 - 1 {
+    print("FAIL: ~0 expected -1, got ")
+    println(int_to_str(y))
+    exit(1)
+}
+
+// ~(-1) = 0
+let z = ~(0 - 1)
+if z != 0 {
+    print("FAIL: ~(-1) expected 0, got ")
+    println(int_to_str(z))
+    exit(1)
+}
+
+// ~~x = x (double NOT is identity)
+let a = 42
+if ~~a != 42 {
+    print("FAIL: ~~42 expected 42, got ")
+    println(int_to_str(~~a))
+    exit(1)
+}
+
+// ~ with & for masking
+let val = 0xFF
+let mask = ~0x0F
+let result = val & mask
+if result != 0xF0 {
+    print("FAIL: 0xFF & ~0x0F expected 240, got ")
+    println(int_to_str(result))
+    exit(1)
+}
+
+println("All bitwise NOT tests passed")

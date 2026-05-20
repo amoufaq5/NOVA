@@ -363,6 +363,11 @@ fn parse_primary() {
         let operand = parse_unary()
         return ast_unary("!", operand)
     }
+    if t == TOK_TILDE {
+        par_advance()
+        let operand = parse_unary()
+        return ast_unary("~", operand)
+    }
     if t == TOK_FN {
         // Check if this is a lambda: fn( without identifier
         let next_pos = par_pos + 1
@@ -1122,7 +1127,7 @@ fn parse_stmt_inner() {
         }
         return ast_assign(name, value)
     }
-    // Compound assignment: +=, -=, *=, /=, %=, **=
+    // Compound assignment: +=, -=, *=, /=, %=, **=, &=, |=, ^=, <<=, >>=
     let pt = par_peek_type()
     let compound_op = ""
     if pt == TOK_PLUS_EQ { compound_op = "+" }
@@ -1131,6 +1136,11 @@ fn parse_stmt_inner() {
     if pt == TOK_SLASH_EQ { compound_op = "/" }
     if pt == TOK_PERCENT_EQ { compound_op = "%" }
     if pt == TOK_STAR_STAR_EQ { compound_op = "**" }
+    if pt == TOK_AMP_EQ { compound_op = "&" }
+    if pt == TOK_PIPE_EQ { compound_op = "|" }
+    if pt == TOK_CARET_EQ { compound_op = "^" }
+    if pt == TOK_SHL_EQ { compound_op = "<<" }
+    if pt == TOK_SHR_EQ { compound_op = ">>" }
     if compound_op == "" {
     } else {
         par_advance()

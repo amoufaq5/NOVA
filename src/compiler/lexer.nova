@@ -89,6 +89,11 @@ let TOK_FINALLY = 89
 let TOK_STAR_STAR_EQ = 90
 let TOK_ASM = 91
 let TOK_EXTERN = 92
+let TOK_AMP_EQ = 93
+let TOK_PIPE_EQ = 94
+let TOK_CARET_EQ = 95
+let TOK_SHL_EQ = 96
+let TOK_SHR_EQ = 97
 
 // --- Lexer State ---
 let lex_src = ""
@@ -561,6 +566,11 @@ fn lex_pipe_char() {
         emit_tok(TOK_PIPE_GT, "|>")
         return 0
     }
+    if pn == 61 {
+        lex_advance()
+        emit_tok(TOK_PIPE_EQ, "|=")
+        return 0
+    }
     emit_tok(TOK_PIPE, "|")
 }
 
@@ -649,9 +659,12 @@ fn lex_all() {
                         if lex_peek() == 38 {
                             lex_advance()
                             emit_tok(TOK_AND, "&&")
+                        } else { if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_AMP_EQ, "&=")
                         } else {
                             emit_tok(TOK_AMP, "&")
-                        }
+                        } }
                     }
                     else { if c == 124 {
                         lex_pipe_char()
@@ -685,7 +698,12 @@ fn lex_all() {
                         lex_advance()
                         if lex_peek() == 60 {
                             lex_advance()
-                            emit_tok(TOK_SHL, "<<")
+                            if lex_peek() == 61 {
+                                lex_advance()
+                                emit_tok(TOK_SHL_EQ, "<<=")
+                            } else {
+                                emit_tok(TOK_SHL, "<<")
+                            }
                         } else {
                             if lex_peek() == 61 {
                                 lex_advance()
@@ -699,7 +717,12 @@ fn lex_all() {
                         lex_advance()
                         if lex_peek() == 62 {
                             lex_advance()
-                            emit_tok(TOK_SHR, ">>")
+                            if lex_peek() == 61 {
+                                lex_advance()
+                                emit_tok(TOK_SHR_EQ, ">>=")
+                            } else {
+                                emit_tok(TOK_SHR, ">>")
+                            }
                         } else {
                             if lex_peek() == 61 {
                                 lex_advance()
@@ -711,7 +734,12 @@ fn lex_all() {
                     }
                     else { if c == 94 {
                         lex_advance()
-                        emit_tok(TOK_CARET, "^")
+                        if lex_peek() == 61 {
+                            lex_advance()
+                            emit_tok(TOK_CARET_EQ, "^=")
+                        } else {
+                            emit_tok(TOK_CARET, "^")
+                        }
                     }
                     else { if c == 46 {
                         lex_advance()
@@ -728,11 +756,12 @@ fn lex_all() {
                         }
                     }
                     else { if c == 63 { lex_advance(); emit_tok(TOK_QUESTION, "?") }
+                    else { if c == 126 { lex_advance(); emit_tok(TOK_TILDE, "~") }
                     else {
                         // Unknown character, skip
                         lex_advance()
                     }
-                    } } } } } } } } } } } } } } } } } } } } } } } }
+                    } } } } } } } } } } } } } } } } } } } } } } } } }
                 }
             }
         }

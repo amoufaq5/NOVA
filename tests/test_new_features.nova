@@ -1,0 +1,68 @@
+// Comprehensive test for new features:
+// - Bitwise compound assignments (&=, |=, ^=, <<=, >>=)
+// - Bitwise NOT (~)
+// - Division strength reduction
+// - Identity elimination
+// - int_sub, int_div, int_mod builtins
+
+fn check(name, got, expected) {
+    if got != expected {
+        print("FAIL: ")
+        print(name)
+        print(" expected ")
+        print(int_to_str(expected))
+        print(" got ")
+        println(int_to_str(got))
+        exit(1)
+    }
+}
+
+// --- Bitwise compound assignments ---
+let x = 0xFF
+x &= 0x0F
+check("&=", x, 15)
+
+x |= 0xF0
+check("|=", x, 255)
+
+x ^= 0xFF
+check("^=", x, 0)
+
+x = 1
+x <<= 4
+check("<<=", x, 16)
+
+x >>= 2
+check(">>=", x, 4)
+
+// --- Bitwise NOT ---
+let a = ~0
+check("~0", a, 0 - 1)
+
+let b = ~(0 - 1)
+check("~-1", b, 0)
+
+let c = 42
+check("~~x", ~~c, 42)
+
+// --- Division by power of 2 ---
+let d = 1024
+check("d/2", d / 2, 512)
+check("d/4", d / 4, 256)
+check("d/8", d / 8, 128)
+
+// --- Identity elimination ---
+let e = 99
+check("e-0", e - 0, 99)
+check("e|0", e | 0, 99)
+check("e^0", e ^ 0, 99)
+check("e<<0", e << 0, 99)
+check("e>>0", e >> 0, 99)
+check("e/1", e / 1, 99)
+
+// --- int_sub, int_div, int_mod ---
+check("int_sub", int_sub(5000, 3000), 2000)
+check("int_div", int_div(5000, 3), 1666)
+check("int_mod", int_mod(5000, 3), 2)
+
+println("All new feature tests passed")

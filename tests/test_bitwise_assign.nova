@@ -1,0 +1,75 @@
+// Test bitwise compound assignment operators
+
+let x = 0xFF
+
+// &=
+x &= 0x0F
+if x != 15 {
+    println("FAIL: &= expected 15")
+    exit(1)
+}
+
+// |=
+x |= 0xF0
+if x != 255 {
+    println("FAIL: |= expected 255")
+    exit(1)
+}
+
+// ^=
+x ^= 0xFF
+if x != 0 {
+    println("FAIL: ^= expected 0")
+    exit(1)
+}
+
+// <<=
+x = 1
+x <<= 4
+if x != 16 {
+    println("FAIL: <<= expected 16")
+    exit(1)
+}
+
+// >>=
+x >>= 2
+if x != 4 {
+    println("FAIL: >>= expected 4")
+    exit(1)
+}
+
+// Combined test
+let flags = 0
+flags |= 0x01
+flags |= 0x04
+flags |= 0x10
+if flags != 21 {
+    println("FAIL: combined |= expected 21")
+    exit(1)
+}
+
+flags &= 0x05
+if flags != 5 {
+    println("FAIL: combined &= expected 5")
+    exit(1)
+}
+
+flags ^= 0x04
+if flags != 1 {
+    println("FAIL: combined ^= expected 1")
+    exit(1)
+}
+
+flags <<= 8
+if flags != 256 {
+    println("FAIL: combined <<= expected 256")
+    exit(1)
+}
+
+flags >>= 4
+if flags != 16 {
+    println("FAIL: combined >>= expected 16")
+    exit(1)
+}
+
+println("All bitwise compound assignment tests passed")

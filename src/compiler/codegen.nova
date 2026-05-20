@@ -780,6 +780,9 @@ fn is_builtin_fn(name) {
     if name == "strcmp" { return 1 }
     if name == "int_mul" { return 1 }
     if name == "int_add" { return 1 }
+    if name == "int_sub" { return 1 }
+    if name == "int_div" { return 1 }
+    if name == "int_mod" { return 1 }
     if name == "str_replace" { return 1 }
     if name == "str_repeat" { return 1 }
     if name == "char_code" { return 1 }
@@ -825,6 +828,24 @@ fn is_known_function(name) {
 // Sentinel value indicating a node cannot be constant-folded.
 // Using a large negative value that is unlikely to appear in real code.
 let FOLD_SENTINEL = 0 - 999999999
+
+fn log2_exact(v) {
+    if v <= 0 { return 0 - 1 }
+    if v == 1 { return 0 }
+    if v == 2 { return 1 }
+    if v == 4 { return 2 }
+    if v == 8 { return 3 }
+    if v == 16 { return 4 }
+    if v == 32 { return 5 }
+    if v == 64 { return 6 }
+    if v == 128 { return 7 }
+    if v == 256 { return 8 }
+    if v == 512 { return 9 }
+    if v == 1024 { return 10 }
+    if v == 2048 { return 11 }
+    if v == 4096 { return 12 }
+    return 0 - 1
+}
 
 fn try_fold(nd) {
     let tag = ast_tag(nd)
@@ -1013,6 +1034,45 @@ fn gen_expr(nd) {
             }
         }
 
+        // Identity operation elimination (only for ops without overloaded semantics)
+        // +,* are overloaded (string concat/repeat) so NOT safe for identity elim
+        if is_foldable(right_val) == 1 {
+            let ident_skip = 0
+            if right_val == 0 {
+                if op == "-" { ident_skip = 1 }
+                if op == "|" { ident_skip = 1 }
+                if op == "^" { ident_skip = 1 }
+                if op == "<<" { ident_skip = 1 }
+                if op == ">>" { ident_skip = 1 }
+            }
+            if right_val == 1 {
+                if op == "/" { ident_skip = 1 }
+            }
+            if ident_skip == 1 {
+                gen_expr(nd[2])
+                return 0
+            }
+        }
+
+        // Strength reduction: divide by power of 2 → arithmetic shift right
+        let sr_done = 0
+        if op == "/" {
+            let rv2 = try_fold(nd[3])
+            if is_foldable(rv2) == 1 {
+                if rv2 > 0 {
+                    let sr_shift = log2_exact(rv2)
+                    if sr_shift >= 0 {
+                        gen_expr(nd[2])
+                        out("    sar rax, " + int_to_str(sr_shift))
+                        sr_done = 1
+                    }
+                }
+            }
+        }
+        if sr_done == 1 {
+            return 0
+        }
+
         // Non-constant path: generate code for both operands
         let rtag = ast_tag(nd[3])
         let right_simple = 0
@@ -1120,6 +1180,9 @@ fn gen_expr(nd) {
             out("    test rax, rax")
             out("    sete al")
             out("    movzx rax, al")
+        }
+        if op == "~" {
+            out("    not rax")
         }
         return 0
     }
@@ -2864,6 +2927,12 @@ fn wasm_gen_expr(nd) {
             wi("i64.extend_i32_u")
             return 0
         }
+        if op == "~" {
+            wi("i64.const -1")
+            wasm_gen_expr(nd[2])
+            wi("i64.xor")
+            return 0
+        }
         wasm_gen_expr(nd[2])
         return 0
     }
@@ -4222,6 +4291,7 @@ fn wasm_gen_program(program) {
 fn peephole_optimize() {
     let n = len(cg_output)
     let i = 0
+    // Pass 1: push/pop elimination
     while i < n - 1 {
         let cur = cg_output[i]
         let nxt = cg_output[i + 1]
@@ -4254,6 +4324,24 @@ fn peephole_optimize() {
                 list_set(cg_output, i, "")
                 list_set(cg_output, i + 1, "")
             }
+        }
+        i = i + 1
+    }
+    // Pass 2: mov rax,0 → xor eax,eax; redundant movs
+    i = 0
+    while i < n {
+        let cur = cg_output[i]
+        if cur == "    mov rax, 0" {
+            list_set(cg_output, i, "    xor eax, eax")
+        }
+        if cur == "    mov rdi, 0" {
+            list_set(cg_output, i, "    xor edi, edi")
+        }
+        if cur == "    mov rsi, 0" {
+            list_set(cg_output, i, "    xor esi, esi")
+        }
+        if cur == "    mov rcx, 0" {
+            list_set(cg_output, i, "    xor ecx, ecx")
         }
         i = i + 1
     }
@@ -7533,6 +7621,21 @@ fn gen_runtime() {
     out("    ret")
     out_label("int_add")
     out("    lea rax, [rdi + rsi]")
+    out("    ret")
+    out_label("int_sub")
+    out("    mov rax, rdi")
+    out("    sub rax, rsi")
+    out("    ret")
+    out_label("int_div")
+    out("    mov rax, rdi")
+    out("    cqo")
+    out("    idiv rsi")
+    out("    ret")
+    out_label("int_mod")
+    out("    mov rax, rdi")
+    out("    cqo")
+    out("    idiv rsi")
+    out("    mov rax, rdx")
     out("    ret")
     out_label("str_replace")
     out("    jmp _nova_str_replace")
