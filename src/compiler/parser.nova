@@ -427,6 +427,12 @@ fn parse_primary() {
         }
         return ast_do_expr(init_stmts, final_expr)
     }
+    if t == TOK_MATCH {
+        return parse_match()
+    }
+    if t == TOK_IF {
+        return parse_if()
+    }
     // Unexpected token
     print("Error at line ")
     let err_tok = par_peek()

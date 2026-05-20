@@ -1,0 +1,54 @@
+fn main() {
+    # match as expression - literal patterns
+    let x = match 2 {
+        1 => "one"
+        2 => "two"
+        3 => "three"
+        _ => "other"
+    }
+    assert(x == "two")
+
+    # match as expression - wildcard
+    let y = match 99 {
+        1 => "one"
+        _ => "many"
+    }
+    assert(y == "many")
+
+    # if as expression
+    let a = if 1 == 1 { 42 } else { 0 }
+    assert(a == 42)
+
+    # if as expression - else branch
+    let b = if 1 == 2 { 42 } else { 99 }
+    assert(b == 99)
+
+    # nested match in expression
+    let val = 3
+    let c = match val {
+        1 => 10
+        2 => 20
+        3 => 30
+        _ => 0
+    }
+    assert(c == 30)
+
+    # if expression with complex condition
+    let n = 15
+    let d = if n > 10 { n * 2 } else { n }
+    assert(d == 30)
+
+    # match result used in arithmetic
+    let e = match 1 {
+        1 => 100
+        _ => 0
+    } + 5
+    assert(e == 105)
+
+    # if expression result used in arithmetic
+    let f = if 1 == 1 { 50 } else { 0 } + 25
+    assert(f == 75)
+
+    print("PASS")
+}
+main()

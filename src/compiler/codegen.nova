@@ -1656,6 +1656,100 @@ fn gen_expr(nd) {
         return 0
     }
 
+    if tag == AST_MATCH_STMT {
+        let mexpr = nd[1]
+        let marms = nd[2]
+        let mend = new_label()
+        gen_expr(mexpr)
+        out("    push rax")
+        let mi = 0
+        while mi < len(marms) {
+            let marm = marms[mi]
+            let mpat = marm[1]
+            let mbody = marm[2]
+            let mptag = ast_tag(mpat)
+            let mhas_guard = 0
+            if len(marm) > 3 { mhas_guard = 1 }
+            if mptag == AST_WILDCARD {
+                let mnxt_w = new_label()
+                if mhas_guard == 1 {
+                    gen_expr(marm[3])
+                    out("    test rax, rax")
+                    out("    jz " + mnxt_w)
+                }
+                out("    add rsp, 8")
+                if ast_tag(mbody) == AST_EXPR_STMT {
+                    gen_expr(mbody[1])
+                } else { if ast_tag(mbody) == AST_BLOCK {
+                    gen_block(mbody)
+                } else {
+                    gen_stmt(mbody)
+                } }
+                out("    jmp " + mend)
+                if mhas_guard == 1 { out_label(mnxt_w) }
+            } else {
+                let mnxt = new_label()
+                gen_expr(mpat)
+                out("    mov rcx, rax")
+                out("    mov rax, [rsp]")
+                out("    mov rdi, rax")
+                out("    mov rsi, rcx")
+                out("    call _nova_eq")
+                out("    test rax, rax")
+                out("    jz " + mnxt)
+                if mhas_guard == 1 {
+                    gen_expr(marm[3])
+                    out("    test rax, rax")
+                    out("    jz " + mnxt)
+                }
+                out("    add rsp, 8")
+                if ast_tag(mbody) == AST_EXPR_STMT {
+                    gen_expr(mbody[1])
+                } else { if ast_tag(mbody) == AST_BLOCK {
+                    gen_block(mbody)
+                } else {
+                    gen_stmt(mbody)
+                } }
+                out("    jmp " + mend)
+                out_label(mnxt)
+            }
+            mi = mi + 1
+        }
+        out("    add rsp, 8")
+        out("    xor eax, eax")
+        out_label(mend)
+        return 0
+    }
+
+    if tag == AST_IF_STMT {
+        let icond = nd[1]
+        let ithen = nd[2]
+        let ielse = nd[3]
+        let ielse_lbl = new_label()
+        let iend_lbl = new_label()
+        gen_expr(icond)
+        out("    test rax, rax")
+        out("    jz " + ielse_lbl)
+        if ast_tag(ithen) == AST_BLOCK {
+            gen_block(ithen)
+        } else {
+            gen_stmt(ithen)
+        }
+        out("    jmp " + iend_lbl)
+        out_label(ielse_lbl)
+        if ielse == 0 {
+            out("    xor eax, eax")
+        } else {
+            if ast_tag(ielse) == AST_BLOCK {
+                gen_block(ielse)
+            } else {
+                gen_stmt(ielse)
+            }
+        }
+        out_label(iend_lbl)
+        return 0
+    }
+
     out("    # unknown expr tag " + int_to_str(tag))
 }
 
