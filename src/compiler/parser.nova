@@ -453,6 +453,9 @@ fn parse_primary() {
         let neg_ucond = ast_unary("!", ucond)
         return ast_if(neg_ucond, ubody, 0)
     }
+    if t == TOK_TRY {
+        return parse_try()
+    }
     // Unexpected token
     print("Error at line ")
     let err_tok = par_peek()

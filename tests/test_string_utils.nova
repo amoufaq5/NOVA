@@ -1,0 +1,27 @@
+fn main() {
+    # pad_left
+    let s1 = pad_left("42", 5, "0")
+    assert(s1 == "00042")
+
+    let s2 = pad_left("hello", 3, " ")
+    assert(s2 == "hello")
+
+    let s3 = pad_left("x", 4, "-")
+    assert(s3 == "---x")
+
+    # pad_right
+    let s4 = pad_right("hi", 5, ".")
+    assert(s4 == "hi...")
+
+    let s5 = pad_right("hello", 3, " ")
+    assert(s5 == "hello")
+
+    # str_count
+    assert(str_count("hello world", "l") == 3)
+    assert(str_count("aaa", "a") == 3)
+    assert(str_count("hello", "xyz") == 0)
+    assert(str_count("abcabc", "abc") == 2)
+
+    print("PASS")
+}
+main()

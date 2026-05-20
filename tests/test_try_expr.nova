@@ -1,0 +1,38 @@
+fn main() {
+    # try as expression - success path (no throw)
+    let a = try { 5 * 2 } catch { 0 }
+    assert(a == 10)
+
+    # try as expression - error path (direct throw)
+    let b = try { throw 42 } catch { 99 }
+    assert(b == 99)
+
+    # try with error variable
+    let c = try { throw "oops" } catch e { e }
+    assert(c == "oops")
+
+    # try with conditional throw
+    let x = -5
+    let d = try {
+        if x < 0 { throw "neg" }
+        x * 2
+    } catch { 0 }
+    assert(d == 0)
+
+    # try success with complex body
+    let e = try {
+        let v = 10
+        v + 20
+    } catch { 0 }
+    assert(e == 30)
+
+    # nested try expressions
+    let f = try {
+        let inner = try { throw 1 } catch { 42 }
+        inner * 2
+    } catch { 0 }
+    assert(f == 84)
+
+    print("PASS")
+}
+main()

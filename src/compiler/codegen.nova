@@ -879,6 +879,9 @@ fn is_builtin_fn(name) {
     if name == "unique" { return 1 }
     if name == "map_merge" { return 1 }
     if name == "enumerate" { return 1 }
+    if name == "pad_left" { return 1 }
+    if name == "pad_right" { return 1 }
+    if name == "str_count" { return 1 }
     if name == "coro_new" { return 1 }
     if name == "coro_resume" { return 1 }
     if name == "coro_yield" { return 1 }
@@ -1833,6 +1836,37 @@ fn gen_expr(nd) {
             }
         }
         out_label(iend_lbl)
+        return 0
+    }
+
+    if tag == AST_TRY_CATCH {
+        let try_body = nd[1]
+        let catch_body = nd[2]
+        let catch_err_var = nd[3]
+        let tcatch_lbl = new_label()
+        let tend_lbl = new_label()
+        let old_catch = cg_catch_label
+        cg_catch_label = tcatch_lbl
+        out("    mov qword ptr [rip + _nova_error_flag], 0")
+        gen_block(try_body)
+        out("    cmp qword ptr [rip + _nova_error_flag], 0")
+        out("    jne " + tcatch_lbl)
+        out("    jmp " + tend_lbl)
+        out_label(tcatch_lbl)
+        if catch_err_var == "" {
+        } else {
+            out("    mov rax, [rip + _nova_error_value]")
+            if is_global(catch_err_var) == 1 {
+                out("    mov [rip + _g_" + catch_err_var + "], rax")
+            } else {
+                let eoff = local_offset(catch_err_var)
+                out("    mov [rbp - " + int_to_str(eoff) + "], rax")
+            }
+        }
+        gen_block(catch_body)
+        out("    mov qword ptr [rip + _nova_error_flag], 0")
+        out_label(tend_lbl)
+        cg_catch_label = old_catch
         return 0
     }
 
@@ -7954,6 +7988,149 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- pad_left(str, width, fill_char) ---
+    out("")
+    out_label("_nova_pad_left")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    mov r14, rdx")
+    out("    mov rdi, r12")
+    out("    call _nova_strlen")
+    out("    cmp rax, r13")
+    out("    jge .pl_ret_orig")
+    out("    mov rcx, r13")
+    out("    sub rcx, rax")
+    out("    push rcx")
+    out("    push rax")
+    out("    lea rdi, [r13 + 1]")
+    out("    call _nova_alloc")
+    out("    push rax")
+    out("    pop rdi")
+    out("    pop rax")
+    out("    pop rcx")
+    out("    push rdi")
+    out("    push rax")
+    out("    mov rsi, r14")
+    out("    mov al, [rsi]")
+    out("    mov rsi, rdi")
+    out(".pl_fill:")
+    out("    test rcx, rcx")
+    out("    jz .pl_copy")
+    out("    mov [rsi], al")
+    out("    inc rsi")
+    out("    dec rcx")
+    out("    jmp .pl_fill")
+    out(".pl_copy:")
+    out("    mov rdi, rsi")
+    out("    mov rsi, r12")
+    out("    pop rcx")
+    out("    rep movsb")
+    out("    mov byte ptr [rdi], 0")
+    out("    pop rax")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+    out(".pl_ret_orig:")
+    out("    mov rax, r12")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- pad_right(str, width, fill_char) ---
+    out("")
+    out_label("_nova_pad_right")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    mov r14, rdx")
+    out("    mov rdi, r12")
+    out("    call _nova_strlen")
+    out("    cmp rax, r13")
+    out("    jge .pr_ret_orig")
+    out("    mov rcx, r13")
+    out("    sub rcx, rax")
+    out("    push rcx")
+    out("    push rax")
+    out("    lea rdi, [r13 + 1]")
+    out("    call _nova_alloc")
+    out("    push rax")
+    out("    mov rdi, rax")
+    out("    mov rsi, r12")
+    out("    mov rcx, [rsp + 8]")
+    out("    rep movsb")
+    out("    mov rsi, r14")
+    out("    mov al, [rsi]")
+    out("    mov rcx, [rsp + 16]")
+    out(".pr_fill:")
+    out("    test rcx, rcx")
+    out("    jz .pr_end")
+    out("    mov [rdi], al")
+    out("    inc rdi")
+    out("    dec rcx")
+    out("    jmp .pr_fill")
+    out(".pr_end:")
+    out("    mov byte ptr [rdi], 0")
+    out("    pop rax")
+    out("    add rsp, 16")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+    out(".pr_ret_orig:")
+    out("    mov rax, r12")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- str_count(haystack, needle) -> count of occurrences ---
+    out("")
+    out_label("_nova_str_count")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    xor r14d, r14d")
+    out("    mov rdi, r13")
+    out("    call _nova_strlen")
+    out("    push rax")
+    out(".sc_loop:")
+    out("    mov rdi, r12")
+    out("    mov rsi, r13")
+    out("    call _nova_str_find")
+    out("    cmp rax, 0")
+    out("    jl .sc_done")
+    out("    inc r14")
+    out("    add r12, rax")
+    out("    add r12, [rsp]")
+    out("    jmp .sc_loop")
+    out(".sc_done:")
+    out("    mov rax, r14")
+    out("    add rsp, 8")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
     // --- flat_map(list, fn): map then flatten one level ---
     out("")
     out_label("_nova_flat_map")
@@ -8559,6 +8736,12 @@ fn gen_runtime() {
     out("    jmp _nova_zip")
     out_label("enumerate")
     out("    jmp _nova_enumerate")
+    out_label("pad_left")
+    out("    jmp _nova_pad_left")
+    out_label("pad_right")
+    out("    jmp _nova_pad_right")
+    out_label("str_count")
+    out("    jmp _nova_str_count")
     out_label("flat_map")
     out("    jmp _nova_flat_map")
     out_label("any")
