@@ -562,10 +562,25 @@ fn parse_add() {
                     let rng_args = list_new()
                     push(rng_args, left)
                     push(rng_args, right)
+                    if par_peek_type() == TOK_DOTDOT {
+                        par_advance()
+                        let step = parse_mul()
+                        push(rng_args, step)
+                        left = ast_call(ast_ident("range_step"), rng_args)
+                    } else {
+                        left = ast_call(ast_ident("range_list"), rng_args)
+                    }
+                } else { if t == TOK_DOTDOT_EQ {
+                    par_advance()
+                    let right = parse_mul()
+                    let inc_right = ast_binop("+", right, ast_int(1))
+                    let rng_args = list_new()
+                    push(rng_args, left)
+                    push(rng_args, inc_right)
                     left = ast_call(ast_ident("range_list"), rng_args)
                 } else {
                     return left
-                }
+                } }
             }
         }
     }

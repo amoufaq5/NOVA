@@ -104,6 +104,7 @@ let TOK_GUARD = 104
 let TOK_NULLISH = 105
 let TOK_NULLISH_EQ = 106
 let TOK_LOOP = 107
+let TOK_DOTDOT_EQ = 108
 
 // --- Lexer State ---
 let lex_src = ""
@@ -793,9 +794,12 @@ fn lex_all() {
                             if lex_peek() == 46 {
                                 lex_advance()
                                 emit_tok(TOK_ELLIPSIS, "...")
+                            } else { if lex_peek() == 61 {
+                                lex_advance()
+                                emit_tok(TOK_DOTDOT_EQ, "..=")
                             } else {
                                 emit_tok(TOK_DOTDOT, "..")
-                            }
+                            } }
                         } else {
                             emit_tok(TOK_DOT, ".")
                         }

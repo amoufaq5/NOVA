@@ -806,6 +806,7 @@ fn is_builtin_fn(name) {
     if name == "char_code" { return 1 }
     if name == "to_int" { return 1 }
     if name == "range_list" { return 1 }
+    if name == "range_step" { return 1 }
     if name == "range" { return 1 }
     if name == "list_copy" { return 1 }
     if name == "list_slice" { return 1 }
@@ -7389,6 +7390,46 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- range_step(start, end, step): create list [start, start+step, ...] ---
+    out("")
+    out_label("_nova_range_step")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    mov r13, rsi")
+    out("    mov r14, rdx")
+    out("    call _nova_list_new")
+    out("    push rax")
+    out("    test r14, r14")
+    out("    jz .rgs_done")
+    out("    jg .rgs_pos")
+    out(".rgs_neg:")
+    out("    cmp r12, r13")
+    out("    jle .rgs_done")
+    out("    mov rdi, [rsp]")
+    out("    mov rsi, r12")
+    out("    call _nova_push")
+    out("    add r12, r14")
+    out("    jmp .rgs_neg")
+    out(".rgs_pos:")
+    out("    cmp r12, r13")
+    out("    jge .rgs_done")
+    out("    mov rdi, [rsp]")
+    out("    mov rsi, r12")
+    out("    call _nova_push")
+    out("    add r12, r14")
+    out("    jmp .rgs_pos")
+    out(".rgs_done:")
+    out("    pop rax")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
     // --- list_copy(list): shallow copy ---
     out("")
     out_label("_nova_list_copy")
@@ -7955,6 +7996,8 @@ fn gen_runtime() {
     out("    jmp _nova_to_int")
     out_label("range_list")
     out("    jmp _nova_range_list")
+    out_label("range_step")
+    out("    jmp _nova_range_step")
     out_label("range")
     out("    jmp _nova_range_list")
     out_label("list_copy")

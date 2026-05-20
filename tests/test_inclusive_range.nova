@@ -1,0 +1,26 @@
+fn main() {
+    # inclusive range: 1..=5 -> [1, 2, 3, 4, 5]
+    let r = 1..=5
+    assert(len(r) == 5)
+    assert(r[0] == 1)
+    assert(r[4] == 5)
+
+    # exclusive range for comparison: 1..5 -> [1, 2, 3, 4]
+    let e = 1..5
+    assert(len(e) == 4)
+
+    # inclusive range in for
+    let sum = 0
+    for x in 1..=10 {
+        sum = sum + x
+    }
+    assert(sum == 55)
+
+    # inclusive range with zero start
+    let z = 0..=3
+    assert(len(z) == 4)
+    assert(z[3] == 3)
+
+    print("PASS")
+}
+main()
