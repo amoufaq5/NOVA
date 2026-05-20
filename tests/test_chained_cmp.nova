@@ -1,0 +1,40 @@
+fn main() {
+    # Basic chained <
+    let a = 1
+    let b = 2
+    let c = 3
+    assert(a < b < c)
+
+    # Basic chained >
+    assert(c > b > a)
+
+    # Chained <=
+    assert(1 <= 2 <= 3)
+    assert(1 <= 1 <= 2)
+
+    # Chained >=
+    assert(3 >= 2 >= 1)
+    assert(3 >= 3 >= 1)
+
+    # Mixed chain: < and <=
+    assert(1 < 2 <= 2)
+    assert(1 <= 2 < 3)
+
+    # Chain that fails
+    if 1 < 5 < 3 {
+        assert(0 == 1)
+    }
+
+    # Three-way chain
+    assert(1 < 2 < 3 < 4)
+
+    # Equality chain
+    assert(1 == 1 == 1)
+
+    # != doesn't typically chain meaningfully but should parse
+    # 1 != 2 != 3 means (1 != 2) and (2 != 3)
+    assert(1 != 2 != 3)
+
+    print("PASS")
+}
+main()

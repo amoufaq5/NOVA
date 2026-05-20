@@ -601,6 +601,26 @@ fn parse_bitwise() {
     return left
 }
 
+fn is_cmp_tok(t) {
+    if t == TOK_LT { return 1 }
+    if t == TOK_GT { return 1 }
+    if t == TOK_LTEQ { return 1 }
+    if t == TOK_GTEQ { return 1 }
+    if t == TOK_EQEQ { return 1 }
+    if t == TOK_BANGEQ { return 1 }
+    return 0
+}
+
+fn cmp_tok_to_op(t) {
+    if t == TOK_LT { return "<" }
+    if t == TOK_GT { return ">" }
+    if t == TOK_LTEQ { return "<=" }
+    if t == TOK_GTEQ { return ">=" }
+    if t == TOK_EQEQ { return "==" }
+    if t == TOK_BANGEQ { return "!=" }
+    return ""
+}
+
 fn parse_cmp() {
     let left = parse_bitwise()
     while 1 == 1 {
@@ -608,27 +628,99 @@ fn parse_cmp() {
         if t == TOK_LT {
             par_advance()
             let right = parse_bitwise()
-            left = ast_binop("<", left, right)
+            if is_cmp_tok(par_peek_type()) == 1 {
+                let chain = ast_binop("<", left, right)
+                while is_cmp_tok(par_peek_type()) == 1 {
+                    let ct = par_peek_type()
+                    par_advance()
+                    let next = parse_bitwise()
+                    chain = ast_and(chain, ast_binop(cmp_tok_to_op(ct), right, next))
+                    right = next
+                }
+                left = chain
+            } else {
+                left = ast_binop("<", left, right)
+            }
         } else { if t == TOK_GT {
             par_advance()
             let right = parse_bitwise()
-            left = ast_binop(">", left, right)
+            if is_cmp_tok(par_peek_type()) == 1 {
+                let chain = ast_binop(">", left, right)
+                while is_cmp_tok(par_peek_type()) == 1 {
+                    let ct = par_peek_type()
+                    par_advance()
+                    let next = parse_bitwise()
+                    chain = ast_and(chain, ast_binop(cmp_tok_to_op(ct), right, next))
+                    right = next
+                }
+                left = chain
+            } else {
+                left = ast_binop(">", left, right)
+            }
         } else { if t == TOK_LTEQ {
             par_advance()
             let right = parse_bitwise()
-            left = ast_binop("<=", left, right)
+            if is_cmp_tok(par_peek_type()) == 1 {
+                let chain = ast_binop("<=", left, right)
+                while is_cmp_tok(par_peek_type()) == 1 {
+                    let ct = par_peek_type()
+                    par_advance()
+                    let next = parse_bitwise()
+                    chain = ast_and(chain, ast_binop(cmp_tok_to_op(ct), right, next))
+                    right = next
+                }
+                left = chain
+            } else {
+                left = ast_binop("<=", left, right)
+            }
         } else { if t == TOK_GTEQ {
             par_advance()
             let right = parse_bitwise()
-            left = ast_binop(">=", left, right)
+            if is_cmp_tok(par_peek_type()) == 1 {
+                let chain = ast_binop(">=", left, right)
+                while is_cmp_tok(par_peek_type()) == 1 {
+                    let ct = par_peek_type()
+                    par_advance()
+                    let next = parse_bitwise()
+                    chain = ast_and(chain, ast_binop(cmp_tok_to_op(ct), right, next))
+                    right = next
+                }
+                left = chain
+            } else {
+                left = ast_binop(">=", left, right)
+            }
         } else { if t == TOK_EQEQ {
             par_advance()
             let right = parse_bitwise()
-            left = ast_binop("==", left, right)
+            if is_cmp_tok(par_peek_type()) == 1 {
+                let chain = ast_binop("==", left, right)
+                while is_cmp_tok(par_peek_type()) == 1 {
+                    let ct = par_peek_type()
+                    par_advance()
+                    let next = parse_bitwise()
+                    chain = ast_and(chain, ast_binop(cmp_tok_to_op(ct), right, next))
+                    right = next
+                }
+                left = chain
+            } else {
+                left = ast_binop("==", left, right)
+            }
         } else { if t == TOK_BANGEQ {
             par_advance()
             let right = parse_bitwise()
-            left = ast_binop("!=", left, right)
+            if is_cmp_tok(par_peek_type()) == 1 {
+                let chain = ast_binop("!=", left, right)
+                while is_cmp_tok(par_peek_type()) == 1 {
+                    let ct = par_peek_type()
+                    par_advance()
+                    let next = parse_bitwise()
+                    chain = ast_and(chain, ast_binop(cmp_tok_to_op(ct), right, next))
+                    right = next
+                }
+                left = chain
+            } else {
+                left = ast_binop("!=", left, right)
+            }
         } else { if t == TOK_IN {
             par_advance()
             let right = parse_bitwise()
