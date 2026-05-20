@@ -789,6 +789,7 @@ fn is_builtin_fn(name) {
     if name == "char_code" { return 1 }
     if name == "to_int" { return 1 }
     if name == "range_list" { return 1 }
+    if name == "range" { return 1 }
     if name == "list_copy" { return 1 }
     if name == "list_slice" { return 1 }
     if name == "append_list" { return 1 }
@@ -1766,6 +1767,7 @@ fn gen_stmt(nd) {
         if is_range == 1 {
             let args = iter_expr[2]
             let argc = len(args)
+            let has_step = 0
             if argc == 1 {
                 out("    mov qword ptr [rbp - " + int_to_str(var_off) + "], 0")
                 gen_expr(args[0])
@@ -1775,6 +1777,11 @@ fn gen_stmt(nd) {
                 out("    mov [rbp - " + int_to_str(var_off) + "], rax")
                 gen_expr(args[1])
                 out("    push rax")
+            }
+            if argc >= 3 {
+                gen_expr(args[2])
+                out("    push rax")
+                has_step = 1
             }
             let loop_lbl = new_label()
             let end_lbl = new_label()
@@ -1792,14 +1799,41 @@ fn gen_stmt(nd) {
             }
             out_label(loop_lbl)
             out("    mov rax, [rbp - " + int_to_str(var_off) + "]")
-            out("    cmp rax, [rsp]")
-            out("    jge " + end_lbl)
+            if has_step == 1 {
+                // Step can be negative: check direction
+                out("    mov rcx, [rsp]")
+                out("    test rcx, rcx")
+                let neg_lbl = new_label()
+                let check_done = new_label()
+                out("    js " + neg_lbl)
+                // Positive step: i < end
+                out("    cmp rax, [rsp+8]")
+                out("    jge " + end_lbl)
+                out("    jmp " + check_done)
+                out_label(neg_lbl)
+                // Negative step: i > end
+                out("    cmp rax, [rsp+8]")
+                out("    jle " + end_lbl)
+                out_label(check_done)
+            } else {
+                out("    cmp rax, [rsp]")
+                out("    jge " + end_lbl)
+            }
             gen_block(body)
             out_label(cont_lbl)
-            out("    inc qword ptr [rbp - " + int_to_str(var_off) + "]")
+            if has_step == 1 {
+                out("    mov rax, [rsp]")
+                out("    add [rbp - " + int_to_str(var_off) + "], rax")
+            } else {
+                out("    inc qword ptr [rbp - " + int_to_str(var_off) + "]")
+            }
             out("    jmp " + loop_lbl)
             out_label(end_lbl)
-            out("    add rsp, 8")
+            if has_step == 1 {
+                out("    add rsp, 16")
+            } else {
+                out("    add rsp, 8")
+            }
             cg_break_label = prev_break
             cg_continue_label = prev_continue
             if flabel == "" {
@@ -7657,6 +7691,8 @@ fn gen_runtime() {
     out_label("to_int")
     out("    jmp _nova_to_int")
     out_label("range_list")
+    out("    jmp _nova_range_list")
+    out_label("range")
     out("    jmp _nova_range_list")
     out_label("list_copy")
     out("    jmp _nova_list_copy")
