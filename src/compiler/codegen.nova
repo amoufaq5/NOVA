@@ -4388,6 +4388,37 @@ fn peephole_optimize() {
         }
         i = i + 1
     }
+    // Pass 3: jmp-to-next-label elimination
+    i = 0
+    while i < n - 1 {
+        let cur = cg_output[i]
+        let nxt = cg_output[i + 1]
+        if starts_with(cur, "    jmp ") == 1 {
+            let target = substr(cur, 8, len(cur) - 8)
+            if nxt == target + ":" {
+                list_set(cg_output, i, "")
+            }
+        }
+        i = i + 1
+    }
+    // Pass 4: redundant mov to same reg when second doesn't read that reg
+    i = 0
+    while i < n - 1 {
+        let cur = cg_output[i]
+        let nxt = cg_output[i + 1]
+        if starts_with(cur, "    mov rax, ") == 1 {
+            if starts_with(nxt, "    mov rax, ") == 1 {
+                if contains(nxt, "rax]") == 0 {
+                    if contains(nxt, "rax +") == 0 {
+                        if contains(nxt, "rax*") == 0 {
+                            list_set(cg_output, i, "")
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
 }
 
 fn gen_runtime() {

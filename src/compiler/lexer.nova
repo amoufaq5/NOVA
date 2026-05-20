@@ -680,7 +680,13 @@ fn lex_all() {
                         lex_pipe_char()
                     }
                     else { if c == 64 { lex_advance(); emit_tok(TOK_AT, "@") }
-                    else { if c == 35 { lex_advance(); emit_tok(TOK_HASH, "#") }
+                    else { if c == 35 {
+                        while lex_pos < lex_len {
+                            let ch = lex_advance()
+                            if ch == 10 { lex_line = lex_line + 1; lex_col = 0 }
+                            if ch == 10 { break }
+                        }
+                    }
                     else { if c == 61 {
                         lex_advance()
                         if lex_peek() == 61 {
