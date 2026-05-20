@@ -5,6 +5,7 @@
 
 let NL = chr(10)
 let DQ = chr(34)
+let PTR_THRESHOLD = "100000"
 let cg_target = 0
 let cg_output = ""
 let cg_label_count = 0
@@ -3807,7 +3808,7 @@ fn wasm_gen_rt_core() {
     wi("(func $rt_eq (param $a i64) (param $b i64) (result i64)")
     wasm_indent = wasm_indent + 1
     wi("local.get $a")
-    wi("i64.const 4096")
+    wi("i64.const 1048576")
     wi("i64.lt_s")
     wi("if (result i64)")
     wasm_indent = wasm_indent + 1
@@ -3880,7 +3881,7 @@ fn wasm_gen_rt_core() {
     wi("(func $rt_add (param $a i64) (param $b i64) (result i64)")
     wasm_indent = wasm_indent + 1
     wi("local.get $a")
-    wi("i64.const 4096")
+    wi("i64.const 1048576")
     wi("i64.lt_s")
     wi("if (result i64)")
     wasm_indent = wasm_indent + 1
@@ -3929,7 +3930,7 @@ fn wasm_gen_rt_core() {
     wi("(func $len (param $v i64) (result i64)")
     wasm_indent = wasm_indent + 1
     wi("local.get $v")
-    wi("i64.const 4096")
+    wi("i64.const 1048576")
     wi("i64.lt_s")
     wi("if (result i64)")
     wasm_indent = wasm_indent + 1
@@ -4607,7 +4608,7 @@ fn wasm_gen_rt_extra() {
     wi("(func $type_of (param $v i64) (result i64)")
     wasm_indent = wasm_indent + 1
     wi("local.get $v")
-    wi("i64.const 4096")
+    wi("i64.const 1048576")
     wi("i64.lt_s")
     wi("if (result i64)")
     wasm_indent = wasm_indent + 1
@@ -4914,9 +4915,9 @@ fn peephole_optimize() {
 fn gen_runtime() {
     // --- Smart add: integer add or string concat ---
     out_label("_nova_add")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .add_int")
-    out("    cmp rsi, 4096")
+    out("    cmp rsi, 0x" + PTR_THRESHOLD)
     out("    jl .add_int")
     out("    jmp _nova_concat")
     out(".add_int:")
@@ -4926,9 +4927,9 @@ fn gen_runtime() {
     // --- Smart multiply: integer mul, string repeat, or list repeat ---
     out("")
     out_label("_nova_mul")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jge .mul_ptr")
-    out("    cmp rsi, 4096")
+    out("    cmp rsi, 0x" + PTR_THRESHOLD)
     out("    jge .mul_ptr_swap")
     out("    mov rax, rdi")
     out("    imul rax, rsi")
@@ -5012,9 +5013,9 @@ fn gen_runtime() {
     out_label("_nova_eq")
     out("    cmp rdi, rsi")
     out("    je .eq_true")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .eq_false")
-    out("    cmp rsi, 4096")
+    out("    cmp rsi, 0x" + PTR_THRESHOLD)
     out("    jl .eq_false")
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -5033,9 +5034,9 @@ fn gen_runtime() {
     out_label("_nova_neq")
     out("    cmp rdi, rsi")
     out("    je .neq_false")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .neq_true")
-    out("    cmp rsi, 4096")
+    out("    cmp rsi, 0x" + PTR_THRESHOLD)
     out("    jl .neq_true")
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -5053,9 +5054,9 @@ fn gen_runtime() {
     // --- Smart less-than: int or string comparison ---
     out("")
     out_label("_nova_lt")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .lt_int")
-    out("    cmp rsi, 4096")
+    out("    cmp rsi, 0x" + PTR_THRESHOLD)
     out("    jl .lt_int")
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -5074,9 +5075,9 @@ fn gen_runtime() {
     // --- Smart greater-than ---
     out("")
     out_label("_nova_gt")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .gt_int")
-    out("    cmp rsi, 4096")
+    out("    cmp rsi, 0x" + PTR_THRESHOLD)
     out("    jl .gt_int")
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -5095,9 +5096,9 @@ fn gen_runtime() {
     // --- Smart less-equal ---
     out("")
     out_label("_nova_le")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .le_int")
-    out("    cmp rsi, 4096")
+    out("    cmp rsi, 0x" + PTR_THRESHOLD)
     out("    jl .le_int")
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -5116,9 +5117,9 @@ fn gen_runtime() {
     // --- Smart greater-equal ---
     out("")
     out_label("_nova_ge")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .ge_int")
-    out("    cmp rsi, 4096")
+    out("    cmp rsi, 0x" + PTR_THRESHOLD)
     out("    jl .ge_int")
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -6359,7 +6360,7 @@ fn gen_runtime() {
     out_label("_nova_type_of")
     out("    test rdi, rdi")
     out("    jz .to_null")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .to_int")
     out("    cmp qword ptr [rdi], -1")
     out("    je .to_list")
@@ -6385,7 +6386,7 @@ fn gen_runtime() {
     out_label("_nova_type_name")
     out("    test rdi, rdi")
     out("    jz .tn_none")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .tn_int")
     out("    cmp qword ptr [rdi], -1")
     out("    je .tn_list")
@@ -6419,7 +6420,7 @@ fn gen_runtime() {
     out("    mov rdi, r12")
     out("    test rdi, rdi")
     out("    jz .dp_null")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .dp_int")
     out("    cmp qword ptr [rdi], -1")
     out("    je .dp_list")
@@ -6692,7 +6693,7 @@ fn gen_runtime() {
     out("")
     out_label("_nova_hash_key")
     out("    mov rax, rdi")
-    out("    cmp rax, 4096")
+    out("    cmp rax, 0x" + PTR_THRESHOLD)
     out("    jl .hk_int")
     out("    xor eax, eax")
     out(".hk_str_loop:")
@@ -7164,12 +7165,12 @@ fn gen_runtime() {
     out("    ret")
 
     // --- to_str(value) -> string representation ---
-    // If value < 4096: treat as integer, convert via int_to_str
-    // If value >= 4096 and [value] == -1: it's a list, return "[list]"
+    // If value < 0x100000: treat as integer, convert via int_to_str
+    // If value >= 0x100000 and [value] == -1: it's a list, return "[list]"
     // Otherwise: it's already a string, return as-is
     out("")
     out_label("_nova_to_str")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .ts_int")
     out("    cmp qword ptr [rdi], -1")
     out("    je .ts_list")
@@ -8438,7 +8439,7 @@ fn gen_runtime() {
     out("    jge .flat_done")
     out("    mov rax, [r12 + 24]")
     out("    mov rdi, [rax + r14*8]")
-    out("    cmp rdi, 4096")
+    out("    cmp rdi, 0x" + PTR_THRESHOLD)
     out("    jl .flat_push_one")
     out("    cmp qword ptr [rdi], -1")
     out("    jne .flat_push_one")

@@ -1,6 +1,13 @@
 // M8 Test: Cognitive Systems
 // Tests all five mind modules together with the M7 core
 
+import "../src/core/moment.nova"
+import "../src/mind/academic.nova"
+import "../src/mind/emotion.nova"
+import "../src/mind/memory.nova"
+import "../src/mind/experiential.nova"
+import "../src/mind/reasoning.nova"
+
 fn test_academic() {
     println("--- Academic tests ---")
     academic_init()

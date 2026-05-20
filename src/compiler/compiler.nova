@@ -201,14 +201,15 @@ fn has_imports(source) {
 }
 
 fn preprocess_imports(source, base_dir) {
-    // Fast path: if no imports, return source unchanged
     if has_imports(source) == 0 {
         return source
     }
-    let result = ""
+    let imports = list_new()
+    let rest_start = 0
     let i = 0
     let line_start = 0
     let src_len = len(source)
+    let found_non_import = 0
 
     while i <= src_len {
         let at_end = 0
@@ -219,25 +220,41 @@ fn preprocess_imports(source, base_dir) {
         }
 
         if is_newline == 1 {
-            let line = substr(source, line_start, i - line_start)
-            let processed = process_line(line, base_dir)
-            result = concat(result, concat(processed, chr(10)))
+            if found_non_import == 0 {
+                let line = substr(source, line_start, i - line_start)
+                if starts_with_str(line, "import ") == 1 {
+                    let imp_path = extract_import_path(line)
+                    if len(imp_path) > 0 {
+                        let content = resolve_import(imp_path, base_dir)
+                        if len(content) > 0 {
+                            push(imports, content)
+                        }
+                    }
+                } else {
+                    if len(line) > 0 {
+                        if starts_with_str(line, "//") == 0 {
+                            found_non_import = 1
+                            rest_start = line_start
+                        }
+                    }
+                }
+            }
             line_start = i + 1
             i = i + 1
         } else {
             if at_end == 1 {
-                if i > line_start {
-                    let line = substr(source, line_start, i - line_start)
-                    let processed = process_line(line, base_dir)
-                    result = concat(result, processed)
-                }
                 i = i + 1
             } else {
                 i = i + 1
             }
         }
     }
-    return result
+    let rest = ""
+    if found_non_import == 1 {
+        rest = substr(source, rest_start, src_len - rest_start)
+    }
+    push(imports, rest)
+    return join(imports, chr(10))
 }
 
 let cg_show_stats = 0
