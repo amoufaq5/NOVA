@@ -1,0 +1,33 @@
+fn main() {
+    let x = 42
+    assert(x is int)
+    assert(not (x is str))
+
+    let s = "hello"
+    assert(s is str)
+    assert(s is string)
+    assert(not (s is int))
+
+    let lst = [1, 2, 3]
+    assert(lst is list)
+    assert(not (lst is map))
+
+    let m = {"a": 1}
+    assert(m is map)
+    assert(not (m is list))
+
+    let n = none
+    assert(n is none)
+    assert(n is null)
+
+    if x is int {
+        if s is str {
+            if lst is list {
+                print("PASS")
+                return 0
+            }
+        }
+    }
+    print("FAIL")
+}
+main()

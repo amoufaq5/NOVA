@@ -616,9 +616,29 @@ fn parse_cmp() {
             push(args, right)
             push(args, left)
             left = ast_call(ast_ident("contains"), args)
+        } else { if t == TOK_IS {
+            par_advance()
+            let type_id = 0
+            let pt2 = par_peek_type()
+            if pt2 == TOK_NONE {
+                par_advance()
+                type_id = 0
+            } else {
+                let type_name = par_expect(TOK_IDENT)
+                let tn = type_name[1]
+                if tn == "null" { type_id = 0 }
+                if tn == "int" { type_id = 1 }
+                if tn == "str" { type_id = 2 }
+                if tn == "string" { type_id = 2 }
+                if tn == "list" { type_id = 3 }
+                if tn == "map" { type_id = 4 }
+            }
+            let to_args = list_new()
+            push(to_args, left)
+            left = ast_binop("==", ast_call(ast_ident("type_of"), to_args), ast_int(type_id))
         } else {
             return left
-        } } } } } } }
+        } } } } } } } }
     }
     return left
 }
