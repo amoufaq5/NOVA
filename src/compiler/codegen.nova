@@ -41,6 +41,8 @@ let cg_source_file = ""
 let cg_last_debug_line = 0
 let cg_current_fn = ""
 let cg_tco_label = ""
+let cg_defers = 0
+let cg_defer_count = 0
 
 fn cg_init() {
     cg_output = list_new()
@@ -265,12 +267,18 @@ fn collect_locals(nd) {
     }
     if tag == AST_WHILE_STMT {
         collect_locals(nd[2])
+        if len(nd) > 4 {
+            if nd[4] != 0 { collect_locals(nd[4]) }
+        }
     }
     if tag == AST_FOR_STMT {
         let var_name = nd[1]
         push(cg_locals, var_name)
         cg_local_count = cg_local_count + 1
         collect_locals(nd[3])
+        if len(nd) > 5 {
+            if nd[5] != 0 { collect_locals(nd[5]) }
+        }
     }
     if tag == AST_MATCH_STMT {
         let arms = nd[2]
@@ -300,6 +308,9 @@ fn collect_locals(nd) {
         }
     }
     if tag == AST_DO_WHILE {
+        collect_locals(nd[1])
+    }
+    if tag == AST_DEFER_STMT {
         collect_locals(nd[1])
     }
     if tag == AST_DESTRUCTURE {
@@ -1628,28 +1639,36 @@ fn gen_stmt(nd) {
     if tag == AST_RETURN_STMT {
         let value = nd[1]
         if value == 0 {
+            gen_defers()
             out("    xor eax, eax")
             out("    mov rsp, rbp")
             out("    pop rbp")
             out("    ret")
             return 0
         }
-        if len(cg_current_fn) > 0 {
-            if ast_tag(value) == AST_CALL {
-                let tc_callee = value[1]
-                if ast_tag(tc_callee) == AST_IDENT {
-                    if tc_callee[1] == cg_current_fn {
-                        let tc_args = value[2]
-                        let tc_argc = len(tc_args)
-                        if tc_argc <= 6 {
-                            gen_tco_call(tc_args, tc_argc)
-                            return 0
+        if cg_defer_count == 0 {
+            if len(cg_current_fn) > 0 {
+                if ast_tag(value) == AST_CALL {
+                    let tc_callee = value[1]
+                    if ast_tag(tc_callee) == AST_IDENT {
+                        if tc_callee[1] == cg_current_fn {
+                            let tc_args = value[2]
+                            let tc_argc = len(tc_args)
+                            if tc_argc <= 6 {
+                                gen_tco_call(tc_args, tc_argc)
+                                return 0
+                            }
                         }
                     }
                 }
             }
         }
         gen_expr(value)
+        if cg_defer_count > 0 {
+            out("    push rax")
+            gen_defers()
+            out("    pop rax")
+        }
         out("    mov rsp, rbp")
         out("    pop rbp")
         out("    ret")
@@ -1708,17 +1727,26 @@ fn gen_stmt(nd) {
         let cond = nd[1]
         let body = nd[2]
         let wlabel = ""
-        if len(nd) > 4 { wlabel = nd[3] }
+        let while_else = 0
+        if len(nd) > 3 { wlabel = nd[3] }
+        if len(nd) > 4 { while_else = nd[4] }
 
         let cond_val = try_fold(cond)
         if is_foldable(cond_val) == 1 {
             if cond_val == 0 {
+                if while_else != 0 {
+                    gen_block(while_else)
+                }
                 return 0
             }
         }
 
         let loop_lbl = new_label()
         let end_lbl = new_label()
+        let nobreak_lbl = end_lbl
+        if while_else != 0 {
+            nobreak_lbl = new_label()
+        }
         let prev_break = cg_break_label
         let prev_continue = cg_continue_label
         cg_break_label = end_lbl
@@ -1733,9 +1761,13 @@ fn gen_stmt(nd) {
         out_label(loop_lbl)
         gen_expr(cond)
         out("    test rax, rax")
-        out("    jz " + end_lbl)
+        out("    jz " + nobreak_lbl)
         gen_block(body)
         out("    jmp " + loop_lbl)
+        if while_else != 0 {
+            out_label(nobreak_lbl)
+            gen_block(while_else)
+        }
         out_label(end_lbl)
         cg_break_label = prev_break
         cg_continue_label = prev_continue
@@ -1751,7 +1783,9 @@ fn gen_stmt(nd) {
         let iter_expr = nd[2]
         let body = nd[3]
         let flabel = ""
-        if len(nd) > 5 { flabel = nd[4] }
+        let for_else = 0
+        if len(nd) > 4 { flabel = nd[4] }
+        if len(nd) > 5 { for_else = nd[5] }
         let var_off = local_offset(var_name)
 
         let is_range = 0
@@ -1786,32 +1820,31 @@ fn gen_stmt(nd) {
             let loop_lbl = new_label()
             let end_lbl = new_label()
             let cont_lbl = new_label()
+            let break_lbl = end_lbl
+            if for_else != 0 { break_lbl = new_label() }
             let prev_break = cg_break_label
             let prev_continue = cg_continue_label
-            cg_break_label = end_lbl
+            cg_break_label = break_lbl
             cg_continue_label = cont_lbl
             if flabel == "" {
             } else {
                 push(cg_lbl_names, flabel)
-                push(cg_lbl_breaks, end_lbl)
+                push(cg_lbl_breaks, break_lbl)
                 push(cg_lbl_continues, cont_lbl)
                 cg_lbl_count = cg_lbl_count + 1
             }
             out_label(loop_lbl)
             out("    mov rax, [rbp - " + int_to_str(var_off) + "]")
             if has_step == 1 {
-                // Step can be negative: check direction
                 out("    mov rcx, [rsp]")
                 out("    test rcx, rcx")
                 let neg_lbl = new_label()
                 let check_done = new_label()
                 out("    js " + neg_lbl)
-                // Positive step: i < end
                 out("    cmp rax, [rsp+8]")
                 out("    jge " + end_lbl)
                 out("    jmp " + check_done)
                 out_label(neg_lbl)
-                // Negative step: i > end
                 out("    cmp rax, [rsp+8]")
                 out("    jle " + end_lbl)
                 out_label(check_done)
@@ -1828,11 +1861,30 @@ fn gen_stmt(nd) {
                 out("    inc qword ptr [rbp - " + int_to_str(var_off) + "]")
             }
             out("    jmp " + loop_lbl)
-            out_label(end_lbl)
-            if has_step == 1 {
-                out("    add rsp, 16")
+            if for_else != 0 {
+                out_label(break_lbl)
+                if has_step == 1 {
+                    out("    add rsp, 16")
+                } else {
+                    out("    add rsp, 8")
+                }
+                let skip_lbl = new_label()
+                out("    jmp " + skip_lbl)
+                out_label(end_lbl)
+                if has_step == 1 {
+                    out("    add rsp, 16")
+                } else {
+                    out("    add rsp, 8")
+                }
+                gen_block(for_else)
+                out_label(skip_lbl)
             } else {
-                out("    add rsp, 8")
+                out_label(end_lbl)
+                if has_step == 1 {
+                    out("    add rsp, 16")
+                } else {
+                    out("    add rsp, 8")
+                }
             }
             cg_break_label = prev_break
             cg_continue_label = prev_continue
@@ -1848,14 +1900,16 @@ fn gen_stmt(nd) {
             let loop_lbl = new_label()
             let end_lbl = new_label()
             let cont_lbl = new_label()
+            let break_lbl = end_lbl
+            if for_else != 0 { break_lbl = new_label() }
             let prev_break = cg_break_label
             let prev_continue = cg_continue_label
-            cg_break_label = end_lbl
+            cg_break_label = break_lbl
             cg_continue_label = cont_lbl
             if flabel == "" {
             } else {
                 push(cg_lbl_names, flabel)
-                push(cg_lbl_breaks, end_lbl)
+                push(cg_lbl_breaks, break_lbl)
                 push(cg_lbl_continues, cont_lbl)
                 cg_lbl_count = cg_lbl_count + 1
             }
@@ -1879,8 +1933,19 @@ fn gen_stmt(nd) {
             out_label(cont_lbl)
             out("    inc qword ptr [rsp]")
             out("    jmp " + loop_lbl)
-            out_label(end_lbl)
-            out("    add rsp, 16")
+            if for_else != 0 {
+                out_label(break_lbl)
+                out("    add rsp, 16")
+                let skip_lbl = new_label()
+                out("    jmp " + skip_lbl)
+                out_label(end_lbl)
+                out("    add rsp, 16")
+                gen_block(for_else)
+                out_label(skip_lbl)
+            } else {
+                out_label(end_lbl)
+                out("    add rsp, 16")
+            }
             cg_break_label = prev_break
             cg_continue_label = prev_continue
             if flabel == "" {
@@ -1915,6 +1980,12 @@ fn gen_stmt(nd) {
 
     if tag == AST_EXPR_STMT {
         gen_expr(nd[1])
+        return 0
+    }
+
+    if tag == AST_DEFER_STMT {
+        push(cg_defers, nd[1])
+        cg_defer_count = cg_defer_count + 1
         return 0
     }
 
@@ -2258,6 +2329,14 @@ fn gen_tco_call(tc_args, tc_argc) {
     out("    jmp " + cg_tco_label)
 }
 
+fn gen_defers() {
+    let di = cg_defer_count - 1
+    while di >= 0 {
+        gen_block(cg_defers[di])
+        di = di - 1
+    }
+}
+
 fn gen_function(nd) {
     let name = nd[1]
     let params = nd[2]
@@ -2276,6 +2355,8 @@ fn gen_function(nd) {
     cg_local_count = 0
     cg_params = params
     cg_param_count = len(params)
+    cg_defers = list_new()
+    cg_defer_count = 0
 
     let pi = 0
     while pi < cg_param_count {
@@ -2318,7 +2399,18 @@ fn gen_function(nd) {
 
     cg_current_fn = ""
     cg_tco_label = ""
-    out("    xor eax, eax")
+    gen_defers()
+    let stmts = body[1]
+    let has_implicit = 0
+    if len(stmts) > 0 {
+        let last = stmts[len(stmts) - 1]
+        let lt = ast_tag(last)
+        if lt == AST_EXPR_STMT { has_implicit = 1 }
+        if lt == AST_RETURN_STMT { has_implicit = 1 }
+    }
+    if has_implicit == 0 {
+        out("    xor eax, eax")
+    }
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")

@@ -1,0 +1,70 @@
+fn main() {
+    # for...else with no break - else runs
+    let found = 0
+    for x in [1, 2, 3] {
+        if x == 99 {
+            found = 1
+            break
+        }
+    } else {
+        found = 2
+    }
+    assert(found == 2)
+
+    # for...else with break - else skipped
+    let found2 = 0
+    for x in [1, 2, 3] {
+        if x == 2 {
+            found2 = 1
+            break
+        }
+    } else {
+        found2 = 2
+    }
+    assert(found2 == 1)
+
+    # for...else with range, no break
+    let r = 0
+    for i in range(5) {
+        if i == 99 { break }
+    } else {
+        r = 1
+    }
+    assert(r == 1)
+
+    # for...else with range, break
+    let r2 = 0
+    for i in range(5) {
+        if i == 3 {
+            r2 = 1
+            break
+        }
+    } else {
+        r2 = 2
+    }
+    assert(r2 == 1)
+
+    # for...else with empty list - else runs
+    let e = 0
+    for x in [] {
+        e = 1
+    } else {
+        e = 2
+    }
+    assert(e == 2)
+
+    # for...else with string iteration
+    let s = 0
+    for c in "abc" {
+        if c == 120 {
+            s = 1
+            break
+        }
+    } else {
+        s = 2
+    }
+    assert(s == 2)
+
+    print("PASS")
+}
+main()

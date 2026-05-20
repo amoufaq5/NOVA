@@ -99,6 +99,7 @@ let TOK_UNLESS = 99
 let TOK_UNTIL = 100
 let TOK_REPEAT = 101
 let TOK_IS = 102
+let TOK_DEFER = 103
 
 // --- Lexer State ---
 let lex_src = ""
@@ -320,9 +321,13 @@ fn lex_number() {
     }
 
     // Normal decimal number
+    let has_sep = 0
     while lex_pos < lex_len {
         let c2 = lex_peek()
         if is_digit(c2) == 1 {
+            lex_advance()
+        } else { if c2 == 95 {
+            has_sep = 1
             lex_advance()
         } else {
             if c2 == 46 {
@@ -331,6 +336,9 @@ fn lex_number() {
                     if is_digit(after_dot) == 1 {
                         // Parse as fixed-point float (scaled by 1000)
                         let int_str = substr(lex_src, start, lex_pos - start)
+                        if has_sep == 1 {
+                            int_str = str_replace(int_str, "_", "")
+                        }
                         let int_v = str_to_int(int_str)
                         lex_advance()  // consume '.'
                         let frac_start = lex_pos
@@ -384,11 +392,17 @@ fn lex_number() {
             }
             // Not a float, emit as integer
             let val = substr(lex_src, start, lex_pos - start)
+            if has_sep == 1 {
+                val = str_replace(val, "_", "")
+            }
             emit_tok(TOK_INT, str_to_int(val))
             return 0
-        }
+        } }
     }
     let val = substr(lex_src, start, lex_pos - start)
+    if has_sep == 1 {
+        val = str_replace(val, "_", "")
+    }
     emit_tok(TOK_INT, str_to_int(val))
 }
 
@@ -527,6 +541,7 @@ fn keyword_type(word) {
     if word == "repeat" { return TOK_REPEAT }
     if word == "when" { return TOK_IF }
     if word == "is" { return TOK_IS }
+    if word == "defer" { return TOK_DEFER }
     return 0
 }
 

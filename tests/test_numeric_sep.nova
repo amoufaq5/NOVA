@@ -1,0 +1,24 @@
+fn main() {
+    # Decimal separators
+    let x = 1_000
+    assert(x == 1000)
+    let y = 1_000_000
+    assert(y == 1000000)
+    let z = 12_34
+    assert(z == 1234)
+
+    # Hex separators (already supported)
+    let h = 0xFF_FF
+    assert(h == 65535)
+
+    # Binary separators (already supported)
+    let b = 0b1111_0000
+    assert(b == 240)
+
+    # Single digits with separators
+    let s = 1_2_3
+    assert(s == 123)
+
+    print("PASS")
+}
+main()

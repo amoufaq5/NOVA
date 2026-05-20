@@ -1,0 +1,71 @@
+let result = ""
+
+fn test_basic() {
+    defer {
+        result = result + "D"
+    }
+    result = result + "A"
+}
+
+fn test_multi() {
+    defer {
+        result = result + "3"
+    }
+    defer {
+        result = result + "2"
+    }
+    defer {
+        result = result + "1"
+    }
+    result = result + "0"
+}
+
+fn test_return_val() {
+    defer {
+        result = result + "R"
+    }
+    result = result + "B"
+    return 42
+}
+
+fn test_early_return(x) {
+    defer {
+        result = result + "E"
+    }
+    if x == 1 {
+        result = result + "Y"
+        return 1
+    }
+    result = result + "N"
+    return 0
+}
+
+fn main() {
+    # Basic defer - runs after function body
+    result = ""
+    test_basic()
+    assert(result == "AD")
+
+    # Multiple defers - LIFO order
+    result = ""
+    test_multi()
+    assert(result == "0123")
+
+    # Defer with return value
+    result = ""
+    let v = test_return_val()
+    assert(v == 42)
+    assert(result == "BR")
+
+    # Defer with early return
+    result = ""
+    test_early_return(1)
+    assert(result == "YE")
+
+    result = ""
+    test_early_return(0)
+    assert(result == "NE")
+
+    print("PASS")
+}
+main()

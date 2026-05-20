@@ -764,9 +764,14 @@ fn parse_while_labeled(lbl) {
     let cond = parse_expr()
     let body = parse_block()
     let nd = ast_while(cond, body)
-    if lbl == "" {
+    push(nd, lbl)
+    let nxt = par_peek_type()
+    if nxt == 53 {
+        par_advance()
+        let else_body = parse_block()
+        push(nd, else_body)
     } else {
-        push(nd, lbl)
+        push(nd, 0)
     }
     return nd
 }
@@ -797,9 +802,14 @@ fn parse_for_labeled(lbl) {
     let iter = parse_expr()
     let body = parse_block()
     let nd = ast_for(var_name, iter, body)
-    if lbl == "" {
+    push(nd, lbl)
+    let fnxt = par_peek_type()
+    if fnxt == 53 {
+        par_advance()
+        let else_body = parse_block()
+        push(nd, else_body)
     } else {
-        push(nd, lbl)
+        push(nd, 0)
     }
     return nd
 }
@@ -840,6 +850,33 @@ fn parse_let() {
     if par_peek_type() == TOK_COLON {
         par_advance()
         par_skip_type()
+    }
+    if par_peek_type() == TOK_COMMA {
+        let names = list_new()
+        push(names, name)
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            let ntok = par_expect(TOK_IDENT)
+            push(names, ntok[1])
+        }
+        par_expect(TOK_EQ)
+        let vals = list_new()
+        push(vals, parse_expr())
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            push(vals, parse_expr())
+        }
+        let stmts = list_new()
+        let mi = 0
+        while mi < len(names) {
+            if mi < len(vals) {
+                push(stmts, ast_let(names[mi], vals[mi]))
+            } else {
+                push(stmts, ast_let(names[mi], ast_none()))
+            }
+            mi = mi + 1
+        }
+        return ast_block(stmts)
     }
     par_expect(TOK_EQ)
     let value = parse_expr()
@@ -1162,9 +1199,41 @@ fn parse_stmt_inner() {
     if t == TOK_ENUM { return parse_enum() }
     if t == TOK_DO { return parse_do_while() }
     if t == TOK_ASM { return parse_asm() }
+    if t == TOK_DEFER {
+        par_advance()
+        let defer_body = parse_block()
+        return ast_defer(defer_body)
+    }
 
     // Assignment or expression statement
     let expr = parse_expr()
+    if ast_tag(expr) == AST_IDENT {
+        if par_peek_type() == TOK_COMMA {
+            let anames = list_new()
+            push(anames, expr[1])
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                let atk = par_expect(TOK_IDENT)
+                push(anames, atk[1])
+            }
+            par_expect(TOK_EQ)
+            let avals = list_new()
+            push(avals, parse_expr())
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                push(avals, parse_expr())
+            }
+            let astmts = list_new()
+            let ai = 0
+            while ai < len(anames) {
+                if ai < len(avals) {
+                    push(astmts, ast_assign(anames[ai], avals[ai]))
+                }
+                ai = ai + 1
+            }
+            return ast_block(astmts)
+        }
+    }
     if par_peek_type() == TOK_EQ {
         par_advance()
         let value = parse_expr()

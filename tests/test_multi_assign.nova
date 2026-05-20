@@ -1,0 +1,20 @@
+fn main() {
+    # Multi-assignment with let
+    let a, b = 1, 2
+    assert(a == 1)
+    assert(b == 2)
+
+    # Multi-assignment with let, 3 vars
+    let x, y, z = 10, 20, 30
+    assert(x == 10)
+    assert(y == 20)
+    assert(z == 30)
+
+    # Re-assignment
+    a, b = 100, 200
+    assert(a == 100)
+    assert(b == 200)
+
+    print("PASS")
+}
+main()

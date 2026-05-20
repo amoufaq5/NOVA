@@ -55,6 +55,7 @@ let AST_METHOD_DECL = 50
 let AST_ASM = 51
 let AST_CONST_STMT = 52
 let AST_EXTERN_FN = 53
+let AST_DEFER_STMT = 54
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -435,6 +436,13 @@ fn ast_extern_fn(name, param_count) {
     push(n, AST_EXTERN_FN)
     push(n, name)
     push(n, param_count)
+    return n
+}
+
+fn ast_defer(body) {
+    let n = list_new()
+    push(n, AST_DEFER_STMT)
+    push(n, body)
     return n
 }
 

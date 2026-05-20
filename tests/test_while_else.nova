@@ -1,0 +1,37 @@
+fn main() {
+    # while...else with no break - else runs
+    let i = 0
+    let r = 0
+    while i < 5 {
+        i = i + 1
+    } else {
+        r = 1
+    }
+    assert(r == 1)
+
+    # while...else with break - else skipped
+    let j = 0
+    let r2 = 0
+    while j < 10 {
+        if j == 3 {
+            r2 = 1
+            break
+        }
+        j = j + 1
+    } else {
+        r2 = 2
+    }
+    assert(r2 == 1)
+
+    # while...else with false condition - else runs immediately
+    let r3 = 0
+    while 0 {
+        r3 = 1
+    } else {
+        r3 = 2
+    }
+    assert(r3 == 2)
+
+    print("PASS")
+}
+main()

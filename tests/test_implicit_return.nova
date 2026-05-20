@@ -1,0 +1,29 @@
+fn add(a, b) {
+    a + b
+}
+
+fn identity(x) {
+    x
+}
+
+fn compute(x) {
+    let y = x * 2
+    y + 1
+}
+
+fn with_if(x) {
+    if x > 0 {
+        return x
+    }
+    0 - x
+}
+
+fn main() {
+    assert(add(3, 4) == 7)
+    assert(identity(42) == 42)
+    assert(compute(5) == 11)
+    assert(with_if(5) == 5)
+    assert(with_if(0 - 3) == 3)
+    print("PASS")
+}
+main()
