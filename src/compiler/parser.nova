@@ -1105,6 +1105,15 @@ fn parse_stmt_inner() {
         return ast_while(neg_cond, body)
     }
     if t == TOK_FOR { return parse_for() }
+    if t == TOK_REPEAT {
+        par_advance()
+        let count_expr = parse_expr()
+        let body = parse_block()
+        let rng_args = list_new()
+        push(rng_args, count_expr)
+        let iter_expr = ast_call(ast_ident("range"), rng_args)
+        return ast_for("_rep_", iter_expr, body)
+    }
     if t == TOK_RETURN { return parse_return() }
     if t == TOK_BREAK {
         par_advance()

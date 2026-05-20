@@ -97,6 +97,7 @@ let TOK_SHR_EQ = 97
 let TOK_ELIF = 98
 let TOK_UNLESS = 99
 let TOK_UNTIL = 100
+let TOK_REPEAT = 101
 
 // --- Lexer State ---
 let lex_src = ""
@@ -523,6 +524,8 @@ fn keyword_type(word) {
     if word == "or" { return TOK_OR }
     if word == "unless" { return TOK_UNLESS }
     if word == "until" { return TOK_UNTIL }
+    if word == "repeat" { return TOK_REPEAT }
+    if word == "when" { return TOK_IF }
     return 0
 }
 
