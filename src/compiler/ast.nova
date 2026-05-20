@@ -56,6 +56,7 @@ let AST_ASM = 51
 let AST_CONST_STMT = 52
 let AST_EXTERN_FN = 53
 let AST_DEFER_STMT = 54
+let AST_NULLISH = 55
 
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
@@ -443,6 +444,14 @@ fn ast_defer(body) {
     let n = list_new()
     push(n, AST_DEFER_STMT)
     push(n, body)
+    return n
+}
+
+fn ast_nullish(left, right) {
+    let n = list_new()
+    push(n, AST_NULLISH)
+    push(n, left)
+    push(n, right)
     return n
 }
 

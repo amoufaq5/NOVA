@@ -502,6 +502,11 @@ fn collect_idents_in(nd, names) {
         collect_idents_in(nd[2], names)
         return 0
     }
+    if tag == AST_NULLISH {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        return 0
+    }
     if tag == AST_LET_STMT {
         collect_idents_in(nd[2], names)
         return 0
@@ -1476,6 +1481,17 @@ fn gen_expr(nd) {
         out("    jmp " + end_lbl)
         out_label(true_lbl)
         out("    mov rax, 1")
+        out_label(end_lbl)
+        return 0
+    }
+
+    if tag == AST_NULLISH {
+        let else_lbl = new_label()
+        let end_lbl = new_label()
+        gen_expr(nd[1])
+        out("    test rax, rax")
+        out("    jnz " + end_lbl)
+        gen_expr(nd[2])
         out_label(end_lbl)
         return 0
     }
@@ -3142,6 +3158,23 @@ fn wasm_gen_expr(nd) {
             i = i + 1
         }
         wi("global.get $g__wasm_list_tmp")
+        return 0
+    }
+
+    if tag == AST_NULLISH {
+        wasm_gen_expr(nd[1])
+        wi("local.tee $__nullish_tmp")
+        wi("i64.eqz")
+        wi("i32.eqz")
+        wi("if (result i64)")
+        wasm_indent = wasm_indent + 1
+        wi("local.get $__nullish_tmp")
+        wasm_indent = wasm_indent - 1
+        wi("else")
+        wasm_indent = wasm_indent + 1
+        wasm_gen_expr(nd[2])
+        wasm_indent = wasm_indent - 1
+        wi("end")
         return 0
     }
 

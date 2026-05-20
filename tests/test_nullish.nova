@@ -1,0 +1,30 @@
+fn main() {
+    # Basic nullish: non-zero returns left
+    let a = 42 ?? 99
+    assert(a == 42)
+
+    # Zero/null returns right
+    let b = 0 ?? 99
+    assert(b == 99)
+
+    # String (non-null) returns left
+    let c = "hello" ?? "world"
+    assert(c == "hello")
+
+    # Chained nullish
+    let d = 0 ?? 0 ?? 77
+    assert(d == 77)
+
+    # With variables
+    let x = 0
+    let y = 10
+    let z = x ?? y
+    assert(z == 10)
+
+    # Non-zero variable returns itself
+    let w = 5 ?? 100
+    assert(w == 5)
+
+    print("PASS")
+}
+main()

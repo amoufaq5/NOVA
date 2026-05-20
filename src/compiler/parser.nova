@@ -775,8 +775,18 @@ fn parse_or() {
     return left
 }
 
-fn parse_pipe() {
+fn parse_nullish() {
     let left = parse_or()
+    while par_peek_type() == TOK_NULLISH {
+        par_advance()
+        let right = parse_or()
+        left = ast_nullish(left, right)
+    }
+    return left
+}
+
+fn parse_pipe() {
+    let left = parse_nullish()
     while par_peek_type() == TOK_PIPE_GT {
         par_advance()
         let right = parse_or()
@@ -1188,10 +1198,10 @@ fn parse_match() {
         } else {
             pattern = parse_expr()
         }
-        let guard = 0
+        let mg = 0
         if par_peek_type() == TOK_IF {
             par_advance()
-            guard = parse_expr()
+            mg = parse_expr()
         }
         par_expect(TOK_ARROW)
         // Parse body - either a block or a single expression
@@ -1202,9 +1212,9 @@ fn parse_match() {
             body = ast_expr_stmt(parse_expr())
         }
         let arm = ast_match_arm(pattern, body)
-        if guard == 0 {
+        if mg == 0 {
         } else {
-            push(arm, guard)
+            push(arm, mg)
         }
         push(arms, arm)
     }
@@ -1315,6 +1325,13 @@ fn parse_stmt_inner() {
         par_advance()
         let defer_body = parse_block()
         return ast_defer(defer_body)
+    }
+    if t == TOK_GUARD {
+        par_advance()
+        let guard_cond = parse_expr()
+        par_expect(TOK_ELSE)
+        let guard_body = parse_block()
+        return ast_if(ast_unary("!", guard_cond), guard_body, 0)
     }
 
     // Assignment or expression statement

@@ -100,6 +100,8 @@ let TOK_UNTIL = 100
 let TOK_REPEAT = 101
 let TOK_IS = 102
 let TOK_DEFER = 103
+let TOK_GUARD = 104
+let TOK_NULLISH = 105
 
 // --- Lexer State ---
 let lex_src = ""
@@ -542,6 +544,7 @@ fn keyword_type(word) {
     if word == "when" { return TOK_IF }
     if word == "is" { return TOK_IS }
     if word == "defer" { return TOK_DEFER }
+    if word == "guard" { return TOK_GUARD }
     return 0
 }
 
@@ -794,7 +797,15 @@ fn lex_all() {
                             emit_tok(TOK_DOT, ".")
                         }
                     }
-                    else { if c == 63 { lex_advance(); emit_tok(TOK_QUESTION, "?") }
+                    else { if c == 63 {
+                        lex_advance()
+                        if lex_peek() == 63 {
+                            lex_advance()
+                            emit_tok(TOK_NULLISH, "??")
+                        } else {
+                            emit_tok(TOK_QUESTION, "?")
+                        }
+                    }
                     else { if c == 126 { lex_advance(); emit_tok(TOK_TILDE, "~") }
                     else {
                         // Unknown character, skip

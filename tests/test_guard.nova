@@ -1,0 +1,30 @@
+fn check_positive(n) {
+    guard n > 0 else {
+        return "not positive"
+    }
+    return "positive"
+}
+
+fn find_item(items, target) {
+    let i = 0
+    while i < len(items) {
+        guard items[i] != target else {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn main() {
+    assert(check_positive(5) == "positive")
+    assert(check_positive(-1) == "not positive")
+    assert(check_positive(0) == "not positive")
+
+    let lst = [10, 20, 30]
+    assert(find_item(lst, 20) == 1)
+    assert(find_item(lst, 99) == -1)
+
+    print("PASS")
+}
+main()
