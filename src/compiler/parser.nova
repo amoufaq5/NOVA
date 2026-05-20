@@ -732,6 +732,11 @@ fn parse_cmp() {
             left = ast_call(ast_ident("contains"), args)
         } else { if t == TOK_IS {
             par_advance()
+            let is_negated = 0
+            if par_peek_type() == TOK_BANG {
+                par_advance()
+                is_negated = 1
+            }
             let type_id = 0
             let pt2 = par_peek_type()
             if pt2 == TOK_NONE {
@@ -749,10 +754,24 @@ fn parse_cmp() {
             }
             let to_args = list_new()
             push(to_args, left)
-            left = ast_binop("==", ast_call(ast_ident("type_of"), to_args), ast_int(type_id))
+            let is_cmp_op = "=="
+            if is_negated == 1 { is_cmp_op = "!=" }
+            left = ast_binop(is_cmp_op, ast_call(ast_ident("type_of"), to_args), ast_int(type_id))
+        } else { if t == TOK_BANG {
+            if par_peek_at_type(1) == TOK_IN {
+                par_advance()
+                par_advance()
+                let right = parse_bitwise()
+                let ni_args = list_new()
+                push(ni_args, right)
+                push(ni_args, left)
+                left = ast_unary("!", ast_call(ast_ident("contains"), ni_args))
+            } else {
+                return left
+            }
         } else {
             return left
-        } } } } } } } }
+        } } } } } } } } }
     }
     return left
 }
@@ -1295,6 +1314,11 @@ fn parse_stmt_inner() {
         push(rng_args, count_expr)
         let iter_expr = ast_call(ast_ident("range"), rng_args)
         return ast_for("_rep_", iter_expr, body)
+    }
+    if t == TOK_LOOP {
+        par_advance()
+        let body = parse_block()
+        return ast_while(ast_int(1), body)
     }
     if t == TOK_RETURN { return parse_return() }
     if t == TOK_BREAK {

@@ -1,0 +1,28 @@
+fn main() {
+    let lst = [1, 2, 3, 4, 5]
+
+    # not in with list
+    assert(6 not in lst)
+    assert(not (3 not in lst))
+
+    # in still works
+    assert(3 in lst)
+
+    # not in with string
+    assert("xyz" not in "hello world")
+    assert(not ("ello" not in "hello world"))
+
+    # is not type check
+    let x = "hello"
+    assert(x is not int)
+    assert(x is not list)
+    assert(not (x is not str))
+
+    let n = 42
+    assert(n is int)
+    assert(n is not str)
+    assert(n is not list)
+
+    print("PASS")
+}
+main()

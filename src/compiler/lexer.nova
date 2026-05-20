@@ -103,6 +103,7 @@ let TOK_DEFER = 103
 let TOK_GUARD = 104
 let TOK_NULLISH = 105
 let TOK_NULLISH_EQ = 106
+let TOK_LOOP = 107
 
 // --- Lexer State ---
 let lex_src = ""
@@ -546,6 +547,7 @@ fn keyword_type(word) {
     if word == "is" { return TOK_IS }
     if word == "defer" { return TOK_DEFER }
     if word == "guard" { return TOK_GUARD }
+    if word == "loop" { return TOK_LOOP }
     return 0
 }
 
