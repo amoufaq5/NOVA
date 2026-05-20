@@ -1,0 +1,39 @@
+fn main() {
+    # basic do expression
+    let x = do {
+        let a = 10
+        let b = 20
+        a + b
+    }
+    assert(x == 30)
+
+    # do expression with ternary
+    let y = do {
+        let val = 42
+        val > 40 ? val * 2 : val
+    }
+    assert(y == 84)
+
+    # do expression with accumulation
+    let total = do {
+        let lst = [1, 2, 3]
+        let s = 0
+        for v in lst {
+            s = s + v
+        }
+        s
+    }
+    assert(total == 6)
+
+    # nested do expressions
+    let z = do {
+        let a = do {
+            5 + 5
+        }
+        a * 3
+    }
+    assert(z == 30)
+
+    print("PASS")
+}
+main()

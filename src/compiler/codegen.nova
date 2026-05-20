@@ -236,6 +236,15 @@ fn collect_comp_vars(expr) {
         collect_comp_vars(expr[3])
         return 0
     }
+    if tag == AST_DO_EXPR {
+        let di = 0
+        while di < len(expr[1]) {
+            collect_locals(expr[1][di])
+            di = di + 1
+        }
+        collect_comp_vars(expr[2])
+        return 0
+    }
     return 0
 }
 
@@ -340,6 +349,13 @@ fn collect_locals(nd) {
     }
     if tag == AST_EXPR_STMT {
         collect_comp_vars(nd[1])
+    }
+    if tag == AST_DO_EXPR {
+        let di = 0
+        while di < len(nd[1]) {
+            collect_locals(nd[1][di])
+            di = di + 1
+        }
     }
     if tag == AST_ASSIGN_STMT {
         collect_comp_vars(nd[2])
@@ -661,6 +677,15 @@ fn collect_idents_in(nd, names) {
             collect_idents_in(mvals[mi], names)
             mi = mi + 1
         }
+        return 0
+    }
+    if tag == AST_DO_EXPR {
+        let di = 0
+        while di < len(nd[1]) {
+            collect_idents_in(nd[1][di], names)
+            di = di + 1
+        }
+        collect_idents_in(nd[2], names)
         return 0
     }
     return 0
@@ -1609,6 +1634,18 @@ fn gen_expr(nd) {
         out("    pop rdx")
         out("    mov rdi, rax")
         out("    call list_slice")
+        return 0
+    }
+
+    if tag == AST_DO_EXPR {
+        let do_stmts = nd[1]
+        let do_final = nd[2]
+        let di = 0
+        while di < len(do_stmts) {
+            gen_stmt(do_stmts[di])
+            di = di + 1
+        }
+        gen_expr(do_final)
         return 0
     }
 

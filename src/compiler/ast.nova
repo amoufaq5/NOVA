@@ -57,6 +57,7 @@ let AST_CONST_STMT = 52
 let AST_EXTERN_FN = 53
 let AST_DEFER_STMT = 54
 let AST_NULLISH = 55
+let AST_DO_EXPR = 56
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -464,6 +465,14 @@ fn ast_asm(lines) {
     let n = list_new()
     push(n, AST_ASM)
     push(n, lines)
+    return n
+}
+
+fn ast_do_expr(stmts, final_expr) {
+    let n = list_new()
+    push(n, AST_DO_EXPR)
+    push(n, stmts)
+    push(n, final_expr)
     return n
 }
 
