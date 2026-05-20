@@ -1,0 +1,155 @@
+// Signal Processing Demo
+// Demonstrates Nova's capabilities for Moment-Signal Computing
+
+// Signal types
+let SIG_EVENT = 1
+let SIG_QUESTION = 2
+let SIG_COMMAND = 3
+
+// Node types
+let NODE_PERCEIVER = 1
+let NODE_REASONER = 2
+let NODE_ACTOR = 3
+
+// Create a signal
+fn make_signal(sig_type, content, salience) {
+    let sig = list_new()
+    push(sig, sig_type)
+    push(sig, content)
+    push(sig, salience)
+    push(sig, time())
+    return sig
+}
+
+fn sig_type(sig) { return sig[0] }
+fn sig_content(sig) { return sig[1] }
+fn sig_salience(sig) { return sig[2] }
+
+// Create a node
+fn make_node(node_type, name, handler) {
+    let nd = list_new()
+    push(nd, node_type)
+    push(nd, name)
+    push(nd, handler)
+    push(nd, list_new())
+    return nd
+}
+
+fn node_name(nd) { return nd[1] }
+fn node_handler(nd) { return nd[2] }
+fn node_inbox(nd) { return nd[3] }
+
+// Channel: routes signals between nodes
+fn make_channel(source, targets) {
+    let ch = list_new()
+    push(ch, source)
+    push(ch, targets)
+    return ch
+}
+
+// Signal queue (priority queue using list)
+let signal_queue = list_new()
+
+fn enqueue_signal(sig, dest) {
+    let entry = list_new()
+    push(entry, sig)
+    push(entry, dest)
+    push(signal_queue, entry)
+}
+
+fn process_queue(nodes) {
+    let processed = 0
+    while len(signal_queue) > 0 {
+        let entry = signal_queue[0]
+        list_remove(signal_queue, 0)
+        let sig = entry[0]
+        let dest_name = entry[1]
+
+        // Find destination node
+        let i = 0
+        while i < len(nodes) {
+            if node_name(nodes[i]) == dest_name {
+                let handler = node_handler(nodes[i])
+                handler(sig)
+                processed = processed + 1
+            }
+            i = i + 1
+        }
+    }
+    return processed
+}
+
+// --- Define node handlers ---
+
+fn perceiver_handle(sig) {
+    print("[Perceiver] Received: ")
+    println(sig_content(sig))
+
+    // Forward enriched signal to reasoner
+    let enriched = make_signal(SIG_EVENT,
+        "processed: " + sig_content(sig),
+        sig_salience(sig) + 10)
+    enqueue_signal(enriched, "reasoner")
+}
+
+fn reasoner_handle(sig) {
+    print("[Reasoner] Analyzing: ")
+    println(sig_content(sig))
+
+    // Generate response signal to actor
+    let response = make_signal(SIG_COMMAND,
+        "action for: " + sig_content(sig),
+        sig_salience(sig) + 5)
+    enqueue_signal(response, "actor")
+}
+
+fn actor_handle(sig) {
+    print("[Actor] Executing: ")
+    println(sig_content(sig))
+}
+
+// --- Build the mind ---
+fn main() {
+    println("=== Nova Signal Processing Demo ===")
+    println("")
+
+    // Create nodes
+    let perceiver = make_node(NODE_PERCEIVER, "perceiver", perceiver_handle)
+    let reasoner = make_node(NODE_REASONER, "reasoner", reasoner_handle)
+    let actor = make_node(NODE_ACTOR, "actor", actor_handle)
+
+    let nodes = [perceiver, reasoner, actor]
+
+    // Emit initial signals
+    let sig1 = make_signal(SIG_EVENT, "user says hello", 80)
+    let sig2 = make_signal(SIG_QUESTION, "what is the weather?", 60)
+
+    enqueue_signal(sig1, "perceiver")
+    enqueue_signal(sig2, "perceiver")
+
+    // Process signal pipeline
+    println("--- Processing cycle 1 ---")
+    let count = process_queue(nodes)
+    print("Processed ")
+    print(int_to_str(count))
+    println(" signals")
+
+    println("")
+    println("--- Processing cycle 2 ---")
+    count = process_queue(nodes)
+    print("Processed ")
+    print(int_to_str(count))
+    println(" signals")
+
+    println("")
+    println("--- Processing cycle 3 ---")
+    count = process_queue(nodes)
+    print("Processed ")
+    print(int_to_str(count))
+    println(" signals")
+
+    println("")
+    println("Signal processing demo complete!")
+}
+
+main()
