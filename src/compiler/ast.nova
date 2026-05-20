@@ -59,6 +59,7 @@ let AST_DEFER_STMT = 54
 let AST_NULLISH = 55
 let AST_DO_EXPR = 56
 let AST_MAP_COMP = 57
+let AST_TYPE_PATTERN = 58
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -494,6 +495,13 @@ fn ast_map_comp(key_expr, val_expr, var_name, iter_expr, cond) {
     push(n, var_name)
     push(n, iter_expr)
     push(n, cond)
+    return n
+}
+
+fn ast_type_pattern(type_id) {
+    let n = list_new()
+    push(n, AST_TYPE_PATTERN)
+    push(n, type_id)
     return n
 }
 

@@ -1,0 +1,40 @@
+fn describe(val) {
+    return match val {
+        is int => "integer"
+        is str => "string"
+        is list => "list"
+        is map => "map"
+        _ => "unknown"
+    }
+}
+
+fn main() {
+    assert(describe(42) == "integer")
+    assert(describe("hello") == "string")
+    assert(describe([1, 2, 3]) == "list")
+    assert(describe({}) == "map")
+    assert(describe(0) == "unknown")
+
+    # Type match as statement
+    let val = [10, 20]
+    let result = ""
+    match val {
+        is int => { result = "int" }
+        is str => { result = "str" }
+        is list => { result = "list" }
+        _ => { result = "other" }
+    }
+    assert(result == "list")
+
+    # Type match with guard
+    let num = 42
+    let category = match num {
+        is int if num > 100 => "big int"
+        is int => "small int"
+        _ => "not int"
+    }
+    assert(category == "small int")
+
+    print("PASS")
+}
+main()
