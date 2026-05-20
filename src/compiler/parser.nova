@@ -1382,9 +1382,18 @@ fn parse_stmt_inner() {
             let astmts = list_new()
             let ai = 0
             while ai < len(anames) {
+                let tmpn = "__ma_" + int_to_str(ai)
                 if ai < len(avals) {
-                    push(astmts, ast_assign(anames[ai], avals[ai]))
+                    push(astmts, ast_let(tmpn, avals[ai]))
+                } else {
+                    push(astmts, ast_let(tmpn, ast_none()))
                 }
+                ai = ai + 1
+            }
+            ai = 0
+            while ai < len(anames) {
+                let tmpn = "__ma_" + int_to_str(ai)
+                push(astmts, ast_assign(anames[ai], ast_ident(tmpn)))
                 ai = ai + 1
             }
             return ast_block(astmts)

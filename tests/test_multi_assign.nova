@@ -15,6 +15,17 @@ fn main() {
     assert(a == 100)
     assert(b == 200)
 
+    # Swap via multi-assign
+    a, b = b, a
+    assert(a == 200)
+    assert(b == 100)
+
+    # Three-way rotation
+    x, y, z = z, x, y
+    assert(x == 30)
+    assert(y == 10)
+    assert(z == 20)
+
     print("PASS")
 }
 main()
