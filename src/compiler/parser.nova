@@ -345,6 +345,19 @@ fn parse_primary() {
         let mk = parse_expr()
         par_expect(TOK_COLON)
         let mv = parse_expr()
+        if par_peek_type() == TOK_FOR {
+            par_advance()
+            let mcv = par_expect(TOK_IDENT)
+            par_expect(TOK_IN)
+            let mciter = parse_expr()
+            let mccond = 0
+            if par_peek_type() == TOK_IF {
+                par_advance()
+                mccond = parse_expr()
+            }
+            par_expect(TOK_RBRACE)
+            return ast_map_comp(mk, mv, mcv[1], mciter, mccond)
+        }
         push(mkeys, mk)
         push(mvals, mv)
         while par_peek_type() == TOK_COMMA {
@@ -432,6 +445,13 @@ fn parse_primary() {
     }
     if t == TOK_IF {
         return parse_if()
+    }
+    if t == TOK_UNLESS {
+        par_advance()
+        let ucond = parse_expr()
+        let ubody = parse_block()
+        let neg_ucond = ast_unary("!", ucond)
+        return ast_if(neg_ucond, ubody, 0)
     }
     // Unexpected token
     print("Error at line ")
@@ -1018,20 +1038,36 @@ fn parse_let() {
     if par_peek_type() == TOK_LBRACKET {
         par_advance()
         let dnames = list_new()
+        let drest = ""
         if par_peek_type() == TOK_RBRACKET {
         } else {
-            let dtok = par_expect(TOK_IDENT)
-            push(dnames, dtok[1])
+            if par_peek_type() == TOK_ELLIPSIS {
+                par_advance()
+                let drt = par_expect(TOK_IDENT)
+                drest = drt[1]
+            } else {
+                let dtok = par_expect(TOK_IDENT)
+                push(dnames, dtok[1])
+            }
             while par_peek_type() == TOK_COMMA {
                 par_advance()
-                let dtok2 = par_expect(TOK_IDENT)
-                push(dnames, dtok2[1])
+                if par_peek_type() == TOK_ELLIPSIS {
+                    par_advance()
+                    let drt2 = par_expect(TOK_IDENT)
+                    drest = drt2[1]
+                } else {
+                    let dtok2 = par_expect(TOK_IDENT)
+                    push(dnames, dtok2[1])
+                }
             }
         }
         par_expect(TOK_RBRACKET)
         par_expect(TOK_EQ)
         let dvalue = parse_expr()
-        return ast_destructure(dnames, dvalue)
+        if drest == "" {
+            return ast_destructure(dnames, dvalue)
+        }
+        return ast_destructure_rest(dnames, drest, dvalue)
     }
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]

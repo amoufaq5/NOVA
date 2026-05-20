@@ -1,0 +1,27 @@
+fn main() {
+    let items = ["apple", "banana", "cherry"]
+    let pairs = enumerate(items)
+    assert(len(pairs) == 3)
+
+    let p0 = pairs[0]
+    assert(p0[0] == 0)
+    assert(p0[1] == "apple")
+
+    let p2 = pairs[2]
+    assert(p2[0] == 2)
+    assert(p2[1] == "cherry")
+
+    # Use enumerate in a loop
+    let result = 0
+    for pair in enumerate([10, 20, 30]) {
+        result = result + pair[0] + pair[1]
+    }
+    # result = (0+10) + (1+20) + (2+30) = 63
+    assert(result == 63)
+
+    # Empty list
+    assert(len(enumerate([])) == 0)
+
+    print("PASS")
+}
+main()

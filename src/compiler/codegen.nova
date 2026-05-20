@@ -222,6 +222,12 @@ fn collect_comp_vars(expr) {
         cg_local_count = cg_local_count + 1
         return 0
     }
+    if tag == AST_MAP_COMP {
+        let mc_var = expr[3]
+        push(cg_locals, mc_var)
+        cg_local_count = cg_local_count + 1
+        return 0
+    }
     if tag == AST_CALL {
         let cargs = expr[2]
         let ci = 0
@@ -332,6 +338,13 @@ fn collect_locals(nd) {
             }
             di = di + 1
         }
+        if len(nd) > 3 {
+            let drname = nd[3]
+            if is_global(drname) == 0 {
+                push(cg_locals, drname)
+                cg_local_count = cg_local_count + 1
+            }
+        }
     }
     if tag == AST_FOR_INDEXED {
         let idx_name = nd[1]
@@ -345,6 +358,11 @@ fn collect_locals(nd) {
     if tag == AST_LIST_COMP {
         let lc_var = nd[2]
         push(cg_locals, lc_var)
+        cg_local_count = cg_local_count + 1
+    }
+    if tag == AST_MAP_COMP {
+        let mc_var = nd[3]
+        push(cg_locals, mc_var)
         cg_local_count = cg_local_count + 1
     }
     if tag == AST_EXPR_STMT {
@@ -679,6 +697,15 @@ fn collect_idents_in(nd, names) {
         }
         return 0
     }
+    if tag == AST_MAP_COMP {
+        collect_idents_in(nd[1], names)
+        collect_idents_in(nd[2], names)
+        collect_idents_in(nd[4], names)
+        if nd[5] == 0 { } else {
+            collect_idents_in(nd[5], names)
+        }
+        return 0
+    }
     if tag == AST_DO_EXPR {
         let di = 0
         while di < len(nd[1]) {
@@ -851,6 +878,7 @@ fn is_builtin_fn(name) {
     if name == "flatten" { return 1 }
     if name == "unique" { return 1 }
     if name == "map_merge" { return 1 }
+    if name == "enumerate" { return 1 }
     if name == "coro_new" { return 1 }
     if name == "coro_resume" { return 1 }
     if name == "coro_yield" { return 1 }
@@ -1618,6 +1646,64 @@ fn gen_expr(nd) {
         return 0
     }
 
+    if tag == AST_MAP_COMP {
+        let mc_key_expr = nd[1]
+        let mc_val_expr = nd[2]
+        let mc_var = nd[3]
+        let mc_iter = nd[4]
+        let mc_cond = nd[5]
+        let mc_var_off = local_offset(mc_var)
+        out("    call _nova_map_new")
+        out("    push rax")
+        gen_expr(mc_iter)
+        out("    push rax")
+        out("    push 0")
+        let mc_loop = new_label()
+        let mc_end = new_label()
+        out_label(mc_loop)
+        out("    mov rcx, [rsp]")
+        out("    mov rdi, [rsp+8]")
+        out("    cmp rcx, [rdi+8]")
+        out("    jge " + mc_end)
+        out("    mov rdi, [rdi+24]")
+        out("    mov rax, [rdi+rcx*8]")
+        out("    mov [rbp - " + int_to_str(mc_var_off) + "], rax")
+        if mc_cond == 0 {
+        } else {
+            let mc_skip = new_label()
+            gen_expr(mc_cond)
+            out("    test rax, rax")
+            out("    jz " + mc_skip)
+            gen_expr(mc_key_expr)
+            out("    push rax")
+            gen_expr(mc_val_expr)
+            out("    mov rdx, rax")
+            out("    pop rsi")
+            out("    mov rdi, [rsp+16]")
+            out("    call _nova_map_set")
+            out_label(mc_skip)
+            out("    inc qword ptr [rsp]")
+            out("    jmp " + mc_loop)
+            out_label(mc_end)
+            out("    add rsp, 16")
+            out("    pop rax")
+            return 0
+        }
+        gen_expr(mc_key_expr)
+        out("    push rax")
+        gen_expr(mc_val_expr)
+        out("    mov rdx, rax")
+        out("    pop rsi")
+        out("    mov rdi, [rsp+16]")
+        out("    call _nova_map_set")
+        out("    inc qword ptr [rsp]")
+        out("    jmp " + mc_loop)
+        out_label(mc_end)
+        out("    add rsp, 16")
+        out("    pop rax")
+        return 0
+    }
+
     if tag == AST_NULL_ACCESS {
         let null_end = new_label()
         gen_expr(nd[1])
@@ -2366,6 +2452,21 @@ fn gen_stmt(nd) {
                 out("    mov [rbp - " + int_to_str(doff) + "], rax")
             }
             di = di + 1
+        }
+        if len(nd) > 3 {
+            let drname = nd[3]
+            out("    mov rdi, [rsp]")
+            out("    call _nova_len")
+            out("    mov rdx, rax")
+            out("    mov rdi, [rsp]")
+            out("    mov rsi, " + int_to_str(len(dnames)))
+            out("    call _nova_list_slice")
+            if is_global(drname) == 1 {
+                out("    mov [rip + _g_" + drname + "], rax")
+            } else {
+                let droff = local_offset(drname)
+                out("    mov [rbp - " + int_to_str(droff) + "], rax")
+            }
         }
         out("    add rsp, 8")
         return 0
@@ -7812,6 +7913,47 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- enumerate(list) -> list of [idx, val] pairs ---
+    out("")
+    out_label("_nova_enumerate")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov r12, rdi")
+    out("    call _nova_list_new")
+    out("    mov r13, rax")
+    out("    mov r14, [r12 + 8]")
+    out("    xor ecx, ecx")
+    out(".enum_loop:")
+    out("    cmp rcx, r14")
+    out("    jge .enum_done")
+    out("    push rcx")
+    out("    call _nova_list_new")
+    out("    push rax")
+    out("    mov rdi, rax")
+    out("    mov rsi, [rsp + 8]")
+    out("    call _nova_push")
+    out("    mov rdi, [rsp]")
+    out("    mov rcx, [rsp + 8]")
+    out("    mov rax, [r12 + 24]")
+    out("    mov rsi, [rax + rcx*8]")
+    out("    call _nova_push")
+    out("    pop rsi")
+    out("    mov rdi, r13")
+    out("    call _nova_push")
+    out("    pop rcx")
+    out("    inc rcx")
+    out("    jmp .enum_loop")
+    out(".enum_done:")
+    out("    mov rax, r13")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
+
     // --- flat_map(list, fn): map then flatten one level ---
     out("")
     out_label("_nova_flat_map")
@@ -8415,6 +8557,8 @@ fn gen_runtime() {
     out("    jmp _nova_map_count")
     out_label("zip")
     out("    jmp _nova_zip")
+    out_label("enumerate")
+    out("    jmp _nova_enumerate")
     out_label("flat_map")
     out("    jmp _nova_flat_map")
     out_label("any")

@@ -1,0 +1,32 @@
+fn square(x) { return x * x }
+
+fn main() {
+    # Basic map comprehension
+    let nums = [1, 2, 3, 4, 5]
+    let squares = {x: square(x) for x in nums}
+    assert(map_get(squares, 1) == 1)
+    assert(map_get(squares, 2) == 4)
+    assert(map_get(squares, 3) == 9)
+    assert(map_get(squares, 5) == 25)
+
+    # Map comprehension with condition
+    let evens = {x: x * 10 for x in nums if x % 2 == 0}
+    assert(map_has(evens, 2) == 1)
+    assert(map_has(evens, 4) == 1)
+    assert(map_has(evens, 1) == 0)
+    assert(map_get(evens, 2) == 20)
+    assert(map_get(evens, 4) == 40)
+
+    # Empty result with filter
+    let big = {x: x for x in nums if x > 100}
+    assert(map_count(big) == 0)
+
+    # Map comprehension from range
+    let r = range_list(0, 4)
+    let doubled = {x: x * 2 for x in r}
+    assert(map_get(doubled, 0) == 0)
+    assert(map_get(doubled, 3) == 6)
+
+    print("PASS")
+}
+main()

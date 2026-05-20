@@ -1,0 +1,35 @@
+fn main() {
+    # Basic rest pattern
+    let nums = [10, 20, 30, 40, 50]
+    let [first, ...rest] = nums
+    assert(first == 10)
+    assert(len(rest) == 4)
+    assert(rest[0] == 20)
+    assert(rest[3] == 50)
+
+    # Rest with two named elements
+    let [a, b, ...tail] = nums
+    assert(a == 10)
+    assert(b == 20)
+    assert(len(tail) == 3)
+    assert(tail[0] == 30)
+
+    # Rest with all elements consumed
+    let [x, y] = [1, 2]
+    assert(x == 1)
+    assert(y == 2)
+
+    # Rest gets empty list when no remaining
+    let [p, q, ...empty] = [100, 200]
+    assert(p == 100)
+    assert(q == 200)
+    assert(len(empty) == 0)
+
+    # Rest only (no named elements)
+    let [...all] = [5, 6, 7]
+    assert(len(all) == 3)
+    assert(all[0] == 5)
+
+    print("PASS")
+}
+main()

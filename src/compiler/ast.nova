@@ -58,6 +58,7 @@ let AST_EXTERN_FN = 53
 let AST_DEFER_STMT = 54
 let AST_NULLISH = 55
 let AST_DO_EXPR = 56
+let AST_MAP_COMP = 57
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -368,6 +369,15 @@ fn ast_destructure(names, value) {
     return n
 }
 
+fn ast_destructure_rest(names, rest_name, value) {
+    let n = list_new()
+    push(n, AST_DESTRUCTURE)
+    push(n, names)
+    push(n, value)
+    push(n, rest_name)
+    return n
+}
+
 fn ast_for_indexed(idx_name, val_name, iter, body) {
     let n = list_new()
     push(n, AST_FOR_INDEXED)
@@ -473,6 +483,17 @@ fn ast_do_expr(stmts, final_expr) {
     push(n, AST_DO_EXPR)
     push(n, stmts)
     push(n, final_expr)
+    return n
+}
+
+fn ast_map_comp(key_expr, val_expr, var_name, iter_expr, cond) {
+    let n = list_new()
+    push(n, AST_MAP_COMP)
+    push(n, key_expr)
+    push(n, val_expr)
+    push(n, var_name)
+    push(n, iter_expr)
+    push(n, cond)
     return n
 }
 
