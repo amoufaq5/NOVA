@@ -25,6 +25,15 @@ fn main() {
     let w = 5 ?? 100
     assert(w == 5)
 
+    # ??= assignment
+    let p = 0
+    p ??= 42
+    assert(p == 42)
+
+    let q = 10
+    q ??= 99
+    assert(q == 10)
+
     print("PASS")
 }
 main()

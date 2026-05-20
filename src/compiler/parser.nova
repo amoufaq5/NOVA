@@ -328,6 +328,7 @@ fn parse_primary() {
         push(elems, first)
         while par_peek_type() == TOK_COMMA {
             par_advance()
+            if par_peek_type() == TOK_RBRACKET { break }
             push(elems, parse_expr())
         }
         par_expect(TOK_RBRACKET)
@@ -443,6 +444,7 @@ fn parse_postfix() {
                 }
                 while par_peek_type() == TOK_COMMA {
                     par_advance()
+                    if par_peek_type() == TOK_RPAREN { break }
                     if par_peek_type() == TOK_ELLIPSIS {
                         par_advance()
                         push(args, ast_spread(parse_expr()))
@@ -1047,6 +1049,7 @@ fn parse_param_list() {
     }
     while par_peek_type() == TOK_COMMA {
         par_advance()
+        if par_peek_type() == TOK_RPAREN { break }
         if par_peek_type() == TOK_ELLIPSIS {
             par_advance()
             let rt = par_expect(TOK_IDENT)
@@ -1423,6 +1426,24 @@ fn parse_stmt_inner() {
             ci = ci + 1
         }
         return ast_assign(name, ast_binop(compound_op, ast_ident(name), rhs))
+    }
+    if pt == TOK_NULLISH_EQ {
+        par_advance()
+        let rhs = parse_expr()
+        if ast_tag(expr) == AST_IDENT {
+            let name = expr[1]
+            return ast_assign(name, ast_nullish(ast_ident(name), rhs))
+        }
+        if ast_tag(expr) == AST_INDEX_EXPR {
+            let base = expr[1]
+            let idx = expr[2]
+            return ast_index_assign(base, idx, ast_nullish(ast_index(base, idx), rhs))
+        }
+        if ast_tag(expr) == AST_FIELD_ACCESS {
+            let fbase = expr[1]
+            let fname = expr[2]
+            return ast_field_assign(fbase, fname, ast_nullish(ast_field_access(fbase, fname), rhs))
+        }
     }
     return ast_expr_stmt(expr)
 }
