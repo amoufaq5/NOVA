@@ -37,6 +37,14 @@ fn par_peek_val() {
     return tok[1]
 }
 
+fn par_peek_at_type(offset) {
+    let p = par_pos + offset
+    if p >= par_count { return TOK_EOF }
+    let tok = par_tokens[p]
+    if tok == 0 { return TOK_EOF }
+    return tok[0]
+}
+
 fn par_advance() {
     let tok = par_peek()
     par_pos = par_pos + 1
@@ -425,6 +433,12 @@ fn parse_postfix() {
                     par_advance()
                     push(args, ast_spread(parse_expr()))
                 } else {
+                    if par_peek_type() == TOK_IDENT {
+                        if par_peek_at_type(1) == TOK_COLON {
+                            par_advance()
+                            par_advance()
+                        }
+                    }
                     push(args, parse_expr())
                 }
                 while par_peek_type() == TOK_COMMA {
@@ -433,6 +447,12 @@ fn parse_postfix() {
                         par_advance()
                         push(args, ast_spread(parse_expr()))
                     } else {
+                        if par_peek_type() == TOK_IDENT {
+                            if par_peek_at_type(1) == TOK_COLON {
+                                par_advance()
+                                par_advance()
+                            }
+                        }
                         push(args, parse_expr())
                     }
                 }

@@ -1,0 +1,24 @@
+fn greet(name, greeting) {
+    return greeting + " " + name
+}
+
+fn add(a, b) {
+    return a + b
+}
+
+fn main() {
+    # Named arguments (positional, names are documentation-only)
+    let r1 = greet(name: "Alice", greeting: "Hello")
+    assert(r1 == "Hello Alice")
+
+    # Mixed: named args treated positionally
+    let r2 = add(a: 3, b: 4)
+    assert(r2 == 7)
+
+    # Without named args still works
+    let r3 = greet("Bob", "Hi")
+    assert(r3 == "Hi Bob")
+
+    print("PASS")
+}
+main()
