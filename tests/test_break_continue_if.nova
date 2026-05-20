@@ -1,0 +1,53 @@
+fn main() {
+    # break if
+    let sum = 0
+    let i = 0
+    while i < 100 {
+        i = i + 1
+        break if i > 5
+        sum = sum + i
+    }
+    assert(sum == 15)
+    assert(i == 6)
+
+    # continue if
+    let evens = 0
+    let j = 0
+    while j < 10 {
+        j = j + 1
+        continue if j % 2 == 1
+        evens = evens + 1
+    }
+    assert(evens == 5)
+
+    # break if with for
+    let count = 0
+    for x in [1, 2, 3, 4, 5, 6, 7] {
+        break if x > 4
+        count = count + 1
+    }
+    assert(count == 4)
+
+    # continue if with for
+    let total = 0
+    for x in [1, 2, 3, 4, 5] {
+        continue if x == 3
+        total = total + x
+    }
+    assert(total == 12)
+
+    # break if with labeled loop
+    let outer_count = 0
+    @outer while true {
+        outer_count = outer_count + 1
+        let inner = 0
+        while true {
+            inner = inner + 1
+            break @outer if inner > 2
+        }
+    }
+    assert(outer_count == 1)
+
+    print("PASS")
+}
+main()

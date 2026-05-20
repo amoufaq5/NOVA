@@ -1,0 +1,38 @@
+fn main() {
+    let m = {"a": 1, "b": 2, "c": 3}
+
+    # for k, v in map
+    let total = 0
+    let found_keys = ""
+    for k, v in m {
+        found_keys = found_keys + k
+        total = total + v
+    }
+    assert(total == 6)
+    assert(len(found_keys) == 3)
+    assert("a" in found_keys)
+    assert("b" in found_keys)
+    assert("c" in found_keys)
+
+    # for i, v in list still works
+    let lst = [10, 20, 30]
+    let idx_sum = 0
+    let val_sum = 0
+    for i, v in lst {
+        idx_sum = idx_sum + i
+        val_sum = val_sum + v
+    }
+    assert(idx_sum == 3)
+    assert(val_sum == 60)
+
+    # empty map
+    let empty = {}
+    let count = 0
+    for k, v in empty {
+        count = count + 1
+    }
+    assert(count == 0)
+
+    print("PASS")
+}
+main()

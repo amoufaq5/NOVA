@@ -1,0 +1,16 @@
+fn main() {
+    assert(typename(42) == "int")
+    assert(typename("hello") == "str")
+    assert(typename([1,2,3]) == "list")
+    assert(typename({"a": 1}) == "map")
+    assert(typename(none) == "none")
+
+    # typename with variables
+    let x = 10
+    assert(typename(x) == "int")
+    let s = "test"
+    assert(typename(s) == "str")
+
+    print("PASS")
+}
+main()

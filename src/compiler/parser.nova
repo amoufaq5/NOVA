@@ -1329,6 +1329,11 @@ fn parse_stmt_inner() {
             let blbl = par_expect(TOK_IDENT)
             push(brk, blbl[1])
         }
+        if par_peek_type() == TOK_IF {
+            par_advance()
+            let bcond = parse_expr()
+            return ast_if(bcond, ast_block_single(brk), 0)
+        }
         return brk
     }
     if t == TOK_CONTINUE {
@@ -1338,6 +1343,11 @@ fn parse_stmt_inner() {
             par_advance()
             let clbl = par_expect(TOK_IDENT)
             push(cnt, clbl[1])
+        }
+        if par_peek_type() == TOK_IF {
+            par_advance()
+            let ccond = parse_expr()
+            return ast_if(ccond, ast_block_single(cnt), 0)
         }
         return cnt
     }
