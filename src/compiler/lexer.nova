@@ -239,33 +239,31 @@ fn lex_number() {
             let val = 0
             while lex_pos < lex_len {
                 let h = lex_peek()
-                if is_digit(h) == 1 {
+                if h == 95 {
+                    lex_advance()
+                } else { if is_digit(h) == 1 {
                     val = val * 16 + (h - 48)
                     lex_advance()
-                } else {
-                    if h >= 97 {
-                        if h <= 102 {
-                            val = val * 16 + (h - 97 + 10)
-                            lex_advance()
-                        } else {
-                            emit_tok(TOK_INT, val)
-                            return 0
-                        }
+                } else { if h >= 97 {
+                    if h <= 102 {
+                        val = val * 16 + (h - 97 + 10)
+                        lex_advance()
                     } else {
-                        if h >= 65 {
-                            if h <= 70 {
-                                val = val * 16 + (h - 65 + 10)
-                                lex_advance()
-                            } else {
-                                emit_tok(TOK_INT, val)
-                                return 0
-                            }
-                        } else {
-                            emit_tok(TOK_INT, val)
-                            return 0
-                        }
+                        emit_tok(TOK_INT, val)
+                        return 0
                     }
-                }
+                } else { if h >= 65 {
+                    if h <= 70 {
+                        val = val * 16 + (h - 65 + 10)
+                        lex_advance()
+                    } else {
+                        emit_tok(TOK_INT, val)
+                        return 0
+                    }
+                } else {
+                    emit_tok(TOK_INT, val)
+                    return 0
+                } } } }
             }
             emit_tok(TOK_INT, val)
             return 0
@@ -307,10 +305,12 @@ fn lex_number() {
                     if h == 49 {
                         val = val * 2 + 1
                         lex_advance()
+                    } else { if h == 95 {
+                        lex_advance()
                     } else {
                         emit_tok(TOK_INT, val)
                         return 0
-                    }
+                    } }
                 }
             }
             emit_tok(TOK_INT, val)
@@ -324,7 +324,6 @@ fn lex_number() {
         if is_digit(c2) == 1 {
             lex_advance()
         } else {
-            // Check for decimal point: '.' followed by digit means float
             if c2 == 46 {
                 if lex_pos + 1 < lex_len {
                     let after_dot = lex_peek_at(1)
