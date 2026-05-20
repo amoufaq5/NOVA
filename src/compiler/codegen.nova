@@ -5273,6 +5273,8 @@ fn gen_runtime() {
     // --- contains(list_or_str, val) -> 1 if found, 0 if not ---
     out("")
     out_label("_nova_contains")
+    out("    cmp qword ptr [rdi], -2")
+    out("    je .contains_is_map")
     out("    cmp qword ptr [rdi], -1")
     out("    je .contains_is_list")
     out("    call _nova_str_find")
@@ -5283,6 +5285,8 @@ fn gen_runtime() {
     out(".contains_str_no:")
     out("    xor eax, eax")
     out("    ret")
+    out(".contains_is_map:")
+    out("    jmp _nova_map_has")
     out(".contains_is_list:")
     out("    push rbp")
     out("    mov rbp, rsp")

@@ -609,9 +609,16 @@ fn parse_cmp() {
             par_advance()
             let right = parse_bitwise()
             left = ast_binop("!=", left, right)
+        } else { if t == TOK_IN {
+            par_advance()
+            let right = parse_bitwise()
+            let args = list_new()
+            push(args, right)
+            push(args, left)
+            left = ast_call(ast_ident("contains"), args)
         } else {
             return left
-        } } } } } }
+        } } } } } } }
     }
     return left
 }
@@ -1082,7 +1089,21 @@ fn parse_stmt_inner() {
     if t == TOK_FN { return parse_fn() }
     if t == TOK_EXTERN { return parse_extern_fn() }
     if t == TOK_IF { return parse_if() }
+    if t == TOK_UNLESS {
+        par_advance()
+        let cond = parse_expr()
+        let body = parse_block()
+        let neg_cond = ast_unary("!", cond)
+        return ast_if(neg_cond, body, 0)
+    }
     if t == TOK_WHILE { return parse_while() }
+    if t == TOK_UNTIL {
+        par_advance()
+        let cond = parse_expr()
+        let body = parse_block()
+        let neg_cond = ast_unary("!", cond)
+        return ast_while(neg_cond, body)
+    }
     if t == TOK_FOR { return parse_for() }
     if t == TOK_RETURN { return parse_return() }
     if t == TOK_BREAK {

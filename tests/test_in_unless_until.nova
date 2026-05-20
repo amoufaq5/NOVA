@@ -1,0 +1,58 @@
+fn test_in_operator() {
+    let items = [10, 20, 30, 40, 50]
+    assert(20 in items)
+    assert(30 in items)
+    assert(!(99 in items))
+
+    # in with strings
+    let names = ["alice", "bob", "charlie"]
+    assert("bob" in names)
+    assert(!("dave" in names))
+
+    # in with maps
+    let m = {"x": 1, "y": 2}
+    assert("x" in m)
+    assert(!("z" in m))
+}
+
+fn test_unless() {
+    let x = 5
+    let result = "default"
+    unless x == 10 {
+        result = "not ten"
+    }
+    assert(result == "not ten")
+
+    let y = 10
+    let r2 = "default"
+    unless y == 10 {
+        r2 = "not ten"
+    }
+    assert(r2 == "default")
+}
+
+fn test_until() {
+    let i = 0
+    let sum = 0
+    until i == 5 {
+        sum = sum + i
+        i = i + 1
+    }
+    assert(sum == 10)
+
+    let j = 10
+    let count = 0
+    until j <= 0 {
+        j = j - 3
+        count = count + 1
+    }
+    assert(count == 4)
+}
+
+fn main() {
+    test_in_operator()
+    test_unless()
+    test_until()
+    print("PASS")
+}
+main()

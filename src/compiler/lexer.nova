@@ -95,6 +95,8 @@ let TOK_CARET_EQ = 95
 let TOK_SHL_EQ = 96
 let TOK_SHR_EQ = 97
 let TOK_ELIF = 98
+let TOK_UNLESS = 99
+let TOK_UNTIL = 100
 
 // --- Lexer State ---
 let lex_src = ""
@@ -519,6 +521,8 @@ fn keyword_type(word) {
     if word == "not" { return TOK_BANG }
     if word == "and" { return TOK_AND }
     if word == "or" { return TOK_OR }
+    if word == "unless" { return TOK_UNLESS }
+    if word == "until" { return TOK_UNTIL }
     return 0
 }
 
