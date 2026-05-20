@@ -3,6 +3,7 @@
 *.s
 !boot/*.s
 a.out
+output
 output.s
 
 # Bootstrap build intermediates
