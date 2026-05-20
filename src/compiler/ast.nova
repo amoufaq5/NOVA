@@ -125,6 +125,12 @@ fn ast_block(stmts) {
     return n
 }
 
+fn ast_block_single(stmt) {
+    let stmts = list_new()
+    push(stmts, stmt)
+    return ast_block(stmts)
+}
+
 fn ast_binop(op, left, right) {
     let n = list_new()
     push(n, AST_BIN_OP)
