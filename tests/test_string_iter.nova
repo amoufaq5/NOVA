@@ -1,0 +1,73 @@
+// Test for-in iteration over strings
+
+// Basic string iteration - collect char codes
+let result = ""
+for c in "Hello" {
+    result = result + chr(c)
+}
+if result != "Hello" {
+    print("FAIL: basic string iter, got: ")
+    println(result)
+    exit(1)
+}
+
+// Empty string
+let count = 0
+for c in "" {
+    count = count + 1
+}
+if count != 0 {
+    print("FAIL: empty string iter, count = ")
+    println(int_to_str(count))
+    exit(1)
+}
+
+// Count characters
+count = 0
+for c in "abcdef" {
+    count = count + 1
+}
+if count != 6 {
+    print("FAIL: char count, expected 6, got ")
+    println(int_to_str(count))
+    exit(1)
+}
+
+// Sum of char codes
+let sum = 0
+for c in "ABC" {
+    sum = sum + c
+}
+// A=65, B=66, C=67 -> sum=198
+if sum != 198 {
+    print("FAIL: char sum, expected 198, got ")
+    println(int_to_str(sum))
+    exit(1)
+}
+
+// String iteration with break
+let found = 0
+for c in "hello world" {
+    if c == 32 {
+        found = 1
+        break
+    }
+}
+if found != 1 {
+    println("FAIL: break in string iter")
+    exit(1)
+}
+
+// List iteration still works
+let nums = [10, 20, 30]
+sum = 0
+for n in nums {
+    sum = sum + n
+}
+if sum != 60 {
+    print("FAIL: list iter, expected 60, got ")
+    println(int_to_str(sum))
+    exit(1)
+}
+
+println("All string iteration tests passed")

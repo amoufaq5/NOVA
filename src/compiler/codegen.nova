@@ -783,6 +783,7 @@ fn is_builtin_fn(name) {
     if name == "int_sub" { return 1 }
     if name == "int_div" { return 1 }
     if name == "int_mod" { return 1 }
+    if name == "chars" { return 1 }
     if name == "str_replace" { return 1 }
     if name == "str_repeat" { return 1 }
     if name == "char_code" { return 1 }
@@ -1824,6 +1825,14 @@ fn gen_stmt(nd) {
                 push(cg_lbl_continues, cont_lbl)
                 cg_lbl_count = cg_lbl_count + 1
             }
+            // Convert strings to char code lists for iteration
+            out("    mov rdi, [rsp+8]")
+            out("    cmp qword ptr [rdi], -1")
+            out("    je " + loop_lbl)
+            out("    mov rdi, [rsp+8]")
+            out("    call _nova_str_to_chars")
+            out("    mov [rsp+8], rax")
+            // List iteration
             out_label(loop_lbl)
             out("    mov rcx, [rsp]")
             out("    mov rdi, [rsp+8]")
@@ -7637,6 +7646,8 @@ fn gen_runtime() {
     out("    idiv rsi")
     out("    mov rax, rdx")
     out("    ret")
+    out_label("chars")
+    out("    jmp _nova_str_to_chars")
     out_label("str_replace")
     out("    jmp _nova_str_replace")
     out_label("str_repeat")
@@ -7681,6 +7692,44 @@ fn gen_runtime() {
     out("    jmp _nova_coro_result")
     out_label("coro_state")
     out("    jmp _nova_coro_state")
+
+    // --- str_to_chars: convert string to list of char codes ---
+    out_label("_nova_str_to_chars")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    sub rsp, 8")
+    out("    mov r12, rdi")
+    out("    xor r13, r13")
+    out(".stc_len:")
+    out("    movzx rax, byte ptr [r12 + r13]")
+    out("    test al, al")
+    out("    jz .stc_got_len")
+    out("    inc r13")
+    out("    jmp .stc_len")
+    out(".stc_got_len:")
+    out("    call _nova_list_new")
+    out("    mov r14, rax")
+    out("    xor r13, r13")
+    out(".stc_loop:")
+    out("    movzx rax, byte ptr [r12 + r13]")
+    out("    test al, al")
+    out("    jz .stc_done")
+    out("    mov rdi, r14")
+    out("    mov rsi, rax")
+    out("    call _nova_push")
+    out("    inc r13")
+    out("    jmp .stc_loop")
+    out(".stc_done:")
+    out("    mov rax, r14")
+    out("    add rsp, 8")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbp")
+    out("    ret")
 
     // --- Data for runtime ---
     out("")
