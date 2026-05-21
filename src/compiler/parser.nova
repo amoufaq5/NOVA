@@ -9,6 +9,7 @@ let par_lambda_count = 0
 let par_lambdas = 0
 let par_consts = 0
 let par_no_is = 0
+let par_source = ""
 
 fn par_init(tokens) {
     par_tokens = tokens
@@ -17,6 +18,73 @@ fn par_init(tokens) {
     par_lambda_count = 0
     par_lambdas = list_new()
     par_consts = list_new()
+}
+
+fn par_set_source(src) {
+    par_source = src
+}
+
+fn par_get_source_line(line_num) {
+    if par_source == "" { return "" }
+    if line_num <= 0 { return "" }
+    let cur_line = 1
+    let line_start = 0
+    let i = 0
+    while i < len(par_source) {
+        if cur_line == line_num {
+            let end = i
+            while end < len(par_source) {
+                if char_at(par_source, end) == 10 {
+                    end = len(par_source) + 1
+                } else {
+                    end = end + 1
+                }
+            }
+            if end > len(par_source) {
+                end = end - 2
+            }
+            let line_len = end - i
+            if line_len > 80 {
+                line_len = 80
+            }
+            if line_len <= 0 { return "" }
+            return substr(par_source, i, line_len)
+        }
+        if char_at(par_source, i) == 10 {
+            cur_line = cur_line + 1
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+fn par_error(msg) {
+    let tok = par_peek()
+    let line = 0
+    let col = 0
+    if tok != 0 {
+        line = tok[2]
+        col = tok[3]
+    }
+    print("error[line ")
+    print_int(line)
+    print("]: ")
+    println(msg)
+    if line > 0 {
+        let src_line = par_get_source_line(line)
+        if len(src_line) > 0 {
+            print("  | ")
+            println(src_line)
+            print("  | ")
+            let ci = 1
+            while ci < col {
+                print(" ")
+                ci = ci + 1
+            }
+            println("^")
+        }
+    }
+    exit(1)
 }
 
 fn par_peek() {
@@ -114,23 +182,7 @@ fn par_expect(typ) {
     let t = par_peek_type()
     if t == typ {
     } else {
-        let tok = par_peek()
-        let line = 0
-        let col = 0
-        if tok == 0 {
-        } else {
-            line = tok[2]
-            col = tok[3]
-        }
-        print("Error at line ")
-        print_int(line)
-        print(", col ")
-        print_int(col)
-        print(": expected ")
-        print(token_type_name(typ))
-        print(" but got ")
-        println(token_type_name(t))
-        exit(1)
+        par_error("expected " + token_type_name(typ) + " but got " + token_type_name(t))
     }
     return par_advance()
 }
@@ -154,8 +206,7 @@ fn par_skip_type() {
             if tt == TOK_LT { depth = depth + 1 }
             if tt == TOK_GT { depth = depth - 1 }
             if tt == TOK_EOF {
-                println("Error: unexpected EOF in type annotation")
-                exit(1)
+                par_error("unexpected end of file in type annotation")
             }
             if depth == 0 { tdone = 1 }
             par_advance()
@@ -457,17 +508,7 @@ fn parse_primary() {
     if t == TOK_TRY {
         return parse_try()
     }
-    // Unexpected token
-    print("Error at line ")
-    let err_tok = par_peek()
-    if err_tok == 0 {
-        print_int(0)
-    } else {
-        print_int(err_tok[2])
-    }
-    print(": unexpected ")
-    println(token_type_name(t))
-    exit(1)
+    par_error("unexpected " + token_type_name(t))
     return ast_none()
 }
 
@@ -956,8 +997,7 @@ fn parse_block() {
             block_done = 1
         } else {
             if par_peek_type() == TOK_EOF {
-                println("Error: unexpected end of file inside block (missing closing '}')")
-                exit(1)
+                par_error("unexpected end of file inside block (missing closing '}')")
             } else {
                 if par_peek_type() == TOK_SEMI {
                     par_advance()
@@ -1328,8 +1368,7 @@ fn parse_match() {
     let arms = list_new()
     while par_peek_type() != TOK_RBRACE {
         if par_peek_type() == TOK_EOF {
-            println("Error: unexpected EOF in match")
-            exit(1)
+            par_error("unexpected end of file in match expression (missing closing '}')")
         }
         // Parse pattern
         let pattern = 0
@@ -1762,8 +1801,7 @@ fn parse_asm() {
         if t[0] == TOK_STRING {
             push(lines, t[1])
         } else {
-            println("Error: asm block expects string literals")
-            exit(1)
+            par_error("asm block expects string literals, e.g. asm { \"mov rax, 1\" }")
         }
     }
     par_expect(TOK_RBRACE)

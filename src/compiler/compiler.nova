@@ -258,10 +258,16 @@ fn preprocess_imports(source, base_dir) {
 }
 
 let cg_show_stats = 0
+let cg_check_only = 0
 
 fn compile(source) {
     let tokens = tokenize(source)
+    par_set_source(source)
     let ast = parse_program(tokens)
+    if cg_check_only == 1 {
+        println("OK: syntax check passed")
+        exit(0)
+    }
     cg_init()
     let asm_code = gen_program(ast)
     if cg_show_stats == 1 {
@@ -343,7 +349,17 @@ fn main() {
                             if cur == "--stats" {
                                 cg_show_stats = 1
                             } else {
-                                input_file = cur
+                                if cur == "--check" {
+                                    cg_check_only = 1
+                                } else {
+                                    if cur == "--version" {
+                                        println("Nova compiler v1.0.0 (self-hosting, x86-64)")
+                                        println("Target: Linux/macOS/WASM")
+                                        exit(0)
+                                    } else {
+                                        input_file = cur
+                                    }
+                                }
                             }
                         }
                     }
@@ -355,8 +371,18 @@ fn main() {
     }
 
     if input_file == "" {
-        println("Usage: nova <input.nova> [-o output.s] [--target=linux|macos|wasm]")
-        println("       nova pkg <init|add|remove|list|install>")
+        println("Usage: nova <input.nova> [-o output.s] [options]")
+        println("")
+        println("Options:")
+        println("  -o <file>              Output assembly file (default: output.s)")
+        println("  --target=<t>           Target: linux, macos, wasm")
+        println("  --check                Syntax check only (no codegen)")
+        println("  --stats                Show compilation statistics")
+        println("  --debug / --no-debug   Enable/disable debug info")
+        println("  --version              Show compiler version")
+        println("")
+        println("Subcommands:")
+        println("  nova pkg <init|add|remove|list|install>")
         exit(1)
     }
 

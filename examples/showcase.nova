@@ -1,0 +1,179 @@
+// Nova Language Showcase
+// Demonstrates key language features in one file.
+
+fn showcase_basics() {
+    println("--- Basics ---")
+    let x = 42
+    let name = "Nova"
+    println("Language: " + name)
+    print("Answer: ")
+    print_int(x)
+    println("")
+
+    // Compound assignment
+    x += 8
+    x *= 2
+    print("After +=8, *=2: ")
+    print_int(x)
+    println("")
+
+    // String interpolation
+    println("${name} says: ${int_to_str(x)}")
+}
+
+fn showcase_control_flow() {
+    println("--- Control Flow ---")
+
+    // Match expression
+    let day = 3
+    let name = match day {
+        1 => "Monday"
+        2 => "Tuesday"
+        3 => "Wednesday"
+        4 => "Thursday"
+        5 => "Friday"
+        _ => "Weekend"
+    }
+    println("Day: " + name)
+
+    // For with index
+    let fruits = ["apple", "banana", "cherry"]
+    for i, fruit in fruits {
+        println("  " + int_to_str(i) + ": " + fruit)
+    }
+
+    // Ternary
+    let x = 7
+    let label = x % 2 == 0 ? "even" : "odd"
+    println("7 is " + label)
+    x = 4
+    label = x % 2 == 0 ? "even" : "odd"
+    println("4 is " + label)
+}
+
+fn showcase_functional() {
+    println("--- Functional ---")
+
+    // Sum
+    let nums = [1, 2, 3, 4, 5]
+    print("Sum: ")
+    print_int(sum(nums))
+    println("")
+
+    // Range + collect
+    print("Range: ")
+    for i in range(5) {
+        print(int_to_str(i) + " ")
+    }
+    println("")
+}
+
+struct Vector {
+    x,
+    y
+}
+
+fn vec_add(a, b) {
+    return Vector(a.x + b.x, a.y + b.y)
+}
+
+fn vec_str(v) {
+    return "(" + int_to_str(v.x) + ", " + int_to_str(v.y) + ")"
+}
+
+fn showcase_structs() {
+    println("--- Structs ---")
+    let a = Vector(3, 4)
+    let b = Vector(1, 2)
+    let c = vec_add(a, b)
+    println("  " + vec_str(a) + " + " + vec_str(b) + " = " + vec_str(c))
+}
+
+fn showcase_error_handling() {
+    println("--- Error Handling ---")
+    try {
+        let x = 10
+        if x > 5 {
+            throw "x is too big"
+        }
+    } catch {
+        let err = get_error()
+        println("  Caught: " + err)
+    }
+    println("  Execution continues after catch")
+}
+
+fn showcase_maps() {
+    println("--- Maps ---")
+    let scores = map_new()
+    map_set(scores, "alice", 95)
+    map_set(scores, "bob", 87)
+    map_set(scores, "charlie", 92)
+
+    let names = keys(scores)
+    for name in names {
+        print("  " + name + ": ")
+        print_int(map_get(scores, name))
+        println("")
+    }
+}
+
+fn showcase_bitwise() {
+    println("--- Bitwise ---")
+    let flags = 0b1010
+    print("  flags: ")
+    print_int(flags)
+    println("")
+    print("  flags & 0b1100: ")
+    print_int(flags & 0b1100)
+    println("")
+    print("  flags | 0b0101: ")
+    print_int(flags | 0b0101)
+    println("")
+    print("  ~flags & 0xFF: ")
+    print_int(~flags & 0xFF)
+    println("")
+}
+
+fn fibonacci(n) {
+    if n <= 1 { return n }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+fn showcase_recursion() {
+    println("--- Recursion ---")
+    print("  fib(10) = ")
+    print_int(fibonacci(10))
+    println("")
+
+    // Range with step
+    print("  Multiples of 3: ")
+    for i in range_step(0, 30, 3) {
+        print(int_to_str(i) + " ")
+    }
+    println("")
+}
+
+fn main() {
+    println("=== Nova Language Showcase ===")
+    println("")
+    showcase_basics()
+    println("")
+    showcase_control_flow()
+    println("")
+    showcase_functional()
+    println("")
+    showcase_structs()
+    println("")
+    showcase_error_handling()
+    println("")
+    showcase_maps()
+    println("")
+    showcase_bitwise()
+    println("")
+    showcase_recursion()
+    println("")
+    println("=== End ===")
+}
+
+main()
