@@ -1,0 +1,234 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+
+let tests_passed = 0
+let tests_failed = 0
+let gen_counter = 0
+
+fn test_gen() {
+    if gen_counter >= 3 { return 0 }
+    gen_counter = gen_counter + 1
+    let gm = moment_new("gen", "auto", 50, 50, 0, 50)
+    return signal_event(gm, "gen", "sink")
+}
+
+fn assert_eq(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected ")
+        print_int(expected)
+        print(" got ")
+        print_int(got)
+        println("")
+    }
+}
+
+fn main() {
+    println("=== Stream & Pool Tests ===")
+    println("")
+
+    // ---------------------------------------------------
+    // Signal Stream Tests
+    // ---------------------------------------------------
+
+    // Test 1: Stream from list
+    let m1 = moment_new("a", "user", 50, 50, 0, 60)
+    let m2 = moment_new("b", "user", 50, 50, 0, 70)
+    let m3 = moment_new("c", "user", 50, 50, 0, 80)
+    let s1 = signal_event(m1, "src", "dst")
+    let s2 = signal_event(m2, "src", "dst")
+    let s3 = signal_event(m3, "src", "dst")
+    let sigs = list_new()
+    push(sigs, s1)
+    push(sigs, s2)
+    push(sigs, s3)
+    let stream = signal_stream_from(sigs)
+    assert_eq("stream_has_next", signal_stream_has_next(stream), 1)
+    assert_eq("stream_count_init", signal_stream_count(stream), 0)
+
+    // Test 2: Stream next
+    let first = signal_stream_next(stream)
+    assert_eq("stream_next_type", signal_type(first), SIG_EVENT)
+    assert_eq("stream_count_after1", signal_stream_count(stream), 1)
+
+    // Test 3: Stream peek (doesn't consume)
+    let peeked = signal_stream_peek(stream)
+    assert_eq("stream_peek", signal_stream_count(stream), 1)
+    let next = signal_stream_next(stream)
+    assert_eq("stream_after_peek", signal_stream_count(stream), 2)
+
+    // Test 4: Stream take
+    let stream2 = signal_stream_from(sigs)
+    let taken = signal_stream_take(stream2, 2)
+    assert_eq("stream_take_len", len(taken), 2)
+    assert_eq("stream_take_count", signal_stream_count(stream2), 2)
+
+    // Test 5: Stream exhaustion
+    let stream3 = signal_stream_from(sigs)
+    signal_stream_next(stream3)
+    signal_stream_next(stream3)
+    signal_stream_next(stream3)
+    assert_eq("stream_exhausted", signal_stream_has_next(stream3), 0)
+    assert_eq("stream_is_done", signal_stream_is_done(stream3), 1)
+
+    // Test 6: Stream close
+    let stream4 = signal_stream_from(sigs)
+    signal_stream_close(stream4)
+    assert_eq("stream_closed", signal_stream_has_next(stream4), 0)
+    assert_eq("stream_closed_done", signal_stream_is_done(stream4), 1)
+
+    // Test 7: Stream filter by priority
+    let mhi = moment_new("hi", "u", 50, 50, 0, 90)
+    let mlo = moment_new("lo", "u", 50, 50, 0, 30)
+    let shi = signal_command(mhi, "a", "b")
+    let slo = signal_event(mlo, "a", "b")
+    let mixed = list_new()
+    push(mixed, shi)
+    push(mixed, slo)
+    let stream5 = signal_stream_from(mixed)
+    let filtered = signal_stream_filter(stream5, 80)
+    assert_eq("filter_has_next", signal_stream_has_next(filtered), 1)
+    let fitem = signal_stream_next(filtered)
+    assert_eq("filter_priority", signal_priority(fitem), 90)
+    assert_eq("filter_exhausted", signal_stream_has_next(filtered), 0)
+
+    // ---------------------------------------------------
+    // Generator-based Stream Test
+    // ---------------------------------------------------
+
+    // Test 8: Generator stream (using global counter)
+    let gstream = signal_stream_new(test_gen)
+    assert_eq("gen_has_next", signal_stream_has_next(gstream), 1)
+    let g1 = signal_stream_next(gstream)
+    let g2 = signal_stream_next(gstream)
+    let g3 = signal_stream_next(gstream)
+    assert_eq("gen_count", signal_stream_count(gstream), 3)
+    assert_eq("gen_done", signal_stream_has_next(gstream), 0)
+
+    // ---------------------------------------------------
+    // Node Pool Tests
+    // ---------------------------------------------------
+
+    // Test 9: Pool creation
+    let pool = node_pool_new("Worker", 4, 4, 5)
+    assert_eq("pool_size_init", node_pool_size(pool), 1)
+
+    // Test 10: Pool grow
+    let n2 = node_pool_grow(pool)
+    assert_eq("pool_size_grow", node_pool_size(pool), 2)
+
+    // Test 11: Pool max limit
+    node_pool_grow(pool)
+    node_pool_grow(pool)
+    let overflow = node_pool_grow(pool)
+    assert_eq("pool_max_limit", overflow, 0)
+    assert_eq("pool_at_max", node_pool_size(pool), 4)
+
+    // Test 12: Pool dispatch (least loaded)
+    let pool2 = node_pool_new("Proc", 4, 8, 3)
+    node_pool_grow(pool2)
+    let dm = moment_new("test", "u", 50, 50, 0, 50)
+    let dsig = signal_event(dm, "src", "Proc_0")
+    node_pool_dispatch(pool2, dsig)
+    node_pool_dispatch(pool2, dsig)
+    node_pool_dispatch(pool2, dsig)
+    let first_node = node_pool_get(pool2, 0)
+    let second_node = node_pool_get(pool2, 1)
+    let total_inbox = node_inbox_count(first_node) + node_inbox_count(second_node)
+    assert_eq("pool_dispatch_total", total_inbox, 3)
+
+    // Test 13: Pool should scale
+    let pool3 = node_pool_new("Scale", 4, 4, 2)
+    let sm = moment_new("load", "u", 50, 50, 0, 50)
+    let ssig = signal_event(sm, "src", "Scale_0")
+    node_pool_dispatch(pool3, ssig)
+    node_pool_dispatch(pool3, ssig)
+    node_pool_dispatch(pool3, ssig)
+    assert_eq("should_scale", node_pool_should_scale(pool3), 1)
+
+    // Test 14: Pool auto scale
+    let new_node = node_pool_auto_scale(pool3)
+    assert_eq("auto_scale_grew", node_pool_size(pool3), 2)
+
+    // Test 15: Pool process all
+    let pool4 = node_pool_new("ProcAll", 1, 4, 5)
+    let pm = moment_new("data", "user", 60, 40, 0, 50)
+    let psig = signal_event(pm, "ext", "ProcAll_0")
+    node_pool_dispatch(pool4, psig)
+    let processed = node_pool_process_all(pool4)
+    assert_eq("pool_process", processed, 1)
+
+    // Test 16: Pool drain all
+    let outputs = node_pool_drain_all(pool4)
+    assert_eq("pool_drain_type", len(outputs) >= 0, 1)
+
+    // ---------------------------------------------------
+    // Scheduler Pool Integration Tests
+    // ---------------------------------------------------
+
+    // Test 17: Register pool with scheduler
+    scheduler_init()
+    let spool = node_pool_new("Sched", 4, 4, 3)
+    scheduler_register_pool(spool)
+    assert_eq("sched_pool_count", scheduler_pool_count(), 1)
+
+    // Test 18: Find pool by name
+    let found = scheduler_find_pool("Sched")
+    assert_eq("sched_find_pool", found != 0, 1)
+
+    // Test 19: Scheduler stream processing
+    scheduler_init()
+    let recv = node_new("Recv", 1)
+    scheduler_register(recv)
+    let rm1 = moment_new("x", "u", 50, 50, 0, 50)
+    let rm2 = moment_new("y", "u", 50, 50, 0, 50)
+    let rs1 = signal_event(rm1, "ext", "Recv")
+    let rs2 = signal_event(rm2, "ext", "Recv")
+    let rsigs = list_new()
+    push(rsigs, rs1)
+    push(rsigs, rs2)
+    let rstream = signal_stream_from(rsigs)
+    let fed = scheduler_run_stream(rstream)
+    assert_eq("sched_stream_fed", fed, 2)
+    assert_eq("sched_stream_processed", scheduler_total_processed() >= 2, 1)
+
+    // Test 20: Feed partial stream
+    scheduler_init()
+    let recv2 = node_new("Recv2", 1)
+    scheduler_register(recv2)
+    let fsigs = list_new()
+    let fi = 0
+    while fi < 5 {
+        let fm = moment_new("f", "u", 50, 50, 0, 50)
+        push(fsigs, signal_event(fm, "ext", "Recv2"))
+        fi = fi + 1
+    }
+    let fstream = signal_stream_from(fsigs)
+    let partial = scheduler_feed_stream(fstream, 3)
+    assert_eq("sched_feed_partial", partial, 3)
+    assert_eq("stream_remaining", signal_stream_has_next(fstream), 1)
+
+    // Results
+    println("")
+    print("Passed: ")
+    print_int(tests_passed)
+    println("")
+    print("Failed: ")
+    print_int(tests_failed)
+    println("")
+    if tests_failed == 0 {
+        println("All stream & pool tests passed!")
+    }
+}
+
+main()

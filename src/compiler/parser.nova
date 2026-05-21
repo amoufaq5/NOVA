@@ -1470,6 +1470,7 @@ fn parse_mind() {
 
     let nodes = list_new()
     let channels = list_new()
+    let scaling = list_new()
 
     while par_peek_type() != TOK_RBRACE {
         let section_tok = par_expect(TOK_IDENT)
@@ -1530,10 +1531,30 @@ fn parse_mind() {
             }
             par_expect(TOK_RBRACE)
         }
+
+        if section == "scaling" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let sn_tok = par_expect(TOK_IDENT)
+                let scale_node = sn_tok[1]
+                par_expect(TOK_COLON)
+                par_expect(TOK_IDENT)
+                let st_tok = par_expect(TOK_IDENT)
+                let threshold = par_expect(TOK_INT)
+                let mx_tok = par_expect(TOK_IDENT)
+                let max_count = par_expect(TOK_INT)
+                let sc_entry = list_new()
+                push(sc_entry, scale_node)
+                push(sc_entry, threshold[1])
+                push(sc_entry, max_count[1])
+                push(scaling, sc_entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
     }
 
     par_expect(TOK_RBRACE)
-    return ast_mind(mind_name, nodes, channels)
+    return ast_mind(mind_name, nodes, channels, scaling)
 }
 
 fn parse_soul() {

@@ -693,3 +693,139 @@ fn node_describe(node) {
     let result = "Node(" + node_name(node) + ", " + node_type_name(node) + ", inbox=" + int_to_str(node_inbox_count(node)) + ")"
     return result
 }
+
+// ========================================================
+// Node cloning: create a copy with a new name
+// ========================================================
+
+fn node_clone(node, new_name) {
+    let n = node_new(new_name, node_type(node))
+    return n
+}
+
+// ========================================================
+// Node Pool: auto-scaling group of identical nodes
+// ========================================================
+// Layout: [TAG, base_name, node_type, pool_nodes, max_size, queue_threshold]
+
+let POOL_TAG = 125
+let POOL_BASE = 1
+let POOL_TYPE = 2
+let POOL_NODES = 3
+let POOL_MAX = 4
+let POOL_THRESHOLD = 5
+
+fn node_pool_new(base_name, ntype, max_size, queue_threshold) {
+    let p = list_new()
+    push(p, POOL_TAG)
+    push(p, base_name)
+    push(p, ntype)
+    let nodes = list_new()
+    let first = node_new(base_name + "_0", ntype)
+    push(nodes, first)
+    push(p, nodes)
+    push(p, max_size)
+    push(p, queue_threshold)
+    return p
+}
+
+fn node_pool_size(pool) {
+    return len(pool[POOL_NODES])
+}
+
+fn node_pool_get(pool, idx) {
+    if idx < len(pool[POOL_NODES]) {
+        return pool[POOL_NODES][idx]
+    }
+    return 0
+}
+
+fn node_pool_first(pool) {
+    return pool[POOL_NODES][0]
+}
+
+fn node_pool_grow(pool) {
+    let current = len(pool[POOL_NODES])
+    if current >= pool[POOL_MAX] { return 0 }
+    let name = pool[POOL_BASE] + "_" + int_to_str(current)
+    let n = node_new(name, pool[POOL_TYPE])
+    push(pool[POOL_NODES], n)
+    return n
+}
+
+fn node_pool_should_scale(pool) {
+    let nodes = pool[POOL_NODES]
+    let total_queued = 0
+    let i = 0
+    while i < len(nodes) {
+        total_queued = total_queued + node_inbox_count(nodes[i])
+        i = i + 1
+    }
+    let avg = total_queued / len(nodes)
+    if avg > pool[POOL_THRESHOLD] { return 1 }
+    return 0
+}
+
+fn node_pool_dispatch(pool, signal) {
+    let nodes = pool[POOL_NODES]
+    let best = nodes[0]
+    let best_load = node_inbox_count(best)
+    let i = 1
+    while i < len(nodes) {
+        let load = node_inbox_count(nodes[i])
+        if load < best_load {
+            best = nodes[i]
+            best_load = load
+        }
+        i = i + 1
+    }
+    node_receive(best, signal)
+    return best
+}
+
+fn node_pool_process_all(pool) {
+    let nodes = pool[POOL_NODES]
+    let total = 0
+    let i = 0
+    while i < len(nodes) {
+        total = total + node_process(nodes[i])
+        i = i + 1
+    }
+    return total
+}
+
+fn node_pool_drain_all(pool) {
+    let all_outputs = list_new()
+    let nodes = pool[POOL_NODES]
+    let i = 0
+    while i < len(nodes) {
+        let outputs = node_drain_outbox(nodes[i])
+        let j = 0
+        while j < len(outputs) {
+            push(all_outputs, outputs[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return all_outputs
+}
+
+fn node_pool_auto_scale(pool) {
+    if node_pool_should_scale(pool) == 1 {
+        let new_node = node_pool_grow(pool)
+        return new_node
+    }
+    return 0
+}
+
+fn node_pool_describe(pool) {
+    print("Pool(")
+    print(pool[POOL_BASE])
+    print(", size=")
+    print_int(node_pool_size(pool))
+    print("/")
+    print_int(pool[POOL_MAX])
+    print(", threshold=")
+    print_int(pool[POOL_THRESHOLD])
+    println(")")
+}

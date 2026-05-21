@@ -2844,23 +2844,48 @@ fn gen_program(program) {
             let mname = ed[1]
             let mnodes = ed[2]
             let mchannels = ed[3]
+            let mscaling = ed[4]
             // scheduler_ensure_init()
             let si_args = list_new()
             push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_ensure_init"), si_args)))
-            // For each node: let <mind>_<name> = node_new("<name>", <type>)
+            // For each node: check if it has a scaling entry
             let ni = 0
             while ni < len(mnodes) {
                 let nd_entry = mnodes[ni]
                 let nd_name = nd_entry[0]
                 let nd_type = nd_entry[1]
                 let var_name = mname + "_" + nd_name
-                let nn_args = list_new()
-                push(nn_args, ast_str(nd_name))
-                push(nn_args, ast_int(nd_type))
-                push(expanded, ast_let(var_name, ast_call(ast_ident("node_new"), nn_args)))
-                let sr_args = list_new()
-                push(sr_args, ast_ident(var_name))
-                push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_register"), sr_args)))
+                let scale_entry = 0
+                let sci = 0
+                while sci < len(mscaling) {
+                    if mscaling[sci][0] == nd_name {
+                        scale_entry = mscaling[sci]
+                    }
+                    sci = sci + 1
+                }
+                if scale_entry == 0 {
+                    let nn_args = list_new()
+                    push(nn_args, ast_str(nd_name))
+                    push(nn_args, ast_int(nd_type))
+                    push(expanded, ast_let(var_name, ast_call(ast_ident("node_new"), nn_args)))
+                    let sr_args = list_new()
+                    push(sr_args, ast_ident(var_name))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_register"), sr_args)))
+                } else {
+                    let pool_var = mname + "_pool_" + nd_name
+                    let np_args = list_new()
+                    push(np_args, ast_str(nd_name))
+                    push(np_args, ast_int(nd_type))
+                    push(np_args, ast_int(scale_entry[2]))
+                    push(np_args, ast_int(scale_entry[1]))
+                    push(expanded, ast_let(pool_var, ast_call(ast_ident("node_pool_new"), np_args)))
+                    let rp_args = list_new()
+                    push(rp_args, ast_ident(pool_var))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_register_pool"), rp_args)))
+                    let pf_args = list_new()
+                    push(pf_args, ast_ident(pool_var))
+                    push(expanded, ast_let(var_name, ast_call(ast_ident("node_pool_first"), pf_args)))
+                }
                 ni = ni + 1
             }
             // For each channel

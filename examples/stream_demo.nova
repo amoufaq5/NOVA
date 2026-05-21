@@ -1,0 +1,184 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+
+let gen_idx = 0
+
+fn sensor_gen() {
+    if gen_idx >= 4 { return 0 }
+    gen_idx = gen_idx + 1
+    let gm = moment_new("reading", "sensor", 50, 30 + gen_idx * 15, 0, 50)
+    return signal_event(gm, "sensor", "processor")
+}
+
+fn main() {
+    println("=== Nova Stream & Pool Demo ===")
+    println("")
+
+    // -----------------------------------------------
+    // Part 1: Signal Streams
+    // -----------------------------------------------
+    println("--- Signal Streams ---")
+
+    let signals = list_new()
+    let i = 0
+    while i < 5 {
+        let m = moment_new("event", "sensor", 50, 40 + i * 10, 0, 50 + i * 5)
+        let s = signal_event(m, "sensor", "analyzer")
+        push(signals, s)
+        i = i + 1
+    }
+
+    let stream = signal_stream_from(signals)
+    print("Stream created with 5 signals")
+    println("")
+
+    println("Processing stream lazily:")
+    while signal_stream_has_next(stream) == 1 {
+        let sig = signal_stream_next(stream)
+        let m = signal_moment(sig)
+        print("  Signal #")
+        print_int(signal_stream_count(stream))
+        print(" arousal=")
+        print_int(moment_arousal(m))
+        print(" salience=")
+        print_int(moment_salience(m))
+        println("")
+    }
+    print("Stream consumed: ")
+    print_int(signal_stream_count(stream))
+    println(" signals")
+    println("")
+
+    // -----------------------------------------------
+    // Part 2: Filtered Streams
+    // -----------------------------------------------
+    println("--- Filtered Stream ---")
+
+    let mixed = list_new()
+    let m_cmd = moment_new("halt", "ctrl", 50, 90, 0, 80)
+    let m_evt = moment_new("tick", "clock", 50, 20, 0, 30)
+    let m_q = moment_new("why", "user", 50, 60, 0, 70)
+    push(mixed, signal_command(m_cmd, "ctrl", "sys"))
+    push(mixed, signal_event(m_evt, "clock", "sys"))
+    push(mixed, signal_question(m_q, "user", "sys"))
+
+    let mstream = signal_stream_from(mixed)
+    let urgent = signal_stream_filter(mstream, 70)
+    print("Filtered (priority >= 70): ")
+    let uc = 0
+    while signal_stream_has_next(urgent) == 1 {
+        let sig = signal_stream_next(urgent)
+        print(signal_type_name(sig))
+        print("(p=")
+        print_int(signal_priority(sig))
+        print(") ")
+        uc = uc + 1
+    }
+    println("")
+    print("Kept ")
+    print_int(uc)
+    print(" of 3 signals")
+    println("")
+    println("")
+
+    // -----------------------------------------------
+    // Part 3: Generator Stream
+    // -----------------------------------------------
+    println("--- Generator Stream ---")
+
+    let gstream = signal_stream_new(sensor_gen)
+    let taken = signal_stream_take(gstream, 2)
+    print("Took 2 from generator: ")
+    print_int(len(taken))
+    println(" signals")
+    print("Stream still has more: ")
+    print_int(signal_stream_has_next(gstream))
+    println("")
+    println("")
+
+    // -----------------------------------------------
+    // Part 4: Node Pools
+    // -----------------------------------------------
+    println("--- Node Pools ---")
+
+    let pool = node_pool_new("Worker", 4, 8, 3)
+    print("Pool created: ")
+    node_pool_describe(pool)
+
+    node_pool_grow(pool)
+    node_pool_grow(pool)
+    print("After growing: ")
+    node_pool_describe(pool)
+
+    let j = 0
+    while j < 10 {
+        let wm = moment_new("task", "dispatch", 50, 40, 0, 50)
+        let ws = signal_event(wm, "dispatch", "Worker")
+        node_pool_dispatch(pool, ws)
+        j = j + 1
+    }
+
+    print("Dispatched 10 signals across ")
+    print_int(node_pool_size(pool))
+    println(" workers")
+
+    let k = 0
+    while k < node_pool_size(pool) {
+        let wn = node_pool_get(pool, k)
+        print("  ")
+        print(node_name(wn))
+        print(" inbox: ")
+        print_int(node_inbox_count(wn))
+        println("")
+        k = k + 1
+    }
+    println("")
+
+    // -----------------------------------------------
+    // Part 5: Scheduler with Streams & Pools
+    // -----------------------------------------------
+    println("--- Scheduler Integration ---")
+
+    scheduler_init()
+
+    let recv = node_new("Gateway", 1)
+    scheduler_register(recv)
+
+    let proc_pool = node_pool_new("Processor", 4, 4, 2)
+    scheduler_register_pool(proc_pool)
+
+    let ch = channel_direct("work", "Gateway", node_pool_first(proc_pool))
+    scheduler_add_channel(ch)
+
+    let work_signals = list_new()
+    let wi = 0
+    while wi < 6 {
+        let wm = moment_new("work_item", "client", 50, 50, 0, 50)
+        push(work_signals, signal_event(wm, "ext", "Gateway"))
+        wi = wi + 1
+    }
+
+    let work_stream = signal_stream_from(work_signals)
+    let fed = scheduler_run_stream(work_stream)
+    print("Fed ")
+    print_int(fed)
+    println(" signals from stream")
+    print("Processed: ")
+    print_int(scheduler_total_processed())
+    println("")
+    print("Pools registered: ")
+    print_int(scheduler_pool_count())
+    println("")
+    scheduler_status()
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

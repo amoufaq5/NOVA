@@ -288,3 +288,122 @@ fn signal_queue_pop(q) {
     pop(q)
     return top
 }
+
+// ---------------------------------------------------------------------------
+// Signal Streams: lazy, potentially infinite signal sources
+// ---------------------------------------------------------------------------
+// A stream wraps a generator function that produces signals on demand.
+// Layout: [TAG, generator_fn, buffer, exhausted, count]
+
+let STREAM_TAG = 115
+let STREAM_GEN = 1
+let STREAM_BUF = 2
+let STREAM_DONE = 3
+let STREAM_COUNT = 4
+
+fn signal_stream_new(generator_fn) {
+    let s = list_new()
+    push(s, STREAM_TAG)
+    push(s, generator_fn)
+    push(s, list_new())
+    push(s, 0)
+    push(s, 0)
+    return s
+}
+
+fn signal_stream_from(signals) {
+    let s = list_new()
+    push(s, STREAM_TAG)
+    push(s, 0)
+    let buf = list_new()
+    let i = 0
+    while i < len(signals) {
+        push(buf, signals[i])
+        i = i + 1
+    }
+    push(s, buf)
+    push(s, 0)
+    push(s, 0)
+    return s
+}
+
+fn signal_stream_has_next(stream) {
+    if len(stream[STREAM_BUF]) > 0 { return 1 }
+    if stream[STREAM_DONE] == 1 { return 0 }
+    if stream[STREAM_GEN] == 0 {
+        stream[STREAM_DONE] = 1
+        return 0
+    }
+    let gen = stream[STREAM_GEN]
+    let sig = gen()
+    if sig == 0 {
+        stream[STREAM_DONE] = 1
+        return 0
+    }
+    push(stream[STREAM_BUF], sig)
+    return 1
+}
+
+fn signal_stream_next(stream) {
+    if signal_stream_has_next(stream) == 0 { return 0 }
+    let buf = stream[STREAM_BUF]
+    let sig = buf[0]
+    let i = 1
+    while i < len(buf) {
+        buf[i - 1] = buf[i]
+        i = i + 1
+    }
+    pop(buf)
+    stream[STREAM_COUNT] = stream[STREAM_COUNT] + 1
+    return sig
+}
+
+fn signal_stream_peek(stream) {
+    if signal_stream_has_next(stream) == 0 { return 0 }
+    return stream[STREAM_BUF][0]
+}
+
+fn signal_stream_count(stream) {
+    return stream[STREAM_COUNT]
+}
+
+fn signal_stream_is_done(stream) {
+    return stream[STREAM_DONE]
+}
+
+fn signal_stream_close(stream) {
+    stream[STREAM_DONE] = 1
+    stream[STREAM_GEN] = 0
+    stream[STREAM_BUF] = list_new()
+}
+
+fn signal_stream_take(stream, n) {
+    let result = list_new()
+    let i = 0
+    while i < n {
+        if signal_stream_has_next(stream) == 0 {
+            i = n
+        } else {
+            push(result, signal_stream_next(stream))
+            i = i + 1
+        }
+    }
+    return result
+}
+
+fn signal_stream_filter(stream, min_priority) {
+    let filtered = list_new()
+    push(filtered, STREAM_TAG)
+    push(filtered, 0)
+    let buf = list_new()
+    while signal_stream_has_next(stream) == 1 {
+        let sig = signal_stream_next(stream)
+        if signal_priority(sig) >= min_priority {
+            push(buf, sig)
+        }
+    }
+    push(filtered, buf)
+    push(filtered, 1)
+    push(filtered, 0)
+    return filtered
+}

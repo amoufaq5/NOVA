@@ -346,3 +346,97 @@ fn scheduler_status() {
     print_int(sched_batched)
     println("")
 }
+
+// ================================================================
+// Node Pool Integration
+// ================================================================
+
+let sched_pools = 0
+
+fn scheduler_init_pools() {
+    if sched_pools == 0 {
+        sched_pools = list_new()
+    }
+}
+
+fn scheduler_register_pool(pool) {
+    scheduler_init_pools()
+    push(sched_pools, pool)
+    let nodes = pool[3]
+    let i = 0
+    while i < len(nodes) {
+        scheduler_register(nodes[i])
+        i = i + 1
+    }
+}
+
+fn scheduler_find_pool(base_name) {
+    scheduler_init_pools()
+    let i = 0
+    while i < len(sched_pools) {
+        if sched_pools[i][1] == base_name {
+            return sched_pools[i]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn scheduler_pool_count() {
+    scheduler_init_pools()
+    return len(sched_pools)
+}
+
+fn scheduler_auto_scale_pools() {
+    scheduler_init_pools()
+    let i = 0
+    while i < len(sched_pools) {
+        let pool = sched_pools[i]
+        let new_node = node_pool_auto_scale(pool)
+        if new_node != 0 {
+            scheduler_register(new_node)
+        }
+        i = i + 1
+    }
+}
+
+// ================================================================
+// Stream Processing
+// ================================================================
+
+fn scheduler_run_stream(stream) {
+    let fed = 0
+    while signal_stream_has_next(stream) == 1 {
+        let sig = signal_stream_next(stream)
+        scheduler_emit(sig)
+        fed = fed + 1
+        scheduler_run_cycle()
+        scheduler_auto_scale_pools()
+    }
+    return fed
+}
+
+fn scheduler_feed_stream(stream, count) {
+    let fed = 0
+    while fed < count {
+        if signal_stream_has_next(stream) == 0 {
+            return fed
+        }
+        let sig = signal_stream_next(stream)
+        scheduler_emit(sig)
+        fed = fed + 1
+    }
+    return fed
+}
+
+fn scheduler_run_stream_batched(stream) {
+    let fed = 0
+    while signal_stream_has_next(stream) == 1 {
+        let sig = signal_stream_next(stream)
+        scheduler_emit(sig)
+        fed = fed + 1
+        scheduler_run_batched_cycle()
+        scheduler_auto_scale_pools()
+    }
+    return fed
+}
