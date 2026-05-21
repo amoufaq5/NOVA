@@ -29,6 +29,12 @@ fn scheduler_init() {
     sched_dropped = 0
 }
 
+fn scheduler_ensure_init() {
+    if sched_nodes == 0 {
+        scheduler_init()
+    }
+}
+
 // ================================================================
 // Node registry
 // ================================================================

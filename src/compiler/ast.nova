@@ -61,6 +61,7 @@ let AST_DO_EXPR = 56
 let AST_MAP_COMP = 57
 let AST_TYPE_PATTERN = 58
 let AST_FLOW = 59
+let AST_MIND = 60
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -523,6 +524,15 @@ let FLOW_ENRICH = 4
 let FLOW_TENTATIVE = 5
 let FLOW_RESONATE = 6
 let FLOW_FILTER = 7
+
+fn ast_mind(name, nodes, channels) {
+    let n = list_new()
+    push(n, AST_MIND)
+    push(n, name)
+    push(n, nodes)
+    push(n, channels)
+    return n
+}
 
 // --- Accessor helpers ---
 fn ast_tag(nd) {

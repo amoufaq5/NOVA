@@ -1410,6 +1410,93 @@ fn parse_throw() {
     return ast_throw(value)
 }
 
+fn mind_ntype(type_str) {
+    if type_str == "perceiver" { return 1 }
+    if type_str == "knower" { return 2 }
+    if type_str == "rememberer" { return 3 }
+    if type_str == "reasoner" { return 4 }
+    if type_str == "feeler" { return 5 }
+    if type_str == "actor" { return 6 }
+    print("Error: unknown node type in mind declaration: ")
+    println(type_str)
+    exit(1)
+    return 0
+}
+
+fn parse_mind() {
+    par_advance()
+    let name_tok = par_expect(TOK_IDENT)
+    let mind_name = name_tok[1]
+    par_expect(TOK_LBRACE)
+
+    let nodes = list_new()
+    let channels = list_new()
+
+    while par_peek_type() != TOK_RBRACE {
+        let section_tok = par_expect(TOK_IDENT)
+        let section = section_tok[1]
+
+        if section == "nodes" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let nn_tok = par_expect(TOK_IDENT)
+                let node_name = nn_tok[1]
+                par_expect(TOK_COLON)
+                let nt_tok = par_expect(TOK_IDENT)
+                let ntype = mind_ntype(nt_tok[1])
+                let entry = list_new()
+                push(entry, node_name)
+                push(entry, ntype)
+                push(nodes, entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
+
+        if section == "channels" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let cn_tok = par_expect(TOK_IDENT)
+                let ch_name = cn_tok[1]
+                par_expect(TOK_COLON)
+                let src_tok = par_expect(TOK_IDENT)
+                let src_name = src_tok[1]
+
+                let flow_tok = par_peek_type()
+                let flow_type = 1
+                if flow_tok == TOK_FLOW_FWD { flow_type = 1; par_advance() }
+                if flow_tok == TOK_BROADCAST { flow_type = 2; par_advance() }
+                if flow_tok == TOK_FLOW_TENTATIVE { flow_type = 3; par_advance() }
+                if flow_tok == TOK_FLOW_FILTER { flow_type = 4; par_advance() }
+
+                let dests = list_new()
+                if par_peek_type() == TOK_LBRACKET {
+                    par_advance()
+                    while par_peek_type() != TOK_RBRACKET {
+                        let dt = par_expect(TOK_IDENT)
+                        push(dests, dt[1])
+                        if par_peek_type() == TOK_COMMA { par_advance() }
+                    }
+                    par_expect(TOK_RBRACKET)
+                } else {
+                    let dt = par_expect(TOK_IDENT)
+                    push(dests, dt[1])
+                }
+
+                let ch_entry = list_new()
+                push(ch_entry, ch_name)
+                push(ch_entry, src_name)
+                push(ch_entry, dests)
+                push(ch_entry, flow_type)
+                push(channels, ch_entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
+    }
+
+    par_expect(TOK_RBRACE)
+    return ast_mind(mind_name, nodes, channels)
+}
+
 fn parse_stmt_inner() {
     let t = par_peek_type()
     if t == TOK_AT {
@@ -1496,6 +1583,7 @@ fn parse_stmt_inner() {
     if t == TOK_TRY { return parse_try() }
     if t == TOK_THROW { return parse_throw() }
     if t == TOK_ENUM { return parse_enum() }
+    if t == TOK_MIND { return parse_mind() }
     if t == TOK_DO { return parse_do_while() }
     if t == TOK_ASM { return parse_asm() }
     if t == TOK_DEFER {

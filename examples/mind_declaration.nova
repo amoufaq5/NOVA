@@ -1,0 +1,103 @@
+// Nova Mind Declaration Example
+// Demonstrates declarative cognitive system setup using the mind syntax.
+// A mind declaration creates nodes, registers them with the scheduler,
+// and wires channels between them — all in one concise block.
+
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/runtime/scheduler.nova"
+
+// Declare a complete cognitive architecture
+mind Nova {
+    nodes {
+        Sense: perceiver
+        Store: knower
+        Memory: rememberer
+        Think: reasoner
+        Heart: feeler
+        Output: actor
+    }
+    channels {
+        perception: Sense =>> [Store, Memory, Think, Heart]
+        reasoning: Think ~> Output
+        emotion: Heart ~> Think
+    }
+}
+
+fn main() {
+    println("=== Nova Mind Declaration ===")
+    println("")
+
+    // Configure the nodes
+    perceiver_add_template(Nova_Sense, "greeting", ["hello", "hi", "hey"], 80)
+    perceiver_add_template(Nova_Sense, "question", ["what", "why", "how"], 70)
+
+    knower_add_concept(Nova_Store, "greetings", "social protocol")
+    knower_add_concept(Nova_Store, "questions", "inquiry pattern")
+    knower_link(Nova_Store, 0, 1)
+
+    reasoner_add_rule(Nova_Think, "hello", "greeting detected")
+    reasoner_add_rule(Nova_Think, "what", "question detected")
+    reasoner_add_case(Nova_Think, "greeting", "respond warmly")
+
+    actor_add_habit(Nova_Output, "action taken", "respond", 60)
+
+    feeler_set_emotion(Nova_Heart, 60, 40, 50)
+
+    // Show mind structure
+    print("Nodes: ")
+    print_int(scheduler_node_count())
+    println("")
+
+    // Process a greeting
+    println("")
+    println("--- Processing: 'hello there!' ---")
+    let alice = entity_new("Alice", "visitor")
+    let cons = consequence_new(CTYPE_EXPECTATION, "conversation", 80)
+    let m = moment_new("hello there!", alice, 75, 55, cons, 80)
+    let sig = signal_event(m, "external", "Sense")
+
+    scheduler_emit(sig)
+    scheduler_run()
+
+    print("Processed: ")
+    print_int(scheduler_total_processed())
+    println(" signals")
+    print("Cycles: ")
+    print_int(scheduler_cycle_count())
+    println("")
+
+    // Process a question
+    println("")
+    println("--- Processing: 'what is this?' ---")
+    scheduler_init()
+    // Re-register nodes (scheduler_init resets state)
+    scheduler_register(Nova_Sense)
+    scheduler_register(Nova_Store)
+    scheduler_register(Nova_Memory)
+    scheduler_register(Nova_Think)
+    scheduler_register(Nova_Heart)
+    scheduler_register(Nova_Output)
+
+    let cons2 = consequence_new(CTYPE_INSIGHT, "knowledge", 70)
+    let m2 = moment_new("what is this?", alice, 50, 60, cons2, 70)
+    let sig2 = signal_question(m2, "external", "Sense")
+
+    scheduler_emit(sig2)
+    scheduler_run()
+
+    print("Processed: ")
+    print_int(scheduler_total_processed())
+    println(" signals")
+
+    println("")
+    println("Mind declaration provides concise cognitive architecture setup.")
+    println("Instead of manual node_new/scheduler_register/channel_direct,")
+    println("just declare: mind Nova { nodes { ... } channels { ... } }")
+}
+
+main()

@@ -1,0 +1,234 @@
+// Test: Mind Declaration
+// Verifies that `mind Name { nodes { ... } channels { ... } }` desugars
+// correctly into node creation, scheduler registration, and channel setup.
+
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/runtime/scheduler.nova"
+
+// Declare a mind with the new syntax
+mind TestMind {
+    nodes {
+        Sense: perceiver
+        Think: reasoner
+        Heart: feeler
+        Act: actor
+    }
+    channels {
+        perception: Sense ~> Think
+        emotion: Heart ~> Think
+        action: Think ~> Act
+    }
+}
+
+fn test_nodes_created() {
+    println("--- nodes created ---")
+    // Verify that mind declaration created global variables
+    if TestMind_Sense == 0 {
+        println("FAIL: TestMind_Sense not created")
+        exit(1)
+    }
+    if TestMind_Think == 0 {
+        println("FAIL: TestMind_Think not created")
+        exit(1)
+    }
+    if TestMind_Heart == 0 {
+        println("FAIL: TestMind_Heart not created")
+        exit(1)
+    }
+    if TestMind_Act == 0 {
+        println("FAIL: TestMind_Act not created")
+        exit(1)
+    }
+    // Verify node types
+    print("  Sense type: ")
+    println(node_type_name(TestMind_Sense))
+    print("  Think type: ")
+    println(node_type_name(TestMind_Think))
+    print("  Heart type: ")
+    println(node_type_name(TestMind_Heart))
+    print("  Act type: ")
+    println(node_type_name(TestMind_Act))
+
+    if node_type(TestMind_Sense) != NTYPE_PERCEIVER {
+        println("FAIL: Sense should be perceiver")
+        exit(1)
+    }
+    if node_type(TestMind_Think) != NTYPE_REASONER {
+        println("FAIL: Think should be reasoner")
+        exit(1)
+    }
+    if node_type(TestMind_Heart) != NTYPE_FEELER {
+        println("FAIL: Heart should be feeler")
+        exit(1)
+    }
+    if node_type(TestMind_Act) != NTYPE_ACTOR {
+        println("FAIL: Act should be actor")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_scheduler_setup() {
+    println("--- scheduler setup ---")
+    print("  registered nodes: ")
+    print_int(scheduler_node_count())
+    println("")
+    // Both TestMind (4 nodes) and BcastMind (4 nodes) registered
+    if scheduler_node_count() != 8 {
+        println("FAIL: expected 8 registered nodes (two minds)")
+        exit(1)
+    }
+    let found = scheduler_find_node("Sense")
+    if found == 0 {
+        println("FAIL: Sense not in scheduler")
+        exit(1)
+    }
+    let found2 = scheduler_find_node("Sensor")
+    if found2 == 0 {
+        println("FAIL: Sensor not in scheduler")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_channels_created() {
+    println("--- channels created ---")
+    if TestMind_ch_perception == 0 {
+        println("FAIL: perception channel not created")
+        exit(1)
+    }
+    if TestMind_ch_emotion == 0 {
+        println("FAIL: emotion channel not created")
+        exit(1)
+    }
+    if TestMind_ch_action == 0 {
+        println("FAIL: action channel not created")
+        exit(1)
+    }
+    print("  perception channel: ")
+    println(channel_name(TestMind_ch_perception))
+    print("  emotion channel: ")
+    println(channel_name(TestMind_ch_emotion))
+    print("  action channel: ")
+    println(channel_name(TestMind_ch_action))
+    println("PASS")
+}
+
+fn test_signal_flow() {
+    println("--- signal flow through mind ---")
+    // Configure nodes for the test
+    perceiver_add_template(TestMind_Sense, "greeting", ["hello"], 80)
+    reasoner_add_rule(TestMind_Think, "hello", "greeting detected")
+    actor_add_habit(TestMind_Act, "action taken", "wave", 60)
+    feeler_set_emotion(TestMind_Heart, 50, 30, 50)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "reply", 70)
+    let m = moment_new("hello", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "Sense")
+
+    scheduler_emit(sig)
+    scheduler_run()
+
+    print("  total processed: ")
+    print_int(scheduler_total_processed())
+    println("")
+    print("  cycles: ")
+    print_int(scheduler_cycle_count())
+    println("")
+    print("  queue remaining: ")
+    print_int(scheduler_queue_size())
+    println("")
+
+    if scheduler_queue_size() != 0 {
+        println("FAIL: queue should be empty")
+        exit(1)
+    }
+    // Signal flows: Sense -> (channel) -> Think -> (channel) -> Act -> dropped
+    if scheduler_total_processed() < 3 {
+        println("FAIL: expected at least 3 processed")
+        exit(1)
+    }
+    println("PASS")
+}
+
+// Second mind with broadcast channels
+mind BcastMind {
+    nodes {
+        Sensor: perceiver
+        Brain: reasoner
+        Emotion: feeler
+        Hand: actor
+    }
+    channels {
+        spread: Sensor =>> [Brain, Emotion, Hand]
+    }
+}
+
+fn test_broadcast_mind() {
+    println("--- broadcast mind ---")
+    // Both minds share the scheduler. Reset and re-register BcastMind only.
+    scheduler_init()
+    scheduler_register(BcastMind_Sensor)
+    scheduler_register(BcastMind_Brain)
+    scheduler_register(BcastMind_Emotion)
+    scheduler_register(BcastMind_Hand)
+    scheduler_add_channel(BcastMind_ch_spread)
+    print("  BcastMind nodes: ")
+    print_int(scheduler_node_count())
+    println("")
+    if scheduler_node_count() != 4 {
+        println("FAIL: expected 4 nodes in BcastMind")
+        exit(1)
+    }
+    if BcastMind_Sensor == 0 {
+        println("FAIL: BcastMind_Sensor not created")
+        exit(1)
+    }
+    if BcastMind_ch_spread == 0 {
+        println("FAIL: spread channel not created")
+        exit(1)
+    }
+
+    perceiver_add_template(BcastMind_Sensor, "alert", ["danger"], 90)
+    feeler_set_emotion(BcastMind_Emotion, 50, 30, 50)
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "act", 80)
+    let m = moment_new("danger ahead", alice, 30, 80, cons, 90)
+    let sig = signal_event(m, "external", "Sensor")
+
+    scheduler_emit(sig)
+    scheduler_run()
+
+    print("  processed: ")
+    print_int(scheduler_total_processed())
+    println("")
+    if scheduler_total_processed() < 3 {
+        println("FAIL: expected at least 3 processed")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn main() {
+    println("=== Mind Declaration Tests ===")
+    println("")
+    test_nodes_created()
+    println("")
+    test_scheduler_setup()
+    println("")
+    test_channels_created()
+    println("")
+    test_signal_flow()
+    println("")
+    test_broadcast_mind()
+    println("")
+    println("All mind declaration tests passed!")
+}
+
+main()

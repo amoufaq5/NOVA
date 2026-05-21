@@ -2829,6 +2829,121 @@ fn gen_program(program) {
     }
     let decls = program[1]
 
+    // Expand mind declarations into regular statements
+    let expanded = list_new()
+    let ei = 0
+    while ei < len(decls) {
+        let ed = decls[ei]
+        if ast_tag(ed) == AST_MIND {
+            let mname = ed[1]
+            let mnodes = ed[2]
+            let mchannels = ed[3]
+            // scheduler_ensure_init()
+            let si_args = list_new()
+            push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_ensure_init"), si_args)))
+            // For each node: let <mind>_<name> = node_new("<name>", <type>)
+            let ni = 0
+            while ni < len(mnodes) {
+                let nd_entry = mnodes[ni]
+                let nd_name = nd_entry[0]
+                let nd_type = nd_entry[1]
+                let var_name = mname + "_" + nd_name
+                let nn_args = list_new()
+                push(nn_args, ast_str(nd_name))
+                push(nn_args, ast_int(nd_type))
+                push(expanded, ast_let(var_name, ast_call(ast_ident("node_new"), nn_args)))
+                let sr_args = list_new()
+                push(sr_args, ast_ident(var_name))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_register"), sr_args)))
+                ni = ni + 1
+            }
+            // For each channel
+            let ci = 0
+            while ci < len(mchannels) {
+                let ch = mchannels[ci]
+                let ch_name = ch[0]
+                let ch_source = ch[1]
+                let ch_dests = ch[2]
+                let ch_flow = ch[3]
+                let ch_var = mname + "_ch_" + ch_name
+                if ch_flow == 1 {
+                    if len(ch_dests) == 1 {
+                        let cd_args = list_new()
+                        push(cd_args, ast_str(ch_name))
+                        push(cd_args, ast_str(ch_source))
+                        push(cd_args, ast_ident(mname + "_" + ch_dests[0]))
+                        push(expanded, ast_let(ch_var, ast_call(ast_ident("channel_direct"), cd_args)))
+                    } else {
+                        let cb_args = list_new()
+                        push(cb_args, ast_str(ch_name))
+                        push(cb_args, ast_str(ch_source))
+                        push(expanded, ast_let(ch_var, ast_call(ast_ident("channel_broadcast"), cb_args)))
+                        let di = 0
+                        while di < len(ch_dests) {
+                            let ad_args = list_new()
+                            push(ad_args, ast_ident(ch_var))
+                            push(ad_args, ast_ident(mname + "_" + ch_dests[di]))
+                            push(expanded, ast_expr_stmt(ast_call(ast_ident("channel_add_dest"), ad_args)))
+                            di = di + 1
+                        }
+                    }
+                }
+                if ch_flow == 2 {
+                    let cb2_args = list_new()
+                    push(cb2_args, ast_str(ch_name))
+                    push(cb2_args, ast_str(ch_source))
+                    push(expanded, ast_let(ch_var, ast_call(ast_ident("channel_broadcast"), cb2_args)))
+                    let di = 0
+                    while di < len(ch_dests) {
+                        let ad_args = list_new()
+                        push(ad_args, ast_ident(ch_var))
+                        push(ad_args, ast_ident(mname + "_" + ch_dests[di]))
+                        push(expanded, ast_expr_stmt(ast_call(ast_ident("channel_add_dest"), ad_args)))
+                        di = di + 1
+                    }
+                }
+                if ch_flow == 3 {
+                    let cw_args = list_new()
+                    push(cw_args, ast_str(ch_name))
+                    push(cw_args, ast_str(ch_source))
+                    push(cw_args, ast_int(50))
+                    push(expanded, ast_let(ch_var, ast_call(ast_ident("channel_weighted"), cw_args)))
+                    let di = 0
+                    while di < len(ch_dests) {
+                        let ad_args = list_new()
+                        push(ad_args, ast_ident(ch_var))
+                        push(ad_args, ast_ident(mname + "_" + ch_dests[di]))
+                        push(expanded, ast_expr_stmt(ast_call(ast_ident("channel_add_dest"), ad_args)))
+                        di = di + 1
+                    }
+                }
+                if ch_flow == 4 {
+                    let cf_args = list_new()
+                    push(cf_args, ast_str(ch_name))
+                    push(cf_args, ast_str(ch_source))
+                    push(cf_args, ast_int(50))
+                    push(expanded, ast_let(ch_var, ast_call(ast_ident("channel_filtered"), cf_args)))
+                    let di = 0
+                    while di < len(ch_dests) {
+                        let ad_args = list_new()
+                        push(ad_args, ast_ident(ch_var))
+                        push(ad_args, ast_ident(mname + "_" + ch_dests[di]))
+                        push(expanded, ast_expr_stmt(ast_call(ast_ident("channel_add_dest"), ad_args)))
+                        di = di + 1
+                    }
+                }
+                let sac_args = list_new()
+                push(sac_args, ast_ident(ch_var))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_add_channel"), sac_args)))
+                ci = ci + 1
+            }
+        } else {
+            push(expanded, ed)
+        }
+        ei = ei + 1
+    }
+    decls = expanded
+
     // First pass: collect struct and enum declarations
     let i = 0
     while i < len(decls) {
