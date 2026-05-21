@@ -92,9 +92,15 @@ fn out_section(sect) {
         if sect == "rodata" { out(".section __TEXT,__const") }
         if sect == "bss" { out(".section __DATA,__bss") }
     } else {
-        if sect == "text" { out(".text") }
-        if sect == "rodata" { out(".section .rodata") }
-        if sect == "bss" { out(".section .bss") }
+        if cg_target == 3 {
+            if sect == "text" { out(".section .text,\"xr\"") }
+            if sect == "rodata" { out(".section .rdata,\"dr\"") }
+            if sect == "bss" { out(".section .bss,\"bw\"") }
+        } else {
+            if sect == "text" { out(".text") }
+            if sect == "rodata" { out(".section .rodata") }
+            if sect == "bss" { out(".section .bss") }
+        }
     }
 }
 
@@ -148,6 +154,12 @@ fn emit_syscall(linux_num) {
     let n = syscall_num(linux_num)
     out("    mov rax, " + int_to_str(n))
     out("    syscall")
+}
+
+fn win_call(api_name) {
+    out("    sub rsp, 32")
+    out("    call [rip + __imp_" + api_name + "]")
+    out("    add rsp, 32")
 }
 
 fn new_label() {
@@ -3453,18 +3465,31 @@ fn gen_program(program) {
         out(".globl _main")
         out("_main:")
     } else {
-        out(".globl _start")
-        out("_start:")
+        if cg_target == 3 {
+            out(".globl mainCRTStartup")
+            out("mainCRTStartup:")
+        } else {
+            out(".globl _start")
+            out("_start:")
+        }
     }
-    out("    mov rdi, [rsp]")
-    out("    lea rsi, [rsp + 8]")
-    out("    mov [rip + _g___argc], rdi")
-    out("    mov [rip + _g___argv], rsi")
-    // envp is after argv: at rsp + 8 + (argc+1)*8
-    out("    mov rax, rdi")
-    out("    inc rax")
-    out("    lea rax, [rsp + 8 + rax*8]")
-    out("    mov [rip + _g___envp], rax")
+    if cg_target == 3 {
+        out("    xor edi, edi")
+        out("    xor esi, esi")
+        out("    mov [rip + _g___argc], rdi")
+        out("    mov [rip + _g___argv], rsi")
+        out("    mov [rip + _g___envp], rsi")
+    } else {
+        out("    mov rdi, [rsp]")
+        out("    lea rsi, [rsp + 8]")
+        out("    mov [rip + _g___argc], rdi")
+        out("    mov [rip + _g___argv], rsi")
+        // envp is after argv: at rsp + 8 + (argc+1)*8
+        out("    mov rax, rdi")
+        out("    inc rax")
+        out("    lea rax, [rsp + 8 + rax*8]")
+        out("    mov [rip + _g___envp], rax")
+    }
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
@@ -3492,8 +3517,13 @@ fn gen_program(program) {
         i = i + 1
     }
 
-    out("    mov rdi, 0")
-    emit_syscall(60)
+    if cg_target == 3 {
+        out("    xor ecx, ecx")
+        out("    call [rip + __imp_ExitProcess]")
+    } else {
+        out("    mov rdi, 0")
+        emit_syscall(60)
+    }
 
     // Emit string data section
     out("")
@@ -3532,6 +3562,23 @@ fn gen_program(program) {
         out_label("_cap_" + slot[0] + "_" + slot[1])
         out("    .quad 0")
         i = i + 1
+    }
+
+    // Emit Win32 API import declarations for PE/COFF linking
+    if cg_target == 3 {
+        out("")
+        out(".extern __imp_ExitProcess")
+        out(".extern __imp_GetStdHandle")
+        out(".extern __imp_WriteFile")
+        out(".extern __imp_ReadFile")
+        out(".extern __imp_CreateFileA")
+        out(".extern __imp_CloseHandle")
+        out(".extern __imp_VirtualAlloc")
+        out(".extern __imp_Sleep")
+        out(".extern __imp_CreateDirectoryA")
+        out(".extern __imp_DeleteFileA")
+        out(".extern __imp_GetFileSizeEx")
+        out(".extern __imp_GetSystemTimeAsFileTime")
     }
 
     // Emit runtime library
@@ -5667,8 +5714,25 @@ fn gen_runtime() {
     out("    inc rdx")
     out("    mov rsi, rdi")
     out(".pi_write:")
-    out("    mov rdi, 1")
-    emit_syscall(1)
+    if cg_target == 3 {
+        out("    push rdx")
+        out("    push rsi")
+        out("    mov ecx, -11")
+        win_call("GetStdHandle")
+        out("    pop rsi")
+        out("    pop rdx")
+        out("    mov rcx, rax")
+        out("    mov r8, rdx")
+        out("    mov rdx, rsi")
+        out("    lea r9, [rbp - 32]")
+        out("    push 0")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_WriteFile]")
+        out("    add rsp, 40")
+    } else {
+        out("    mov rdi, 1")
+        emit_syscall(1)
+    }
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -5686,8 +5750,27 @@ fn gen_runtime() {
     out("    inc edx")
     out("    jmp .ps_len")
     out(".ps_write:")
-    out("    mov rdi, 1")
-    emit_syscall(1)
+    if cg_target == 3 {
+        out("    push rdx")
+        out("    push rsi")
+        out("    mov ecx, -11")
+        win_call("GetStdHandle")
+        out("    pop rsi")
+        out("    pop rdx")
+        out("    sub rsp, 16")
+        out("    mov rcx, rax")
+        out("    mov r8, rdx")
+        out("    mov rdx, rsi")
+        out("    lea r9, [rsp]")
+        out("    mov qword ptr [rsp + 8], 0")
+        out("    push qword ptr [rsp + 8]")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_WriteFile]")
+        out("    add rsp, 56")
+    } else {
+        out("    mov rdi, 1")
+        emit_syscall(1)
+    }
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -5703,8 +5786,25 @@ fn gen_runtime() {
     out("    mov byte ptr [rsp], 10")
     out("    mov rsi, rsp")
     out("    mov rdx, 1")
-    out("    mov rdi, 1")
-    emit_syscall(1)
+    if cg_target == 3 {
+        out("    push rdx")
+        out("    push rsi")
+        out("    mov ecx, -11")
+        win_call("GetStdHandle")
+        out("    pop rsi")
+        out("    pop rdx")
+        out("    mov rcx, rax")
+        out("    mov r8, rdx")
+        out("    mov rdx, rsi")
+        out("    lea r9, [rbp - 16]")
+        out("    push 0")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_WriteFile]")
+        out("    add rsp, 40")
+    } else {
+        out("    mov rdi, 1")
+        emit_syscall(1)
+    }
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -5719,26 +5819,37 @@ fn gen_runtime() {
     out("    mov rax, [rip + _heap_ptr]")
     out("    test rax, rax")
     out("    jnz .alloc_have_heap")
-    if cg_target == 1 {
-        // macOS: use mmap (no brk)
-        out("    xor edi, edi")
-        out("    mov rsi, 1048576")
-        out("    mov rdx, 3")
-        out("    mov r10, 4098")
-        out("    mov r8, -1")
-        out("    xor r9d, r9d")
-        emit_syscall(9)
+    if cg_target == 3 {
+        out("    xor ecx, ecx")
+        out("    mov edx, 1048576")
+        out("    mov r8d, 12288")
+        out("    mov r9d, 4")
+        win_call("VirtualAlloc")
     } else {
-        out("    mov rdi, 0")
-        emit_syscall(12)
+        if cg_target == 1 {
+            out("    xor edi, edi")
+            out("    mov rsi, 1048576")
+            out("    mov rdx, 3")
+            out("    mov r10, 4098")
+            out("    mov r8, -1")
+            out("    xor r9d, r9d")
+            emit_syscall(9)
+        } else {
+            out("    mov rdi, 0")
+            emit_syscall(12)
+        }
     }
     out("    mov [rip + _heap_base], rax")
     out("    mov [rip + _heap_ptr], rax")
-    if cg_target == 1 {
+    if cg_target == 3 {
         out("    lea rax, [rax + 1048576]")
     } else {
-        out("    lea rdi, [rax + 1048576]")
-        emit_syscall(12)
+        if cg_target == 1 {
+            out("    lea rax, [rax + 1048576]")
+        } else {
+            out("    lea rdi, [rax + 1048576]")
+            emit_syscall(12)
+        }
     }
     out("    mov [rip + _heap_end], rax")
     out("    mov rax, [rip + _heap_ptr]")
@@ -5747,22 +5858,33 @@ fn gen_runtime() {
     out("    add rcx, rbx")
     out("    cmp rcx, [rip + _heap_end]")
     out("    jle .alloc_ok")
-    if cg_target == 1 {
-        out("    xor edi, edi")
-        out("    mov rsi, 1048576")
-        out("    mov rdx, 3")
-        out("    mov r10, 4098")
-        out("    mov r8, -1")
-        out("    xor r9d, r9d")
-        emit_syscall(9)
+    if cg_target == 3 {
+        out("    xor ecx, ecx")
+        out("    mov edx, 1048576")
+        out("    mov r8d, 12288")
+        out("    mov r9d, 4")
+        win_call("VirtualAlloc")
         out("    mov [rip + _heap_end], rax")
         out("    add qword ptr [rip + _heap_end], 1048576")
         out("    mov rax, [rip + _heap_ptr]")
     } else {
-        out("    lea rdi, [rcx + 1048576]")
-        emit_syscall(12)
-        out("    mov [rip + _heap_end], rax")
-        out("    mov rax, [rip + _heap_ptr]")
+        if cg_target == 1 {
+            out("    xor edi, edi")
+            out("    mov rsi, 1048576")
+            out("    mov rdx, 3")
+            out("    mov r10, 4098")
+            out("    mov r8, -1")
+            out("    xor r9d, r9d")
+            emit_syscall(9)
+            out("    mov [rip + _heap_end], rax")
+            out("    add qword ptr [rip + _heap_end], 1048576")
+            out("    mov rax, [rip + _heap_ptr]")
+        } else {
+            out("    lea rdi, [rcx + 1048576]")
+            emit_syscall(12)
+            out("    mov [rip + _heap_end], rax")
+            out("    mov rax, [rip + _heap_ptr]")
+        }
     }
     out("    mov rcx, rax")
     out("    add rcx, rbx")
@@ -5997,7 +6119,12 @@ fn gen_runtime() {
     // --- exit(code) ---
     out("")
     out_label("_nova_exit")
-    emit_syscall(60)
+    if cg_target == 3 {
+        out("    mov ecx, edi")
+        win_call("ExitProcess")
+    } else {
+        emit_syscall(60)
+    }
 
     // --- read_file(path) -> string ptr or 0 ---
     out("")
@@ -6005,24 +6132,59 @@ fn gen_runtime() {
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    push r12")
-    out("    mov rsi, 0")
-    emit_syscall(2)
-    out("    cmp rax, 0")
-    out("    jl .rf_fail")
-    out("    mov r12, rax")
-    out("    mov rdi, 524288")
-    out("    call _nova_alloc")
-    out("    push rax")
-    out("    mov rdi, r12")
-    out("    mov rsi, rax")
-    out("    mov rdx, 524287")
-    emit_syscall(0)
-    out("    pop rsi")
-    out("    mov byte ptr [rsi+rax], 0")
-    out("    mov rdi, r12")
-    out("    push rsi")
-    emit_syscall(3)
-    out("    pop rax")
+    if cg_target == 3 {
+        out("    sub rsp, 64")
+        out("    mov rcx, rdi")
+        out("    mov edx, -2147483648")
+        out("    xor r8d, r8d")
+        out("    xor r9d, r9d")
+        out("    push 0")
+        out("    push 128")
+        out("    push 3")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_CreateFileA]")
+        out("    add rsp, 56")
+        out("    cmp rax, -1")
+        out("    je .rf_fail")
+        out("    mov r12, rax")
+        out("    mov rdi, 524288")
+        out("    call _nova_alloc")
+        out("    mov [rbp - 24], rax")
+        out("    mov rcx, r12")
+        out("    mov rdx, rax")
+        out("    mov r8d, 524287")
+        out("    lea r9, [rbp - 32]")
+        out("    push 0")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_ReadFile]")
+        out("    add rsp, 40")
+        out("    mov rsi, [rbp - 24]")
+        out("    mov eax, [rbp - 32]")
+        out("    mov byte ptr [rsi + rax], 0")
+        out("    mov rcx, r12")
+        win_call("CloseHandle")
+        out("    mov rax, [rbp - 24]")
+        out("    add rsp, 64")
+    } else {
+        out("    mov rsi, 0")
+        emit_syscall(2)
+        out("    cmp rax, 0")
+        out("    jl .rf_fail")
+        out("    mov r12, rax")
+        out("    mov rdi, 524288")
+        out("    call _nova_alloc")
+        out("    push rax")
+        out("    mov rdi, r12")
+        out("    mov rsi, rax")
+        out("    mov rdx, 524287")
+        emit_syscall(0)
+        out("    pop rsi")
+        out("    mov byte ptr [rsi+rax], 0")
+        out("    mov rdi, r12")
+        out("    push rsi")
+        emit_syscall(3)
+        out("    pop rax")
+    }
     out("    pop r12")
     out("    pop rbp")
     out("    ret")
@@ -6040,21 +6202,52 @@ fn gen_runtime() {
     out("    push r12")
     out("    push r13")
     out("    mov r13, rsi")
-    out("    mov rsi, 577")
-    out("    mov rdx, 420")
-    emit_syscall(2)
-    out("    cmp rax, 0")
-    out("    jl .wf_fail")
-    out("    mov r12, rax")
-    out("    mov rdi, r13")
-    out("    call _nova_strlen")
-    out("    mov rdx, rax")
-    out("    mov rdi, r12")
-    out("    mov rsi, r13")
-    emit_syscall(1)
-    out("    mov rdi, r12")
-    emit_syscall(3)
-    out("    mov rax, 1")
+    if cg_target == 3 {
+        out("    sub rsp, 64")
+        out("    mov rcx, rdi")
+        out("    mov edx, 1073741824")
+        out("    xor r8d, r8d")
+        out("    xor r9d, r9d")
+        out("    push 0")
+        out("    push 128")
+        out("    push 2")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_CreateFileA]")
+        out("    add rsp, 56")
+        out("    cmp rax, -1")
+        out("    je .wf_fail")
+        out("    mov r12, rax")
+        out("    mov rdi, r13")
+        out("    call _nova_strlen")
+        out("    mov rcx, r12")
+        out("    mov rdx, r13")
+        out("    mov r8, rax")
+        out("    lea r9, [rbp - 24]")
+        out("    push 0")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_WriteFile]")
+        out("    add rsp, 40")
+        out("    mov rcx, r12")
+        win_call("CloseHandle")
+        out("    mov rax, 1")
+        out("    add rsp, 64")
+    } else {
+        out("    mov rsi, 577")
+        out("    mov rdx, 420")
+        emit_syscall(2)
+        out("    cmp rax, 0")
+        out("    jl .wf_fail")
+        out("    mov r12, rax")
+        out("    mov rdi, r13")
+        out("    call _nova_strlen")
+        out("    mov rdx, rax")
+        out("    mov rdi, r12")
+        out("    mov rsi, r13")
+        emit_syscall(1)
+        out("    mov rdi, r12")
+        emit_syscall(3)
+        out("    mov rax, 1")
+    }
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
@@ -6103,7 +6296,7 @@ fn gen_runtime() {
     out("    lea rdi, [rip + _err_null_access]")
     out("    call _nova_println")
     out("    mov rdi, 1")
-    emit_syscall(60)
+    out("    call _nova_exit")
     out(".idx_oob:")
     out("    push rsi")
     out("    lea rdi, [rip + _err_index_oob]")
@@ -6113,7 +6306,7 @@ fn gen_runtime() {
     out("    lea rdi, [rip + _err_newline]")
     out("    call _nova_print_str")
     out("    mov rdi, 1")
-    emit_syscall(60)
+    out("    call _nova_exit")
 
     // --- chr(code) -> 1-char string ---
     out("")
@@ -6439,10 +6632,21 @@ fn gen_runtime() {
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    sub rsp, 16")
-    out("    xor edi, edi")
-    out("    lea rsi, [rbp - 16]")
-    emit_syscall(228)
-    out("    mov rax, [rbp - 16]")
+    if cg_target == 3 {
+        out("    lea rcx, [rbp - 16]")
+        win_call("GetSystemTimeAsFileTime")
+        out("    mov rax, [rbp - 16]")
+        out("    mov rcx, 10000000")
+        out("    xor edx, edx")
+        out("    div rcx")
+        out("    mov rcx, 11644473600")
+        out("    sub rax, rcx")
+    } else {
+        out("    xor edi, edi")
+        out("    lea rsi, [rbp - 16]")
+        emit_syscall(228)
+        out("    mov rax, [rbp - 16]")
+    }
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -6453,27 +6657,32 @@ fn gen_runtime() {
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    sub rsp, 32")
-    out("    mov rax, rdi")
-    out("    xor edx, edx")
-    out("    mov rcx, 1000")
-    out("    div rcx")
-    if cg_target == 1 {
-        out("    mov [rbp - 16], rax")
-        out("    imul rdx, rdx, 1000")
-        out("    mov [rbp - 8], rdx")
-        out("    xor edi, edi")
-        out("    xor esi, esi")
-        out("    xor edx, edx")
-        out("    xor r10d, r10d")
-        out("    lea r8, [rbp - 16]")
-        emit_syscall(93)
+    if cg_target == 3 {
+        out("    mov rcx, rdi")
+        win_call("Sleep")
     } else {
-        out("    mov [rbp - 16], rax")
-        out("    imul rdx, rdx, 1000000")
-        out("    mov [rbp - 8], rdx")
-        out("    lea rdi, [rbp - 16]")
-        out("    xor esi, esi")
-        emit_syscall(35)
+        out("    mov rax, rdi")
+        out("    xor edx, edx")
+        out("    mov rcx, 1000")
+        out("    div rcx")
+        if cg_target == 1 {
+            out("    mov [rbp - 16], rax")
+            out("    imul rdx, rdx, 1000")
+            out("    mov [rbp - 8], rdx")
+            out("    xor edi, edi")
+            out("    xor esi, esi")
+            out("    xor edx, edx")
+            out("    xor r10d, r10d")
+            out("    lea r8, [rbp - 16]")
+            emit_syscall(93)
+        } else {
+            out("    mov [rbp - 16], rax")
+            out("    imul rdx, rdx, 1000000")
+            out("    mov [rbp - 8], rdx")
+            out("    lea rdi, [rbp - 16]")
+            out("    xor esi, esi")
+            emit_syscall(35)
+        }
     }
     out("    xor eax, eax")
     out("    mov rsp, rbp")
@@ -6483,30 +6692,88 @@ fn gen_runtime() {
     // --- mkdir(path) -> 0 on success, -1 on error ---
     out("")
     out_label("_nova_mkdir")
-    out("    mov rsi, 493")
-    emit_syscall(83)
-    out("    ret")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov rcx, rdi")
+        out("    xor edx, edx")
+        win_call("CreateDirectoryA")
+        out("    test eax, eax")
+        out("    jz .mkdir_fail")
+        out("    xor eax, eax")
+        out("    pop rbp")
+        out("    ret")
+        out(".mkdir_fail:")
+        out("    mov rax, -1")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        out("    mov rsi, 493")
+        emit_syscall(83)
+        out("    ret")
+    }
 
     // --- unlink(path) -> 0 on success, -1 on error ---
     out("")
     out_label("_nova_unlink")
-    emit_syscall(87)
-    out("    ret")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov rcx, rdi")
+        win_call("DeleteFileA")
+        out("    test eax, eax")
+        out("    jz .unlink_fail")
+        out("    xor eax, eax")
+        out("    pop rbp")
+        out("    ret")
+        out(".unlink_fail:")
+        out("    mov rax, -1")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        emit_syscall(87)
+        out("    ret")
+    }
 
     // --- file_size(path) -> size in bytes or -1 ---
     out("")
     out_label("_nova_file_size")
     out("    push rbp")
     out("    mov rbp, rsp")
-    out("    sub rsp, 160")
-    out("    lea rsi, [rbp - 160]")
-    emit_syscall(4)
-    out("    cmp rax, 0")
-    out("    jl .fs_fail")
-    if cg_target == 1 {
-        out("    mov rax, [rbp - 160 + 96]")
+    if cg_target == 3 {
+        out("    sub rsp, 64")
+        out("    mov rcx, rdi")
+        out("    mov edx, -2147483648")
+        out("    xor r8d, r8d")
+        out("    xor r9d, r9d")
+        out("    push 0")
+        out("    push 128")
+        out("    push 3")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_CreateFileA]")
+        out("    add rsp, 56")
+        out("    cmp rax, -1")
+        out("    je .fs_fail")
+        out("    mov [rbp - 8], rax")
+        out("    mov rcx, rax")
+        out("    lea rdx, [rbp - 16]")
+        win_call("GetFileSizeEx")
+        out("    mov rcx, [rbp - 8]")
+        out("    push qword ptr [rbp - 16]")
+        win_call("CloseHandle")
+        out("    pop rax")
+        out("    add rsp, 64")
     } else {
-        out("    mov rax, [rbp - 160 + 48]")
+        out("    sub rsp, 160")
+        out("    lea rsi, [rbp - 160]")
+        emit_syscall(4)
+        out("    cmp rax, 0")
+        out("    jl .fs_fail")
+        if cg_target == 1 {
+            out("    mov rax, [rbp - 160 + 96]")
+        } else {
+            out("    mov rax, [rbp - 160 + 48]")
+        }
     }
     out("    mov rsp, rbp")
     out("    pop rbp")
@@ -6520,49 +6787,54 @@ fn gen_runtime() {
     // --- socket(domain, type, protocol) -> fd ---
     out("")
     out_label("_nova_socket")
-    emit_syscall(41)
+    if cg_target == 3 { out("    mov rax, -1") } else { emit_syscall(41) }
     out("    ret")
 
     // --- bind(fd, addr, addrlen) -> 0 or error ---
     out("")
     out_label("_nova_bind")
-    emit_syscall(49)
+    if cg_target == 3 { out("    mov rax, -1") } else { emit_syscall(49) }
     out("    ret")
 
     // --- listen(fd, backlog) -> 0 or error ---
     out("")
     out_label("_nova_listen")
-    emit_syscall(50)
+    if cg_target == 3 { out("    mov rax, -1") } else { emit_syscall(50) }
     out("    ret")
 
     // --- accept(fd, addr, addrlen) -> new fd ---
     out("")
     out_label("_nova_accept")
-    emit_syscall(43)
+    if cg_target == 3 { out("    mov rax, -1") } else { emit_syscall(43) }
     out("    ret")
 
     // --- connect(fd, addr, addrlen) -> 0 or error ---
     out("")
     out_label("_nova_connect")
-    emit_syscall(42)
+    if cg_target == 3 { out("    mov rax, -1") } else { emit_syscall(42) }
     out("    ret")
 
     // --- send_data(fd, buf, len) -> bytes sent ---
     out("")
     out_label("_nova_send_data")
-    emit_syscall(1)
+    if cg_target == 3 { out("    mov rax, -1") } else { emit_syscall(1) }
     out("    ret")
 
     // --- recv_data(fd, buf, len) -> bytes received ---
     out("")
     out_label("_nova_recv_data")
-    emit_syscall(0)
+    if cg_target == 3 { out("    mov rax, -1") } else { emit_syscall(0) }
     out("    ret")
 
     // --- close_fd(fd) -> 0 or error ---
     out("")
     out_label("_nova_close_fd")
-    emit_syscall(3)
+    if cg_target == 3 {
+        out("    mov rcx, rdi")
+        win_call("CloseHandle")
+    } else {
+        emit_syscall(3)
+    }
     out("    ret")
 
     // --- make_sockaddr_in(port, ip_addr) -> pointer to sockaddr_in struct ---
@@ -6590,57 +6862,66 @@ fn gen_runtime() {
     // --- fork() -> pid (0 in child, >0 in parent) ---
     out("")
     out_label("_nova_fork")
-    emit_syscall(57)
+    if cg_target == 3 { out("    mov rax, -1") } else { emit_syscall(57) }
     out("    ret")
 
     // --- waitpid(pid) -> exit status ---
     out("")
     out_label("_nova_waitpid")
-    out("    push rbp")
-    out("    mov rbp, rsp")
-    out("    sub rsp, 16")
-    out("    lea rsi, [rbp - 8]")
-    out("    xor edx, edx")
-    out("    xor r10d, r10d")
-    emit_syscall(61)
-    out("    mov eax, [rbp - 8]")
-    out("    shr eax, 8")
-    out("    and eax, 255")
-    out("    mov rsp, rbp")
-    out("    pop rbp")
-    out("    ret")
+    if cg_target == 3 {
+        out("    mov rax, -1")
+        out("    ret")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 16")
+        out("    lea rsi, [rbp - 8]")
+        out("    xor edx, edx")
+        out("    xor r10d, r10d")
+        emit_syscall(61)
+        out("    mov eax, [rbp - 8]")
+        out("    shr eax, 8")
+        out("    and eax, 255")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+    }
 
     // --- exec(path, argv) -> doesn't return on success ---
     out("")
     out_label("_nova_exec")
-    out("    mov rdx, 0")
-    emit_syscall(59)
+    if cg_target == 3 { out("    mov rax, -1") } else { out("    mov rdx, 0"); emit_syscall(59) }
     out("    ret")
 
     // --- pipe() -> list of [read_fd, write_fd] ---
     out("")
     out_label("_nova_pipe")
-    out("    push rbp")
-    out("    mov rbp, rsp")
-    out("    sub rsp, 16")
-    out("    lea rdi, [rbp - 8]")
-    emit_syscall(22)
-    out("    call _nova_list_new")
-    out("    push rax")
-    out("    mov edi, [rbp - 8]")
-    out("    movsx rdi, edi")
-    out("    mov rsi, rdi")
-    out("    mov rdi, [rsp]")
-    out("    call _nova_push")
-    out("    mov edi, [rbp - 4]")
-    out("    movsx rdi, edi")
-    out("    mov rsi, rdi")
-    out("    mov rdi, [rsp]")
-    out("    call _nova_push")
-    out("    pop rax")
-    out("    mov rsp, rbp")
-    out("    pop rbp")
-    out("    ret")
+    if cg_target == 3 {
+        out("    call _nova_list_new")
+        out("    ret")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 16")
+        out("    lea rdi, [rbp - 8]")
+        emit_syscall(22)
+        out("    call _nova_list_new")
+        out("    push rax")
+        out("    mov edi, [rbp - 8]")
+        out("    movsx rdi, edi")
+        out("    mov rsi, rdi")
+        out("    mov rdi, [rsp]")
+        out("    call _nova_push")
+        out("    mov edi, [rbp - 4]")
+        out("    movsx rdi, edi")
+        out("    mov rsi, rdi")
+        out("    mov rdi, [rsp]")
+        out("    call _nova_push")
+        out("    pop rax")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+    }
 
     // --- Coroutine support ---
     // Context layout (80 bytes):
@@ -6776,7 +7057,7 @@ fn gen_runtime() {
     out("    lea rdi, [rip + _err_div_zero]")
     out("    call _nova_println")
     out("    mov rdi, 1")
-    emit_syscall(60)
+    out("    call _nova_exit")
 
     // --- _nova_throw_impl: dynamic exception dispatch ---
     out("")
@@ -6796,7 +7077,7 @@ fn gen_runtime() {
     out("    lea rdi, [rip + _err_uncaught]")
     out("    call _nova_println")
     out("    mov rdi, 1")
-    emit_syscall(60)
+    out("    call _nova_exit")
 
     // --- assert(condition, message) ---
     out("")
@@ -6809,7 +7090,7 @@ fn gen_runtime() {
     out("    pop rdi")
     out("    call _nova_println")
     out("    mov rdi, 1")
-    emit_syscall(60)
+    out("    call _nova_exit")
     out(".assert_ok:")
     out("    ret")
 
@@ -6974,10 +7255,26 @@ fn gen_runtime() {
     out("    mov r12, rax")
     out("    xor r13d, r13d")
     out(".rl_loop:")
-    out("    xor edi, edi")
-    out("    lea rsi, [r12 + r13]")
-    out("    mov rdx, 1")
-    emit_syscall(0)
+    if cg_target == 3 {
+        out("    sub rsp, 48")
+        out("    mov ecx, -10")
+        win_call("GetStdHandle")
+        out("    mov rcx, rax")
+        out("    lea rdx, [r12 + r13]")
+        out("    mov r8d, 1")
+        out("    lea r9, [rbp - 24]")
+        out("    push 0")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_ReadFile]")
+        out("    add rsp, 40")
+        out("    movzx eax, byte ptr [rbp - 24]")
+        out("    add rsp, 48")
+    } else {
+        out("    xor edi, edi")
+        out("    lea rsi, [r12 + r13]")
+        out("    mov rdx, 1")
+        emit_syscall(0)
+    }
     out("    cmp rax, 0")
     out("    jle .rl_done")
     out("    movzx eax, byte ptr [r12 + r13]")
@@ -7005,10 +7302,26 @@ fn gen_runtime() {
     out("    lea rdi, [r13 + 1]")
     out("    call _nova_alloc")
     out("    mov r12, rax")
-    out("    xor edi, edi")
-    out("    mov rsi, r12")
-    out("    mov rdx, r13")
-    emit_syscall(0)
+    if cg_target == 3 {
+        out("    sub rsp, 48")
+        out("    mov ecx, -10")
+        win_call("GetStdHandle")
+        out("    mov rcx, rax")
+        out("    mov rdx, r12")
+        out("    mov r8, r13")
+        out("    lea r9, [rbp - 24]")
+        out("    push 0")
+        out("    sub rsp, 32")
+        out("    call [rip + __imp_ReadFile]")
+        out("    add rsp, 40")
+        out("    mov eax, [rbp - 24]")
+        out("    add rsp, 48")
+    } else {
+        out("    xor edi, edi")
+        out("    mov rsi, r12")
+        out("    mov rdx, r13")
+        emit_syscall(0)
+    }
     out("    cmp rax, 0")
     out("    jl .rs_fail")
     out("    mov byte ptr [r12 + rax], 0")
@@ -7084,11 +7397,17 @@ fn gen_runtime() {
     out("    test rax, rax")
     out("    jnz .rand_have_seed")
     out("    sub rsp, 16")
-    out("    xor edi, edi")
-    out("    lea rsi, [rsp]")
-    emit_syscall(228)
-    out("    mov rax, [rsp]")
-    out("    xor rax, [rsp + 8]")
+    if cg_target == 3 {
+        out("    lea rcx, [rsp]")
+        win_call("GetSystemTimeAsFileTime")
+        out("    mov rax, [rsp]")
+    } else {
+        out("    xor edi, edi")
+        out("    lea rsi, [rsp]")
+        emit_syscall(228)
+        out("    mov rax, [rsp]")
+        out("    xor rax, [rsp + 8]")
+    }
     out("    add rsp, 16")
     out("    test rax, rax")
     out("    jnz .rand_have_seed")

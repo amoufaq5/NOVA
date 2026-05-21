@@ -55,6 +55,7 @@ fn lx_store_to(vreg, src_reg) {
 
 fn lx_syscall_num(linux_num) {
     if lx_target == 0 { return linux_num }
+    if lx_target == 3 { return 0 }
     if linux_num == 0 { return 33554435 }
     if linux_num == 1 { return 33554436 }
     if linux_num == 2 { return 33554437 }
@@ -531,6 +532,13 @@ fn lx_lower_inst(inst) {
         let dest = inst[1]
         let num = inst[2]
         let args = inst[3]
+        if lx_target == 3 {
+            lx_out("    # syscall " + int_to_str(num) + " not available on Windows")
+            lx_out("    mov rax, -1")
+            if dest == "" {
+            } else { lx_store_to(dest, "rax") }
+            return 0
+        }
         let arg_regs_sc = list_new()
         push(arg_regs_sc, "rdi")
         push(arg_regs_sc, "rsi")

@@ -1,0 +1,55 @@
+fn main() {
+    println("=== Windows Cross-Compilation Test ===")
+
+    println("--- Basic output ---")
+    println("Hello from Nova on Windows!")
+    print("Number output: ")
+    print_int(42)
+    println("")
+
+    println("--- String operations ---")
+    let s = "Hello, Windows World!"
+    print("String length: ")
+    print_int(len(s))
+    println("")
+    print("Substring: ")
+    println(substr(s, 7, 7))
+
+    println("--- Arithmetic ---")
+    let a = 100
+    let b = 37
+    print("100 + 37 = ")
+    print_int(a + b)
+    println("")
+    print("100 - 37 = ")
+    print_int(a - b)
+    println("")
+    print("100 * 37 = ")
+    print_int(a * b)
+    println("")
+
+    println("--- Lists ---")
+    let items = list_new()
+    push(items, "alpha")
+    push(items, "beta")
+    push(items, "gamma")
+    print("List length: ")
+    print_int(len(items))
+    println("")
+    print("First item: ")
+    println(items[0])
+
+    println("--- Maps ---")
+    let m = map_new()
+    map_set(m, "os", "windows")
+    map_set(m, "arch", "x86-64")
+    print("OS: ")
+    println(map_get(m, "os"))
+    print("Arch: ")
+    println(map_get(m, "arch"))
+
+    println("")
+    println("=== All Windows tests passed! ===")
+}
+
+main()

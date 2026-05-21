@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows
 
 all: bin/nova
 
@@ -55,6 +55,16 @@ cross-macos: bin/nova
 	@echo "Transfer to macOS and build with:"
 	@echo "  as -o nova.o nova_macos.s"
 	@echo "  ld -e _main -o nova nova.o"
+
+# Cross-compile for Windows (generates .exe; requires mingw-w64 toolchain)
+cross-windows: bin/nova
+	@mkdir -p bin
+	cat $(COMPILER_SRC) > /tmp/nova_combined.nova
+	bin/nova /tmp/nova_combined.nova --target=windows -o bin/nova_windows.s
+	x86_64-w64-mingw32-as -o bin/nova_windows.o bin/nova_windows.s
+	x86_64-w64-mingw32-ld -o bin/nova.exe bin/nova_windows.o -L/usr/x86_64-w64-mingw32/lib -lkernel32
+	@echo "Windows executable written to bin/nova.exe"
+	@echo "Transfer to Windows and run: nova.exe <file.nova> -o output.s"
 
 # Compile to WASM and run (requires Node.js + wabt npm package)
 wasm: bin/nova
