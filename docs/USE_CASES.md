@@ -1,8 +1,9 @@
 # Nova Use Cases
 
 Nova is a self-hosting compiled language targeting x86-64 with no libc dependency,
-direct Linux syscalls, and built-in cognitive computing primitives. This document
-covers the major use cases with short, runnable code examples for each.
+direct Linux syscalls (and Windows via Win32 API), and built-in cognitive computing
+primitives. This document covers the major use cases with short, runnable code
+examples for each.
 
 ---
 
@@ -481,6 +482,69 @@ fn main() {
 main()
 ```
 
+### Soul-Driven Agent
+```nova
+import "src/core/soul.nova"
+import "src/core/node.nova"
+import "src/runtime/scheduler.nova"
+
+soul Aria {
+    identity {
+        purpose: "assist and learn"
+        nature: "curious and kind"
+    }
+    values {
+        truth: "verify before asserting"
+        growth: "embrace complexity"
+    }
+    drives {
+        curiosity: 85
+        empathy: 70
+    }
+    feelings {
+        warmth: 60
+        focus: 75
+    }
+}
+
+// The soul biases cognitive processing and
+// initiates signals when drives exceed thresholds
+```
+
+### Multi-Mind System
+```nova
+import "src/core/system.nova"
+
+mind Perception {
+    nodes { Eyes: perceiver, Ears: perceiver }
+    channels { }
+}
+
+mind Reasoning {
+    nodes { Think: reasoner, Store: rememberer }
+    channels { recall: Think ~> Store }
+}
+
+mind Emotion {
+    nodes { Heart: feeler }
+    channels { }
+}
+
+system Agent {
+    minds {
+        perception: Perception
+        reasoning: Reasoning
+        emotion: Emotion
+    }
+    bridges {
+        see: perception.Eyes ~> reasoning.Think
+        hear: perception.Ears ~> reasoning.Think
+        feel: emotion.Heart ~~> reasoning.Think
+    }
+    soul: Aria
+}
+```
+
 ---
 
 ## 5. Signal Processing
@@ -895,6 +959,20 @@ println("fib(10) = " + int_to_str(fibonacci(10)))
 println("fact(12) = " + int_to_str(factorial(12)))
 ```
 
+### Windows Cross-Compilation
+
+```bash
+# Cross-compile Nova to a Windows executable
+bin/nova my_app.nova --target=windows -o my_app.s
+x86_64-w64-mingw32-as -o my_app.o my_app.s
+x86_64-w64-mingw32-ld -o my_app.exe my_app.o -lkernel32
+
+# Or use the Makefile
+make cross-windows
+```
+
+Nova produces native PE32+ executables for Windows x86-64, using Win32 API calls (kernel32.dll) instead of Linux syscalls.
+
 ### Serverless Function Pattern
 
 ```nova
@@ -1037,6 +1115,105 @@ cognitive_cycle("the sky is blue")
 
 ---
 
+## 11. Knowledge & Persistence
+
+Nova includes built-in persistence, embeddings, and knowledge graphs for
+building agents that remember across sessions.
+
+### Key-Value Database
+
+```nova
+import "src/runtime/db.nova"
+
+let db = db_open("knowledge.novdb")
+db_put(db, "capital:France", "Paris")
+db_put(db, "capital:Japan", "Tokyo")
+db_put(db, "capital:Germany", "Berlin")
+
+let city = db_get(db, "capital:France")
+println("Capital of France: " + city)
+
+let all_capitals = db_prefix(db, "capital:")
+println("Known capitals: " + int_to_str(len(all_capitals)))
+db_close(db)
+```
+
+### Semantic Embeddings
+
+```nova
+import "src/runtime/embed.nova"
+
+let cat = embed_new(8)
+embed_set(cat, 0, 90)   // animal
+embed_set(cat, 1, 60)   // domestic
+embed_set(cat, 2, 30)   // size
+
+let dog = embed_new(8)
+embed_set(dog, 0, 90)   // animal
+embed_set(dog, 1, 80)   // domestic
+embed_set(dog, 2, 50)   // size
+
+let sim = embed_cosine(cat, dog)
+println("Cat-Dog similarity: " + int_to_str(sim))
+```
+
+### Knowledge Graph
+
+```nova
+import "src/core/knowledge.nova"
+
+let kg = kg_new()
+kg_add_entity(kg, "cat", cat)
+kg_add_entity(kg, "dog", dog)
+kg_add_relation(kg, "cat", "is_a", "animal", 95)
+kg_add_relation(kg, "dog", "is_a", "animal", 95)
+kg_add_relation(kg, "cat", "similar_to", "dog", 75)
+
+let near = kg_nearest(kg, cat, 3)
+println("Nearest to cat: " + int_to_str(len(near)) + " entities")
+```
+
+---
+
+## 12. Security
+
+Nova provides built-in security primitives for hashing, validation, and
+secure memory management.
+
+### SHA-256 Hashing
+
+```nova
+import "src/runtime/crypto.nova"
+
+let hash = sha256("password123")
+println("SHA-256: " + hash)
+
+let ok = sha256_verify("password123", hash)
+println("Verified: " + int_to_str(ok))
+```
+
+### Input Validation
+
+```nova
+import "src/runtime/validate.nova"
+
+let clean = sanitize(user_input)
+let valid_age = validate_range(age, 0, 150)
+let valid_name = validate_length(name, 1, 100)
+```
+
+### Secure Memory
+
+```nova
+import "src/runtime/secure_mem.nova"
+
+let secret = secure_alloc(256)
+// ... use secret ...
+secure_free(secret, 256)   // zeroes memory before freeing
+```
+
+---
+
 ## Summary
 
 | Use Case | Key Nova Features Used |
@@ -1051,3 +1228,7 @@ cognitive_cycle("the sky is blue")
 | Embedded / Bare-Metal | `asm{}`, `store64`/`load64`, `alloc`, direct syscalls |
 | Web / WebAssembly | `--target=wasm`, pure computation functions |
 | Educational | Self-hosting, visible pipeline, cognitive science mapping |
+| Knowledge & Persistence | `db_open`, `db_put`, `embed_new`, `embed_cosine`, `kg_new`, `kg_nearest` |
+| Security | `sha256`, `sanitize`, `validate_range`, `secure_alloc`, `secure_free` |
+| Multi-Mind Systems | `soul` declaration, `system` declaration, bridges, `system_resolve_node` |
+| Windows Deployment | `--target=windows`, `make cross-windows`, PE32+ executables |

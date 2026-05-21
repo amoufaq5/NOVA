@@ -2,7 +2,7 @@
 
 Nova is a self-hosting compiled programming language for building AGI through
 Moment-Signal Computing. Zero dependencies. No libc. Direct syscalls only.
-Compiles to native x86-64 machine code.
+Compiles to native x86-64 machine code on Linux and Windows.
 
 ## Types
 
@@ -371,6 +371,64 @@ mind Nova {
 | `feeler` | Emotion | Dimensional drift (valence, arousal, dominance) |
 | `actor` | Output/action | Competing activations |
 
+## Soul Declaration
+
+Soul declarations define the behavioral identity of a cognitive system, including
+its core purpose, ethical values, drives (persistent motivational intensities),
+and feelings (short-term emotional state). The soul integrates with the scheduler
+and biases actor node outputs. Access soul properties at runtime via soul functions.
+
+```nova
+soul Aurora {
+    identity {
+        purpose: "understand and assist"
+        nature: "curious, careful, honest"
+    }
+    values {
+        truth: "never fabricate"
+        kindness: "consider impact"
+    }
+    drives {
+        curiosity: 80
+        precision: 90
+    }
+    feelings {
+        warmth: 50
+        alertness: 60
+    }
+}
+```
+
+- **identity**: Key-value pairs describing the soul's purpose and character.
+- **values**: Ethical principles the soul upholds.
+- **drives**: Persistent motivational intensities, each an integer from 0 to 100.
+- **feelings**: Short-term emotional state, each an integer from 0 to 100.
+
+## System Declaration
+
+System declarations compose multiple minds into a unified cognitive architecture.
+Bridges wire nodes across mind boundaries using qualified names (`mind.Node`).
+An optional soul attaches behavioral identity to the system.
+
+```nova
+system CogAgent {
+    minds {
+        perception: Perception
+        cognition: Cognition
+        emotion: Emotion
+    }
+    bridges {
+        see_to_think: perception.Eyes ~> cognition.Think
+        feel_to_think: emotion.Heart ~~> cognition.Think
+    }
+    soul: Aurora
+}
+```
+
+- **minds**: Named references to previously declared mind blocks.
+- **bridges**: Cross-mind channels using flow operators with qualified node paths.
+- **soul**: Optional soul declaration to attach to the system.
+
 ## Inline Assembly
 
 ```nova
@@ -613,6 +671,85 @@ let m = {k: v * 2 for k, v in items}
 | `typename(val)` | Type as string |
 | `debug_print(label, val)` | Print label + value |
 
+### Soul
+| Function | Description |
+|----------|-------------|
+| `soul_new(name)` | Create a new soul |
+| `soul_set_identity(soul, key, val)` | Set identity property |
+| `soul_set_value(soul, key, val)` | Set a value/principle |
+| `soul_set_drive(soul, name, level)` | Set drive intensity (0-100) |
+| `soul_set_feeling(soul, name, level)` | Set feeling level (0-100) |
+| `soul_feel(soul, name)` | Get current feeling level |
+| `soul_drive_level(soul, name)` | Get drive intensity |
+| `soul_bias(soul)` | Get activation bias for actor nodes |
+| `soul_tick(soul, signal)` | Process one signal through the soul |
+| `soul_preprocess(soul, input)` | Classify raw input by keywords |
+
+### Database
+| Function | Description |
+|----------|-------------|
+| `db_open(path)` | Open/create a key-value store |
+| `db_put(db, key, value)` | Store a key-value pair |
+| `db_get(db, key)` | Retrieve value by key |
+| `db_has(db, key)` | Check if key exists |
+| `db_delete(db, key)` | Delete a key |
+| `db_prefix(db, prefix)` | Get all entries matching prefix |
+| `db_count(db)` | Number of entries |
+| `db_close(db)` | Close and flush to disk |
+
+### Embeddings
+| Function | Description |
+|----------|-------------|
+| `embed_new(dims)` | Create zero vector of given dimensions |
+| `embed_set(vec, idx, val)` | Set dimension value (0-100) |
+| `embed_get(vec, idx)` | Get dimension value |
+| `embed_dot(a, b)` | Dot product of two vectors |
+| `embed_cosine(a, b)` | Cosine similarity (0-100) |
+| `embed_distance(a, b)` | Euclidean distance |
+| `embed_magnitude(vec)` | Vector magnitude |
+| `embed_normalize(vec)` | Normalize to unit length |
+
+### Knowledge Graph
+| Function | Description |
+|----------|-------------|
+| `kg_new()` | Create knowledge graph |
+| `kg_add_entity(kg, name, embedding)` | Add entity with embedding |
+| `kg_add_relation(kg, from, rel, to, weight)` | Add weighted relation |
+| `kg_nearest(kg, embedding, k)` | Find k nearest entities |
+| `kg_get_relations(kg, entity)` | Get all relations for entity |
+
+### Security
+| Function | Description |
+|----------|-------------|
+| `sha256(data)` | SHA-256 hash (hex string) |
+| `sha256_verify(data, hash)` | Verify SHA-256 hash |
+| `sanitize(input)` | Strip control characters |
+| `validate_range(val, min, max)` | Bounds check |
+| `validate_length(str, min, max)` | String length validation |
+| `secure_alloc(size)` | Allocate zeroed memory |
+| `secure_free(ptr, size)` | Zero memory before freeing |
+
+### Streams
+| Function | Description |
+|----------|-------------|
+| `signal_stream_new(source_fn)` | Create lazy signal stream |
+| `signal_stream_next(stream)` | Get next signal |
+| `signal_stream_has_next(stream)` | Check if more signals available |
+| `signal_stream_close(stream)` | Close stream |
+| `stream_pipe(stream, mind)` | Pipe stream into a mind |
+
+### Systems
+| Function | Description |
+|----------|-------------|
+| `system_new(name)` | Create multi-mind system |
+| `system_add_mind(sys, name, mind)` | Add a mind to the system |
+| `system_add_bridge(sys, name, src, dst, type)` | Add cross-mind bridge |
+| `system_resolve_node(sys, path)` | Resolve "mind.Node" path |
+| `system_mind_count(sys)` | Number of minds |
+| `system_bridge_count(sys)` | Number of bridges |
+| `system_spawn_mind(sys, name, nodes, channels)` | Dynamically add mind |
+| `system_describe(sys)` | Print system description |
+
 ## Runtime Modules
 
 The runtime provides higher-level functionality built on the compiler built-ins.
@@ -723,7 +860,14 @@ bin/nova myprogram.nova -o out.s --stats
 
 # Cross-compilation
 bin/nova myprogram.nova -o out.s --target=macos
+bin/nova myprogram.nova -o out.s --target=windows
 bin/nova myprogram.nova -o out.s --target=wasm
+
+# Windows x86-64 (requires mingw-w64)
+bin/nova myprogram.nova -o out.s --target=windows
+# On Linux with mingw-w64 installed:
+x86_64-w64-mingw32-as -o out.o out.s
+x86_64-w64-mingw32-ld -o out.exe out.o -lkernel32
 
 # Package management
 bin/nova pkg init

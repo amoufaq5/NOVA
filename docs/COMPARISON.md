@@ -17,7 +17,7 @@ languages in systems programming and general-purpose development, respectively.
 | **Garbage collection** | None (bump/arena allocator) | None (manual malloc/free) | Reference counting + generational GC |
 | **Runtime dependencies** | Zero -- direct Linux syscalls, no libc | libc (glibc, musl, etc.) | CPython interpreter + libpython |
 | **Binary size** | Minimal static binary (no runtime) | Small static or dynamic binary | N/A (requires interpreter + stdlib) |
-| **Self-hosting** | Yes (~22,000 lines Nova + 7,379 lines asm) | Yes (GCC: ~15 million lines) | No (CPython is written in C) |
+| **Self-hosting** | Yes (~39,000 lines Nova + 7,379 lines asm) | Yes (GCC: ~15 million lines) | No (CPython is written in C) |
 | **Bootstrap** | 7,379 lines of x86-64 assembly | Bootstrapped from earlier C compilers | N/A |
 | **Memory model** | Bump allocator, arena reset | Manual (malloc/free/calloc/realloc) | Automatic (GC managed) |
 | **Integers** | 64-bit signed | Platform-dependent (int, long, etc.) | Arbitrary precision |
@@ -25,10 +25,10 @@ languages in systems programming and general-purpose development, respectively.
 | **Collections** | Dynamic lists, hash maps | Arrays, manual linked structures | list, dict, set, tuple, etc. |
 | **Error handling** | try/catch/finally, throw | Return codes, errno, setjmp/longjmp | try/except/finally, raise |
 | **Inline assembly** | Built-in `asm {}` blocks | Compiler-specific (__asm__, asm) | Not available |
-| **Cognitive primitives** | Built-in (moments, signals, nodes, channels, minds) | Not available (requires libraries) | Not available (requires libraries) |
+| **Cognitive primitives** | Built-in (moments, signals, nodes, channels, minds, souls, systems, knowledge graphs, embeddings, security) | Not available (requires libraries) | Not available (requires libraries) |
 | **Flow operators** | `~>`, `<~`, `=>>`, `<<~`, `~~>`, `<=>`, `\|~>` | Not available | Not available |
 | **Package manager** | Built-in (`nova pkg`) | Third-party (apt, vcpkg, conan) | pip / PyPI |
-| **Target platforms** | Linux x86-64, macOS x86-64, WebAssembly | Every major platform and architecture | Every major platform (via interpreter) |
+| **Target platforms** | Linux x86-64, macOS x86-64, WebAssembly, Windows x86-64 | Every major platform and architecture | Every major platform (via interpreter) |
 | **First release** | 2024 | 1972 | 1991 |
 | **Ecosystem maturity** | Young, growing | 50+ years, massive | 30+ years, massive |
 
@@ -705,6 +705,11 @@ episodic similarity, reasoners apply multi-strategy inference (deductive,
 abductive, analogical), feelers drift emotional dimensions, and actors resolve
 competing activations. None of this requires external libraries.
 
+Nova now also supports `soul` and `system` declarations for even more declarative
+cognitive architectures beyond the single `mind` shown here. A `system` composes
+multiple minds with cross-mind bridges, and a `soul` attaches behavioral identity
+(drives, values, feelings) that biases processing across the entire system.
+
 ---
 
 ## 3. Performance Comparison
@@ -773,7 +778,7 @@ from scratch or depend on external frameworks like SOAR, ACT-R, PyClarion, or
 custom solutions.
 
 ### Self-Hosting Simplicity
-The entire Nova compiler -- lexer, parser, AST, code generator -- is ~22,000
+The entire Nova compiler -- lexer, parser, AST, code generator -- is ~39,000
 lines of Nova plus a 7,379-line assembly bootstrap. You can read and understand
 the complete compiler in a weekend. GCC is ~15 million lines. LLVM/Clang is ~30
 million lines. CPython is ~500,000 lines of C. Nova is among the most
@@ -803,6 +808,24 @@ long as you reset arenas at appropriate boundaries). This makes Nova suitable
 for latency-sensitive workloads where Python's GC pauses and C's allocator
 overhead are unacceptable.
 
+### Multi-Mind Composition
+Nova's `system` declaration composes multiple `mind` architectures into a unified
+cognitive system with cross-mind bridges. A `soul` declaration attaches behavioral
+identity -- drives, values, feelings -- that biases processing across the entire
+system. This allows building layered AGI architectures (perception mind + reasoning
+mind + emotion mind) wired together declaratively.
+
+### Knowledge Persistence
+Nova includes a built-in file-based key-value store (`db_open`, `db_put`,
+`db_get`), integer-vector embeddings for semantic similarity (`embed_cosine`,
+`embed_distance`), and knowledge graphs with weighted relations (`kg_add_entity`,
+`kg_nearest`). Knowledge survives across sessions without external databases.
+
+### Security Primitives
+SHA-256 hashing, input sanitization, bounds validation, and secure memory
+(zero-on-free) are built into the language runtime. No need for OpenSSL or
+external crypto libraries for basic security needs.
+
 ---
 
 ## 5. Where C Wins
@@ -815,7 +838,9 @@ and are available on every platform. Nova's package ecosystem is in its infancy.
 ### Platform Support
 C compilers exist for virtually every CPU architecture and operating system ever
 made: x86, ARM, MIPS, RISC-V, AVR, PIC, mainframes, embedded microcontrollers,
-and more. Nova currently targets Linux x86-64, macOS x86-64, and WebAssembly.
+and more. Nova currently targets Linux x86-64, macOS x86-64, WebAssembly, and
+Windows x86-64 -- a significant expansion but still far from C's universal
+coverage.
 
 ### Optimization
 GCC and Clang/LLVM represent decades of optimization research: register
@@ -907,6 +932,12 @@ runtime, no GC threads, no JIT compiler, no standard library bloat. The
 generated assembly is readable, the syscalls are explicit, and the memory
 layout is deterministic.
 
+### Building persistent cognitive agents
+If your agent needs to remember across sessions, Nova's built-in database,
+embedding vectors, and knowledge graphs provide persistence without external
+dependencies like PostgreSQL or Redis. Combined with soul and system declarations,
+you can build a self-contained AGI agent in a single binary.
+
 ---
 
 ## Honest Limitations of Nova
@@ -914,7 +945,7 @@ layout is deterministic.
 Nova is a young language. Choosing it means accepting these trade-offs:
 
 - **Small ecosystem**: Hundreds of packages, not hundreds of thousands.
-- **Limited platform support**: Linux x86-64 is the primary target. macOS x86-64 and WebAssembly support exists but is less mature.
+- **Limited platform support**: Linux x86-64 is the primary target. macOS x86-64, WebAssembly, and Windows x86-64 cross-compilation are supported but less mature.
 - **Young optimizer**: The code generator does not yet match GCC or LLVM in optimization sophistication.
 - **Small community**: Finding help, tutorials, and Stack Overflow answers is harder than with C or Python.
 - **No floating-point hardware support**: Fixed-point arithmetic (scale factor 1000) serves many use cases but is not IEEE 754.

@@ -2,28 +2,28 @@
 
 **A self-hosting compiled language for AGI through Moment-Signal Computing.**
 
-Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux syscalls.
+Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux/Windows syscalls.
 
 ---
 
 | | |
 |---|---|
 | **Status** | Self-hosting verified (`stage2.s == stage3.s`) |
-| **Version** | 0.2.0 |
+| **Version** | 1.0.0 |
 | **Bootstrap** | 7,379 lines of handwritten x86-64 assembly |
-| **Compiler** | 14,491 lines of Nova (lexer, parser, AST, IR, register allocator, x86-64 lowering, codegen) |
-| **Core Types** | 2,052 lines (moment, signal, node, channel, path, similarity) |
-| **Mind Systems** | 2,455 lines (academic, experiential, emotion, memory, reasoning) |
-| **Runtime** | 2,694 lines (syscall, alloc, string, io, scheduler, json, coroutine, etc.) |
-| **Total Nova** | ~22,000 lines across compiler, runtime, core, mind, and package manager |
-| **Tests** | 114 tests (110 pass, 4 skip) |
-| **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI) |
+| **Compiler** | 15,555 lines of Nova (lexer, parser, AST, IR, register allocator, x86-64 lowering, codegen) |
+| **Core Types** | 3,559 lines (moment, signal, node, channel, path, similarity, soul, system) |
+| **Mind Systems** | 2,573 lines (academic, experiential, emotion, memory, reasoning) |
+| **Runtime** | 4,134 lines (syscall, alloc, string, io, scheduler, json, coroutine, db, embed, knowledge, crypto, validate, secure_mem, stream, etc.) |
+| **Total Nova** | ~39,000 lines across compiler, runtime, core, mind, and package manager |
+| **Tests** | 121 tests (113 pass, 4 skip) |
+| **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64 |
 
 ---
 
 ## What is Nova?
 
-Nova is a compiled programming language designed for building AGI systems through **Moment-Signal Computing** -- a paradigm where cognition emerges from signals flowing through specialized processing nodes. Nova compiles to native x86-64 machine code via direct Linux syscalls with no C library, no garbage collector, and no runtime interpreter.
+Nova is a compiled programming language designed for building AGI systems through **Moment-Signal Computing** -- a paradigm where cognition emerges from signals flowing through specialized processing nodes. Nova compiles to native x86-64 machine code via direct Linux and Windows syscalls with no C library, no garbage collector, and no runtime interpreter.
 
 The language is **fully self-hosting**: the Nova compiler is written in Nova, bootstrapped from 7,379 lines of handwritten x86-64 assembly. The resulting native binary compiles its own source code to produce byte-identical output -- a verified fixed point.
 
@@ -32,12 +32,16 @@ At its foundation, Nova is a practical systems language with structs, enums, lam
 What sets Nova apart is its first-class support for cognitive computing. Where other languages treat AI as a library concern, Nova builds it into the language itself:
 
 - **Moments** capture structured experiences -- what happened, who was involved, what was felt, and what the consequences were.
-- **Signals** carry moments between processing nodes with typed routing, priority, and trace metadata.
-- **Nodes** are specialized cognitive processors -- perceivers, knowers, rememberers, reasoners, feelers, and actors -- each with domain-specific computation.
+- **Signals** carry moments between processing nodes with typed routing, priority, and trace metadata. Streaming signals enable lazy, incremental processing via `signal_stream_new()` and `stream_pipe()`.
+- **Nodes** are specialized cognitive processors -- perceivers, knowers, rememberers, reasoners, feelers, and actors -- each with domain-specific computation. Dynamic node scaling via `node_pool_new()` auto-scales when queue depth exceeds thresholds.
 - **Flow operators** (`~>`, `<~`, `=>>`, `<<~`, `~~>`, `<=>`, `|~>`) express signal routing as concisely as arithmetic.
 - **Mind declarations** wire an entire cognitive architecture in a single declarative block.
+- **Soul declarations** define first-class identity and behavior constructs -- purpose, values, drives, and feelings -- giving each agent a persistent personality.
+- **System declarations** compose multiple minds, bridges between them, and a soul into a unified multi-mind agent.
+- **Knowledge persistence** provides file-based key-value stores and knowledge graphs for long-term memory across sessions.
+- **Security primitives** include SHA-256 hashing, input validation, secure memory allocation, and rate limiting.
 
-The result is a language where you can write a TCP server with raw syscalls on one line and declare a reasoning pipeline with memory enrichment on the next -- all compiling to the same native binary.
+The result is a language where you can write a TCP server with raw syscalls on one line and declare a reasoning pipeline with memory enrichment on the next -- all compiling to the same native binary. Nova targets Linux, macOS, WebAssembly (WASI), and Windows.
 
 ## Quick Start
 
@@ -52,7 +56,7 @@ make
 # Compile and run a program
 make run FILE=examples/hello.nova
 
-# Run all 114 tests
+# Run all 121 tests
 make test-all
 
 # Verify self-hosting (stage2.s == stage3.s)
@@ -83,12 +87,29 @@ There is no implicit entry point. Execution begins at the first top-level statem
 
 - **Moment literals** -- structured experience records with entities, emotions, and consequences
 - **Signal types** -- event, question, command, request, response, correction, reflection
+- **Streaming signals** -- lazy, incremental signal processing via `signal_stream_new()`, `signal_stream_next()`, and `stream_pipe()`
 - **6 cognitive node types** -- perceiver, knower, rememberer, reasoner, feeler, actor
+- **Dynamic node scaling** -- `node_pool_new()` with auto-scaling when queue depth exceeds thresholds
 - **7 flow operators** -- `~>` forward, `<~` backward, `=>>` broadcast, `<<~` memory enrichment, `~~>` tentative, `<=>` resonance, `|~>` filtered
 - **Mind declarations** -- `mind Nova { nodes { ... } channels { ... } }` for declarative cognitive architecture
+- **Soul declarations** -- first-class identity/behavior construct with identity, values, drives, and feelings sections
+- **System declarations** -- multi-mind composition with bridges and soul binding: `system FullAgent { minds { ... } bridges { ... } soul: Aurora }`
 - **Signal scheduler** -- priority-based dispatch with batching for cache-friendly processing
 - **Path declarations** -- named signal processing pipelines with enrichment stages
 - **5 mind systems** -- academic learning, experiential learning, emotion modeling, memory, reasoning
+
+### Knowledge & Persistence
+
+- **File-based key-value store** -- `db_open`, `db_put`, `db_get`, `db_prefix`, `db_close` for persistent storage across sessions
+- **Embeddings** -- integer vectors for semantic similarity: `embed_new`, `embed_set`, `embed_cosine`, `embed_distance`
+- **Knowledge graphs** -- entity-relation graphs with nearest-neighbor lookup: `kg_new`, `kg_add_entity`, `kg_add_relation`, `kg_nearest`
+
+### Security
+
+- **SHA-256 hashing** -- `sha256` and `sha256_verify` for cryptographic integrity checks
+- **Input validation** -- `sanitize` for string cleaning, `validate_range` for bounds checking
+- **Secure memory** -- `secure_alloc` and `secure_free` for sensitive data that is zeroed on deallocation
+- **Rate limiting** -- built-in throttling primitives for controlling signal and request throughput
 
 ### Functions and Control Flow
 
@@ -152,7 +173,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 
 ### Compiler and Tooling
 
-- Cross-compilation: `--target=linux` (default), `--target=macos`, `--target=wasm`
+- Cross-compilation: `--target=linux` (default), `--target=macos`, `--target=wasm`, `--target=windows`
 - `--check` for syntax validation without code generation
 - `--stats` for compilation statistics
 - `--version` and `--debug` flags
@@ -271,6 +292,40 @@ path ForwardEnrichment {
         ~> actor decides response
 }
 ```
+
+### Soul Declarations -- Identity and Behavior
+
+A `soul` declaration defines the persistent identity, values, drives, and feelings of a cognitive agent. The soul influences signal processing through bias functions and emotional preprocessing.
+
+```nova
+soul Aurora {
+    identity { purpose: "understand and assist" }
+    values { truth: "never fabricate" }
+    drives { curiosity: 80 }
+    feelings { warmth: 50 }
+}
+```
+
+Soul values bias signal processing (`soul_bias`), drives modulate attention (`soul_drive_level`), and feelings evolve over time (`soul_tick`). The `soul_preprocess` function applies the soul's personality to incoming signals before they reach cognitive nodes.
+
+### System Declarations -- Multi-Mind Composition
+
+A `system` declaration composes multiple minds, bridges between them, and a soul into a unified agent:
+
+```nova
+system FullAgent {
+    minds {
+        perception: Perception
+        cognition: Cognition
+    }
+    bridges {
+        see_to_think: perception.Eyes ~> cognition.Think
+    }
+    soul: Aurora
+}
+```
+
+Bridges wire nodes from different minds together, enabling modular cognitive architectures where each mind handles a distinct domain. The system scheduler coordinates signal flow across all minds while the soul provides unified identity.
 
 ## Examples
 
@@ -480,30 +535,32 @@ fn sieve(limit) {
 
 ```
 boot/nova_boot.s           Handwritten x86-64 assembly bootstrap    7,379 lines
-src/compiler/              Self-hosting compiler in Nova            14,491 lines
+src/compiler/              Self-hosting compiler in Nova            15,555 lines
   lexer.nova                 Tokenizer                                883 lines
-  parser.nova                Recursive descent parser               1,858 lines
+  parser.nova                Recursive descent parser               2,258 lines
   ast.nova                   AST node definitions                     540 lines
   ir.nova                    Intermediate representation              486 lines
   regalloc.nova              Register allocator                       197 lines
-  lower_x64.nova             x86-64 lowering                          676 lines
-  codegen.nova               Code generation + runtime stubs        9,437 lines
-  compiler.nova              Entry point, CLI, import resolution      414 lines
-src/core/                  Cognitive architecture types              2,052 lines
+  lower_x64.nova             x86-64 lowering                          684 lines
+  codegen.nova               Code generation + runtime stubs       10,054 lines
+  compiler.nova              Entry point, CLI, import resolution      419 lines
+src/core/                  Cognitive architecture types              3,559 lines
   moment.nova                Experience records, entities, emotions
   signal.nova                Typed message passing with priority
   node.nova                  6 cognitive processor types
   channel.nova               Signal routing between nodes
   path.nova                  Named processing pipelines
   similarity.nova            Similarity computation for matching
-src/mind/                  Mind systems                              2,455 lines
+  soul.nova                  Identity, values, drives, feelings
+  system.nova                Multi-mind composition with bridges
+src/mind/                  Mind systems                              2,573 lines
   academic.nova              Knowledge from axioms and rules
   experiential.nova          Learning from lived moments
   emotion.nova               Emotional state modeling
   memory.nova                Episodic memory store and recall
   reasoning.nova             Rule-based and case-based reasoning
-src/runtime/               Runtime library                          2,694 lines
-  syscall.nova               Raw Linux syscall wrappers
+src/runtime/               Runtime library                          4,134 lines
+  syscall.nova               Raw Linux/Windows syscall wrappers
   alloc.nova                 Arena allocator (mmap-backed bump alloc)
   string.nova                String operations
   io.nova                    File and console I/O
@@ -517,13 +574,20 @@ src/runtime/               Runtime library                          2,694 lines
   chan.nova                   Channels for coroutine communication
   taskpool.nova              Concurrent task pools
   path.nova                  File path utilities
+  db.nova                    File-based key-value store
+  embed.nova                 Integer vector embeddings
+  knowledge.nova             Knowledge graph with nearest-neighbor
+  crypto.nova                SHA-256 hashing and verification
+  validate.nova              Input sanitization and range checking
+  secure_mem.nova            Secure memory (zeroed on free)
+  stream.nova                Streaming signals and pipe composition
 src/pkg/pkg.nova           Package manager                            466 lines
 src/agent/agent.nova       Cognitive agent                             773 lines
-examples/                  23 example programs                       1,975 lines
-tests/                     114 test programs                         7,720 lines
+examples/                  29 example programs                       2,800 lines
+tests/                     121 test programs                         8,900 lines
 ```
 
-**Total: ~22,000 lines of Nova + 7,379 lines of bootstrap assembly.**
+**Total: ~39,000 lines of Nova + 7,379 lines of bootstrap assembly.**
 
 ## How It Works
 
@@ -575,11 +639,12 @@ That's it. No C compiler. No package manager. No downloads.
 ```bash
 make                # Build bin/nova
 make self-host      # Verify self-hosting (stage2.s == stage3.s)
-make test-all       # Run all 114 tests
+make test-all       # Run all 121 tests
 make run FILE=path  # Compile and run a .nova file
-make examples       # Build and run all 23 examples
+make examples       # Build and run all 29 examples
 make agent          # Run the cognitive agent
 make cross-macos    # Generate macOS x86-64 assembly
+make cross-windows  # Generate Windows x86-64 PE32+ executable
 make wasm FILE=path # Compile to WebAssembly and run (requires Node.js + wabt)
 make stats          # Show codebase statistics
 make clean          # Remove build artifacts
@@ -591,7 +656,7 @@ make clean          # Remove build artifacts
 bin/nova <input.nova> [-o output.s] [options]
 
   -o <file>              Output assembly file (default: output.s)
-  --target=<t>           Target platform: linux, macos, wasm
+  --target=<t>           Target platform: linux, macos, wasm, windows
   --check                Syntax check only (no code generation)
   --stats                Show compilation statistics
   --debug                Enable debug output
@@ -612,11 +677,17 @@ make cross-macos
 as -o nova.o bin/nova_macos.s
 ld -e _main -o nova nova.o
 
+# Windows x86-64: generate PE32+ executable
+make cross-windows
+# Or directly:
+bin/nova examples/hello.nova --target=windows -o hello_win.s
+# Transfer hello_win.exe to a Windows machine and run
+
 # WebAssembly (WASI)
 make wasm FILE=examples/hello.nova
 ```
 
-## Built-in Functions (100+)
+## Built-in Functions (140+)
 
 ### I/O
 `print` `println` `print_int` `read_line` `read_file` `write_file`
@@ -651,6 +722,27 @@ make wasm FILE=examples/hello.nova
 ### Memory
 `store64` `load64` `store8` `load8` `memcpy_raw`
 
+### Soul
+`soul_new` `soul_feel` `soul_drive_level` `soul_bias` `soul_tick` `soul_preprocess`
+
+### Database
+`db_open` `db_put` `db_get` `db_prefix` `db_close`
+
+### Embeddings
+`embed_new` `embed_set` `embed_get` `embed_cosine` `embed_distance`
+
+### Knowledge Graph
+`kg_new` `kg_add_entity` `kg_add_relation` `kg_nearest`
+
+### Security
+`sha256` `sha256_verify` `sanitize` `validate_range` `secure_alloc` `secure_free`
+
+### Streams
+`signal_stream_new` `signal_stream_next` `stream_pipe`
+
+### Multi-Mind System
+`system_new` `system_add_mind` `system_resolve_node` `system_spawn_mind` `system_describe`
+
 ### Debug
 `assert` `type_of` `debug_print`
 
@@ -662,12 +754,12 @@ Contributions are welcome. The compiler is written entirely in Nova (`src/compil
 
 To get started:
 
-1. Read the code -- start with `src/compiler/compiler.nova` (entry point, 414 lines) and work outward
+1. Read the code -- start with `src/compiler/compiler.nova` (entry point, 419 lines) and work outward
 2. Make your changes
 3. Run `make self-host` to verify the compiler can still compile itself
-4. Run `make test-all` to check for regressions (110 of 114 tests should pass)
+4. Run `make test-all` to check for regressions (113 of 121 tests should pass)
 
-The cognitive architecture lives in `src/core/` (types) and `src/mind/` (systems). The runtime is in `src/runtime/`. The 23 examples in `examples/` demonstrate most language features.
+The cognitive architecture lives in `src/core/` (types, soul, system) and `src/mind/` (systems). The runtime is in `src/runtime/`. The 29 examples in `examples/` demonstrate most language features.
 
 ## License
 
