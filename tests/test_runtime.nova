@@ -1,22 +1,256 @@
-fn main() {
-    let a = "Hello"
-    let b = " World"
-    let c = concat(a, b)
-    println(c)
+// Test: Runtime primitives (store64, load64, store8, load8, memcpy_raw, asm syscalls)
 
-    let n = 42
-    let s = int_to_str(n)
-    println(s)
+import "../src/runtime/syscall.nova"
+import "../src/runtime/alloc.nova"
+import "../src/runtime/string.nova"
+import "../src/runtime/io.nova"
 
-    let x = concat("Value: ", int_to_str(123))
-    println(x)
+fn test_memory_primitives() {
+    println("--- memory primitives ---")
+    let buf = alloc(64)
+    store64(buf, 42)
+    let v = load64(buf)
+    if v != 42 {
+        println("FAIL: store64/load64 basic")
+        exit(1)
+    }
+    store64(buf + 8, 9999)
+    if load64(buf + 8) != 9999 {
+        println("FAIL: store64/load64 offset")
+        exit(1)
+    }
 
-    let items = list_new()
-    push(items, 10)
-    push(items, 20)
-    push(items, 30)
-    print_int(len(items))
+    store8(buf, 65)
+    let b = load8(buf)
+    if b != 65 {
+        println("FAIL: store8/load8")
+        exit(1)
+    }
+    store8(buf + 1, 66)
+    store8(buf + 2, 67)
+    if load8(buf + 1) != 66 {
+        println("FAIL: store8/load8 offset")
+        exit(1)
+    }
+
+    let src = alloc(16)
+    let dst = alloc(16)
+    store64(src, 12345)
+    store64(src + 8, 67890)
+    memcpy_raw(dst, src, 16)
+    if load64(dst) != 12345 {
+        println("FAIL: memcpy_raw first qword")
+        exit(1)
+    }
+    if load64(dst + 8) != 67890 {
+        println("FAIL: memcpy_raw second qword")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_syscall_wrappers() {
+    println("--- syscall wrappers ---")
+    let result = sys_brk(0)
+    if result == 0 {
+        println("FAIL: sys_brk returned 0")
+        exit(1)
+    }
+    print("  brk: ")
+    print_int(result)
     println("")
+
+    let mapped = sys_mmap(0, 4096, 3, 34, -1, 0)
+    if mapped <= 0 {
+        println("FAIL: sys_mmap failed")
+        exit(1)
+    }
+    print("  mmap: ")
+    print_int(mapped)
+    println("")
+
+    store64(mapped, 777)
+    if load64(mapped) != 777 {
+        println("FAIL: write to mmap'd memory")
+        exit(1)
+    }
+
+    sys_munmap(mapped, 4096)
+    println("PASS")
+}
+
+fn test_arena() {
+    println("--- arena allocator ---")
+    arena_init()
+    let p1 = arena_alloc(64)
+    let p2 = arena_alloc(128)
+    if p1 == 0 {
+        println("FAIL: arena_alloc returned 0")
+        exit(1)
+    }
+    if p2 == 0 {
+        println("FAIL: arena_alloc second returned 0")
+        exit(1)
+    }
+    if p2 <= p1 {
+        println("FAIL: arena not bumping")
+        exit(1)
+    }
+    let used = arena_used()
+    print("  used: ")
+    print_int(used)
+    println("")
+    if used < 192 {
+        println("FAIL: arena_used too low")
+        exit(1)
+    }
+
+    store64(p1, 111)
+    store64(p2, 222)
+    if load64(p1) != 111 {
+        println("FAIL: arena memory write")
+        exit(1)
+    }
+
+    arena_reset()
+    if arena_used() != 0 {
+        println("FAIL: arena_reset did not zero used")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_rt_alloc() {
+    println("--- rt_alloc/rt_free ---")
+    heap_init()
+    let p = rt_alloc(256)
+    if p == 0 {
+        println("FAIL: rt_alloc returned 0")
+        exit(1)
+    }
+    store64(p, 12345)
+    if load64(p) != 12345 {
+        println("FAIL: rt_alloc memory write")
+        exit(1)
+    }
+    rt_free(p)
+
+    let p2 = rt_alloc(64)
+    if p2 == 0 {
+        println("FAIL: rt_alloc after free")
+        exit(1)
+    }
+
+    let p3 = rt_alloc(32)
+    store64(p3, 99)
+    let p4 = rt_realloc(p3, 128)
+    if p4 == 0 {
+        println("FAIL: rt_realloc returned 0")
+        exit(1)
+    }
+    if load64(p4) != 99 {
+        println("FAIL: rt_realloc preserved data")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_runtime_strings() {
+    println("--- runtime strings ---")
+    let s = str_new("hello", 5)
+    if str_len(s) != 5 {
+        println("FAIL: str_len")
+        exit(1)
+    }
+    if str_char_at(s, 0) != 104 {
+        println("FAIL: str_char_at(0)")
+        exit(1)
+    }
+    if str_char_at(s, 4) != 111 {
+        println("FAIL: str_char_at(4)")
+        exit(1)
+    }
+
+    let b = str_new("world", 5)
+    let c = str_concat(s, b)
+    if str_len(c) != 10 {
+        println("FAIL: str_concat len")
+        exit(1)
+    }
+
+    let sl = str_slice(s, 1, 4)
+    if str_len(sl) != 3 {
+        println("FAIL: str_slice len")
+        exit(1)
+    }
+
+    if rt_str_eq(s, s) != 1 {
+        println("FAIL: str_eq same")
+        exit(1)
+    }
+    if rt_str_eq(s, b) != 0 {
+        println("FAIL: str_eq different")
+        exit(1)
+    }
+
+    let n = rt_int_to_str(42)
+    if str_len(n) != 2 {
+        println("FAIL: int_to_str len")
+        exit(1)
+    }
+
+    let v = rt_str_to_int(n)
+    if v != 42 {
+        println("FAIL: str_to_int")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_file_io() {
+    println("--- file I/O ---")
+    let path = str_new("/tmp/nova_io_test.txt", 20)
+    let content = str_new("hello nova!", 11)
+    let ok = io_write_file(path, content)
+    if ok == 0 {
+        println("FAIL: io_write_file")
+        exit(1)
+    }
+
+    let read_back = io_read_file(path)
+    if read_back == 0 {
+        println("FAIL: io_read_file returned 0")
+        exit(1)
+    }
+    if str_len(read_back) != 11 {
+        println("FAIL: read_back length")
+        exit(1)
+    }
+    if rt_str_eq(content, read_back) != 1 {
+        println("FAIL: content mismatch")
+        exit(1)
+    }
+
+    sys_unlink(str_data(path))
+    println("PASS")
+}
+
+fn main() {
+    println("=== Runtime Tests ===")
+    println("")
+    test_memory_primitives()
+    println("")
+    test_syscall_wrappers()
+    println("")
+    test_arena()
+    println("")
+    test_rt_alloc()
+    println("")
+    test_runtime_strings()
+    println("")
+    test_file_io()
+    println("")
+    println("All runtime tests passed!")
 }
 
 main()

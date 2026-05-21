@@ -4,6 +4,7 @@
 // Integrates with node_receive/node_process/node_drain_outbox for dispatch.
 // Cycle detection: signals that have already visited their destination are dropped.
 // Channel routing: outputs can be routed via channel network to next-hop nodes.
+// Signal batching: groups signals by destination for cache-friendly dispatch.
 
 // Scheduler state (module-level globals)
 let sched_queue = 0
@@ -14,6 +15,7 @@ let sched_running = 0
 let sched_processed = 0
 let sched_dropped = 0
 let sched_max_per_cycle = 10000
+let sched_batched = 0
 
 // ================================================================
 // Initialization
@@ -27,6 +29,7 @@ fn scheduler_init() {
     sched_running = 0
     sched_processed = 0
     sched_dropped = 0
+    sched_batched = 0
 }
 
 fn scheduler_ensure_init() {
@@ -66,10 +69,6 @@ fn scheduler_add_channel(ch) {
     push(sched_channels, ch)
 }
 
-// Route a signal from source_name through configured channels.
-// Instead of delivering to node inboxes directly, creates redirected
-// signals aimed at channel destination nodes and queues them.
-// Returns the number of signals routed.
 fn scheduler_route_output(source_name, sig) {
     let routed = 0
     let i = 0
@@ -129,7 +128,6 @@ fn scheduler_dispatch_one() {
         return 1
     }
 
-    // Cycle detection: drop signals that already visited their destination
     if signal_has_visited(sig, dest_name) == 1 {
         sched_dropped = sched_dropped + 1
         sched_processed = sched_processed + 1
@@ -148,6 +146,92 @@ fn scheduler_dispatch_one() {
 
     sched_processed = sched_processed + 1
     return 1
+}
+
+// ================================================================
+// Signal batching
+// ================================================================
+
+fn scheduler_collect_batch(dest_name) {
+    let batch = list_new()
+    let remaining = list_new()
+    let qlen = len(sched_queue)
+    let i = 0
+    while i < qlen {
+        let sig = signal_queue_pop(sched_queue)
+        if sig == 0 {
+            i = qlen
+        } else {
+            if signal_dest(sig) == dest_name {
+                push(batch, sig)
+            } else {
+                push(remaining, sig)
+            }
+            i = i + 1
+        }
+    }
+    let ri = 0
+    while ri < len(remaining) {
+        signal_queue_push(sched_queue, remaining[ri])
+        ri = ri + 1
+    }
+    return batch
+}
+
+fn scheduler_dispatch_batch(dest_name) {
+    let dest_node = scheduler_find_node(dest_name)
+    if dest_node == 0 {
+        return 0
+    }
+
+    let batch = scheduler_collect_batch(dest_name)
+    let count = 0
+    let bi = 0
+    while bi < len(batch) {
+        let sig = batch[bi]
+
+        if signal_has_visited(sig, dest_name) == 1 {
+            sched_dropped = sched_dropped + 1
+            sched_processed = sched_processed + 1
+        } else {
+            node_receive(dest_node, sig)
+            count = count + 1
+        }
+        bi = bi + 1
+    }
+
+    if count > 0 {
+        node_process(dest_node)
+        let outputs = node_drain_outbox(dest_node)
+        let oi = 0
+        while oi < len(outputs) {
+            scheduler_route_output(node_name(dest_node), outputs[oi])
+            oi = oi + 1
+        }
+    }
+
+    sched_processed = sched_processed + count
+    sched_batched = sched_batched + count
+    return count
+}
+
+fn scheduler_run_batched_cycle() {
+    sched_cycle = sched_cycle + 1
+    let count = 0
+    while len(sched_queue) > 0 {
+        let sig = signal_queue_pop(sched_queue)
+        if sig == 0 { return count }
+
+        let dest_name = signal_dest(sig)
+        signal_queue_push(sched_queue, sig)
+        count = count + scheduler_dispatch_batch(dest_name)
+
+        if count >= sched_max_per_cycle {
+            println("WARNING: cycle signal limit reached")
+            return count
+        }
+    }
+    return count
 }
 
 // ================================================================
@@ -183,6 +267,17 @@ fn scheduler_run() {
     }
 }
 
+fn scheduler_run_batched() {
+    sched_running = 1
+    while sched_running == 1 {
+        if len(sched_queue) == 0 {
+            sched_running = 0
+        } else {
+            scheduler_run_batched_cycle()
+        }
+    }
+}
+
 fn scheduler_stop() {
     sched_running = 0
 }
@@ -207,6 +302,10 @@ fn scheduler_total_dropped() {
     return sched_dropped
 }
 
+fn scheduler_total_batched() {
+    return sched_batched
+}
+
 fn scheduler_status() {
     print("Cycle: ")
     print_int(sched_cycle)
@@ -222,5 +321,8 @@ fn scheduler_status() {
     println("")
     print("Total dropped: ")
     print_int(sched_dropped)
+    println("")
+    print("Total batched: ")
+    print_int(sched_batched)
     println("")
 }

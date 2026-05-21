@@ -896,6 +896,11 @@ fn is_builtin_fn(name) {
     if name == "coro_done" { return 1 }
     if name == "coro_result" { return 1 }
     if name == "coro_state" { return 1 }
+    if name == "store64" { return 1 }
+    if name == "load64" { return 1 }
+    if name == "store8" { return 1 }
+    if name == "load8" { return 1 }
+    if name == "memcpy_raw" { return 1 }
     return 0
 }
 
@@ -2814,6 +2819,7 @@ fn gen_function(nd) {
         let lt = ast_tag(last)
         if lt == AST_EXPR_STMT { has_implicit = 1 }
         if lt == AST_RETURN_STMT { has_implicit = 1 }
+        if lt == AST_ASM { has_implicit = 1 }
     }
     if has_implicit == 0 {
         out("    xor eax, eax")
@@ -9007,6 +9013,25 @@ fn gen_runtime() {
     out("    jmp _nova_coro_result")
     out_label("coro_state")
     out("    jmp _nova_coro_state")
+    out_label("store64")
+    out("    mov [rdi], rsi")
+    out("    ret")
+    out_label("load64")
+    out("    mov rax, [rdi]")
+    out("    ret")
+    out_label("store8")
+    out("    mov byte ptr [rdi], sil")
+    out("    ret")
+    out_label("load8")
+    out("    movzx eax, byte ptr [rdi]")
+    out("    ret")
+    out_label("memcpy_raw")
+    out("    push rdi")
+    out("    mov rcx, rdx")
+    out("    cld")
+    out("    rep movsb")
+    out("    pop rax")
+    out("    ret")
 
     // --- str_to_chars: convert string to list of char codes ---
     out_label("_nova_str_to_chars")

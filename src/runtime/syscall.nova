@@ -1,58 +1,126 @@
 // Nova Runtime: Linux x86-64 syscall wrappers
-// These are compiled by the Nova compiler into inline syscall instructions.
-// The __intrinsic("syscall", N) annotation tells codegen to emit the syscall
-// instruction with rax=N and args in rdi, rsi, rdx, r10, r8, r9.
+// Each function uses inline assembly to execute the syscall instruction.
+// Parameters are at [rbp-8], [rbp-16], [rbp-24], [rbp-32], [rbp-40], [rbp-48].
 
 fn sys_read(fd, buf, count) {
-    return __intrinsic("syscall", 0, fd, buf, count)
+    asm {
+        "mov rax, 0"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "syscall"
+    }
 }
 
 fn sys_write(fd, buf, count) {
-    return __intrinsic("syscall", 1, fd, buf, count)
+    asm {
+        "mov rax, 1"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "syscall"
+    }
 }
 
 fn sys_open(path, flags, mode) {
-    return __intrinsic("syscall", 2, path, flags, mode)
+    asm {
+        "mov rax, 2"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "syscall"
+    }
 }
 
 fn sys_close(fd) {
-    return __intrinsic("syscall", 3, fd)
+    asm {
+        "mov rax, 3"
+        "mov rdi, [rbp-8]"
+        "syscall"
+    }
 }
 
 fn sys_lseek(fd, offset, whence) {
-    return __intrinsic("syscall", 8, fd, offset, whence)
+    asm {
+        "mov rax, 8"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "syscall"
+    }
 }
 
 fn sys_mmap(addr, length, prot, flags, fd, offset) {
-    return __intrinsic("syscall", 9, addr, length, prot, flags, fd, offset)
+    asm {
+        "mov rax, 9"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "mov r10, [rbp-32]"
+        "mov r8, [rbp-40]"
+        "mov r9, [rbp-48]"
+        "syscall"
+    }
 }
 
 fn sys_munmap(addr, length) {
-    return __intrinsic("syscall", 11, addr, length)
+    asm {
+        "mov rax, 11"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "syscall"
+    }
 }
 
 fn sys_brk(addr) {
-    return __intrinsic("syscall", 12, addr)
+    asm {
+        "mov rax, 12"
+        "mov rdi, [rbp-8]"
+        "syscall"
+    }
 }
 
 fn sys_exit(code) {
-    __intrinsic("syscall", 60, code)
+    asm {
+        "mov rax, 60"
+        "mov rdi, [rbp-8]"
+        "syscall"
+    }
 }
 
 fn sys_getcwd(buf, size) {
-    return __intrinsic("syscall", 79, buf, size)
+    asm {
+        "mov rax, 79"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "syscall"
+    }
 }
 
 fn sys_mkdir(path, mode) {
-    return __intrinsic("syscall", 83, path, mode)
+    asm {
+        "mov rax, 83"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "syscall"
+    }
 }
 
 fn sys_unlink(path) {
-    return __intrinsic("syscall", 87, path)
+    asm {
+        "mov rax, 87"
+        "mov rdi, [rbp-8]"
+        "syscall"
+    }
 }
 
 fn sys_fstat(fd, statbuf) {
-    return __intrinsic("syscall", 5, fd, statbuf)
+    asm {
+        "mov rax, 5"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "syscall"
+    }
 }
 
 // Constants

@@ -1,20 +1,22 @@
 // Nova Runtime: String Operations
 // Strings are length-prefixed byte sequences: [len: 8 bytes][...chars...]
-// They are immutable once created. Operations return new strings.
+// Immutable once created. Operations return new strings.
 
 let STR_LEN_OFFSET = 0
 let STR_DATA_OFFSET = 8
 
 fn str_new(data_ptr, length) {
     let s = alloc(8 + length + 1)
-    __intrinsic("store64", s, length)
-    __intrinsic("memcpy", s + 8, data_ptr, length)
-    __intrinsic("store8", s + 8 + length, 0)  // null terminator for C compat
+    store64(s, length)
+    if data_ptr != 0 {
+        memcpy_raw(s + 8, data_ptr, length)
+    }
+    store8(s + 8 + length, 0)
     return s
 }
 
 fn str_len(s) {
-    return __intrinsic("load64", s)
+    return load64(s)
 }
 
 fn str_data(s) {
@@ -32,7 +34,7 @@ fn str_char_at(s, index) {
     if index >= length {
         return -1
     }
-    return __intrinsic("load8", s + 8 + index)
+    return load8(s + 8 + index)
 }
 
 fn str_concat(a, b) {
@@ -40,10 +42,10 @@ fn str_concat(a, b) {
     let len_b = str_len(b)
     let total = len_a + len_b
     let s = alloc(8 + total + 1)
-    __intrinsic("store64", s, total)
-    __intrinsic("memcpy", s + 8, str_data(a), len_a)
-    __intrinsic("memcpy", s + 8 + len_a, str_data(b), len_b)
-    __intrinsic("store8", s + 8 + total, 0)
+    store64(s, total)
+    memcpy_raw(s + 8, str_data(a), len_a)
+    memcpy_raw(s + 8 + len_a, str_data(b), len_b)
+    store8(s + 8 + total, 0)
     return s
 }
 
@@ -64,20 +66,20 @@ fn str_slice(s, start, end) {
     return str_new(str_data(s) + start, slice_len)
 }
 
-fn str_eq(a, b) {
+fn rt_str_eq(a, b) {
     let len_a = str_len(a)
     let len_b = str_len(b)
     if len_a != len_b {
-        return false
+        return 0
     }
     let i = 0
     while i < len_a {
-        if __intrinsic("load8", str_data(a) + i) != __intrinsic("load8", str_data(b) + i) {
-            return false
+        if load8(str_data(a) + i) != load8(str_data(b) + i) {
+            return 0
         }
         i = i + 1
     }
-    return true
+    return 1
 }
 
 fn str_cmp(a, b) {
@@ -87,8 +89,8 @@ fn str_cmp(a, b) {
     if len_b < min_len { min_len = len_b }
     let i = 0
     while i < min_len {
-        let ca = __intrinsic("load8", str_data(a) + i)
-        let cb = __intrinsic("load8", str_data(b) + i)
+        let ca = load8(str_data(a) + i)
+        let cb = load8(str_data(b) + i)
         if ca < cb { return -1 }
         if ca > cb { return 1 }
         i = i + 1
@@ -98,7 +100,7 @@ fn str_cmp(a, b) {
     return 0
 }
 
-fn str_find(haystack, needle) {
+fn rt_str_find(haystack, needle) {
     let h_len = str_len(haystack)
     let n_len = str_len(needle)
     if n_len == 0 { return 0 }
@@ -106,17 +108,17 @@ fn str_find(haystack, needle) {
     let limit = h_len - n_len
     let i = 0
     while i <= limit {
-        let match = true
+        let matched = 1
         let j = 0
         while j < n_len {
-            if __intrinsic("load8", str_data(haystack) + i + j) != __intrinsic("load8", str_data(needle) + j) {
-                match = false
-                j = n_len  // break
+            if load8(str_data(haystack) + i + j) != load8(str_data(needle) + j) {
+                matched = 0
+                j = n_len
             } else {
                 j = j + 1
             }
         }
-        if match {
+        if matched == 1 {
             return i
         }
         i = i + 1
@@ -125,36 +127,36 @@ fn str_find(haystack, needle) {
 }
 
 fn str_contains(haystack, needle) {
-    return str_find(haystack, needle) >= 0
+    return rt_str_find(haystack, needle) >= 0
 }
 
 fn str_starts_with(s, prefix) {
     let s_len = str_len(s)
     let p_len = str_len(prefix)
-    if p_len > s_len { return false }
+    if p_len > s_len { return 0 }
     let i = 0
     while i < p_len {
-        if __intrinsic("load8", str_data(s) + i) != __intrinsic("load8", str_data(prefix) + i) {
-            return false
+        if load8(str_data(s) + i) != load8(str_data(prefix) + i) {
+            return 0
         }
         i = i + 1
     }
-    return true
+    return 1
 }
 
 fn str_ends_with(s, suffix) {
     let s_len = str_len(s)
     let sf_len = str_len(suffix)
-    if sf_len > s_len { return false }
+    if sf_len > s_len { return 0 }
     let offset = s_len - sf_len
     let i = 0
     while i < sf_len {
-        if __intrinsic("load8", str_data(s) + offset + i) != __intrinsic("load8", str_data(suffix) + i) {
-            return false
+        if load8(str_data(s) + offset + i) != load8(str_data(suffix) + i) {
+            return 0
         }
         i = i + 1
     }
-    return true
+    return 1
 }
 
 fn str_split(s, delim) {
@@ -164,60 +166,39 @@ fn str_split(s, delim) {
     let start = 0
     let i = 0
     while i <= s_len - d_len {
-        let match = true
+        let matched = 1
         let j = 0
         while j < d_len {
-            if __intrinsic("load8", str_data(s) + i + j) != __intrinsic("load8", str_data(delim) + j) {
-                match = false
+            if load8(str_data(s) + i + j) != load8(str_data(delim) + j) {
+                matched = 0
                 j = d_len
             } else {
                 j = j + 1
             }
         }
-        if match {
-            list_push(parts, str_slice(s, start, i))
+        if matched == 1 {
+            push(parts, str_slice(s, start, i))
             start = i + d_len
             i = start
         } else {
             i = i + 1
         }
     }
-    list_push(parts, str_slice(s, start, s_len))
+    push(parts, str_slice(s, start, s_len))
     return parts
 }
 
-fn str_trim(s) {
+fn rt_str_trim(s) {
     let length = str_len(s)
     let start = 0
     while start < length {
-        let c = __intrinsic("load8", str_data(s) + start)
-        if c != 32 & c != 9 & c != 10 & c != 13 {
-            start = length  // break
-        } else {
-            start = start + 1
-        }
-    }
-    // Re-check start after loop
-    start = 0
-    while start < length {
-        let c = __intrinsic("load8", str_data(s) + start)
-        if c == 32 { start = start + 1 }
-        else { if c == 9 { start = start + 1 }
-        else { if c == 10 { start = start + 1 }
-        else { if c == 13 { start = start + 1 }
-        else { length = -1 } } } }  // break hack
-    }
-    // Find actual start
-    start = 0
-    while start < str_len(s) {
-        let c = __intrinsic("load8", str_data(s) + start)
+        let c = load8(str_data(s) + start)
         if c == 32 | c == 9 | c == 10 | c == 13 {
             start = start + 1
         } else {
-            // done
-            let end = str_len(s)
+            let end = length
             while end > start {
-                let c2 = __intrinsic("load8", str_data(s) + end - 1)
+                let c2 = load8(str_data(s) + end - 1)
                 if c2 == 32 | c2 == 9 | c2 == 10 | c2 == 13 {
                     end = end - 1
                 } else {
@@ -230,54 +211,56 @@ fn str_trim(s) {
     return str_new(0, 0)
 }
 
-fn str_to_int(s) {
+fn rt_str_to_int(s) {
     let length = str_len(s)
     let result = 0
-    let negative = false
+    let negative = 0
     let i = 0
     if length > 0 {
-        let first = __intrinsic("load8", str_data(s))
-        if first == 45 {  // '-'
-            negative = true
+        let first = load8(str_data(s))
+        if first == 45 {
+            negative = 1
             i = 1
         }
     }
     while i < length {
-        let c = __intrinsic("load8", str_data(s) + i)
-        if c >= 48 & c <= 57 {
-            result = result * 10 + (c - 48)
+        let c = load8(str_data(s) + i)
+        if c >= 48 {
+            if c <= 57 {
+                result = result * 10 + (c - 48)
+            } else {
+                i = length
+            }
         } else {
-            i = length  // break
+            i = length
         }
         i = i + 1
     }
-    if negative {
+    if negative == 1 {
         return 0 - result
     }
     return result
 }
 
-fn int_to_str(n) {
+fn rt_int_to_str(n) {
     if n == 0 {
         return str_new("0", 1)
     }
-    let buf = alloc(21)  // max 20 digits + sign
+    let buf = alloc(21)
     let pos = 20
-    let negative = false
+    let negative = 0
     if n < 0 {
-        negative = true
+        negative = 1
         n = 0 - n
     }
     while n > 0 {
         pos = pos - 1
-        __intrinsic("store8", buf + pos, 48 + (n % 10))
+        store8(buf + pos, 48 + (n % 10))
         n = n / 10
     }
-    if negative {
+    if negative == 1 {
         pos = pos - 1
-        __intrinsic("store8", buf + pos, 45)  // '-'
+        store8(buf + pos, 45)
     }
-    let result = str_new(buf + pos, 20 - pos)
-    free(buf)
-    return result
+    return str_new(buf + pos, 20 - pos)
 }

@@ -3,7 +3,7 @@
 
 let IO_BUF_SIZE = 4096
 
-// File handle structure:
+// File handle layout:
 // [fd: 8][read_buf: ptr][read_pos: 8][read_len: 8]
 // [write_buf: ptr][write_pos: 8][mode: 8]
 let FILE_FD = 0
@@ -31,26 +31,26 @@ fn file_open(path, mode) {
         flags = O_WRONLY + O_CREAT + O_APPEND
     }
 
-    let fd = sys_open(str_data(path), flags, 438)  // 0o666
+    let fd = sys_open(str_data(path), flags, 438)
     if fd < 0 {
         return 0
     }
 
     let f = alloc(FILE_SIZE)
-    __intrinsic("store64", f + FILE_FD, fd)
-    __intrinsic("store64", f + FILE_MODE, mode)
-    __intrinsic("store64", f + FILE_RPOS, 0)
-    __intrinsic("store64", f + FILE_RLEN, 0)
-    __intrinsic("store64", f + FILE_WPOS, 0)
+    store64(f + FILE_FD, fd)
+    store64(f + FILE_MODE, mode)
+    store64(f + FILE_RPOS, 0)
+    store64(f + FILE_RLEN, 0)
+    store64(f + FILE_WPOS, 0)
 
     if mode == MODE_READ {
         let rbuf = alloc(IO_BUF_SIZE)
-        __intrinsic("store64", f + FILE_RBUF, rbuf)
-        __intrinsic("store64", f + FILE_WBUF, 0)
+        store64(f + FILE_RBUF, rbuf)
+        store64(f + FILE_WBUF, 0)
     } else {
         let wbuf = alloc(IO_BUF_SIZE)
-        __intrinsic("store64", f + FILE_WBUF, wbuf)
-        __intrinsic("store64", f + FILE_RBUF, 0)
+        store64(f + FILE_WBUF, wbuf)
+        store64(f + FILE_RBUF, 0)
     }
 
     return f
@@ -58,37 +58,31 @@ fn file_open(path, mode) {
 
 fn file_close(f) {
     if f == 0 { return }
-    let mode = __intrinsic("load64", f + FILE_MODE)
+    let mode = load64(f + FILE_MODE)
     if mode != MODE_READ {
         file_flush(f)
     }
-    let fd = __intrinsic("load64", f + FILE_FD)
+    let fd = load64(f + FILE_FD)
     sys_close(fd)
-    let rbuf = __intrinsic("load64", f + FILE_RBUF)
-    if rbuf != 0 { free(rbuf) }
-    let wbuf = __intrinsic("load64", f + FILE_WBUF)
-    if wbuf != 0 { free(wbuf) }
-    free(f)
 }
 
 fn file_read_byte(f) {
-    let pos = __intrinsic("load64", f + FILE_RPOS)
-    let len = __intrinsic("load64", f + FILE_RLEN)
-    if pos >= len {
-        // Refill buffer
-        let fd = __intrinsic("load64", f + FILE_FD)
-        let rbuf = __intrinsic("load64", f + FILE_RBUF)
+    let pos = load64(f + FILE_RPOS)
+    let rlen = load64(f + FILE_RLEN)
+    if pos >= rlen {
+        let fd = load64(f + FILE_FD)
+        let rbuf = load64(f + FILE_RBUF)
         let n = sys_read(fd, rbuf, IO_BUF_SIZE)
         if n <= 0 {
-            return -1  // EOF or error
+            return -1
         }
-        __intrinsic("store64", f + FILE_RLEN, n)
-        __intrinsic("store64", f + FILE_RPOS, 0)
+        store64(f + FILE_RLEN, n)
+        store64(f + FILE_RPOS, 0)
         pos = 0
     }
-    let rbuf = __intrinsic("load64", f + FILE_RBUF)
-    let byte = __intrinsic("load8", rbuf + pos)
-    __intrinsic("store64", f + FILE_RPOS, pos + 1)
+    let rbuf = load64(f + FILE_RBUF)
+    let byte = load8(rbuf + pos)
+    store64(f + FILE_RPOS, pos + 1)
     return byte
 }
 
@@ -98,39 +92,34 @@ fn file_read(f, count) {
     while i < count {
         let b = file_read_byte(f)
         if b < 0 {
-            // Return what we have so far
             return str_new(buf, i)
         }
-        __intrinsic("store8", buf + i, b)
+        store8(buf + i, b)
         i = i + 1
     }
-    let result = str_new(buf, count)
-    free(buf)
-    return result
+    return str_new(buf, count)
 }
 
 fn file_read_line(f) {
     let buf = alloc(1024)
     let cap = 1024
     let i = 0
-    while true {
+    while 1 {
         let b = file_read_byte(f)
         if b < 0 {
-            if i == 0 { free(buf); return none }
-            let result = str_new(buf, i)
-            free(buf)
-            return result
+            if i == 0 { return 0 }
+            return str_new(buf, i)
         }
-        if b == 10 {  // newline
-            let result = str_new(buf, i)
-            free(buf)
-            return result
+        if b == 10 {
+            return str_new(buf, i)
         }
         if i >= cap {
             cap = cap * 2
-            buf = realloc(buf, cap)
+            let new_buf = alloc(cap)
+            memcpy_raw(new_buf, buf, i)
+            buf = new_buf
         }
-        __intrinsic("store8", buf + i, b)
+        store8(buf + i, b)
         i = i + 1
     }
 }
@@ -139,28 +128,28 @@ fn file_read_all(f) {
     let buf = alloc(4096)
     let cap = 4096
     let total = 0
-    while true {
+    while 1 {
         let b = file_read_byte(f)
         if b < 0 {
-            let result = str_new(buf, total)
-            free(buf)
-            return result
+            return str_new(buf, total)
         }
         if total >= cap {
             cap = cap * 2
-            buf = realloc(buf, cap)
+            let new_buf = alloc(cap)
+            memcpy_raw(new_buf, buf, total)
+            buf = new_buf
         }
-        __intrinsic("store8", buf + total, b)
+        store8(buf + total, b)
         total = total + 1
     }
 }
 
 fn file_write_byte(f, byte) {
-    let pos = __intrinsic("load64", f + FILE_WPOS)
-    let wbuf = __intrinsic("load64", f + FILE_WBUF)
-    __intrinsic("store8", wbuf + pos, byte)
+    let pos = load64(f + FILE_WPOS)
+    let wbuf = load64(f + FILE_WBUF)
+    store8(wbuf + pos, byte)
     pos = pos + 1
-    __intrinsic("store64", f + FILE_WPOS, pos)
+    store64(f + FILE_WPOS, pos)
     if pos >= IO_BUF_SIZE {
         file_flush(f)
     }
@@ -170,7 +159,7 @@ fn file_write(f, s) {
     let length = str_len(s)
     let i = 0
     while i < length {
-        file_write_byte(f, __intrinsic("load8", str_data(s) + i))
+        file_write_byte(f, load8(str_data(s) + i))
         i = i + 1
     }
 }
@@ -181,66 +170,59 @@ fn file_write_line(f, s) {
 }
 
 fn file_flush(f) {
-    let pos = __intrinsic("load64", f + FILE_WPOS)
+    let pos = load64(f + FILE_WPOS)
     if pos > 0 {
-        let fd = __intrinsic("load64", f + FILE_FD)
-        let wbuf = __intrinsic("load64", f + FILE_WBUF)
+        let fd = load64(f + FILE_FD)
+        let wbuf = load64(f + FILE_WBUF)
         sys_write(fd, wbuf, pos)
-        __intrinsic("store64", f + FILE_WPOS, 0)
+        store64(f + FILE_WPOS, 0)
     }
 }
 
-// Convenience: read entire file by path
-fn read_file(path) {
+fn io_read_file(path) {
     let f = file_open(path, MODE_READ)
-    if f == 0 { return none }
+    if f == 0 { return 0 }
     let content = file_read_all(f)
     file_close(f)
     return content
 }
 
-// Convenience: write string to file by path
-fn write_file(path, content) {
+fn io_write_file(path, content) {
     let f = file_open(path, MODE_WRITE)
-    if f == 0 { return false }
+    if f == 0 { return 0 }
     file_write(f, content)
     file_close(f)
-    return true
+    return 1
 }
 
-// Standard I/O wrappers
-fn print(s) {
+fn io_print(s) {
     sys_write(STDOUT, str_data(s), str_len(s))
 }
 
-fn println(s) {
-    print(s)
+fn io_println(s) {
+    io_print(s)
     sys_write(STDOUT, "\n", 1)
 }
 
-fn eprint(s) {
+fn io_eprint(s) {
     sys_write(STDERR, str_data(s), str_len(s))
 }
 
-fn eprintln(s) {
-    eprint(s)
+fn io_eprintln(s) {
+    io_eprint(s)
     sys_write(STDERR, "\n", 1)
 }
 
-fn input() {
+fn io_input() {
     let buf = alloc(1024)
     let n = sys_read(STDIN, buf, 1024)
     if n <= 0 {
-        free(buf)
         return str_new(0, 0)
     }
-    // Strip trailing newline
     if n > 0 {
-        if __intrinsic("load8", buf + n - 1) == 10 {
+        if load8(buf + n - 1) == 10 {
             n = n - 1
         }
     }
-    let result = str_new(buf, n)
-    free(buf)
-    return result
+    return str_new(buf, n)
 }
