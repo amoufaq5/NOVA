@@ -46,6 +46,13 @@ for test_file in tests/test_*.nova; do
             grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"
             ;;
+        test_flow_ops)
+            cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
+                src/core/node.nova src/core/channel.nova src/core/path.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
         test_m9_fullsystem)
             cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
                 src/core/node.nova src/core/channel.nova src/core/path.nova \

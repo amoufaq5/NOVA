@@ -6,6 +6,7 @@
 let NL = chr(10)
 let DQ = chr(34)
 let PTR_THRESHOLD = "100000"
+let cg_has_flow = 0
 let cg_target = 0
 let cg_output = ""
 let cg_label_count = 0
@@ -70,6 +71,7 @@ fn cg_init() {
     cg_externs = list_new()
     cg_extern_count = 0
     cg_last_debug_line = 0
+    cg_has_flow = 0
 }
 
 fn out(s) {
@@ -540,6 +542,11 @@ fn collect_idents_in(nd, names) {
     if tag == AST_NULLISH {
         collect_idents_in(nd[1], names)
         collect_idents_in(nd[2], names)
+        return 0
+    }
+    if tag == AST_FLOW {
+        collect_idents_in(nd[2], names)
+        collect_idents_in(nd[3], names)
         return 0
     }
     if tag == AST_LET_STMT {
@@ -1559,6 +1566,24 @@ fn gen_expr(nd) {
         out("    jnz " + end_lbl)
         gen_expr(nd[2])
         out_label(end_lbl)
+        return 0
+    }
+
+    if tag == AST_FLOW {
+        cg_has_flow = 1
+        let ft = nd[1]
+        gen_expr(nd[3])
+        out("    push rax")
+        gen_expr(nd[2])
+        out("    pop rsi")
+        out("    mov rdi, rax")
+        if ft == FLOW_FWD { out("    call _nova_flow_fwd") }
+        if ft == FLOW_BWD { out("    call _nova_flow_bwd") }
+        if ft == FLOW_BROADCAST { out("    call _nova_flow_broadcast") }
+        if ft == FLOW_ENRICH { out("    call _nova_flow_enrich") }
+        if ft == FLOW_TENTATIVE { out("    call _nova_flow_tentative") }
+        if ft == FLOW_RESONATE { out("    call _nova_flow_resonate") }
+        if ft == FLOW_FILTER { out("    call _nova_flow_filter") }
         return 0
     }
 
@@ -3541,6 +3566,20 @@ fn wasm_gen_expr(nd) {
         wasm_gen_expr(nd[2])
         wasm_indent = wasm_indent - 1
         wi("end")
+        return 0
+    }
+
+    if tag == AST_FLOW {
+        wasm_gen_expr(nd[2])
+        wasm_gen_expr(nd[3])
+        let ft = nd[1]
+        if ft == FLOW_FWD { wi("call $_nova_flow_fwd") }
+        if ft == FLOW_BWD { wi("call $_nova_flow_bwd") }
+        if ft == FLOW_BROADCAST { wi("call $_nova_flow_broadcast") }
+        if ft == FLOW_ENRICH { wi("call $_nova_flow_enrich") }
+        if ft == FLOW_TENTATIVE { wi("call $_nova_flow_tentative") }
+        if ft == FLOW_RESONATE { wi("call $_nova_flow_resonate") }
+        if ft == FLOW_FILTER { wi("call $_nova_flow_filter") }
         return 0
     }
 
@@ -8892,6 +8931,297 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
+    // --- Flow operators runtime (only emitted when flow ops are used) ---
+    if cg_has_flow == 1 {
+
+    // ~> forward flow: rdi=signal, rsi=node -> signal or 0
+    out("")
+    out_label("_nova_flow_fwd")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push rbx")
+    out("    push r12")
+    out("    push r13")
+    out("    sub rsp, 8")
+    out("    mov rbx, rdi")
+    out("    mov r12, rsi")
+    out("    mov rdi, r12")
+    out("    mov rsi, rbx")
+    out("    call node_receive")
+    out("    mov rdi, r12")
+    out("    call node_process")
+    out("    mov rdi, r12")
+    out("    call node_drain_outbox")
+    out("    mov r13, rax")
+    out("    mov rdi, r13")
+    out("    call _nova_len")
+    out("    cmp rax, 0")
+    out("    je .flow_fwd_empty")
+    out("    mov rdi, r13")
+    out("    mov rsi, 0")
+    out("    call _nova_index")
+    out("    jmp .flow_fwd_done")
+    out(".flow_fwd_empty:")
+    out("    xor eax, eax")
+    out(".flow_fwd_done:")
+    out("    add rsp, 8")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbx")
+    out("    pop rbp")
+    out("    ret")
+
+    // <~ backward flow: rdi=signal, rsi=node -> reflected signal or 0
+    out("")
+    out_label("_nova_flow_bwd")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push rbx")
+    out("    push r12")
+    out("    push r13")
+    out("    sub rsp, 8")
+    out("    mov rbx, rdi")
+    out("    mov r12, rsi")
+    out("    mov rdi, rbx")
+    out("    call signal_moment")
+    out("    mov r13, rax")
+    out("    mov rdi, rbx")
+    out("    call signal_dest")
+    out("    push rax")
+    out("    mov rdi, rbx")
+    out("    call signal_origin")
+    out("    pop rsi")
+    out("    mov rdx, rax")
+    out("    mov rdi, r13")
+    out("    call signal_reflection")
+    out("    mov rbx, rax")
+    out("    mov rdi, r12")
+    out("    mov rsi, rbx")
+    out("    call node_receive")
+    out("    mov rdi, r12")
+    out("    call node_process")
+    out("    mov rdi, r12")
+    out("    call node_drain_outbox")
+    out("    mov r13, rax")
+    out("    mov rdi, r13")
+    out("    call _nova_len")
+    out("    cmp rax, 0")
+    out("    je .flow_bwd_empty")
+    out("    mov rdi, r13")
+    out("    mov rsi, 0")
+    out("    call _nova_index")
+    out("    jmp .flow_bwd_done")
+    out(".flow_bwd_empty:")
+    out("    xor eax, eax")
+    out(".flow_bwd_done:")
+    out("    add rsp, 8")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbx")
+    out("    pop rbp")
+    out("    ret")
+
+    // =>> broadcast: rdi=signal, rsi=node_list -> count
+    out("")
+    out_label("_nova_flow_broadcast")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push rbx")
+    out("    push r12")
+    out("    push r13")
+    out("    push r14")
+    out("    mov rbx, rdi")
+    out("    mov r12, rsi")
+    out("    mov rdi, r12")
+    out("    call _nova_len")
+    out("    mov r13, rax")
+    out("    xor r14d, r14d")
+    out(".flow_bcast_loop:")
+    out("    cmp r14, r13")
+    out("    jge .flow_bcast_done")
+    out("    mov rdi, r12")
+    out("    mov rsi, r14")
+    out("    call _nova_index")
+    out("    mov rdi, rax")
+    out("    mov rsi, rbx")
+    out("    call node_receive")
+    out("    mov rdi, r12")
+    out("    mov rsi, r14")
+    out("    call _nova_index")
+    out("    mov rdi, rax")
+    out("    call node_process")
+    out("    inc r14")
+    out("    jmp .flow_bcast_loop")
+    out(".flow_bcast_done:")
+    out("    mov rax, r14")
+    out("    pop r14")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbx")
+    out("    pop rbp")
+    out("    ret")
+
+    // <<~ enrichment: rdi=signal, rsi=rememberer_node -> enriched signal
+    out("")
+    out_label("_nova_flow_enrich")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push rbx")
+    out("    push r12")
+    out("    push r13")
+    out("    sub rsp, 8")
+    out("    mov rbx, rdi")
+    out("    mov r12, rsi")
+    out("    mov rdi, r12")
+    out("    mov rsi, rbx")
+    out("    call node_receive")
+    out("    mov rdi, r12")
+    out("    call node_process")
+    out("    mov rdi, r12")
+    out("    call node_drain_outbox")
+    out("    mov r13, rax")
+    out("    mov rdi, r13")
+    out("    call _nova_len")
+    out("    cmp rax, 0")
+    out("    je .flow_enrich_noctx")
+    out("    mov rdi, r13")
+    out("    mov rsi, 0")
+    out("    call _nova_index")
+    out("    mov rdi, rax")
+    out("    call signal_moment")
+    out("    mov rdx, rax")
+    out("    mov rdi, rbx")
+    out("    lea rsi, [rip + _flow_ctx_key]")
+    out("    call signal_enrich")
+    out(".flow_enrich_noctx:")
+    out("    mov rax, rbx")
+    out("    add rsp, 8")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbx")
+    out("    pop rbp")
+    out("    ret")
+
+    // ~~> tentative flow: rdi=signal, rsi=node -> signal or 0
+    out("")
+    out_label("_nova_flow_tentative")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push rbx")
+    out("    push r12")
+    out("    sub rsp, 8")
+    out("    mov rbx, rdi")
+    out("    mov r12, rsi")
+    out("    mov rdi, rbx")
+    out("    call signal_priority")
+    out("    shr rax, 1")
+    out("    mov rsi, rax")
+    out("    mov rdi, rbx")
+    out("    call signal_elevate")
+    out("    mov rdi, rax")
+    out("    mov rsi, r12")
+    out("    call _nova_flow_fwd")
+    out("    add rsp, 8")
+    out("    pop r12")
+    out("    pop rbx")
+    out("    pop rbp")
+    out("    ret")
+
+    // <=> resonance: rdi=node_a, rsi=node_b -> signal or 0
+    out("")
+    out_label("_nova_flow_resonate")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push rbx")
+    out("    push r12")
+    out("    push r13")
+    out("    sub rsp, 8")
+    out("    mov rbx, rdi")
+    out("    mov r12, rsi")
+    out("    mov rdi, rbx")
+    out("    call node_process")
+    out("    mov rdi, rbx")
+    out("    call node_drain_outbox")
+    out("    mov r13, rax")
+    out("    mov rdi, r13")
+    out("    call _nova_len")
+    out("    cmp rax, 0")
+    out("    je .flow_res_empty")
+    out("    mov rdi, r13")
+    out("    mov rsi, 0")
+    out("    call _nova_index")
+    out("    mov rdi, r12")
+    out("    mov rsi, rax")
+    out("    call node_receive")
+    out("    mov rdi, r12")
+    out("    call node_process")
+    out("    mov rdi, r12")
+    out("    call node_drain_outbox")
+    out("    mov r13, rax")
+    out("    mov rdi, r13")
+    out("    call _nova_len")
+    out("    cmp rax, 0")
+    out("    je .flow_res_empty")
+    out("    mov rdi, r13")
+    out("    mov rsi, 0")
+    out("    call _nova_index")
+    out("    mov r13, rax")
+    out("    mov rdi, rbx")
+    out("    mov rsi, r13")
+    out("    call node_receive")
+    out("    mov rax, r13")
+    out("    jmp .flow_res_done")
+    out(".flow_res_empty:")
+    out("    xor eax, eax")
+    out(".flow_res_done:")
+    out("    add rsp, 8")
+    out("    pop r13")
+    out("    pop r12")
+    out("    pop rbx")
+    out("    pop rbp")
+    out("    ret")
+
+    // |~> filtered flow: rdi=signal, rsi=node -> signal or 0
+    out("")
+    out_label("_nova_flow_filter")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    push rbx")
+    out("    push r12")
+    out("    sub rsp, 8")
+    out("    mov rbx, rdi")
+    out("    mov r12, rsi")
+    out("    mov rdi, rbx")
+    out("    call signal_moment")
+    out("    mov rdi, rax")
+    out("    call moment_salience")
+    out("    push rax")
+    out("    lea rdi, [rip + _flow_threshold_key]")
+    out("    mov rsi, rdi")
+    out("    mov rdi, r12")
+    out("    call node_get_config")
+    out("    test rax, rax")
+    out("    jnz .flow_filt_has_thresh")
+    out("    mov rax, 30")
+    out(".flow_filt_has_thresh:")
+    out("    pop rcx")
+    out("    cmp rcx, rax")
+    out("    jl .flow_filt_blocked")
+    out("    mov rdi, rbx")
+    out("    mov rsi, r12")
+    out("    call _nova_flow_fwd")
+    out("    jmp .flow_filt_done")
+    out(".flow_filt_blocked:")
+    out("    xor eax, eax")
+    out(".flow_filt_done:")
+    out("    add rsp, 8")
+    out("    pop r12")
+    out("    pop rbx")
+    out("    pop rbp")
+    out("    ret")
+
+    } // end cg_has_flow
+
     // --- Data for runtime ---
     out("")
     out_section("rodata")
@@ -8935,6 +9265,12 @@ fn gen_runtime() {
     out("    .asciz " + DQ + "-" + DQ)
     out_label("_str_list_repr")
     out("    .asciz " + DQ + "[list]" + DQ)
+    if cg_has_flow == 1 {
+        out_label("_flow_ctx_key")
+        out("    .asciz " + DQ + "context" + DQ)
+        out_label("_flow_threshold_key")
+        out("    .asciz " + DQ + "threshold" + DQ)
+    }
 
     // --- Heap state in .bss ---
     out("")

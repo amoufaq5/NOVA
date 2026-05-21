@@ -876,8 +876,41 @@ fn parse_nullish() {
     return left
 }
 
-fn parse_pipe() {
+fn is_flow_token(t) {
+    if t == TOK_FLOW_FWD { return 1 }
+    if t == TOK_FLOW_BWD { return 1 }
+    if t == TOK_BROADCAST { return 1 }
+    if t == TOK_ENRICH { return 1 }
+    if t == TOK_FLOW_TENTATIVE { return 1 }
+    if t == TOK_FLOW_RESONATE { return 1 }
+    if t == TOK_FLOW_FILTER { return 1 }
+    return 0
+}
+
+fn flow_type_from_token(t) {
+    if t == TOK_FLOW_FWD { return FLOW_FWD }
+    if t == TOK_FLOW_BWD { return FLOW_BWD }
+    if t == TOK_BROADCAST { return FLOW_BROADCAST }
+    if t == TOK_ENRICH { return FLOW_ENRICH }
+    if t == TOK_FLOW_TENTATIVE { return FLOW_TENTATIVE }
+    if t == TOK_FLOW_RESONATE { return FLOW_RESONATE }
+    if t == TOK_FLOW_FILTER { return FLOW_FILTER }
+    return 0
+}
+
+fn parse_flow() {
     let left = parse_nullish()
+    while is_flow_token(par_peek_type()) == 1 {
+        let ft = flow_type_from_token(par_peek_type())
+        par_advance()
+        let right = parse_nullish()
+        left = ast_flow(ft, left, right)
+    }
+    return left
+}
+
+fn parse_pipe() {
+    let left = parse_flow()
     while par_peek_type() == TOK_PIPE_GT {
         par_advance()
         let right = parse_or()

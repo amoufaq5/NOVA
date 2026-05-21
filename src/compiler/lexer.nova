@@ -105,6 +105,9 @@ let TOK_NULLISH = 105
 let TOK_NULLISH_EQ = 106
 let TOK_LOOP = 107
 let TOK_DOTDOT_EQ = 108
+let TOK_FLOW_TENTATIVE = 109
+let TOK_FLOW_RESONATE = 110
+let TOK_FLOW_FILTER = 111
 
 // --- Lexer State ---
 let lex_src = ""
@@ -611,6 +614,17 @@ fn lex_pipe_char() {
         emit_tok(TOK_PIPE_EQ, "|=")
         return 0
     }
+    if pn == 126 {
+        lex_advance()
+        if lex_peek() == 62 {
+            lex_advance()
+            emit_tok(TOK_FLOW_FILTER, "|~>")
+            return 0
+        }
+        emit_tok(TOK_PIPE, "|")
+        emit_tok(TOK_TILDE, "~")
+        return 0
+    }
     emit_tok(TOK_PIPE, "|")
 }
 
@@ -722,14 +736,17 @@ fn lex_all() {
                         if lex_peek() == 61 {
                             lex_advance()
                             emit_tok(TOK_EQEQ, "==")
-                        } else {
+                        } else { if lex_peek() == 62 {
+                            lex_advance()
                             if lex_peek() == 62 {
                                 lex_advance()
-                                emit_tok(TOK_ARROW, "=>")
+                                emit_tok(TOK_BROADCAST, "=>>")
                             } else {
-                                emit_tok(TOK_EQ, "=")
+                                emit_tok(TOK_ARROW, "=>")
                             }
-                        }
+                        } else {
+                            emit_tok(TOK_EQ, "=")
+                        } }
                     }
                     else { if c == 33 {
                         lex_advance()
@@ -744,20 +761,29 @@ fn lex_all() {
                         lex_advance()
                         if lex_peek() == 60 {
                             lex_advance()
-                            if lex_peek() == 61 {
+                            if lex_peek() == 126 {
+                                lex_advance()
+                                emit_tok(TOK_ENRICH, "<<~")
+                            } else { if lex_peek() == 61 {
                                 lex_advance()
                                 emit_tok(TOK_SHL_EQ, "<<=")
                             } else {
                                 emit_tok(TOK_SHL, "<<")
+                            } }
+                        } else { if lex_peek() == 126 {
+                            lex_advance()
+                            emit_tok(TOK_FLOW_BWD, "<~")
+                        } else { if lex_peek() == 61 {
+                            lex_advance()
+                            if lex_peek() == 62 {
+                                lex_advance()
+                                emit_tok(TOK_FLOW_RESONATE, "<=>")
+                            } else {
+                                emit_tok(TOK_LTEQ, "<=")
                             }
                         } else {
-                            if lex_peek() == 61 {
-                                lex_advance()
-                                emit_tok(TOK_LTEQ, "<=")
-                            } else {
-                                emit_tok(TOK_LT, "<")
-                            }
-                        }
+                            emit_tok(TOK_LT, "<")
+                        } } }
                     }
                     else { if c == 62 {
                         lex_advance()
@@ -818,7 +844,24 @@ fn lex_all() {
                             emit_tok(TOK_QUESTION, "?")
                         }
                     }
-                    else { if c == 126 { lex_advance(); emit_tok(TOK_TILDE, "~") }
+                    else { if c == 126 {
+                        lex_advance()
+                        if lex_peek() == 126 {
+                            lex_advance()
+                            if lex_peek() == 62 {
+                                lex_advance()
+                                emit_tok(TOK_FLOW_TENTATIVE, "~~>")
+                            } else {
+                                emit_tok(TOK_TILDE, "~")
+                                emit_tok(TOK_TILDE, "~")
+                            }
+                        } else { if lex_peek() == 62 {
+                            lex_advance()
+                            emit_tok(TOK_FLOW_FWD, "~>")
+                        } else {
+                            emit_tok(TOK_TILDE, "~")
+                        } }
+                    }
                     else {
                         // Unknown character, skip
                         lex_advance()

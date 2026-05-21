@@ -1,0 +1,90 @@
+// Nova Flow Operators Example
+// Demonstrates signal routing through cognitive nodes using
+// Nova's seven flow operators.
+
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+
+fn main() {
+    println("=== Nova Flow Operators ===")
+    println("")
+
+    // Create cognitive nodes
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    let reasoner = node_new("Reasoner", NTYPE_REASONER)
+    let feeler = node_new("Feeler", NTYPE_FEELER)
+    let actor = node_new("Actor", NTYPE_ACTOR)
+
+    perceiver_add_template(perceiver, "greeting", ["hello", "hi"], 80)
+    feeler_set_emotion(feeler, 70, 50, 50)
+
+    let user = entity_new("User", "human")
+    let cons = consequence_new(CTYPE_EXPECTATION, "expects reply", 80)
+    let moment = moment_new("hello there!", user, 75, 55, cons, 80)
+    let sig = signal_event(moment, "external", "Perceiver")
+
+    // ~> Forward flow: signal passes through nodes in sequence
+    println("1. Forward flow (sig ~> perceiver ~> reasoner)")
+    let result = sig ~> perceiver ~> reasoner
+    if result != 0 {
+        print("   Result: ")
+        println(signal_type_name(result))
+    }
+
+    // =>> Broadcast: one signal to many nodes
+    println("")
+    println("2. Broadcast (sig =>> [reasoner, feeler, actor])")
+    let targets = [reasoner, feeler, actor]
+    let count = sig =>> targets
+    print("   Delivered to ")
+    print_int(count)
+    println(" nodes")
+
+    // ~~> Tentative flow: reduced priority
+    println("")
+    println("3. Tentative flow (sig ~~> feeler)")
+    print("   Original priority: ")
+    print_int(signal_priority(sig))
+    println("")
+    let tentative = sig ~~> feeler
+    if tentative != 0 {
+        print("   Tentative result priority: ")
+        print_int(signal_priority(tentative))
+        println("")
+    }
+
+    // |~> Filtered flow: only passes if salience exceeds threshold
+    println("")
+    println("4. Filtered flow (sig |~> perceiver)")
+    node_set_config(perceiver, "threshold", 50)
+    let filtered = sig |~> perceiver
+    print("   High salience (75): ")
+    if filtered != 0 { println("passed") } else { println("blocked") }
+
+    let low_m = moment_new("meh", user, 10, 5, cons, 10)
+    let low_sig = signal_event(low_m, "external", "Perceiver")
+    let low_filtered = low_sig |~> perceiver
+    print("   Low salience (10):  ")
+    if low_filtered != 0 { println("passed") } else { println("blocked") }
+
+    // <~ Backward flow: reflection
+    println("")
+    println("5. Backward flow (sig <~ reasoner)")
+    let reflection = sig <~ reasoner
+    if reflection != 0 {
+        println("   Got reflection signal")
+    } else {
+        println("   No reflection (reasoner had nothing to reflect)")
+    }
+
+    println("")
+    println("Flow operators enable concise, readable signal routing.")
+    println("Instead of manual node_receive/process/drain sequences,")
+    println("just write: result = signal ~> node1 ~> node2 ~> node3")
+}
+
+main()

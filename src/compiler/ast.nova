@@ -60,6 +60,7 @@ let AST_NULLISH = 55
 let AST_DO_EXPR = 56
 let AST_MAP_COMP = 57
 let AST_TYPE_PATTERN = 58
+let AST_FLOW = 59
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -504,6 +505,24 @@ fn ast_type_pattern(type_id) {
     push(n, type_id)
     return n
 }
+
+fn ast_flow(flow_type, left, right) {
+    let n = list_new()
+    push(n, AST_FLOW)
+    push(n, flow_type)
+    push(n, left)
+    push(n, right)
+    return n
+}
+
+// Flow type constants
+let FLOW_FWD = 1
+let FLOW_BWD = 2
+let FLOW_BROADCAST = 3
+let FLOW_ENRICH = 4
+let FLOW_TENTATIVE = 5
+let FLOW_RESONATE = 6
+let FLOW_FILTER = 7
 
 // --- Accessor helpers ---
 fn ast_tag(nd) {

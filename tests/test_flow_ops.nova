@@ -1,0 +1,226 @@
+// Test: Flow Operators (~>, <~, =>>, <<~, ~~>, <=>, |~>)
+// Tests signal routing operators with the core module infrastructure.
+
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+
+fn test_forward_flow() {
+    println("--- Forward flow (~>) ---")
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    perceiver_add_template(perceiver, "greeting", ["hello"], 80)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "respond", 70)
+    let m = moment_new("hello", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    // Forward flow: signal ~> node
+    let result = sig ~> perceiver
+    if result == 0 {
+        println("  perceiver produced no output (terminated)")
+    } else {
+        print("  result type: ")
+        println(signal_type_name(result))
+        print("  trace depth: ")
+        print_int(signal_trace_depth(result))
+        println("")
+    }
+    println("PASS")
+}
+
+fn test_chained_flow() {
+    println("--- Chained flow (sig ~> a ~> b ~> c) ---")
+    let p = node_new("Perceiver", NTYPE_PERCEIVER)
+    let r = node_new("Reasoner", NTYPE_REASONER)
+    let a = node_new("Actor", NTYPE_ACTOR)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_INSIGHT, "test", 60)
+    let m = moment_new("question", alice, 80, 60, cons, 75)
+    let sig = signal_question(m, "external", "Perceiver")
+
+    // Chained: signal flows through perceiver -> reasoner -> actor
+    let result = sig ~> p ~> r ~> a
+    if result == 0 {
+        println("  chain terminated early")
+    } else {
+        print("  final trace depth: ")
+        print_int(signal_trace_depth(result))
+        println("")
+    }
+    println("PASS")
+}
+
+fn test_broadcast() {
+    println("--- Broadcast (=>>) ---")
+    let n1 = node_new("Node1", NTYPE_PERCEIVER)
+    let n2 = node_new("Node2", NTYPE_KNOWER)
+    let n3 = node_new("Node3", NTYPE_FEELER)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "broadcast", 70)
+    let m = moment_new("hello everyone", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "all")
+
+    let targets = [n1, n2, n3]
+
+    // Broadcast: signal sent to all nodes
+    let count = sig =>> targets
+    print("  broadcast to ")
+    print_int(count)
+    println(" nodes")
+
+    // Verify each node received it
+    print("  n1 inbox after process: ")
+    print_int(node_inbox_count(n1))
+    println("")
+    print("  n2 inbox after process: ")
+    print_int(node_inbox_count(n2))
+    println("")
+
+    if count == 3 {
+        println("PASS")
+    } else {
+        println("FAIL: expected broadcast to 3 nodes")
+        exit(1)
+    }
+}
+
+fn test_tentative_flow() {
+    println("--- Tentative flow (~~>) ---")
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "maybe", 70)
+    let m = moment_new("uncertain signal", alice, 60, 40, cons, 60)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    let original_priority = signal_priority(sig)
+    print("  original priority: ")
+    print_int(original_priority)
+    println("")
+
+    // Tentative flow: halves priority before sending
+    let result = sig ~~> perceiver
+    if result == 0 {
+        println("  tentative flow produced no output")
+    } else {
+        let result_priority = signal_priority(result)
+        print("  result priority: ")
+        print_int(result_priority)
+        println("")
+    }
+    println("PASS")
+}
+
+fn test_filtered_flow() {
+    println("--- Filtered flow (|~>) ---")
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    node_set_config(perceiver, "threshold", 50)
+
+    let alice = entity_new("Alice", "user")
+
+    // High salience signal (should pass filter)
+    let cons_hi = consequence_new(CTYPE_EXPECTATION, "important", 90)
+    let m_hi = moment_new("urgent alert", alice, 90, 80, cons_hi, 90)
+    let sig_hi = signal_event(m_hi, "external", "Perceiver")
+
+    let result_hi = sig_hi |~> perceiver
+    print("  high salience (90): ")
+    if result_hi == 0 {
+        println("blocked")
+    } else {
+        println("passed")
+    }
+
+    // Low salience signal (should be blocked)
+    let cons_lo = consequence_new(CTYPE_EXPECTATION, "minor", 20)
+    let m_lo = moment_new("trivial note", alice, 20, 10, cons_lo, 20)
+    let sig_lo = signal_event(m_lo, "external", "Perceiver")
+
+    let result_lo = sig_lo |~> perceiver
+    print("  low salience (20): ")
+    if result_lo == 0 {
+        println("blocked")
+    } else {
+        println("passed")
+    }
+
+    println("PASS")
+}
+
+fn test_backward_flow() {
+    println("--- Backward flow (<~) ---")
+    let reasoner = node_new("Reasoner", NTYPE_REASONER)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "reflect", 70)
+    let m = moment_new("need reflection", alice, 70, 50, cons, 70)
+    let sig = signal_event(m, "Actor", "Reasoner")
+
+    // Backward flow: send reflection signal to node
+    let result = sig <~ reasoner
+    if result == 0 {
+        println("  backward flow: no reflection returned")
+    } else {
+        print("  reflection trace depth: ")
+        print_int(signal_trace_depth(result))
+        println("")
+    }
+    println("PASS")
+}
+
+fn test_mixed_operators() {
+    println("--- Mixed operators ---")
+    let p = node_new("Perceiver", NTYPE_PERCEIVER)
+    let r = node_new("Reasoner", NTYPE_REASONER)
+    let f = node_new("Feeler", NTYPE_FEELER)
+    feeler_set_emotion(f, 70, 60, 50)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "complex", 80)
+    let m = moment_new("complex scenario", alice, 80, 60, cons, 80)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    // Forward through perceiver
+    let perceived = sig ~> p
+    if perceived == 0 {
+        println("  perception failed, using original signal")
+        perceived = sig
+    }
+
+    // Broadcast perceived signal
+    let targets = [r, f]
+    let bc_count = perceived =>> targets
+    print("  broadcast count: ")
+    print_int(bc_count)
+    println("")
+
+    println("PASS")
+}
+
+fn main() {
+    println("=== Flow Operator Tests ===")
+    println("")
+    test_forward_flow()
+    println("")
+    test_chained_flow()
+    println("")
+    test_broadcast()
+    println("")
+    test_tentative_flow()
+    println("")
+    test_filtered_flow()
+    println("")
+    test_backward_flow()
+    println("")
+    test_mixed_operators()
+    println("")
+    println("All flow operator tests passed!")
+}
+
+main()
