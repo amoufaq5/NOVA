@@ -43,6 +43,25 @@ x = 20              // reassignment
 x += 5              // compound assignment (also -=, *=, /=, %=)
 x &= 0xFF           // bitwise compound assignment (also |=, ^=, <<=, >>=)
 let [a, b] = [1, 2] // destructuring
+let [first, ...rest] = [1, 2, 3, 4] // rest pattern: first=1, rest=[2,3,4]
+```
+
+### Rest Parameters and Spread
+
+```nova
+// Rest parameters collect remaining arguments into a list
+fn log_all(label, ...args) {
+    print(label + ": ")
+    for arg in args {
+        print(to_str(arg) + " ")
+    }
+    println("")
+}
+log_all("values", 1, 2, 3)  // values: 1 2 3
+
+// Spread in function calls expands a list into individual arguments
+let nums = [10, 20, 30]
+some_fn(...nums)  // equivalent to some_fn(10, 20, 30)
 ```
 
 ## Functions
@@ -129,11 +148,18 @@ for i in 0..10 { }           // 0..9
 for i in 0..=10 { }          // 0..10 (inclusive)
 for i in range_step(0, 20, 3) { } // 0, 3, 6, ...
 
-// For-else (runs else if loop body never executed)
+// For-else (runs else if loop completes without break)
 for item in list {
     if item == target { break }
 } else {
     println("not found")
+}
+
+// While-else (runs else if loop completes without break)
+while condition {
+    if found { break }
+} else {
+    println("loop ended naturally")
 }
 
 // Labeled loops
@@ -186,6 +212,12 @@ throw "something went wrong"
 defer {
     file_close(f)
 }
+
+// Guard clause (early exit if condition is false)
+guard x > 0 else {
+    return -1
+}
+// execution continues here only if x > 0
 ```
 
 ## Operators
@@ -358,20 +390,37 @@ instruction (Intel syntax). The return value is in `rax`.
 
 ## Coroutines
 
+Nova provides cooperative coroutines via built-in functions. Use `coro_yield()`
+inside a coroutine function to suspend and produce a value.
+
 ```nova
 fn counter(start) {
     let i = start
-    while true {
-        yield i
+    while i < start + 3 {
+        coro_yield(i)
         i = i + 1
     }
+    return 999
 }
 
 let c = coro_new(counter, 0)
-println(coro_resume(c))  // 0
-println(coro_resume(c))  // 1
-println(coro_done(c))    // false
+println(int_to_str(coro_resume(c)))  // 0
+println(int_to_str(coro_resume(c)))  // 1
+println(int_to_str(coro_resume(c)))  // 2
+println(int_to_str(coro_resume(c)))  // 999 (return value)
+println(int_to_str(coro_done(c)))    // 1 (true)
+println(int_to_str(coro_result(c)))  // 999 (final return value)
+println(int_to_str(coro_state(c)))   // 3 (done)
 ```
+
+| Function | Description |
+|----------|-------------|
+| `coro_new(fn, arg)` | Create coroutine from function with one argument |
+| `coro_resume(c)` | Resume coroutine, returns yielded/returned value |
+| `coro_yield(val)` | Suspend coroutine and produce a value (call inside coroutine) |
+| `coro_done(c)` | Returns 1 if coroutine has finished, 0 otherwise |
+| `coro_result(c)` | Returns the final return value after coroutine completes |
+| `coro_state(c)` | Returns state: 0=ready, 1=running, 2=suspended, 3=done |
 
 ## List Comprehensions
 
@@ -398,6 +447,7 @@ let m = {k: v * 2 for k, v in items}
 | `read_stdin(n)` | Read n bytes from stdin |
 | `read_file(path)` | Read entire file as string |
 | `write_file(path, data)` | Write string to file |
+| `__arg(n)` | Command-line argument at index n (0-indexed), returns "" if missing |
 
 ### Strings
 | Function | Description |
@@ -426,8 +476,10 @@ let m = {k: v * 2 for k, v in items}
 | `chars(s)` | String to list of char codes |
 | `contains(s, sub)` | Check if contains |
 | `strcmp(a, b)` | Compare (-1, 0, 1) |
+| `str_eq(a, b)` | String equality check (returns 1 or 0) |
 | `pad_left(s, n, ch)` | Left-pad to width |
 | `pad_right(s, n, ch)` | Right-pad to width |
+| `to_int(s)` | Parse string as integer (alias for `str_to_int`) |
 
 ### Lists
 | Function | Description |
@@ -478,6 +530,14 @@ let m = {k: v * 2 for k, v in items}
 | `map_merge(a, b)` | Merge two maps |
 | `keys(m)` | List of keys |
 | `values(m)` | List of values |
+
+### Ranges
+| Function | Description |
+|----------|-------------|
+| `range(n)` | Iterable range 0 to n-1 |
+| `range(start, end)` | Iterable range start to end-1 |
+| `range_step(start, end, step)` | Iterable range with custom step |
+| `range_list(start, end)` | Create list `[start, start+1, ..., end-1]` |
 
 ### Math
 | Function | Description |
@@ -540,6 +600,11 @@ let m = {k: v * 2 for k, v in items}
 | `exec_program(path, argv)` | Replace process |
 | `pipe_create()` | Create pipe `[read_fd, write_fd]` |
 
+### Error Retrieval
+| Function | Description |
+|----------|-------------|
+| `get_error()` | Returns the error value from the last `throw` (use inside `catch`) |
+
 ### Debug
 | Function | Description |
 |----------|-------------|
@@ -583,6 +648,57 @@ Signal dispatch engine:
 - **Execution**: `scheduler_run` (sequential), `scheduler_run_batched` (cache-friendly)
 - **Queries**: `scheduler_queue_size`, `scheduler_node_count`, `scheduler_cycle_count`,
   `scheduler_total_processed`, `scheduler_total_dropped`, `scheduler_total_batched`
+
+### `src/runtime/coroutine.nova`
+Higher-level coroutine abstractions:
+- **Generators**: `gen_new`, `gen_has_next`, `gen_next`, `gen_collect`, `gen_take`, `gen_skip`
+- **Task groups**: `task_group_new`, `task_group_add`, `task_group_run`
+- **Cooperative scheduler**: `scheduler_new`, `scheduler_spawn`, `scheduler_tick`,
+  `scheduler_run_all`, `scheduler_active_count`
+- **Pipelines**: `pipeline_new`, `pipeline_add_stage`, `pipeline_run`
+
+### `src/runtime/chan.nova`
+Go-style buffered channels for inter-coroutine communication:
+`chan_new`, `chan_send`, `chan_recv`, `chan_try_send`, `chan_try_recv`,
+`chan_close`, `chan_closed`, `chan_len`, `chan_is_full`, `chan_is_empty`,
+`chan_drain`, `chan_cap`, `chan_send_count`, `chan_recv_count`
+
+### `src/runtime/json.nova`
+JSON parser and serializer:
+`json_parse`, `json_stringify`, `json_get`, `json_set`,
+`json_load` (from file), `json_save` (to file)
+
+### `src/runtime/math.nova`
+Integer math utilities:
+`math_abs`, `math_sign`, `math_clamp`, `math_min`, `math_max`, `math_min3`,
+`math_max3`, `math_gcd`, `math_lcm`, `math_sqrt`, `math_pow`, `math_factorial`,
+`math_is_even`, `math_is_odd`, `math_is_prime`, `math_fibonacci`, `math_sum`,
+`math_product`, `math_average`, `math_lerp`, `math_map_range`, `math_digits`,
+`math_digital_root`
+
+### `src/runtime/path.nova`
+File path utilities:
+`path_join`, `path_basename`, `path_dirname`, `path_extension`, `path_stem`,
+`path_is_absolute`, `path_normalize`, `path_change_ext`
+
+### `src/runtime/set.nova`
+Set data structure (backed by maps):
+`set_new`, `set_add`, `set_has`, `set_remove`, `set_size`, `set_items`,
+`set_from_list`, `set_to_list`, `set_union`, `set_intersect`, `set_diff`,
+`set_symmetric_diff`, `set_is_subset`, `set_is_superset`, `set_equals`,
+`set_clear`, `set_print`
+
+### `src/runtime/list.nova`
+Low-level dynamic list implementation using raw memory (`alloc`/`store64`/`load64`).
+Used internally; prefer built-in list operations for most code.
+
+### `src/runtime/map.nova`
+Low-level hash map implementation using open addressing with linear probing.
+Used internally; prefer built-in map operations for most code.
+
+### `src/runtime/taskpool.nova`
+Process-based parallelism using `fork`/`pipe`:
+`task_run`, `parallel_map_int`, `parallel_run_all`, `parallel_reduce_int`
 
 ## Compilation
 
