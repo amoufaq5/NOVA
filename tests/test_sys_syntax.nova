@@ -1,0 +1,130 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+import "../src/core/system.nova"
+
+let passed = 0
+let failed = 0
+
+fn check(name, cond) {
+    if cond {
+        passed = passed + 1
+    } else {
+        println("  FAIL: " + name)
+        failed = failed + 1
+    }
+}
+
+// Define a soul
+soul Aurora {
+    identity {
+        purpose: "understand and assist"
+    }
+    values {
+        truth: "never fabricate"
+    }
+    drives {
+        curiosity: 80
+    }
+    feelings {
+        warmth: 50
+    }
+}
+
+// Define minds
+mind Perception {
+    nodes {
+        Eyes: perceiver
+        Ears: perceiver
+    }
+    channels {
+    }
+}
+
+mind Cognition {
+    nodes {
+        Think: reasoner
+        Store: rememberer
+    }
+    channels {
+    }
+}
+
+mind Emotion {
+    nodes {
+        Heart: feeler
+    }
+    channels {
+    }
+}
+
+// Define a system using all three minds
+system CogAgent {
+    minds {
+        perception: Perception
+        cognition: Cognition
+        emotion: Emotion
+    }
+    bridges {
+        see_to_think: perception.Eyes ~> cognition.Think
+        hear_to_think: perception.Ears ~> cognition.Think
+        feel_to_think: emotion.Heart ~~> cognition.Think
+    }
+    soul: Aurora
+}
+
+fn test_system_created() {
+    println("--- system created ---")
+    check("system exists", CogAgent_sys != 0)
+}
+
+fn test_system_minds() {
+    println("--- system minds ---")
+    check("mind count", system_mind_count(CogAgent_sys) == 3)
+}
+
+fn test_system_bridges() {
+    println("--- system bridges ---")
+    check("bridge count", system_bridge_count(CogAgent_sys) == 3)
+}
+
+fn test_system_soul() {
+    println("--- system soul ---")
+    let desc = system_describe(CogAgent_sys)
+}
+
+fn test_node_resolution() {
+    println("--- node resolution ---")
+    let eyes = system_resolve_node(CogAgent_sys, "perception.Eyes")
+    check("resolve perception.Eyes", eyes != 0)
+    let think = system_resolve_node(CogAgent_sys, "cognition.Think")
+    check("resolve cognition.Think", think != 0)
+    let heart = system_resolve_node(CogAgent_sys, "emotion.Heart")
+    check("resolve emotion.Heart", heart != 0)
+}
+
+fn main() {
+    println("=== System Syntax Tests ===")
+    test_system_created()
+    test_system_minds()
+    test_system_bridges()
+    test_system_soul()
+    test_node_resolution()
+    println("")
+    print("Passed: ")
+    print_int(passed)
+    println("")
+    print("Failed: ")
+    print_int(failed)
+    println("")
+    if failed == 0 {
+        println("All system syntax tests passed!")
+    }
+}
+
+main()

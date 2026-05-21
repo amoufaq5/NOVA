@@ -110,6 +110,7 @@ let TOK_FLOW_RESONATE = 110
 let TOK_FLOW_FILTER = 111
 let TOK_MIND = 112
 let TOK_SOUL = 113
+let TOK_SYSTEM = 114
 
 // --- Lexer State ---
 let lex_src = ""
@@ -556,6 +557,7 @@ fn keyword_type(word) {
     if word == "loop" { return TOK_LOOP }
     if word == "mind" { return TOK_MIND }
     if word == "soul" { return TOK_SOUL }
+    if word == "system" { return TOK_SYSTEM }
     return 0
 }
 

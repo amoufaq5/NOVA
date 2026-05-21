@@ -1,0 +1,293 @@
+// Nova Runtime: Multi-Mind System Composition
+// Orchestrates multiple minds with inter-mind bridges and shared state.
+
+let SYS_TAG = 300
+let SYS_NAME = 1
+let SYS_MINDS = 2
+let SYS_BRIDGES = 3
+let SYS_SHARED_DB = 4
+let SYS_SOUL = 5
+let SYS_MAX_MINDS = 6
+
+fn system_new(name) {
+    let s = list_new()
+    push(s, SYS_TAG)
+    push(s, name)
+    push(s, list_new())
+    push(s, list_new())
+    push(s, 0)
+    push(s, 0)
+    push(s, 16)
+    return s
+}
+
+fn system_name(s) {
+    return s[SYS_NAME]
+}
+
+// ================================================================
+// Mind Registration
+// ================================================================
+
+let SMIND_TAG = 301
+let SMIND_LABEL = 1
+let SMIND_NODES = 2
+let SMIND_CHANNELS = 3
+
+fn system_mind_entry(label, nodes, channels) {
+    let e = list_new()
+    push(e, SMIND_TAG)
+    push(e, label)
+    push(e, nodes)
+    push(e, channels)
+    return e
+}
+
+fn system_add_mind(sys, label, nodes, channels) {
+    let entry = system_mind_entry(label, nodes, channels)
+    push(sys[SYS_MINDS], entry)
+}
+
+fn system_mind_count(sys) {
+    return len(sys[SYS_MINDS])
+}
+
+fn system_get_mind(sys, label) {
+    let minds = sys[SYS_MINDS]
+    let i = 0
+    while i < len(minds) {
+        if minds[i][SMIND_LABEL] == label {
+            return minds[i]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn system_mind_nodes(mind_entry) {
+    return mind_entry[SMIND_NODES]
+}
+
+fn system_mind_channels(mind_entry) {
+    return mind_entry[SMIND_CHANNELS]
+}
+
+// ================================================================
+// Bridges (inter-mind channels)
+// ================================================================
+
+let BRIDGE_TAG = 302
+let BRIDGE_NAME = 1
+let BRIDGE_SRC = 2
+let BRIDGE_DST = 3
+let BRIDGE_FLOW = 4
+
+fn system_bridge_new(name, src_ref, dst_ref, flow_type) {
+    let b = list_new()
+    push(b, BRIDGE_TAG)
+    push(b, name)
+    push(b, src_ref)
+    push(b, dst_ref)
+    push(b, flow_type)
+    return b
+}
+
+fn system_add_bridge(sys, name, src_ref, dst_ref, flow_type) {
+    let b = system_bridge_new(name, src_ref, dst_ref, flow_type)
+    push(sys[SYS_BRIDGES], b)
+}
+
+fn system_bridge_count(sys) {
+    return len(sys[SYS_BRIDGES])
+}
+
+fn system_get_bridge(sys, name) {
+    let bridges = sys[SYS_BRIDGES]
+    let i = 0
+    while i < len(bridges) {
+        if bridges[i][BRIDGE_NAME] == name {
+            return bridges[i]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ================================================================
+// Shared State
+// ================================================================
+
+fn system_set_shared_db(sys, db) {
+    sys[SYS_SHARED_DB] = db
+}
+
+fn system_get_shared_db(sys) {
+    return sys[SYS_SHARED_DB]
+}
+
+// ================================================================
+// Soul Attachment
+// ================================================================
+
+fn system_attach_soul(sys, sl) {
+    sys[SYS_SOUL] = sl
+}
+
+fn system_get_soul(sys) {
+    return sys[SYS_SOUL]
+}
+
+// ================================================================
+// Node Resolution (mind.Node syntax)
+// ================================================================
+
+fn system_resolve_node(sys, dotted_ref) {
+    let dot = str_find(dotted_ref, ".")
+    if dot < 0 { return 0 }
+    let mind_label = substr(dotted_ref, 0, dot)
+    let node_name = substr(dotted_ref, dot + 1, len(dotted_ref) - dot - 1)
+    let m = system_get_mind(sys, mind_label)
+    if m == 0 { return 0 }
+    let nodes = m[SMIND_NODES]
+    let i = 0
+    while i < len(nodes) {
+        let nd = nodes[i]
+        if nd[0] == node_name {
+            return nd[1]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ================================================================
+// System Initialization
+// ================================================================
+
+fn system_init(sys) {
+    scheduler_ensure_init()
+    let minds = sys[SYS_MINDS]
+    let mi = 0
+    while mi < len(minds) {
+        let m = minds[mi]
+        let nodes = m[SMIND_NODES]
+        let ni = 0
+        while ni < len(nodes) {
+            let nd = nodes[ni]
+            scheduler_register(nd[1])
+            ni = ni + 1
+        }
+        let channels = m[SMIND_CHANNELS]
+        let ci = 0
+        while ci < len(channels) {
+            scheduler_add_channel(channels[ci])
+            ci = ci + 1
+        }
+        mi = mi + 1
+    }
+    let bridges = sys[SYS_BRIDGES]
+    let bi = 0
+    while bi < len(bridges) {
+        let br = bridges[bi]
+        scheduler_add_channel(br[BRIDGE_DST])
+        bi = bi + 1
+    }
+    if sys[SYS_SOUL] != 0 {
+        scheduler_register_soul(sys[SYS_SOUL])
+    }
+}
+
+// ================================================================
+// System Execution
+// ================================================================
+
+fn system_run(sys, max_steps) {
+    system_init(sys)
+    scheduler_run()
+}
+
+fn system_run_secure(sys, max_steps) {
+    system_init(sys)
+    scheduler_run_secure()
+}
+
+fn system_emit(sys, signal) {
+    scheduler_emit(signal)
+}
+
+// ================================================================
+// System Description
+// ================================================================
+
+fn system_describe(sys) {
+    print("System: ")
+    println(sys[SYS_NAME])
+    print("  Minds: ")
+    print_int(system_mind_count(sys))
+    println("")
+    let minds = sys[SYS_MINDS]
+    let mi = 0
+    while mi < len(minds) {
+        let m = minds[mi]
+        print("    [")
+        print(m[SMIND_LABEL])
+        print("] nodes=")
+        print_int(len(m[SMIND_NODES]))
+        print(" channels=")
+        print_int(len(m[SMIND_CHANNELS]))
+        println("")
+        mi = mi + 1
+    }
+    print("  Bridges: ")
+    print_int(system_bridge_count(sys))
+    println("")
+    let bridges = sys[SYS_BRIDGES]
+    let bi = 0
+    while bi < len(bridges) {
+        let br = bridges[bi]
+        print("    ")
+        print(br[BRIDGE_NAME])
+        print(": ")
+        print(br[BRIDGE_SRC])
+        print(" -> ")
+        print(br[BRIDGE_DST])
+        println("")
+        bi = bi + 1
+    }
+    if sys[SYS_SHARED_DB] != 0 {
+        println("  Shared DB: active")
+    }
+    if sys[SYS_SOUL] != 0 {
+        println("  Soul: attached")
+    }
+}
+
+// ================================================================
+// Dynamic Mind Spawning
+// ================================================================
+
+fn system_set_max_minds(sys, max) {
+    sys[SYS_MAX_MINDS] = max
+}
+
+fn system_can_expand(sys) {
+    if len(sys[SYS_MINDS]) < sys[SYS_MAX_MINDS] { return 1 }
+    return 0
+}
+
+fn system_spawn_mind(sys, label, nodes, channels) {
+    if system_can_expand(sys) == 0 { return 0 }
+    system_add_mind(sys, label, nodes, channels)
+    let m = system_get_mind(sys, label)
+    let ni = 0
+    while ni < len(nodes) {
+        scheduler_register(nodes[ni][1])
+        ni = ni + 1
+    }
+    let ci = 0
+    while ci < len(channels) {
+        scheduler_add_channel(channels[ci])
+        ci = ci + 1
+    }
+    return 1
+}

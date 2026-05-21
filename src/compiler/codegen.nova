@@ -2889,6 +2889,30 @@ fn gen_program(program) {
                 }
                 ni = ni + 1
             }
+            // Create aggregate nodes list: MindName_nodes
+            let nlist_var = mname + "_nodes"
+            push(expanded, ast_let(nlist_var, ast_call(ast_ident("list_new"), list_new())))
+            let nli = 0
+            while nli < len(mnodes) {
+                let nle = mnodes[nli]
+                let nle_name = nle[0]
+                let nle_var = mname + "_" + nle_name
+                let ne_var = nlist_var + "_e" + int_to_str(nli)
+                push(expanded, ast_let(ne_var, ast_call(ast_ident("list_new"), list_new())))
+                let p1_args = list_new()
+                push(p1_args, ast_ident(ne_var))
+                push(p1_args, ast_str(nle_name))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("push"), p1_args)))
+                let p2_args = list_new()
+                push(p2_args, ast_ident(ne_var))
+                push(p2_args, ast_ident(nle_var))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("push"), p2_args)))
+                let p3_args = list_new()
+                push(p3_args, ast_ident(nlist_var))
+                push(p3_args, ast_ident(ne_var))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("push"), p3_args)))
+                nli = nli + 1
+            }
             // For each channel
             let ci = 0
             while ci < len(mchannels) {
@@ -2969,6 +2993,9 @@ fn gen_program(program) {
                 push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_add_channel"), sac_args)))
                 ci = ci + 1
             }
+            // Create aggregate channels list: MindName_channels
+            let clist_var = mname + "_channels"
+            push(expanded, ast_let(clist_var, ast_call(ast_ident("list_new"), list_new())))
             // Persist section: open DB for each persist entry
             let pi = 0
             while pi < len(mpersist) {
@@ -2987,7 +3014,7 @@ fn gen_program(program) {
                 pi = pi + 1
             }
             // Security section
-            let msecurity = ed[7]
+            let msecurity = ed[6]
             let si2 = 0
             while si2 < len(msecurity) {
                 let se = msecurity[si2]
@@ -3160,7 +3187,61 @@ fn gen_program(program) {
             push(srs_args, ast_ident(soul_var))
             push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_register_soul"), srs_args)))
           } else {
-            push(expanded, ed)
+            if ast_tag(ed) == AST_SYSTEM {
+                let sysname = ed[1]
+                let sys_minds = ed[2]
+                let sys_bridges = ed[3]
+                let sys_shared = ed[4]
+                let sys_soul = ed[5]
+                let sys_var = sysname + "_sys"
+
+                let sn_args = list_new()
+                push(sn_args, ast_str(sysname))
+                push(expanded, ast_let(sys_var, ast_call(ast_ident("system_new"), sn_args)))
+
+                let mi = 0
+                while mi < len(sys_minds) {
+                    let me = sys_minds[mi]
+                    let label = me[0]
+                    let mtype = me[1]
+                    let sam_args = list_new()
+                    push(sam_args, ast_ident(sys_var))
+                    push(sam_args, ast_str(label))
+                    push(sam_args, ast_ident(mtype + "_nodes"))
+                    push(sam_args, ast_ident(mtype + "_channels"))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("system_add_mind"), sam_args)))
+                    mi = mi + 1
+                }
+
+                let bi = 0
+                while bi < len(sys_bridges) {
+                    let be = sys_bridges[bi]
+                    let sab_args = list_new()
+                    push(sab_args, ast_ident(sys_var))
+                    push(sab_args, ast_str(be[0]))
+                    push(sab_args, ast_str(be[1]))
+                    push(sab_args, ast_str(be[2]))
+                    push(sab_args, ast_int(be[3]))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("system_add_bridge"), sab_args)))
+                    bi = bi + 1
+                }
+
+                if sys_shared != "" {
+                    let ssd_args = list_new()
+                    push(ssd_args, ast_ident(sys_var))
+                    push(ssd_args, ast_str(sys_shared))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("system_set_shared_db"), ssd_args)))
+                }
+
+                if sys_soul != "" {
+                    let ssa_args = list_new()
+                    push(ssa_args, ast_ident(sys_var))
+                    push(ssa_args, ast_ident(sys_soul + "_soul"))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("system_attach_soul"), ssa_args)))
+                }
+            } else {
+                push(expanded, ed)
+            }
           }
         }
         ei = ei + 1

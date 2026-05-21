@@ -1,0 +1,134 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+import "../src/core/system.nova"
+
+// Define a soul with personality and drives
+soul Nova {
+    identity {
+        purpose: "learn and create"
+        nature: "curious and precise"
+    }
+    values {
+        truth: "verify before asserting"
+        growth: "embrace complexity"
+    }
+    drives {
+        curiosity: 90
+        precision: 85
+    }
+    feelings {
+        excitement: 70
+        focus: 80
+    }
+}
+
+// Define specialized minds
+mind Sensory {
+    nodes {
+        Vision: perceiver
+        Audio: perceiver
+    }
+    channels {
+    }
+}
+
+mind Reasoning {
+    nodes {
+        Analyzer: reasoner
+        Memory: rememberer
+    }
+    channels {
+        recall: Analyzer ~> Memory
+    }
+}
+
+mind Emotional {
+    nodes {
+        Core: feeler
+    }
+    channels {
+    }
+}
+
+mind Action {
+    nodes {
+        Output: actor
+    }
+    channels {
+    }
+}
+
+// Compose into a unified system
+system NovaMind {
+    minds {
+        sensory: Sensory
+        reasoning: Reasoning
+        emotional: Emotional
+        action: Action
+    }
+    bridges {
+        see_to_think: sensory.Vision ~> reasoning.Analyzer
+        hear_to_think: sensory.Audio ~> reasoning.Analyzer
+        feel_to_think: emotional.Core ~~> reasoning.Analyzer
+        think_to_act: reasoning.Analyzer ~> action.Output
+        think_to_feel: reasoning.Analyzer ~> emotional.Core
+    }
+    soul: Nova
+}
+
+fn main() {
+    println("=== Nova System Syntax Demo ===")
+    println("")
+
+    // The system was created by the `system` declaration
+    system_describe(NovaMind_sys)
+    println("")
+
+    // Resolve nodes across mind boundaries
+    println("--- Cross-Mind Node Resolution ---")
+    let v = system_resolve_node(NovaMind_sys, "sensory.Vision")
+    print("sensory.Vision: ")
+    if v != 0 { println("found") } else { println("not found") }
+
+    let a = system_resolve_node(NovaMind_sys, "reasoning.Analyzer")
+    print("reasoning.Analyzer: ")
+    if a != 0 { println("found") } else { println("not found") }
+
+    let o = system_resolve_node(NovaMind_sys, "action.Output")
+    print("action.Output: ")
+    if o != 0 { println("found") } else { println("not found") }
+
+    println("")
+
+    // Dynamic expansion
+    println("--- Dynamic System Growth ---")
+    system_set_max_minds(NovaMind_sys, 8)
+    print("Current minds: ")
+    print_int(system_mind_count(NovaMind_sys))
+    println("")
+    print("Can expand: ")
+    print_int(system_can_expand(NovaMind_sys))
+    println("")
+
+    // Spawn a new worker mind
+    let w_nodes = list_new()
+    let w_entry = list_new()
+    push(w_entry, "Worker")
+    push(w_entry, node_new("Worker1", 4))
+    push(w_nodes, w_entry)
+    system_spawn_mind(NovaMind_sys, "worker", w_nodes, list_new())
+    print("After spawn: ")
+    print_int(system_mind_count(NovaMind_sys))
+    println(" minds")
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

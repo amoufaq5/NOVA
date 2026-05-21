@@ -1605,8 +1605,90 @@ fn parse_mind() {
 
     par_expect(TOK_RBRACE)
     let mind_node = ast_mind(mind_name, nodes, channels, scaling, persist)
-    mind_node[7] = security
+    mind_node[6] = security
     return mind_node
+}
+
+fn parse_system() {
+    par_advance()
+    let name_tok = par_expect(TOK_IDENT)
+    let sys_name = name_tok[1]
+    par_expect(TOK_LBRACE)
+
+    let minds = list_new()
+    let bridges = list_new()
+    let shared_db = ""
+    let soul_ref = ""
+
+    while par_peek_type() != TOK_RBRACE {
+        let sec_type = par_peek_type()
+        if sec_type == TOK_SOUL {
+            par_advance()
+            par_expect(TOK_COLON)
+            let sr_tok = par_expect(TOK_IDENT)
+            soul_ref = sr_tok[1]
+        } else {
+            let sec_tok = par_expect(TOK_IDENT)
+            let sec_name = sec_tok[1]
+
+            if sec_name == "minds" {
+                par_expect(TOK_LBRACE)
+                while par_peek_type() != TOK_RBRACE {
+                    let label_tok = par_expect(TOK_IDENT)
+                    par_expect(TOK_COLON)
+                    let type_tok = par_expect(TOK_IDENT)
+                    let me = list_new()
+                    push(me, label_tok[1])
+                    push(me, type_tok[1])
+                    push(minds, me)
+                }
+                par_expect(TOK_RBRACE)
+            }
+
+            if sec_name == "bridges" {
+                par_expect(TOK_LBRACE)
+                while par_peek_type() != TOK_RBRACE {
+                    let bn_tok = par_expect(TOK_IDENT)
+                    par_expect(TOK_COLON)
+                    let src_tok = par_expect(TOK_IDENT)
+                    par_expect(TOK_DOT)
+                    let src_nd = par_expect(TOK_IDENT)
+                    let src_ref = src_tok[1] + "." + src_nd[1]
+                    let flow_tok = par_peek_type()
+                    let ftype = 1
+                    if flow_tok == TOK_FLOW_FWD { ftype = 1; par_advance() }
+                    if flow_tok == TOK_BROADCAST { ftype = 2; par_advance() }
+                    if flow_tok == TOK_FLOW_TENTATIVE { ftype = 3; par_advance() }
+                    if flow_tok == TOK_FLOW_FILTER { ftype = 4; par_advance() }
+                    let dst_tok = par_expect(TOK_IDENT)
+                    par_expect(TOK_DOT)
+                    let dst_nd = par_expect(TOK_IDENT)
+                    let dst_ref = dst_tok[1] + "." + dst_nd[1]
+                    let be = list_new()
+                    push(be, bn_tok[1])
+                    push(be, src_ref)
+                    push(be, dst_ref)
+                    push(be, ftype)
+                    push(bridges, be)
+                }
+                par_expect(TOK_RBRACE)
+            }
+
+            if sec_name == "shared" {
+                par_expect(TOK_LBRACE)
+                while par_peek_type() != TOK_RBRACE {
+                    let sk_tok = par_expect(TOK_IDENT)
+                    par_expect(TOK_COLON)
+                    let sv_tok = par_expect(TOK_STRING)
+                    shared_db = sv_tok[1]
+                }
+                par_expect(TOK_RBRACE)
+            }
+        }
+    }
+
+    par_expect(TOK_RBRACE)
+    return ast_system(sys_name, minds, bridges, shared_db, soul_ref)
 }
 
 fn parse_soul() {
@@ -1940,6 +2022,7 @@ fn parse_stmt_inner() {
     if t == TOK_ENUM { return parse_enum() }
     if t == TOK_MIND { return parse_mind() }
     if t == TOK_SOUL { return parse_soul() }
+    if t == TOK_SYSTEM { return parse_system() }
     if t == TOK_DO { return parse_do_while() }
     if t == TOK_ASM { return parse_asm() }
     if t == TOK_DEFER {

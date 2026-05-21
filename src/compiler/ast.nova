@@ -63,6 +63,7 @@ let AST_TYPE_PATTERN = 58
 let AST_FLOW = 59
 let AST_MIND = 60
 let AST_SOUL = 61
+let AST_SYSTEM = 62
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -549,6 +550,17 @@ fn ast_soul(name, identity, values, drives, feelings, phases, reactions) {
     push(n, feelings)
     push(n, phases)
     push(n, reactions)
+    return n
+}
+
+fn ast_system(name, minds, bridges, shared, soul_name) {
+    let n = list_new()
+    push(n, AST_SYSTEM)
+    push(n, name)
+    push(n, minds)
+    push(n, bridges)
+    push(n, shared)
+    push(n, soul_name)
     return n
 }
 

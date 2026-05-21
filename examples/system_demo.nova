@@ -1,0 +1,124 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+import "../src/runtime/db.nova"
+import "../src/runtime/embed.nova"
+import "../src/core/knowledge.nova"
+import "../src/runtime/crypto.nova"
+import "../src/runtime/validate.nova"
+import "../src/runtime/secure_mem.nova"
+import "../src/core/system.nova"
+
+fn main() {
+    println("=== Nova Multi-Mind System Demo ===")
+    println("")
+
+    // Create a multi-mind system programmatically
+    scheduler_init()
+
+    // -- Perception Mind --
+    let perc_nodes = list_new()
+    let eyes_entry = list_new()
+    push(eyes_entry, "Eyes")
+    push(eyes_entry, node_new("Eyes", 1))
+    push(perc_nodes, eyes_entry)
+
+    let ears_entry = list_new()
+    push(ears_entry, "Ears")
+    push(ears_entry, node_new("Ears", 1))
+    push(perc_nodes, ears_entry)
+
+    // -- Cognition Mind --
+    let cogn_nodes = list_new()
+    let think_entry = list_new()
+    push(think_entry, "Think")
+    push(think_entry, node_new("Think", 4))
+    push(cogn_nodes, think_entry)
+
+    let store_entry = list_new()
+    push(store_entry, "Store")
+    push(store_entry, node_new("Store", 5))
+    push(cogn_nodes, store_entry)
+
+    // -- Emotion Mind --
+    let emo_nodes = list_new()
+    let heart_entry = list_new()
+    push(heart_entry, "Heart")
+    push(heart_entry, node_new("Heart", 3))
+    push(emo_nodes, heart_entry)
+
+    // Build the system
+    let sys = system_new("CognitiveAgent")
+
+    system_add_mind(sys, "perception", perc_nodes, list_new())
+    system_add_mind(sys, "cognition", cogn_nodes, list_new())
+    system_add_mind(sys, "emotion", emo_nodes, list_new())
+
+    // Wire inter-mind bridges
+    system_add_bridge(sys, "see_to_think", "perception.Eyes", "cognition.Think", 1)
+    system_add_bridge(sys, "hear_to_think", "perception.Ears", "cognition.Think", 1)
+    system_add_bridge(sys, "feel_to_think", "emotion.Heart", "cognition.Think", 3)
+    system_add_bridge(sys, "think_to_feel", "cognition.Think", "emotion.Heart", 1)
+
+    // Attach a soul
+    let s = soul_new("Aurora")
+    soul_set_identity(s, "purpose", "understand and assist")
+    soul_set_value(s, "truth", "never fabricate")
+    soul_set_drive(s, "curiosity", 85)
+    soul_set_drive(s, "empathy", 70)
+    soul_set_feeling(s, "warmth", 50)
+    soul_set_feeling(s, "alertness", 60)
+    system_attach_soul(sys, s)
+
+    // Describe the system
+    system_describe(sys)
+    println("")
+
+    // Dynamic expansion
+    println("--- Dynamic Expansion ---")
+    system_set_max_minds(sys, 5)
+    print("Can expand: ")
+    print_int(system_can_expand(sys))
+    println("")
+
+    let w_nodes = list_new()
+    let w_entry = list_new()
+    push(w_entry, "Worker")
+    push(w_entry, node_new("Worker1", 4))
+    push(w_nodes, w_entry)
+    let spawned = system_spawn_mind(sys, "worker", w_nodes, list_new())
+    print("Spawned worker mind: ")
+    print_int(spawned)
+    println("")
+    print("Total minds: ")
+    print_int(system_mind_count(sys))
+    println("")
+    println("")
+
+    // Resolve nodes across minds
+    println("--- Node Resolution ---")
+    let gw = system_resolve_node(sys, "perception.Eyes")
+    print("perception.Eyes resolved: ")
+    print_int(gw != 0)
+    println("")
+
+    let th = system_resolve_node(sys, "cognition.Think")
+    print("cognition.Think resolved: ")
+    print_int(th != 0)
+    println("")
+
+    let ht = system_resolve_node(sys, "emotion.Heart")
+    print("emotion.Heart resolved: ")
+    print_int(ht != 0)
+    println("")
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

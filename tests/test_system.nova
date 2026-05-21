@@ -1,0 +1,317 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+import "../src/runtime/db.nova"
+import "../src/runtime/embed.nova"
+import "../src/core/knowledge.nova"
+import "../src/runtime/crypto.nova"
+import "../src/runtime/validate.nova"
+import "../src/runtime/secure_mem.nova"
+import "../src/core/system.nova"
+
+let tests_passed = 0
+let tests_failed = 0
+
+fn assert_eq(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected ")
+        print_int(expected)
+        print(" got ")
+        print_int(got)
+        println("")
+    }
+}
+
+fn assert_str(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected '")
+        print(expected)
+        print("' got '")
+        print(got)
+        println("'")
+    }
+}
+
+fn test_system_create() {
+    println("--- System Creation ---")
+    let sys = system_new("TestAgent")
+    assert_str("sys_name", system_name(sys), "TestAgent")
+    assert_eq("sys_minds_0", system_mind_count(sys), 0)
+    assert_eq("sys_bridges_0", system_bridge_count(sys), 0)
+    assert_eq("sys_no_soul", system_get_soul(sys), 0)
+    assert_eq("sys_no_db", system_get_shared_db(sys), 0)
+}
+
+fn test_mind_registration() {
+    println("--- Mind Registration ---")
+    let sys = system_new("MultiMind")
+
+    let nodes1 = list_new()
+    let n1 = list_new()
+    push(n1, "Eyes")
+    push(n1, node_new("Eyes", 1))
+    push(nodes1, n1)
+    let n2 = list_new()
+    push(n2, "Ears")
+    push(n2, node_new("Ears", 1))
+    push(nodes1, n2)
+
+    let ch1 = list_new()
+    system_add_mind(sys, "perception", nodes1, ch1)
+    assert_eq("sys_minds_1", system_mind_count(sys), 1)
+
+    let nodes2 = list_new()
+    let n3 = list_new()
+    push(n3, "Think")
+    push(n3, node_new("Think", 4))
+    push(nodes2, n3)
+
+    let ch2 = list_new()
+    system_add_mind(sys, "cognition", nodes2, ch2)
+    assert_eq("sys_minds_2", system_mind_count(sys), 2)
+
+    let m1 = system_get_mind(sys, "perception")
+    assert_eq("sys_find_perc", m1 != 0, 1)
+    let m2 = system_get_mind(sys, "cognition")
+    assert_eq("sys_find_cogn", m2 != 0, 1)
+    let m3 = system_get_mind(sys, "missing")
+    assert_eq("sys_find_miss", m3, 0)
+}
+
+fn test_bridges() {
+    println("--- Bridges ---")
+    let sys = system_new("Bridged")
+
+    system_add_bridge(sys, "sense_to_think", "perception.Eyes", "cognition.Think", 1)
+    system_add_bridge(sys, "feel_to_think", "emotion.Heart", "cognition.Think", 3)
+    assert_eq("sys_bridges_2", system_bridge_count(sys), 2)
+
+    let b1 = system_get_bridge(sys, "sense_to_think")
+    assert_eq("bridge_found", b1 != 0, 1)
+    assert_str("bridge_src", b1[2], "perception.Eyes")
+    assert_str("bridge_dst", b1[3], "cognition.Think")
+    assert_eq("bridge_flow", b1[4], 1)
+
+    let b2 = system_get_bridge(sys, "feel_to_think")
+    assert_eq("bridge_flow2", b2[4], 3)
+
+    let b3 = system_get_bridge(sys, "missing")
+    assert_eq("bridge_miss", b3, 0)
+}
+
+fn test_shared_state() {
+    println("--- Shared State ---")
+    let sys = system_new("SharedTest")
+    assert_eq("no_db_init", system_get_shared_db(sys), 0)
+
+    let db = db_new()
+    db_put(db, "shared_key", "shared_value")
+    system_set_shared_db(sys, db)
+    let sdb = system_get_shared_db(sys)
+    assert_eq("has_db", sdb != 0, 1)
+    assert_str("db_get", db_get(sdb, "shared_key"), "shared_value")
+}
+
+fn test_soul_attachment() {
+    println("--- Soul Attachment ---")
+    let sys = system_new("SoulSystem")
+    assert_eq("no_soul_init", system_get_soul(sys), 0)
+
+    let s = soul_new("TestSoul")
+    system_attach_soul(sys, s)
+    let got = system_get_soul(sys)
+    assert_eq("has_soul", got != 0, 1)
+}
+
+fn test_node_resolution() {
+    println("--- Node Resolution ---")
+    let sys = system_new("ResolveTest")
+
+    let nodes = list_new()
+    let n1 = list_new()
+    push(n1, "Gateway")
+    let gw = node_new("Gateway", 1)
+    push(n1, gw)
+    push(nodes, n1)
+
+    let n2 = list_new()
+    push(n2, "Worker")
+    let wk = node_new("Worker", 4)
+    push(n2, wk)
+    push(nodes, n2)
+
+    system_add_mind(sys, "core", nodes, list_new())
+
+    let resolved = system_resolve_node(sys, "core.Gateway")
+    assert_eq("resolve_gw", resolved != 0, 1)
+
+    let resolved2 = system_resolve_node(sys, "core.Worker")
+    assert_eq("resolve_wk", resolved2 != 0, 1)
+
+    let resolved3 = system_resolve_node(sys, "core.Missing")
+    assert_eq("resolve_miss", resolved3, 0)
+
+    let resolved4 = system_resolve_node(sys, "bad.Node")
+    assert_eq("resolve_bad_mind", resolved4, 0)
+
+    let resolved5 = system_resolve_node(sys, "nodot")
+    assert_eq("resolve_nodot", resolved5, 0)
+}
+
+fn test_dynamic_spawn() {
+    println("--- Dynamic Spawning ---")
+    scheduler_init()
+    let sys = system_new("GrowTest")
+    system_set_max_minds(sys, 3)
+    assert_eq("can_expand_init", system_can_expand(sys), 1)
+
+    let n1 = list_new()
+    let ne1 = list_new()
+    push(ne1, "W1")
+    push(ne1, node_new("W1", 4))
+    push(n1, ne1)
+    let r1 = system_spawn_mind(sys, "worker1", n1, list_new())
+    assert_eq("spawn_1", r1, 1)
+    assert_eq("minds_after_1", system_mind_count(sys), 1)
+
+    let n2 = list_new()
+    let ne2 = list_new()
+    push(ne2, "W2")
+    push(ne2, node_new("W2", 4))
+    push(n2, ne2)
+    system_spawn_mind(sys, "worker2", n2, list_new())
+    assert_eq("minds_after_2", system_mind_count(sys), 2)
+
+    let n3 = list_new()
+    let ne3 = list_new()
+    push(ne3, "W3")
+    push(ne3, node_new("W3", 4))
+    push(n3, ne3)
+    system_spawn_mind(sys, "worker3", n3, list_new())
+    assert_eq("minds_after_3", system_mind_count(sys), 3)
+
+    assert_eq("can_expand_full", system_can_expand(sys), 0)
+    let n4 = list_new()
+    let ne4 = list_new()
+    push(ne4, "W4")
+    push(ne4, node_new("W4", 4))
+    push(n4, ne4)
+    let r4 = system_spawn_mind(sys, "worker4", n4, list_new())
+    assert_eq("spawn_blocked", r4, 0)
+    assert_eq("minds_still_3", system_mind_count(sys), 3)
+}
+
+fn test_system_describe() {
+    println("--- System Description ---")
+    let sys = system_new("DescTest")
+
+    let nodes = list_new()
+    let ne = list_new()
+    push(ne, "Gateway")
+    push(ne, node_new("Gateway", 1))
+    push(nodes, ne)
+    system_add_mind(sys, "core", nodes, list_new())
+    system_add_bridge(sys, "bridge1", "core.Gateway", "ext.Worker", 1)
+
+    let s = soul_new("Desc")
+    system_attach_soul(sys, s)
+
+    system_describe(sys)
+    assert_eq("describe_ok", 1, 1)
+}
+
+fn test_full_integration() {
+    println("--- Full Integration ---")
+    scheduler_init()
+
+    let gw = node_new("Gateway", 1)
+    let proc = node_new("Processor", 4)
+    let out = node_new("Output", 6)
+
+    let sys = system_new("FullAgent")
+
+    let nodes1 = list_new()
+    let ne1 = list_new()
+    push(ne1, "Gateway")
+    push(ne1, gw)
+    push(nodes1, ne1)
+    let ch1 = list_new()
+
+    let nodes2 = list_new()
+    let ne2 = list_new()
+    push(ne2, "Processor")
+    push(ne2, proc)
+    push(nodes2, ne2)
+    let ne3 = list_new()
+    push(ne3, "Output")
+    push(ne3, out)
+    push(nodes2, ne3)
+    let ch2 = list_new()
+
+    system_add_mind(sys, "input", nodes1, ch1)
+    system_add_mind(sys, "process", nodes2, ch2)
+
+    system_add_bridge(sys, "in_to_proc", "input.Gateway", "process.Processor", 1)
+
+    assert_eq("full_minds", system_mind_count(sys), 2)
+    assert_eq("full_bridges", system_bridge_count(sys), 1)
+
+    let s = soul_new("Agent")
+    soul_set_drive(s, "curiosity", 80)
+    soul_set_feeling(s, "alertness", 60)
+    system_attach_soul(sys, s)
+
+    assert_eq("full_soul", system_get_soul(sys) != 0, 1)
+    system_describe(sys)
+}
+
+fn main() {
+    println("=== Multi-Mind System Tests ===")
+    println("")
+
+    test_system_create()
+    println("")
+    test_mind_registration()
+    println("")
+    test_bridges()
+    println("")
+    test_shared_state()
+    println("")
+    test_soul_attachment()
+    println("")
+    test_node_resolution()
+    println("")
+    test_dynamic_spawn()
+    println("")
+    test_system_describe()
+    println("")
+    test_full_integration()
+    println("")
+
+    print("Passed: ")
+    print_int(tests_passed)
+    println("")
+    print("Failed: ")
+    print_int(tests_failed)
+    println("")
+    if tests_failed == 0 {
+        println("All system tests passed!")
+    }
+}
+
+main()
