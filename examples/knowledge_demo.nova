@@ -1,0 +1,235 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+import "../src/runtime/db.nova"
+import "../src/runtime/embed.nova"
+import "../src/core/knowledge.nova"
+import "../src/mind/memory.nova"
+import "../src/mind/academic.nova"
+
+fn main() {
+    println("=== Nova Knowledge & Persistence Demo ===")
+    println("")
+
+    // -----------------------------------------------
+    // Part 1: Key-Value Database
+    // -----------------------------------------------
+    println("--- Persistent Key-Value Store ---")
+
+    let db = db_new()
+    db_put(db, "capital:France", "Paris")
+    db_put(db, "capital:Japan", "Tokyo")
+    db_put(db, "capital:Germany", "Berlin")
+    db_put(db, "capital:UK", "London")
+    db_put(db, "language:France", "French")
+    db_put(db, "language:Japan", "Japanese")
+
+    print("Capitals: ")
+    let caps = db_prefix(db, "capital:")
+    let i = 0
+    while i < len(caps) {
+        if i > 0 { print(", ") }
+        print(caps[i][0])
+        print("=")
+        print(caps[i][1])
+        i = i + 1
+    }
+    println("")
+
+    db[3] = "/tmp/nova_knowledge_demo.novdb"
+    db_save(db)
+    println("Saved to /tmp/nova_knowledge_demo.novdb")
+
+    let db2 = db_open("/tmp/nova_knowledge_demo.novdb")
+    print("Reloaded ")
+    print_int(db_count(db2))
+    println(" entries from disk")
+    println("")
+
+    // -----------------------------------------------
+    // Part 2: Embeddings
+    // -----------------------------------------------
+    println("--- Semantic Embeddings ---")
+
+    let cat_vec = embed_new(6)
+    embed_set(cat_vec, 0, 90)
+    embed_set(cat_vec, 1, 60)
+    embed_set(cat_vec, 2, 30)
+    embed_set(cat_vec, 3, 10)
+    embed_set(cat_vec, 4, 80)
+    embed_set(cat_vec, 5, 20)
+
+    let dog_vec = embed_new(6)
+    embed_set(dog_vec, 0, 85)
+    embed_set(dog_vec, 1, 70)
+    embed_set(dog_vec, 2, 50)
+    embed_set(dog_vec, 3, 20)
+    embed_set(dog_vec, 4, 75)
+    embed_set(dog_vec, 5, 30)
+
+    let car_vec = embed_new(6)
+    embed_set(car_vec, 0, 10)
+    embed_set(car_vec, 1, 5)
+    embed_set(car_vec, 2, 90)
+    embed_set(car_vec, 3, 80)
+    embed_set(car_vec, 4, 20)
+    embed_set(car_vec, 5, 70)
+
+    print("cat: ")
+    println(embed_to_str(cat_vec))
+    print("dog: ")
+    println(embed_to_str(dog_vec))
+    print("car: ")
+    println(embed_to_str(car_vec))
+
+    print("cat-dog cosine similarity: ")
+    print_int(embed_cosine(cat_vec, dog_vec))
+    println("")
+    print("cat-car cosine similarity: ")
+    print_int(embed_cosine(cat_vec, car_vec))
+    println("")
+    print("cat-dog distance: ")
+    print_int(embed_distance(cat_vec, dog_vec))
+    println("")
+    print("cat-car distance: ")
+    print_int(embed_distance(cat_vec, car_vec))
+    println("")
+    println("")
+
+    // -----------------------------------------------
+    // Part 3: Knowledge Graph
+    // -----------------------------------------------
+    println("--- Knowledge Graph ---")
+
+    let kg = kg_new()
+    kg_add_entity(kg, "cat", cat_vec)
+    kg_add_entity(kg, "dog", dog_vec)
+    kg_add_entity(kg, "car", car_vec)
+    kg_add_entity(kg, "animal", 0)
+    kg_add_entity(kg, "vehicle", 0)
+
+    kg_add_relation(kg, "cat", "is_a", "animal", 95)
+    kg_add_relation(kg, "dog", "is_a", "animal", 95)
+    kg_add_relation(kg, "car", "is_a", "vehicle", 95)
+    kg_add_relation(kg, "cat", "similar_to", "dog", 80)
+    kg_add_relation(kg, "dog", "similar_to", "cat", 80)
+    kg_add_relation(kg, "animal", "different_from", "vehicle", 90)
+
+    kg_describe(kg)
+
+    print("cat is_a: ")
+    let cat_types = kg_query(kg, "cat", "is_a")
+    let ci = 0
+    while ci < len(cat_types) {
+        print(cat_types[ci])
+        print(" ")
+        ci = ci + 1
+    }
+    println("")
+
+    println("Nearest to cat (by embedding):")
+    let near = kg_nearest(kg, cat_vec, 3)
+    let ni = 0
+    while ni < len(near) {
+        print("  ")
+        print(near[ni][0])
+        print(" (similarity=")
+        print_int(near[ni][1])
+        println(")")
+        ni = ni + 1
+    }
+
+    print("Path from cat to vehicle: ")
+    let path = kg_path(kg, "cat", "vehicle")
+    let pi = 0
+    while pi < len(path) {
+        if pi > 0 { print(" -> ") }
+        print(path[pi])
+        pi = pi + 1
+    }
+    println("")
+
+    // Persist KG
+    let kdb = db_new()
+    kg_save(kg, kdb)
+    kdb[3] = "/tmp/nova_kg_demo.novdb"
+    db_save(kdb)
+    print("Knowledge graph saved (")
+    print_int(db_count(kdb))
+    println(" db entries)")
+    println("")
+
+    // -----------------------------------------------
+    // Part 4: Memory Persistence
+    // -----------------------------------------------
+    println("--- Memory Persistence ---")
+
+    memory_init()
+    let m1 = moment_new("learned about cats", "user", 70, 50, 0, 80)
+    let m2 = moment_new("discussed cars", "user", 50, 30, 0, 40)
+    let m3 = moment_new("happy conversation", "user", 90, 60, 0, 70)
+    memory_store(m1, 80)
+    memory_store(m2, 50)
+    memory_store(m3, 90)
+
+    let mdb = db_new()
+    memory_save(mdb)
+    mdb[3] = "/tmp/nova_memory_demo.novdb"
+    db_save(mdb)
+
+    let stats = memory_stats()
+    print("Saved ")
+    print_int(stats[0])
+    print(" memories (avg importance=")
+    print_int(stats[2])
+    println(")")
+
+    memory_load(mdb)
+    let stats2 = memory_stats()
+    print("Reloaded ")
+    print_int(stats2[0])
+    println(" memories from disk")
+    println("")
+
+    // -----------------------------------------------
+    // Part 5: Academic Persistence
+    // -----------------------------------------------
+    println("--- Academic Persistence ---")
+
+    academic_init()
+    academic_add_axiom("cat", "is_a", "animal")
+    academic_add_axiom("dog", "is_a", "animal")
+    academic_add_axiom("animal", "is_a", "living_thing")
+    academic_add_rule("is_a", "related_to", 80)
+    academic_store("cat", "has", "fur", "observation", 90)
+
+    let adb = db_new()
+    academic_save(adb)
+    adb[3] = "/tmp/nova_academic_demo.novdb"
+    db_save(adb)
+
+    print("Saved academic knowledge (")
+    print_int(db_count(adb))
+    println(" db entries)")
+
+    academic_load(adb)
+    let result = academic_query("cat", "is_a")
+    print("After reload - cat is_a: ")
+    let ri = 0
+    while ri < len(result) {
+        print(result[ri])
+        print(" ")
+        ri = ri + 1
+    }
+    println("")
+    println("")
+
+    println("=== Demo Complete ===")
+}
+
+main()

@@ -526,13 +526,14 @@ let FLOW_TENTATIVE = 5
 let FLOW_RESONATE = 6
 let FLOW_FILTER = 7
 
-fn ast_mind(name, nodes, channels, scaling) {
+fn ast_mind(name, nodes, channels, scaling, persist) {
     let n = list_new()
     push(n, AST_MIND)
     push(n, name)
     push(n, nodes)
     push(n, channels)
     push(n, scaling)
+    push(n, persist)
     return n
 }
 

@@ -1,0 +1,326 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+import "../src/runtime/db.nova"
+import "../src/runtime/embed.nova"
+import "../src/core/knowledge.nova"
+import "../src/mind/memory.nova"
+import "../src/mind/academic.nova"
+
+let tests_passed = 0
+let tests_failed = 0
+
+fn assert_eq(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected ")
+        print_int(expected)
+        print(" got ")
+        print_int(got)
+        println("")
+    }
+}
+
+fn assert_str(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected '")
+        print(expected)
+        print("' got '")
+        print(got)
+        println("'")
+    }
+}
+
+fn main() {
+    println("=== Knowledge Persistence & Embedding Tests ===")
+    println("")
+
+    // ---------------------------------------------------
+    // DB Tests
+    // ---------------------------------------------------
+    println("--- Database ---")
+
+    let d = db_new()
+    db_put(d, "name", "Nova")
+    db_put(d, "version", "1.0")
+    assert_str("db_get", db_get(d, "name"), "Nova")
+    assert_eq("db_count", db_count(d), 2)
+    assert_eq("db_has_yes", db_has(d, "name"), 1)
+    assert_eq("db_has_no", db_has(d, "missing"), 0)
+
+    // Update existing key
+    db_put(d, "version", "2.0")
+    assert_str("db_update", db_get(d, "version"), "2.0")
+    assert_eq("db_count_after_update", db_count(d), 2)
+
+    // Delete
+    db_delete(d, "version")
+    assert_eq("db_count_after_delete", db_count(d), 1)
+    assert_eq("db_has_deleted", db_has(d, "version"), 0)
+
+    // Integer helpers
+    db_put_int(d, "count", 42)
+    assert_eq("db_get_int", db_get_int(d, "count"), 42)
+
+    // Prefix query
+    db_put(d, "capital:France", "Paris")
+    db_put(d, "capital:Japan", "Tokyo")
+    db_put(d, "capital:UK", "London")
+    let caps = db_prefix(d, "capital:")
+    assert_eq("db_prefix_count", len(caps), 3)
+
+    // File persistence
+    d[3] = "/tmp/nova_test_db.novdb"
+    let save_ok = db_save(d)
+    assert_eq("db_save", save_ok, 1)
+
+    let d2 = db_open("/tmp/nova_test_db.novdb")
+    assert_str("db_load_name", db_get(d2, "name"), "Nova")
+    assert_str("db_load_capital", db_get(d2, "capital:France"), "Paris")
+    assert_eq("db_load_count", db_count(d2), 5)
+
+    // Clear
+    db_clear(d)
+    assert_eq("db_clear", db_count(d), 0)
+
+    println("")
+
+    // ---------------------------------------------------
+    // Embedding Tests
+    // ---------------------------------------------------
+    println("--- Embeddings ---")
+
+    let cat = embed_new(4)
+    embed_set(cat, 0, 90)
+    embed_set(cat, 1, 60)
+    embed_set(cat, 2, 30)
+    embed_set(cat, 3, 10)
+    assert_eq("embed_dims", embed_dims(cat), 4)
+    assert_eq("embed_get", embed_get(cat, 0), 90)
+
+    let dog = embed_new(4)
+    embed_set(dog, 0, 85)
+    embed_set(dog, 1, 70)
+    embed_set(dog, 2, 50)
+    embed_set(dog, 3, 20)
+
+    // Dot product
+    let dot = embed_dot(cat, dog)
+    assert_eq("embed_dot", dot, 90*85 + 60*70 + 30*50 + 10*20)
+
+    // Distance (Manhattan)
+    let dist = embed_distance(cat, dog)
+    assert_eq("embed_distance", dist, 5 + 10 + 20 + 10)
+
+    // Cosine similarity (high for similar vectors)
+    let cos = embed_cosine(cat, dog)
+    assert_eq("embed_cosine_high", cos > 90, 1)
+
+    // Very different vector
+    let fish = embed_new(4)
+    embed_set(fish, 0, 80)
+    embed_set(fish, 1, 10)
+    embed_set(fish, 2, 5)
+    embed_set(fish, 3, 95)
+    let cos2 = embed_cosine(cat, fish)
+    assert_eq("embed_cosine_lower", cos2 < cos, 1)
+
+    // Add/Sub
+    let sum = embed_add(cat, dog)
+    assert_eq("embed_add", embed_get(sum, 0), 175)
+    let diff = embed_sub(cat, dog)
+    assert_eq("embed_sub", embed_get(diff, 0), 5)
+
+    // Scale
+    let scaled = embed_scale(cat, 50)
+    assert_eq("embed_scale", embed_get(scaled, 0), 45)
+
+    // Max/Min/Avg
+    assert_eq("embed_max", embed_max_component(cat), 90)
+    assert_eq("embed_min", embed_min_component(cat), 10)
+    assert_eq("embed_avg", embed_avg(cat), 47)
+
+    // Lerp (interpolation)
+    let mid = embed_lerp(cat, dog, 50)
+    assert_eq("embed_lerp", embed_get(mid, 1), 65)
+
+    // Centroid
+    let vecs = list_new()
+    push(vecs, cat)
+    push(vecs, dog)
+    let center = embed_centroid(vecs)
+    assert_eq("embed_centroid", embed_get(center, 0), 87)
+
+    // Serialize/Deserialize
+    let ser = embed_serialize(cat)
+    let deser = embed_deserialize(ser)
+    assert_eq("embed_ser_dims", embed_dims(deser), 4)
+    assert_eq("embed_ser_val", embed_get(deser, 0), 90)
+    assert_eq("embed_ser_val2", embed_get(deser, 2), 30)
+
+    // from_list
+    let vals = list_new()
+    push(vals, 10)
+    push(vals, 20)
+    push(vals, 30)
+    let from_list = embed_from_list(vals)
+    assert_eq("embed_from_list", embed_get(from_list, 1), 20)
+
+    println("")
+
+    // ---------------------------------------------------
+    // Knowledge Graph Tests
+    // ---------------------------------------------------
+    println("--- Knowledge Graph ---")
+
+    let kg = kg_new()
+    kg_add_entity(kg, "cat", cat)
+    kg_add_entity(kg, "dog", dog)
+    kg_add_entity(kg, "fish", fish)
+    assert_eq("kg_count", kg_entity_count(kg), 3)
+
+    // Relations
+    kg_add_relation(kg, "cat", "is_a", "animal", 95)
+    kg_add_relation(kg, "dog", "is_a", "animal", 95)
+    kg_add_relation(kg, "fish", "is_a", "animal", 90)
+    kg_add_relation(kg, "cat", "similar_to", "dog", 80)
+    kg_add_relation(kg, "dog", "similar_to", "cat", 80)
+    assert_eq("kg_rel_count", kg_relation_count(kg), 5)
+
+    // Query
+    let animals = kg_query(kg, "cat", "is_a")
+    assert_eq("kg_query_count", len(animals), 1)
+    assert_str("kg_query_val", animals[0], "animal")
+
+    // Has relation
+    assert_eq("kg_has_rel", kg_has_relation(kg, "cat", "is_a", "animal"), 1)
+    assert_eq("kg_no_rel", kg_has_relation(kg, "cat", "is_a", "plant"), 0)
+
+    // Nearest neighbor (by embedding)
+    let near = kg_nearest(kg, cat, 2)
+    assert_eq("kg_nearest_count", len(near), 2)
+    assert_str("kg_nearest_first", near[0][0], "cat")
+
+    // Similarity
+    let sim = kg_similarity(kg, "cat", "dog")
+    assert_eq("kg_sim_high", sim > 90, 1)
+
+    // Neighbors (graph adjacency)
+    let nbrs = kg_neighbors(kg, "cat")
+    assert_eq("kg_neighbors", len(nbrs), 2)
+
+    // Path finding
+    kg_add_relation(kg, "animal", "lives_in", "earth", 100)
+    kg_add_entity(kg, "animal", 0)
+    kg_add_entity(kg, "earth", 0)
+    let path = kg_path(kg, "cat", "earth")
+    assert_eq("kg_path_len", len(path), 3)
+    assert_str("kg_path_start", path[0], "cat")
+    assert_str("kg_path_end", path[len(path) - 1], "earth")
+
+    // Remove relation
+    kg_remove_relation(kg, "cat", "similar_to", "dog")
+    assert_eq("kg_removed", kg_has_relation(kg, "cat", "similar_to", "dog"), 0)
+
+    // Weighted query
+    let weighted = kg_query_weighted(kg, "dog", "is_a")
+    assert_eq("kg_weighted_count", len(weighted), 1)
+    assert_eq("kg_weighted_w", weighted[0][1], 95)
+
+    // Entity attributes
+    kg_set_attr(kg, "cat", "color", "orange")
+    assert_str("kg_attr", kg_get_attr(kg, "cat", "color"), "orange")
+
+    // Reverse query
+    let rev = kg_get_reverse(kg, "animal")
+    assert_eq("kg_reverse", len(rev) >= 2, 1)
+
+    println("")
+
+    // ---------------------------------------------------
+    // KG Persistence via DB
+    // ---------------------------------------------------
+    println("--- KG Persistence ---")
+
+    let kdb = db_new()
+    kg_save(kg, kdb)
+    assert_eq("kg_save_entries", db_count(kdb) > 0, 1)
+
+    let kg2 = kg_new()
+    kg_load(kg2, kdb)
+    assert_eq("kg_load_ents", kg_entity_count(kg2), kg_entity_count(kg))
+    assert_eq("kg_load_has", kg_has_relation(kg2, "dog", "is_a", "animal"), 1)
+    let loaded_embed = kg_get_embedding(kg2, "cat")
+    assert_eq("kg_load_embed", embed_get(loaded_embed, 0), 90)
+
+    println("")
+
+    // ---------------------------------------------------
+    // Memory Persistence
+    // ---------------------------------------------------
+    println("--- Memory Persistence ---")
+
+    memory_init()
+    let m1 = moment_new("hello", "user", 70, 50, 0, 60)
+    let m2 = moment_new("goodbye", "user", 30, 40, 0, 50)
+    memory_store(m1, 80)
+    memory_store(m2, 60)
+
+    let mdb = db_new()
+    memory_save(mdb)
+    assert_eq("mem_save_entries", db_count(mdb) > 0, 1)
+
+    memory_load(mdb)
+    let stats = memory_stats()
+    assert_eq("mem_load_count", stats[0], 2)
+
+    println("")
+
+    // ---------------------------------------------------
+    // Academic Persistence
+    // ---------------------------------------------------
+    println("--- Academic Persistence ---")
+
+    academic_init()
+    academic_add_axiom("Paris", "is_capital_of", "France")
+    academic_add_axiom("Tokyo", "is_capital_of", "Japan")
+    academic_add_rule("is_capital_of", "is_city_in", 90)
+    academic_store("Berlin", "is_capital_of", "Germany", "learned", 85)
+
+    let adb = db_new()
+    academic_save(adb)
+    assert_eq("acad_save_entries", db_count(adb) > 0, 1)
+
+    academic_load(adb)
+    let paris = academic_query("Paris", "is_capital_of")
+    assert_eq("acad_load_query", len(paris) > 0, 1)
+
+    println("")
+
+    // Results
+    print("Passed: ")
+    print_int(tests_passed)
+    println("")
+    print("Failed: ")
+    print_int(tests_failed)
+    println("")
+    if tests_failed == 0 {
+        println("All knowledge, persistence & embedding tests passed!")
+    }
+}
+
+main()

@@ -482,3 +482,81 @@ fn academic_merge_from(other_axioms) {
         i = i + 1
     }
 }
+
+// ──────────────────────────────────────────────
+// Persistence: save/load to db
+// ──────────────────────────────────────────────
+
+fn academic_save(d) {
+    let ax = academic_axioms
+    db_put_int(d, "_acad_axiom_count", len(ax))
+    let i = 0
+    while i < len(ax) {
+        let a = ax[i]
+        let prefix = "_acad_ax_" + int_to_str(i)
+        db_put(d, prefix + "_s", a[1])
+        db_put(d, prefix + "_r", a[2])
+        db_put(d, prefix + "_o", a[3])
+        i = i + 1
+    }
+    let rules = academic_rules
+    db_put_int(d, "_acad_rule_count", len(rules))
+    let ri = 0
+    while ri < len(rules) {
+        let r = rules[ri]
+        let rp = "_acad_rl_" + int_to_str(ri)
+        db_put(d, rp + "_if", r[1])
+        db_put(d, rp + "_then", r[2])
+        db_put_int(d, rp + "_conf", r[3])
+        ri = ri + 1
+    }
+    let kn = academic_knowledge
+    db_put_int(d, "_acad_know_count", len(kn))
+    let ki = 0
+    while ki < len(kn) {
+        let k = kn[ki]
+        let kp = "_acad_kn_" + int_to_str(ki)
+        db_put(d, kp + "_s", k[1])
+        db_put(d, kp + "_r", k[2])
+        db_put(d, kp + "_o", k[3])
+        db_put(d, kp + "_src", k[4])
+        db_put_int(d, kp + "_conf", k[5])
+        ki = ki + 1
+    }
+}
+
+fn academic_load(d) {
+    academic_init()
+    let ac = db_get_int(d, "_acad_axiom_count")
+    let i = 0
+    while i < ac {
+        let prefix = "_acad_ax_" + int_to_str(i)
+        let s = db_get(d, prefix + "_s")
+        let r = db_get(d, prefix + "_r")
+        let o = db_get(d, prefix + "_o")
+        academic_add_axiom(s, r, o)
+        i = i + 1
+    }
+    let rc = db_get_int(d, "_acad_rule_count")
+    let ri = 0
+    while ri < rc {
+        let rp = "_acad_rl_" + int_to_str(ri)
+        let if_rel = db_get(d, rp + "_if")
+        let then_rel = db_get(d, rp + "_then")
+        let conf = db_get_int(d, rp + "_conf")
+        academic_add_rule(if_rel, then_rel, conf)
+        ri = ri + 1
+    }
+    let kc = db_get_int(d, "_acad_know_count")
+    let ki = 0
+    while ki < kc {
+        let kp = "_acad_kn_" + int_to_str(ki)
+        let s = db_get(d, kp + "_s")
+        let r = db_get(d, kp + "_r")
+        let o = db_get(d, kp + "_o")
+        let src = db_get(d, kp + "_src")
+        let conf = db_get_int(d, kp + "_conf")
+        academic_store(s, r, o, src, conf)
+        ki = ki + 1
+    }
+}

@@ -1,0 +1,212 @@
+// Nova Runtime: Persistent Key-Value Database
+// File-backed storage using simple line-based format.
+// Each entry stored as "key=value\n" in the backing file.
+// Supports prefix queries, bulk operations, and auto-save.
+
+let DB_TAG = 250
+let DB_KEYS = 1
+let DB_VALS = 2
+let DB_PATH = 3
+let DB_DIRTY = 4
+let DB_COUNT = 5
+let DB_AUTOSAVE = 6
+let DB_SAVE_INTERVAL = 7
+let DB_OPS_SINCE_SAVE = 8
+
+fn db_new() {
+    let d = list_new()
+    push(d, DB_TAG)
+    push(d, list_new())
+    push(d, list_new())
+    push(d, "")
+    push(d, 0)
+    push(d, 0)
+    push(d, 0)
+    push(d, 0)
+    push(d, 0)
+    return d
+}
+
+fn db_open(filepath) {
+    let d = db_new()
+    d[DB_PATH] = filepath
+    let content = read_file(filepath)
+    if content != 0 {
+        let lines = split(content, "\n")
+        let i = 0
+        while i < len(lines) {
+            let line = lines[i]
+            if len(line) > 0 {
+                let eq_pos = str_find(line, "=")
+                if eq_pos > 0 {
+                    let key = substr(line, 0, eq_pos)
+                    let val = substr(line, eq_pos + 1, len(line))
+                    push(d[DB_KEYS], key)
+                    push(d[DB_VALS], val)
+                    d[DB_COUNT] = d[DB_COUNT] + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    return d
+}
+
+fn _db_find(d, key) {
+    let keys = d[DB_KEYS]
+    let i = 0
+    while i < len(keys) {
+        if keys[i] == key { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn db_put(d, key, value) {
+    let idx = _db_find(d, key)
+    if idx == -1 {
+        push(d[DB_KEYS], key)
+        push(d[DB_VALS], value)
+        d[DB_COUNT] = d[DB_COUNT] + 1
+    } else {
+        d[DB_VALS][idx] = value
+    }
+    d[DB_DIRTY] = 1
+    d[DB_OPS_SINCE_SAVE] = d[DB_OPS_SINCE_SAVE] + 1
+    if d[DB_AUTOSAVE] == 1 {
+        if d[DB_OPS_SINCE_SAVE] >= d[DB_SAVE_INTERVAL] {
+            db_save(d)
+        }
+    }
+}
+
+fn db_get(d, key) {
+    let idx = _db_find(d, key)
+    if idx == -1 { return 0 }
+    return d[DB_VALS][idx]
+}
+
+fn db_has(d, key) {
+    let idx = _db_find(d, key)
+    if idx == -1 { return 0 }
+    return 1
+}
+
+fn db_delete(d, key) {
+    let idx = _db_find(d, key)
+    if idx == -1 { return 0 }
+    let keys = d[DB_KEYS]
+    let vals = d[DB_VALS]
+    let last = len(keys) - 1
+    keys[idx] = keys[last]
+    vals[idx] = vals[last]
+    pop(keys)
+    pop(vals)
+    d[DB_COUNT] = d[DB_COUNT] - 1
+    d[DB_DIRTY] = 1
+    return 1
+}
+
+fn db_count(d) {
+    return d[DB_COUNT]
+}
+
+fn db_keys(d) {
+    let result = list_new()
+    let keys = d[DB_KEYS]
+    let i = 0
+    while i < len(keys) {
+        push(result, keys[i])
+        i = i + 1
+    }
+    return result
+}
+
+fn db_prefix(d, prefix) {
+    let result = list_new()
+    let keys = d[DB_KEYS]
+    let vals = d[DB_VALS]
+    let i = 0
+    while i < len(keys) {
+        if starts_with(keys[i], prefix) == 1 {
+            let entry = list_new()
+            push(entry, keys[i])
+            push(entry, vals[i])
+            push(result, entry)
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn db_save(d) {
+    let path = d[DB_PATH]
+    if path == "" { return 0 }
+    let keys = d[DB_KEYS]
+    let vals = d[DB_VALS]
+    let content = ""
+    let i = 0
+    while i < len(keys) {
+        content = content + keys[i] + "=" + vals[i] + "\n"
+        i = i + 1
+    }
+    let ok = write_file(path, content)
+    if ok == 1 {
+        d[DB_DIRTY] = 0
+        d[DB_OPS_SINCE_SAVE] = 0
+    }
+    return ok
+}
+
+fn db_close(d) {
+    if d[DB_DIRTY] == 1 {
+        db_save(d)
+    }
+}
+
+fn db_is_dirty(d) {
+    return d[DB_DIRTY]
+}
+
+fn db_set_autosave(d, interval) {
+    d[DB_AUTOSAVE] = 1
+    d[DB_SAVE_INTERVAL] = interval
+}
+
+fn db_clear(d) {
+    d[DB_KEYS] = list_new()
+    d[DB_VALS] = list_new()
+    d[DB_COUNT] = 0
+    d[DB_DIRTY] = 1
+}
+
+fn db_put_int(d, key, value) {
+    db_put(d, key, int_to_str(value))
+}
+
+fn db_get_int(d, key) {
+    let v = db_get(d, key)
+    if v == 0 { return 0 }
+    return str_to_int(v)
+}
+
+fn db_merge(dst, src) {
+    let keys = src[DB_KEYS]
+    let vals = src[DB_VALS]
+    let i = 0
+    while i < len(keys) {
+        db_put(dst, keys[i], vals[i])
+        i = i + 1
+    }
+}
+
+fn db_describe(d) {
+    print("DB(entries=")
+    print_int(db_count(d))
+    print(", path=")
+    print(d[DB_PATH])
+    if d[DB_DIRTY] == 1 {
+        print(", dirty")
+    }
+    println(")")
+}

@@ -462,3 +462,43 @@ fn memory_stats() {
     push(stats, avg_imp)
     return stats
 }
+
+// ──────────────────────────────────────────────
+// Persistence: save/load to db
+// ──────────────────────────────────────────────
+
+fn memory_save(d) {
+    db_put_int(d, "_mem_count", memory_count)
+    let i = 0
+    while i < memory_count {
+        let ep = memory_episodes[i]
+        let m = episode_moment(ep)
+        let prefix = "_mem_" + int_to_str(i)
+        db_put(d, prefix + "_what", moment_what(m))
+        db_put(d, prefix + "_who", moment_who(m))
+        db_put_int(d, prefix + "_val", moment_valence(m))
+        db_put_int(d, prefix + "_aro", moment_arousal(m))
+        db_put_int(d, prefix + "_sal", moment_salience(m))
+        db_put_int(d, prefix + "_imp", episode_importance(ep))
+        db_put_int(d, prefix + "_acc", episode_access_count(ep))
+        i = i + 1
+    }
+}
+
+fn memory_load(d) {
+    memory_init()
+    let count = db_get_int(d, "_mem_count")
+    let i = 0
+    while i < count {
+        let prefix = "_mem_" + int_to_str(i)
+        let what = db_get(d, prefix + "_what")
+        let who = db_get(d, prefix + "_who")
+        let val = db_get_int(d, prefix + "_val")
+        let aro = db_get_int(d, prefix + "_aro")
+        let sal = db_get_int(d, prefix + "_sal")
+        let m = moment_new(what, who, val, aro, 0, sal)
+        let imp = db_get_int(d, prefix + "_imp")
+        memory_store(m, imp)
+        i = i + 1
+    }
+}

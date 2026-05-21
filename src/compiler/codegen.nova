@@ -2845,6 +2845,7 @@ fn gen_program(program) {
             let mnodes = ed[2]
             let mchannels = ed[3]
             let mscaling = ed[4]
+            let mpersist = ed[5]
             // scheduler_ensure_init()
             let si_args = list_new()
             push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_ensure_init"), si_args)))
@@ -2967,6 +2968,23 @@ fn gen_program(program) {
                 push(sac_args, ast_ident(ch_var))
                 push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_add_channel"), sac_args)))
                 ci = ci + 1
+            }
+            // Persist section: open DB for each persist entry
+            let pi = 0
+            while pi < len(mpersist) {
+                let pe = mpersist[pi]
+                let pe_node = pe[0]
+                let pe_path = pe[1]
+                let pe_interval = pe[2]
+                let db_var = mname + "_db_" + pe_node
+                let dbo_args = list_new()
+                push(dbo_args, ast_str(pe_path))
+                push(expanded, ast_let(db_var, ast_call(ast_ident("db_open"), dbo_args)))
+                let das_args = list_new()
+                push(das_args, ast_ident(db_var))
+                push(das_args, ast_int(pe_interval))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("db_set_autosave"), das_args)))
+                pi = pi + 1
             }
         } else {
           if ast_tag(ed) == AST_SOUL {

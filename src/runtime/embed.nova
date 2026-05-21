@@ -1,0 +1,292 @@
+// Nova Runtime: Integer Vector Embeddings
+// Fixed-dimension integer vectors for semantic representation.
+// All values scaled 0-100. Operations use integer math only.
+
+let EMBED_TAG = 260
+let EMBED_DIMS = 1
+let EMBED_DATA = 2
+
+fn embed_new(dims) {
+    let e = list_new()
+    push(e, EMBED_TAG)
+    push(e, dims)
+    let data = list_new()
+    let i = 0
+    while i < dims {
+        push(data, 0)
+        i = i + 1
+    }
+    push(e, data)
+    return e
+}
+
+fn embed_dims(e) {
+    return e[EMBED_DIMS]
+}
+
+fn embed_set(e, idx, val) {
+    e[EMBED_DATA][idx] = val
+}
+
+fn embed_get(e, idx) {
+    return e[EMBED_DATA][idx]
+}
+
+fn embed_from_list(values) {
+    let e = embed_new(len(values))
+    let i = 0
+    while i < len(values) {
+        embed_set(e, i, values[i])
+        i = i + 1
+    }
+    return e
+}
+
+fn embed_dot(a, b) {
+    let dims = embed_dims(a)
+    let sum = 0
+    let i = 0
+    while i < dims {
+        sum = sum + embed_get(a, i) * embed_get(b, i)
+        i = i + 1
+    }
+    return sum
+}
+
+fn embed_magnitude_sq(e) {
+    return embed_dot(e, e)
+}
+
+fn _isqrt(n) {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    let x = n
+    let y = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+fn embed_magnitude(e) {
+    return _isqrt(embed_magnitude_sq(e))
+}
+
+fn embed_cosine(a, b) {
+    let dot = embed_dot(a, b)
+    let mag_a = embed_magnitude(a)
+    let mag_b = embed_magnitude(b)
+    if mag_a == 0 { return 0 }
+    if mag_b == 0 { return 0 }
+    let result = (dot * 100) / (mag_a * mag_b)
+    if result > 100 { result = 100 }
+    if result < 0 { result = 0 }
+    return result
+}
+
+fn embed_distance(a, b) {
+    let dims = embed_dims(a)
+    let sum = 0
+    let i = 0
+    while i < dims {
+        let diff = embed_get(a, i) - embed_get(b, i)
+        if diff < 0 { diff = 0 - diff }
+        sum = sum + diff
+        i = i + 1
+    }
+    return sum
+}
+
+fn embed_euclidean_sq(a, b) {
+    let dims = embed_dims(a)
+    let sum = 0
+    let i = 0
+    while i < dims {
+        let diff = embed_get(a, i) - embed_get(b, i)
+        sum = sum + diff * diff
+        i = i + 1
+    }
+    return sum
+}
+
+fn embed_euclidean(a, b) {
+    return _isqrt(embed_euclidean_sq(a, b))
+}
+
+fn embed_add(a, b) {
+    let dims = embed_dims(a)
+    let r = embed_new(dims)
+    let i = 0
+    while i < dims {
+        embed_set(r, i, embed_get(a, i) + embed_get(b, i))
+        i = i + 1
+    }
+    return r
+}
+
+fn embed_sub(a, b) {
+    let dims = embed_dims(a)
+    let r = embed_new(dims)
+    let i = 0
+    while i < dims {
+        embed_set(r, i, embed_get(a, i) - embed_get(b, i))
+        i = i + 1
+    }
+    return r
+}
+
+fn embed_scale(e, factor) {
+    let dims = embed_dims(e)
+    let r = embed_new(dims)
+    let i = 0
+    while i < dims {
+        embed_set(r, i, embed_get(e, i) * factor / 100)
+        i = i + 1
+    }
+    return r
+}
+
+fn embed_normalize(e) {
+    let mag = embed_magnitude(e)
+    if mag == 0 { return embed_new(embed_dims(e)) }
+    let dims = embed_dims(e)
+    let r = embed_new(dims)
+    let i = 0
+    while i < dims {
+        embed_set(r, i, embed_get(e, i) * 100 / mag)
+        i = i + 1
+    }
+    return r
+}
+
+fn embed_clamp(e, lo, hi) {
+    let dims = embed_dims(e)
+    let r = embed_new(dims)
+    let i = 0
+    while i < dims {
+        let v = embed_get(e, i)
+        if v < lo { v = lo }
+        if v > hi { v = hi }
+        embed_set(r, i, v)
+        i = i + 1
+    }
+    return r
+}
+
+fn embed_max_component(e) {
+    let dims = embed_dims(e)
+    let mx = embed_get(e, 0)
+    let i = 1
+    while i < dims {
+        let v = embed_get(e, i)
+        if v > mx { mx = v }
+        i = i + 1
+    }
+    return mx
+}
+
+fn embed_min_component(e) {
+    let dims = embed_dims(e)
+    let mn = embed_get(e, 0)
+    let i = 1
+    while i < dims {
+        let v = embed_get(e, i)
+        if v < mn { mn = v }
+        i = i + 1
+    }
+    return mn
+}
+
+fn embed_avg(e) {
+    let dims = embed_dims(e)
+    let sum = 0
+    let i = 0
+    while i < dims {
+        sum = sum + embed_get(e, i)
+        i = i + 1
+    }
+    return sum / dims
+}
+
+fn embed_lerp(a, b, t) {
+    let dims = embed_dims(a)
+    let r = embed_new(dims)
+    let i = 0
+    while i < dims {
+        let va = embed_get(a, i)
+        let vb = embed_get(b, i)
+        embed_set(r, i, va + (vb - va) * t / 100)
+        i = i + 1
+    }
+    return r
+}
+
+fn embed_centroid(vectors) {
+    if len(vectors) == 0 { return 0 }
+    let dims = embed_dims(vectors[0])
+    let r = embed_new(dims)
+    let i = 0
+    while i < len(vectors) {
+        let j = 0
+        while j < dims {
+            embed_set(r, j, embed_get(r, j) + embed_get(vectors[i], j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let n = len(vectors)
+    let k = 0
+    while k < dims {
+        embed_set(r, k, embed_get(r, k) / n)
+        k = k + 1
+    }
+    return r
+}
+
+fn embed_to_str(e) {
+    let dims = embed_dims(e)
+    let s = "["
+    let i = 0
+    while i < dims {
+        if i > 0 { s = s + "," }
+        s = s + int_to_str(embed_get(e, i))
+        i = i + 1
+    }
+    s = s + "]"
+    return s
+}
+
+fn embed_serialize(e) {
+    let dims = embed_dims(e)
+    let s = int_to_str(dims)
+    let i = 0
+    while i < dims {
+        s = s + ":" + int_to_str(embed_get(e, i))
+        i = i + 1
+    }
+    return s
+}
+
+fn embed_deserialize(s) {
+    let parts = split(s, ":")
+    if len(parts) < 1 { return 0 }
+    let dims = str_to_int(parts[0])
+    let e = embed_new(dims)
+    let i = 1
+    while i < len(parts) {
+        if i - 1 < dims {
+            embed_set(e, i - 1, str_to_int(parts[i]))
+        }
+        i = i + 1
+    }
+    return e
+}
+
+fn embed_describe(e) {
+    print("Embed(dims=")
+    print_int(embed_dims(e))
+    print(", data=")
+    print(embed_to_str(e))
+    println(")")
+}

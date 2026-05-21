@@ -1,0 +1,391 @@
+// Nova Core: Knowledge Graph
+// Entities with embedding vectors and weighted relations.
+// Supports nearest-neighbor search, path finding, and relation queries.
+
+let KG_TAG = 270
+let KG_ENTITIES = 1
+let KG_RELATIONS = 2
+let KG_COUNT = 3
+
+let KG_ENT_NAME = 0
+let KG_ENT_EMBED = 1
+let KG_ENT_ATTRS = 2
+
+let KG_REL_SUBJ = 0
+let KG_REL_TYPE = 1
+let KG_REL_OBJ = 2
+let KG_REL_WEIGHT = 3
+
+fn kg_new() {
+    let g = list_new()
+    push(g, KG_TAG)
+    push(g, list_new())
+    push(g, list_new())
+    push(g, 0)
+    return g
+}
+
+fn _kg_find_entity(kg, name) {
+    let ents = kg[KG_ENTITIES]
+    let i = 0
+    while i < len(ents) {
+        if ents[i][KG_ENT_NAME] == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn kg_add_entity(kg, name, embedding) {
+    let idx = _kg_find_entity(kg, name)
+    if idx != -1 {
+        kg[KG_ENTITIES][idx][KG_ENT_EMBED] = embedding
+        return idx
+    }
+    let ent = list_new()
+    push(ent, name)
+    push(ent, embedding)
+    push(ent, map_new())
+    push(kg[KG_ENTITIES], ent)
+    kg[KG_COUNT] = kg[KG_COUNT] + 1
+    return len(kg[KG_ENTITIES]) - 1
+}
+
+fn kg_get_entity(kg, name) {
+    let idx = _kg_find_entity(kg, name)
+    if idx == -1 { return 0 }
+    return kg[KG_ENTITIES][idx]
+}
+
+fn kg_get_embedding(kg, name) {
+    let ent = kg_get_entity(kg, name)
+    if ent == 0 { return 0 }
+    return ent[KG_ENT_EMBED]
+}
+
+fn kg_set_attr(kg, name, key, value) {
+    let ent = kg_get_entity(kg, name)
+    if ent == 0 { return 0 }
+    map_set(ent[KG_ENT_ATTRS], key, value)
+    return 1
+}
+
+fn kg_get_attr(kg, name, key) {
+    let ent = kg_get_entity(kg, name)
+    if ent == 0 { return 0 }
+    if map_has(ent[KG_ENT_ATTRS], key) == 0 { return 0 }
+    return map_get(ent[KG_ENT_ATTRS], key)
+}
+
+fn kg_entity_count(kg) {
+    return kg[KG_COUNT]
+}
+
+fn kg_add_relation(kg, subj, rel, obj, weight) {
+    let r = list_new()
+    push(r, subj)
+    push(r, rel)
+    push(r, obj)
+    push(r, weight)
+    push(kg[KG_RELATIONS], r)
+}
+
+fn kg_get_relations(kg, name) {
+    let result = list_new()
+    let rels = kg[KG_RELATIONS]
+    let i = 0
+    while i < len(rels) {
+        if rels[i][KG_REL_SUBJ] == name {
+            push(result, rels[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn kg_get_reverse(kg, name) {
+    let result = list_new()
+    let rels = kg[KG_RELATIONS]
+    let i = 0
+    while i < len(rels) {
+        if rels[i][KG_REL_OBJ] == name {
+            push(result, rels[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn kg_has_relation(kg, subj, rel, obj) {
+    let rels = kg[KG_RELATIONS]
+    let i = 0
+    while i < len(rels) {
+        let r = rels[i]
+        if r[KG_REL_SUBJ] == subj {
+            if r[KG_REL_TYPE] == rel {
+                if r[KG_REL_OBJ] == obj {
+                    return 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn kg_query(kg, subj, rel) {
+    let result = list_new()
+    let rels = kg[KG_RELATIONS]
+    let i = 0
+    while i < len(rels) {
+        let r = rels[i]
+        if r[KG_REL_SUBJ] == subj {
+            if r[KG_REL_TYPE] == rel {
+                push(result, r[KG_REL_OBJ])
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn kg_query_weighted(kg, subj, rel) {
+    let result = list_new()
+    let rels = kg[KG_RELATIONS]
+    let i = 0
+    while i < len(rels) {
+        let r = rels[i]
+        if r[KG_REL_SUBJ] == subj {
+            if r[KG_REL_TYPE] == rel {
+                let pair = list_new()
+                push(pair, r[KG_REL_OBJ])
+                push(pair, r[KG_REL_WEIGHT])
+                push(result, pair)
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn kg_remove_relation(kg, subj, rel, obj) {
+    let rels = kg[KG_RELATIONS]
+    let i = 0
+    while i < len(rels) {
+        let r = rels[i]
+        if r[KG_REL_SUBJ] == subj {
+            if r[KG_REL_TYPE] == rel {
+                if r[KG_REL_OBJ] == obj {
+                    let last = len(rels) - 1
+                    rels[i] = rels[last]
+                    pop(rels)
+                    return 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn kg_nearest(kg, query_embed, k) {
+    let ents = kg[KG_ENTITIES]
+    let scores = list_new()
+    let i = 0
+    while i < len(ents) {
+        let ent = ents[i]
+        if ent[KG_ENT_EMBED] != 0 {
+            let sim = embed_cosine(query_embed, ent[KG_ENT_EMBED])
+            let entry = list_new()
+            push(entry, ent[KG_ENT_NAME])
+            push(entry, sim)
+            push(scores, entry)
+        }
+        i = i + 1
+    }
+    let si = 0
+    while si < len(scores) {
+        let sj = si + 1
+        while sj < len(scores) {
+            if scores[sj][1] > scores[si][1] {
+                let tmp = scores[si]
+                scores[si] = scores[sj]
+                scores[sj] = tmp
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    let result = list_new()
+    let ri = 0
+    while ri < k {
+        if ri < len(scores) {
+            push(result, scores[ri])
+        }
+        ri = ri + 1
+    }
+    return result
+}
+
+fn kg_similarity(kg, name1, name2) {
+    let e1 = kg_get_embedding(kg, name1)
+    let e2 = kg_get_embedding(kg, name2)
+    if e1 == 0 { return 0 }
+    if e2 == 0 { return 0 }
+    return embed_cosine(e1, e2)
+}
+
+fn kg_neighbors(kg, name) {
+    let result = list_new()
+    let rels = kg[KG_RELATIONS]
+    let i = 0
+    while i < len(rels) {
+        let r = rels[i]
+        if r[KG_REL_SUBJ] == name {
+            let found = 0
+            let j = 0
+            while j < len(result) {
+                if result[j] == r[KG_REL_OBJ] { found = 1 }
+                j = j + 1
+            }
+            if found == 0 { push(result, r[KG_REL_OBJ]) }
+        }
+        if r[KG_REL_OBJ] == name {
+            let found = 0
+            let j = 0
+            while j < len(result) {
+                if result[j] == r[KG_REL_SUBJ] { found = 1 }
+                j = j + 1
+            }
+            if found == 0 { push(result, r[KG_REL_SUBJ]) }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn kg_path(kg, from, to) {
+    let queue = list_new()
+    let visited = list_new()
+    let parents = list_new()
+    let start = list_new()
+    push(start, from)
+    push(start, -1)
+    push(queue, start)
+    push(visited, from)
+
+    let found = 0
+    let found_idx = -1
+    let qi = 0
+    while qi < len(queue) {
+        let current = queue[qi][0]
+        if current == to {
+            found = 1
+            found_idx = qi
+            qi = len(queue)
+        } else {
+            let nbrs = kg_neighbors(kg, current)
+            let ni = 0
+            while ni < len(nbrs) {
+                let nbr = nbrs[ni]
+                let seen = 0
+                let vi = 0
+                while vi < len(visited) {
+                    if visited[vi] == nbr { seen = 1 }
+                    vi = vi + 1
+                }
+                if seen == 0 {
+                    push(visited, nbr)
+                    let entry = list_new()
+                    push(entry, nbr)
+                    push(entry, qi)
+                    push(queue, entry)
+                }
+                ni = ni + 1
+            }
+            qi = qi + 1
+        }
+    }
+
+    if found == 0 { return list_new() }
+
+    let path = list_new()
+    let ci = found_idx
+    while ci != -1 {
+        push(path, queue[ci][0])
+        ci = queue[ci][1]
+    }
+
+    let reversed = list_new()
+    let pi = len(path) - 1
+    while pi >= 0 {
+        push(reversed, path[pi])
+        pi = pi - 1
+    }
+    return reversed
+}
+
+fn kg_relation_count(kg) {
+    return len(kg[KG_RELATIONS])
+}
+
+fn kg_save(kg, d) {
+    let ents = kg[KG_ENTITIES]
+    db_put_int(d, "_kg_ent_count", len(ents))
+    let i = 0
+    while i < len(ents) {
+        let ent = ents[i]
+        let prefix = "_kg_ent_" + int_to_str(i)
+        db_put(d, prefix + "_name", ent[KG_ENT_NAME])
+        if ent[KG_ENT_EMBED] != 0 {
+            db_put(d, prefix + "_embed", embed_serialize(ent[KG_ENT_EMBED]))
+        }
+        i = i + 1
+    }
+    let rels = kg[KG_RELATIONS]
+    db_put_int(d, "_kg_rel_count", len(rels))
+    let ri = 0
+    while ri < len(rels) {
+        let r = rels[ri]
+        let rp = "_kg_rel_" + int_to_str(ri)
+        db_put(d, rp + "_s", r[KG_REL_SUBJ])
+        db_put(d, rp + "_t", r[KG_REL_TYPE])
+        db_put(d, rp + "_o", r[KG_REL_OBJ])
+        db_put_int(d, rp + "_w", r[KG_REL_WEIGHT])
+        ri = ri + 1
+    }
+}
+
+fn kg_load(kg, d) {
+    let ec = db_get_int(d, "_kg_ent_count")
+    let i = 0
+    while i < ec {
+        let prefix = "_kg_ent_" + int_to_str(i)
+        let name = db_get(d, prefix + "_name")
+        let embed_str = db_get(d, prefix + "_embed")
+        let embedding = 0
+        if embed_str != 0 {
+            embedding = embed_deserialize(embed_str)
+        }
+        kg_add_entity(kg, name, embedding)
+        i = i + 1
+    }
+    let rc = db_get_int(d, "_kg_rel_count")
+    let ri = 0
+    while ri < rc {
+        let rp = "_kg_rel_" + int_to_str(ri)
+        let subj = db_get(d, rp + "_s")
+        let rel_type = db_get(d, rp + "_t")
+        let obj = db_get(d, rp + "_o")
+        let weight = db_get_int(d, rp + "_w")
+        kg_add_relation(kg, subj, rel_type, obj, weight)
+        ri = ri + 1
+    }
+}
+
+fn kg_describe(kg) {
+    print("KnowledgeGraph(entities=")
+    print_int(kg_entity_count(kg))
+    print(", relations=")
+    print_int(kg_relation_count(kg))
+    println(")")
+}
