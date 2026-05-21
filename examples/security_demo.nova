@@ -1,0 +1,139 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+import "../src/runtime/db.nova"
+import "../src/runtime/embed.nova"
+import "../src/core/knowledge.nova"
+import "../src/runtime/crypto.nova"
+import "../src/runtime/validate.nova"
+import "../src/runtime/secure_mem.nova"
+
+fn main() {
+    println("=== Nova Security Demo ===")
+    println("")
+
+    // SHA-256 hashing
+    println("--- Cryptographic Hashing ---")
+    let hash = sha256("Hello, Nova!")
+    print("SHA-256 of 'Hello, Nova!': ")
+    println(hash)
+    print("Verification: ")
+    if sha256_verify("Hello, Nova!", hash) == 1 {
+        println("PASS")
+    } else {
+        println("FAIL")
+    }
+    println("")
+
+    // Input validation
+    println("--- Input Validation ---")
+    let email = "user@example.com"
+    print("Email '")
+    print(email)
+    print("' valid: ")
+    print_int(validate_email(email))
+    println("")
+
+    let bad_input = "'; DROP TABLE users"
+    print("SQL injection in '")
+    print(bad_input)
+    print("' detected: ")
+    if validate_no_injection(bad_input) == 0 {
+        println("YES (blocked)")
+    } else {
+        println("NO")
+    }
+
+    let xss = "<script>alert(1)</script>"
+    print("XSS in '")
+    print(xss)
+    print("' detected: ")
+    if validate_no_xss(xss) == 0 {
+        println("YES (blocked)")
+    } else {
+        println("NO")
+    }
+    println("")
+
+    // Sanitization
+    println("--- Sanitization ---")
+    let dirty = "hello-world!@#123"
+    print("Alphanumeric sanitize '")
+    print(dirty)
+    print("': ")
+    println(sanitize_alphanum(dirty))
+
+    let html = "<b>Hello</b> & 'world'"
+    print("HTML escape: ")
+    println(escape_html(html))
+    println("")
+
+    // Secure memory
+    println("--- Secure Memory ---")
+    let buf = sbuf_new(32)
+    sbuf_write_str(buf, "secret data")
+    print("Buffer contents: ")
+    println(sbuf_to_str(buf))
+    print("Buffer used: ")
+    print_int(sbuf_used(buf))
+    print("/")
+    print_int(32)
+    println("")
+    sbuf_clear(buf)
+    print("After clear, used: ")
+    print_int(sbuf_used(buf))
+    println("")
+    println("")
+
+    // Token generation
+    println("--- Secure Tokens ---")
+    secure_seed(42)
+    print("Token 1: ")
+    println(secure_token(16))
+    print("Token 2: ")
+    println(secure_token(16))
+    println("")
+
+    // Rate limiting
+    println("--- Rate Limiting ---")
+    let rl = rate_limiter_new(10, 3)
+    let t = 1
+    while t <= 5 {
+        let allowed = rate_limiter_check(rl, t)
+        print("Request at t=")
+        print_int(t)
+        if allowed == 1 {
+            println(": ALLOWED")
+        } else {
+            println(": BLOCKED (rate limited)")
+        }
+        t = t + 1
+    }
+    println("")
+
+    // Checksum
+    println("--- Checksums ---")
+    let data = "important data"
+    let ck = checksum(data)
+    print("Checksum of '")
+    print(data)
+    print("': ")
+    print_int(ck)
+    println("")
+    print("Verification: ")
+    if checksum_verify(data, ck) == 1 {
+        println("PASS")
+    } else {
+        println("FAIL")
+    }
+    println("")
+
+    println("=== Demo Complete ===")
+}
+
+main()

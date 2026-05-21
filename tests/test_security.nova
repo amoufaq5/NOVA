@@ -1,0 +1,269 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+import "../src/runtime/db.nova"
+import "../src/runtime/embed.nova"
+import "../src/core/knowledge.nova"
+import "../src/runtime/crypto.nova"
+import "../src/runtime/validate.nova"
+import "../src/runtime/secure_mem.nova"
+
+let tests_passed = 0
+let tests_failed = 0
+
+fn assert_eq(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected ")
+        print_int(expected)
+        print(" got ")
+        print_int(got)
+        println("")
+    }
+}
+
+fn assert_str(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected '")
+        print(expected)
+        print("' got '")
+        print(got)
+        println("'")
+    }
+}
+
+fn test_sha256() {
+    println("--- SHA-256 ---")
+    let hash_empty = sha256("")
+    assert_str("sha256_empty", hash_empty, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    let hash_abc = sha256("abc")
+    assert_str("sha256_abc", hash_abc, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    assert_eq("sha256_verify_ok", sha256_verify("abc", hash_abc), 1)
+    assert_eq("sha256_verify_bad", sha256_verify("abc", "wrong"), 0)
+}
+
+fn test_checksum() {
+    println("--- Checksum ---")
+    let ck1 = checksum("hello")
+    let ck2 = checksum("hello")
+    let ck3 = checksum("world")
+    assert_eq("checksum_same", int_eq(ck1, ck2), 1)
+    assert_eq("checksum_diff", int_eq(ck1, ck3), 0)
+    assert_eq("checksum_verify", checksum_verify("hello", ck1), 1)
+}
+
+fn test_xor() {
+    println("--- XOR Cipher ---")
+    let plain = "hello"
+    let key = "secret"
+    let encrypted = xor_encrypt(plain, key)
+    assert_eq("xor_len", len(encrypted), 5)
+    let decrypted = xor_decrypt(encrypted, key)
+    assert_eq("xor_roundtrip_len", len(decrypted) > 0, 1)
+}
+
+fn test_validation() {
+    println("--- Validation ---")
+    assert_eq("range_ok", validate_range(50, 0, 100), 1)
+    assert_eq("range_low", validate_range(-1, 0, 100), 0)
+    assert_eq("range_high", validate_range(101, 0, 100), 0)
+    assert_eq("clamp_mid", clamp(50, 0, 100), 50)
+    assert_eq("clamp_lo", clamp(-10, 0, 100), 0)
+    assert_eq("clamp_hi", clamp(200, 0, 100), 100)
+    assert_eq("len_ok", validate_length("hello", 1, 10), 1)
+    assert_eq("len_short", validate_length("", 1, 10), 0)
+    assert_eq("len_long", validate_length("abcdefghijk", 1, 10), 0)
+    assert_eq("not_empty_ok", validate_not_empty("hi"), 1)
+    assert_eq("not_empty_fail", validate_not_empty(""), 0)
+    assert_eq("numeric_ok", validate_numeric("12345"), 1)
+    assert_eq("numeric_neg", validate_numeric("-42"), 1)
+    assert_eq("numeric_bad", validate_numeric("12a3"), 0)
+    assert_eq("numeric_empty", validate_numeric(""), 0)
+    assert_eq("alpha_ok", validate_alpha("hello"), 1)
+    assert_eq("alpha_bad", validate_alpha("hello123"), 0)
+    assert_eq("alnum_ok", validate_alphanum("hello123"), 1)
+    assert_eq("alnum_bad", validate_alphanum("hello!"), 0)
+    assert_eq("ident_ok", validate_identifier("my_var"), 1)
+    assert_eq("ident_num", validate_identifier("123abc"), 0)
+    assert_eq("email_ok", validate_email("user@example.com"), 1)
+    assert_eq("email_bad", validate_email("invalid"), 0)
+    assert_eq("email_no_at", validate_email("nodomain.com"), 0)
+    assert_eq("no_injection_ok", validate_no_injection("normal input"), 1)
+    assert_eq("no_injection_sql", validate_no_injection("'; DROP TABLE"), 0)
+    assert_eq("no_injection_comment", validate_no_injection("x--y"), 0)
+    assert_eq("no_xss_ok", validate_no_xss("safe text"), 1)
+    assert_eq("no_xss_script", validate_no_xss("<script>alert(1)</script>"), 0)
+}
+
+fn test_sanitize() {
+    println("--- Sanitization ---")
+    let dirty = "hello world"
+    let clean = sanitize(dirty)
+    assert_eq("sanitize_printable", len(clean) > 0, 1)
+    let alnum = sanitize_alphanum("hello-world!123")
+    assert_str("sanitize_alnum", alnum, "helloworld123")
+    let long_str = "abcdefghij"
+    let trimmed = sanitize_max_length(long_str, 5)
+    assert_eq("sanitize_maxlen", len(trimmed), 5)
+    let html = escape_html("<b>bold</b>")
+    assert_eq("escape_html", contains(html, "&lt;"), 1)
+    let allowed = list_new()
+    push(allowed, "admin")
+    push(allowed, "user")
+    push(allowed, "guest")
+    assert_eq("whitelist_ok", validate_whitelist("user", allowed), 1)
+    assert_eq("whitelist_bad", validate_whitelist("hacker", allowed), 0)
+    let blocked = list_new()
+    push(blocked, "root")
+    push(blocked, "system")
+    assert_eq("blacklist_ok", validate_blacklist("user", blocked), 1)
+    assert_eq("blacklist_bad", validate_blacklist("root", blocked), 0)
+}
+
+fn test_ratelimit() {
+    println("--- Rate Limiting ---")
+    let rl = rate_limiter_new(10, 3)
+    assert_eq("rate_1", rate_limiter_check(rl, 1), 1)
+    assert_eq("rate_2", rate_limiter_check(rl, 2), 1)
+    assert_eq("rate_3", rate_limiter_check(rl, 3), 1)
+    assert_eq("rate_blocked", rate_limiter_check(rl, 4), 0)
+    assert_eq("rate_count", rate_limiter_count(rl), 3)
+    assert_eq("rate_expired", rate_limiter_check(rl, 15), 1)
+}
+
+fn test_securemem() {
+    println("--- Secure Memory ---")
+    let ptr = secure_alloc(64)
+    assert_eq("secure_alloc", ptr != 0, 1)
+    store8(ptr, 42)
+    store8(ptr + 1, 99)
+    assert_eq("secure_read", load8(ptr), 42)
+    assert_eq("secure_read2", load8(ptr + 1), 99)
+    secure_zero(ptr, 64)
+    assert_eq("secure_zero", load8(ptr), 0)
+    assert_eq("secure_zero2", load8(ptr + 1), 0)
+    let p1 = secure_alloc(8)
+    let p2 = secure_alloc(8)
+    store8(p1, 10)
+    store8(p1 + 1, 20)
+    store8(p2, 10)
+    store8(p2 + 1, 20)
+    assert_eq("secure_cmp_eq", secure_compare(p1, p2, 2), 1)
+    store8(p2 + 1, 99)
+    assert_eq("secure_cmp_ne", secure_compare(p1, p2, 2), 0)
+    secure_free(ptr, 64)
+    secure_free(p1, 8)
+    secure_free(p2, 8)
+}
+
+fn test_sbuf() {
+    println("--- Bounded Buffer ---")
+    let buf = sbuf_new(8)
+    assert_eq("sbuf_new", buf != 0, 1)
+    assert_eq("sbuf_remaining", sbuf_remaining(buf), 8)
+    sbuf_write(buf, 65)
+    sbuf_write(buf, 66)
+    sbuf_write(buf, 67)
+    assert_eq("sbuf_used", sbuf_used(buf), 3)
+    assert_eq("sbuf_read", sbuf_read(buf, 0), 65)
+    assert_eq("sbuf_read2", sbuf_read(buf, 2), 67)
+    assert_eq("sbuf_oob", sbuf_read(buf, 10), -1)
+    let tiny = sbuf_new(2)
+    sbuf_write(tiny, 1)
+    sbuf_write(tiny, 2)
+    let overflow = sbuf_write(tiny, 3)
+    assert_eq("sbuf_overflow", overflow, 0)
+    assert_eq("sbuf_still_2", sbuf_used(tiny), 2)
+    sbuf_clear(buf)
+    assert_eq("sbuf_cleared", sbuf_used(buf), 0)
+}
+
+fn test_token() {
+    println("--- Secure Tokens ---")
+    secure_seed(42)
+    let tok1 = secure_token(16)
+    assert_eq("token_len", len(tok1), 16)
+    let tok2 = secure_token(16)
+    assert_eq("token_diff", tok1 == tok2, 0)
+}
+
+fn test_scheduler_sec() {
+    println("--- Scheduler Security ---")
+    scheduler_init()
+    let gw = node_new("Gateway", 1)
+    let proc = node_new("Processor", 4)
+    let output = node_new("Output", 6)
+    scheduler_register(gw)
+    scheduler_register(proc)
+    scheduler_register(output)
+    scheduler_set_rate_limit("Processor", 3, 10)
+    scheduler_block_route("Gateway", "Output")
+    let i = 0
+    while i < 5 {
+        let m = moment_new("data", "user", 50, 50, 0, 50)
+        let sig = signal_event(m, "Gateway", "Processor")
+        scheduler_emit(sig)
+        i = i + 1
+    }
+    let bm = moment_new("blocked", "user", 50, 50, 0, 50)
+    let bsig = signal_event(bm, "Gateway", "Output")
+    scheduler_emit(bsig)
+    scheduler_run_secure()
+    let violations = scheduler_security_violations()
+    assert_eq("sched_violations", violations > 0, 1)
+    print("Security violations: ")
+    print_int(violations)
+    println("")
+}
+
+fn main() {
+    println("=== Security Primitives Tests ===")
+    println("")
+
+    test_sha256()
+    println("")
+    test_checksum()
+    println("")
+    test_xor()
+    println("")
+    test_validation()
+    println("")
+    test_sanitize()
+    println("")
+    test_ratelimit()
+    println("")
+    test_securemem()
+    println("")
+    test_sbuf()
+    println("")
+    test_token()
+    println("")
+    test_scheduler_sec()
+    println("")
+
+    print("Passed: ")
+    print_int(tests_passed)
+    println("")
+    print("Failed: ")
+    print_int(tests_failed)
+    println("")
+    if tests_failed == 0 {
+        println("All security tests passed!")
+    }
+}
+
+main()

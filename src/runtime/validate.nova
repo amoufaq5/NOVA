@@ -1,0 +1,291 @@
+// Nova Runtime: Input Validation & Sanitization
+// Bounds checking, pattern matching, and string sanitization.
+
+// ================================================================
+// Bounds Checking
+// ================================================================
+
+fn validate_range(value, lo, hi) {
+    if value < lo { return 0 }
+    if value > hi { return 0 }
+    return 1
+}
+
+fn clamp(value, lo, hi) {
+    if value < lo { return lo }
+    if value > hi { return hi }
+    return value
+}
+
+fn validate_length(s, min_len, max_len) {
+    let slen = len(s)
+    if slen < min_len { return 0 }
+    if slen > max_len { return 0 }
+    return 1
+}
+
+fn validate_not_empty(s) {
+    if len(s) == 0 { return 0 }
+    return 1
+}
+
+// ================================================================
+// Character Classification
+// ================================================================
+
+fn _is_alpha(ch) {
+    if ch >= 65 {
+        if ch <= 90 { return 1 }
+    }
+    if ch >= 97 {
+        if ch <= 122 { return 1 }
+    }
+    return 0
+}
+
+fn _is_digit(ch) {
+    if ch >= 48 {
+        if ch <= 57 { return 1 }
+    }
+    return 0
+}
+
+fn _is_alnum(ch) {
+    if _is_alpha(ch) == 1 { return 1 }
+    if _is_digit(ch) == 1 { return 1 }
+    return 0
+}
+
+fn _is_whitespace(ch) {
+    if ch == 32 { return 1 }
+    if ch == 9 { return 1 }
+    if ch == 10 { return 1 }
+    if ch == 13 { return 1 }
+    return 0
+}
+
+fn _is_printable(ch) {
+    if ch >= 32 {
+        if ch <= 126 { return 1 }
+    }
+    return 0
+}
+
+fn _is_control(ch) {
+    if ch < 32 { return 1 }
+    if ch == 127 { return 1 }
+    return 0
+}
+
+// ================================================================
+// Sanitization
+// ================================================================
+
+fn sanitize(input) {
+    let result = ""
+    let i = 0
+    while i < len(input) {
+        let ch = char_at(input, i)
+        if _is_printable(ch) == 1 {
+            result = result + chr(ch)
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn sanitize_alphanum(input) {
+    let result = ""
+    let i = 0
+    while i < len(input) {
+        let ch = char_at(input, i)
+        if _is_alnum(ch) == 1 {
+            result = result + chr(ch)
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn sanitize_max_length(input, max_len) {
+    if len(input) <= max_len { return input }
+    return substr(input, 0, max_len)
+}
+
+fn escape_html(input) {
+    let result = ""
+    let i = 0
+    while i < len(input) {
+        let ch = char_at(input, i)
+        if ch == 60 {
+            result = result + "&lt;"
+        } else {
+            if ch == 62 {
+                result = result + "&gt;"
+            } else {
+                if ch == 38 {
+                    result = result + "&amp;"
+                } else {
+                    if ch == 34 {
+                        result = result + "&quot;"
+                    } else {
+                        result = result + chr(ch)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// ================================================================
+// Pattern Validation
+// ================================================================
+
+fn validate_numeric(s) {
+    if len(s) == 0 { return 0 }
+    let i = 0
+    if char_at(s, 0) == 45 { i = 1 }
+    if i >= len(s) { return 0 }
+    while i < len(s) {
+        if _is_digit(char_at(s, i)) == 0 { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+fn validate_alpha(s) {
+    if len(s) == 0 { return 0 }
+    let i = 0
+    while i < len(s) {
+        if _is_alpha(char_at(s, i)) == 0 { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+fn validate_alphanum(s) {
+    if len(s) == 0 { return 0 }
+    let i = 0
+    while i < len(s) {
+        if _is_alnum(char_at(s, i)) == 0 { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+fn validate_identifier(s) {
+    if len(s) == 0 { return 0 }
+    let first = char_at(s, 0)
+    if _is_alpha(first) == 0 {
+        if first != 95 { return 0 }
+    }
+    let i = 1
+    while i < len(s) {
+        let ch = char_at(s, i)
+        if _is_alnum(ch) == 0 {
+            if ch != 95 { return 0 }
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn validate_email(s) {
+    let at_pos = str_find(s, "@")
+    if at_pos < 1 { return 0 }
+    let dot_pos = str_find(s, ".")
+    if dot_pos < at_pos + 2 { return 0 }
+    if dot_pos >= len(s) - 1 { return 0 }
+    return 1
+}
+
+fn validate_no_injection(s) {
+    if contains(s, ";") == 1 { return 0 }
+    if contains(s, "--") == 1 { return 0 }
+    if contains(s, "/*") == 1 { return 0 }
+    if contains(s, "*/") == 1 { return 0 }
+    if contains(s, "'") == 1 { return 0 }
+    if contains(s, "\"") == 1 { return 0 }
+    return 1
+}
+
+fn validate_no_xss(s) {
+    if contains(s, "<script") == 1 { return 0 }
+    if contains(s, "<SCRIPT") == 1 { return 0 }
+    if contains(s, "javascript:") == 1 { return 0 }
+    if contains(s, "onerror=") == 1 { return 0 }
+    if contains(s, "onclick=") == 1 { return 0 }
+    if contains(s, "onload=") == 1 { return 0 }
+    return 1
+}
+
+// ================================================================
+// Whitelist / Blacklist
+// ================================================================
+
+fn validate_whitelist(value, allowed) {
+    let i = 0
+    while i < len(allowed) {
+        if value == allowed[i] { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn validate_blacklist(value, blocked) {
+    let i = 0
+    while i < len(blocked) {
+        if value == blocked[i] { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// ================================================================
+// Rate Tracking
+// ================================================================
+
+let RATE_TAG = 280
+let RATE_WINDOW = 1
+let RATE_LIMIT = 2
+let RATE_TIMES = 3
+
+fn rate_limiter_new(window_size, max_count) {
+    let r = list_new()
+    push(r, RATE_TAG)
+    push(r, window_size)
+    push(r, max_count)
+    push(r, list_new())
+    return r
+}
+
+fn rate_limiter_check(rl, now) {
+    let times = rl[RATE_TIMES]
+    let window = rl[RATE_WINDOW]
+    let cutoff = now - window
+
+    // Remove expired entries
+    let new_times = list_new()
+    let i = 0
+    while i < len(times) {
+        if times[i] >= cutoff {
+            push(new_times, times[i])
+        }
+        i = i + 1
+    }
+    rl[RATE_TIMES] = new_times
+
+    if len(new_times) >= rl[RATE_LIMIT] { return 0 }
+    push(new_times, now)
+    return 1
+}
+
+fn rate_limiter_count(rl) {
+    return len(rl[RATE_TIMES])
+}
+
+fn rate_limiter_reset(rl) {
+    rl[RATE_TIMES] = list_new()
+}

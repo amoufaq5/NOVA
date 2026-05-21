@@ -534,6 +534,8 @@ fn ast_mind(name, nodes, channels, scaling, persist) {
     push(n, channels)
     push(n, scaling)
     push(n, persist)
+    // security stored as n[7]
+    push(n, list_new())
     return n
 }
 

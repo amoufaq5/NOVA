@@ -1,0 +1,223 @@
+// Nova Runtime: Cryptographic Primitives
+// Pure Nova implementations — no FFI, no libc.
+// Uses int_add/int_mul for large-value arithmetic to bypass
+// the smart dispatch in + which treats large ints as string ptrs.
+
+let MASK32 = 4294967295
+
+fn _rotr32(x, n) {
+    let masked = x & MASK32
+    return ((masked >> n) | (masked << (int_sub(32, n)))) & MASK32
+}
+
+fn _shr32(x, n) {
+    return (x >> n) & MASK32
+}
+
+// ================================================================
+// SHA-256
+// ================================================================
+
+let _sha256_k = 0
+
+fn _sha256_init_k() {
+    if _sha256_k != 0 { return 0 }
+    _sha256_k = list_new()
+    push(_sha256_k, 1116352408); push(_sha256_k, 1899447441); push(_sha256_k, 3049323471); push(_sha256_k, 3921009573)
+    push(_sha256_k, 961987163); push(_sha256_k, 1508970993); push(_sha256_k, 2453635748); push(_sha256_k, 2870763221)
+    push(_sha256_k, 3624381080); push(_sha256_k, 310598401); push(_sha256_k, 607225278); push(_sha256_k, 1426881987)
+    push(_sha256_k, 1925078388); push(_sha256_k, 2162078206); push(_sha256_k, 2614888103); push(_sha256_k, 3248222580)
+    push(_sha256_k, 3835390401); push(_sha256_k, 4022224774); push(_sha256_k, 264347078); push(_sha256_k, 604807628)
+    push(_sha256_k, 770255983); push(_sha256_k, 1249150122); push(_sha256_k, 1555081692); push(_sha256_k, 1996064986)
+    push(_sha256_k, 2554220882); push(_sha256_k, 2821834349); push(_sha256_k, 2952996808); push(_sha256_k, 3210313671)
+    push(_sha256_k, 3336571891); push(_sha256_k, 3584528711); push(_sha256_k, 113926993); push(_sha256_k, 338241895)
+    push(_sha256_k, 666307205); push(_sha256_k, 773529912); push(_sha256_k, 1294757372); push(_sha256_k, 1396182291)
+    push(_sha256_k, 1695183700); push(_sha256_k, 1986661051); push(_sha256_k, 2177026350); push(_sha256_k, 2456956037)
+    push(_sha256_k, 2730485921); push(_sha256_k, 2820302411); push(_sha256_k, 3259730800); push(_sha256_k, 3345764771)
+    push(_sha256_k, 3516065817); push(_sha256_k, 3600352804); push(_sha256_k, 4094571909); push(_sha256_k, 275423344)
+    push(_sha256_k, 430227734); push(_sha256_k, 506948616); push(_sha256_k, 659060556); push(_sha256_k, 883997877)
+    push(_sha256_k, 958139571); push(_sha256_k, 1322822218); push(_sha256_k, 1537002063); push(_sha256_k, 1747873779)
+    push(_sha256_k, 1955562222); push(_sha256_k, 2024104815); push(_sha256_k, 2227730452); push(_sha256_k, 2361852424)
+    push(_sha256_k, 2428436474); push(_sha256_k, 2756734187); push(_sha256_k, 3204031479); push(_sha256_k, 3329325298)
+    return 0
+}
+
+fn _sha256_pad(msg) {
+    let msg_len = len(msg)
+    let bit_len = int_mul(msg_len, 8)
+    let padded = list_new()
+    let i = 0
+    while i < msg_len {
+        push(padded, char_at(msg, i))
+        i = i + 1
+    }
+    push(padded, 128)
+    while (len(padded) % 64) != 56 {
+        push(padded, 0)
+    }
+    push(padded, 0)
+    push(padded, 0)
+    push(padded, 0)
+    push(padded, 0)
+    push(padded, (bit_len >> 24) & 255)
+    push(padded, (bit_len >> 16) & 255)
+    push(padded, (bit_len >> 8) & 255)
+    push(padded, bit_len & 255)
+    return padded
+}
+
+fn _sha256_block(state, block, offset) {
+    _sha256_init_k()
+    let w = list_new()
+    let wi = 0
+    while wi < 16 {
+        let base = int_add(offset, int_mul(wi, 4))
+        let val = (block[base] << 24) | (block[int_add(base,1)] << 16) | (block[int_add(base,2)] << 8) | block[int_add(base,3)]
+        push(w, val & MASK32)
+        wi = wi + 1
+    }
+    while wi < 64 {
+        let s0 = _rotr32(w[int_sub(wi,15)], 7) ^ _rotr32(w[int_sub(wi,15)], 18) ^ _shr32(w[int_sub(wi,15)], 3)
+        let s1 = _rotr32(w[int_sub(wi,2)], 17) ^ _rotr32(w[int_sub(wi,2)], 19) ^ _shr32(w[int_sub(wi,2)], 10)
+        let val = int_add(int_add(w[int_sub(wi,16)], s0), int_add(w[int_sub(wi,7)], s1)) & MASK32
+        push(w, val)
+        wi = wi + 1
+    }
+    let a = state[0]
+    let b = state[1]
+    let c = state[2]
+    let d = state[3]
+    let e = state[4]
+    let f = state[5]
+    let g = state[6]
+    let h = state[7]
+    let ri = 0
+    while ri < 64 {
+        let S1 = _rotr32(e, 6) ^ _rotr32(e, 11) ^ _rotr32(e, 25)
+        let ch = (e & f) ^ ((~e) & g & MASK32)
+        let temp1 = int_add(int_add(h, S1), int_add(ch, int_add(_sha256_k[ri], w[ri]))) & MASK32
+        let S0 = _rotr32(a, 2) ^ _rotr32(a, 13) ^ _rotr32(a, 22)
+        let maj = (a & b) ^ (a & c) ^ (b & c)
+        let temp2 = int_add(S0, maj) & MASK32
+        h = g
+        g = f
+        f = e
+        e = int_add(d, temp1) & MASK32
+        d = c
+        c = b
+        b = a
+        a = int_add(temp1, temp2) & MASK32
+        ri = ri + 1
+    }
+    state[0] = int_add(state[0], a) & MASK32
+    state[1] = int_add(state[1], b) & MASK32
+    state[2] = int_add(state[2], c) & MASK32
+    state[3] = int_add(state[3], d) & MASK32
+    state[4] = int_add(state[4], e) & MASK32
+    state[5] = int_add(state[5], f) & MASK32
+    state[6] = int_add(state[6], g) & MASK32
+    state[7] = int_add(state[7], h) & MASK32
+}
+
+fn _hex_byte(val) {
+    let hex = "0123456789abcdef"
+    let hi = char_at(hex, (val >> 4) & 15)
+    let lo = char_at(hex, val & 15)
+    return chr(hi) + chr(lo)
+}
+
+fn _hex_word32(val) {
+    let s = ""
+    s = s + _hex_byte((val >> 24) & 255)
+    s = s + _hex_byte((val >> 16) & 255)
+    s = s + _hex_byte((val >> 8) & 255)
+    s = s + _hex_byte(val & 255)
+    return s
+}
+
+fn sha256(msg) {
+    let padded = _sha256_pad(msg)
+    let state = list_new()
+    push(state, 1779033703)
+    push(state, 3144134277)
+    push(state, 1013904242)
+    push(state, 2773480762)
+    push(state, 1359893119)
+    push(state, 2600822924)
+    push(state, 528734635)
+    push(state, 1541459225)
+    let blocks = len(padded) / 64
+    let bi = 0
+    while bi < blocks {
+        _sha256_block(state, padded, int_mul(bi, 64))
+        bi = bi + 1
+    }
+    let result = ""
+    let hi = 0
+    while hi < 8 {
+        result = result + _hex_word32(state[hi])
+        hi = hi + 1
+    }
+    return result
+}
+
+fn sha256_verify(msg, expected_hash) {
+    let computed = sha256(msg)
+    if computed == expected_hash { return 1 }
+    return 0
+}
+
+// ================================================================
+// XOR Cipher (symmetric)
+// ================================================================
+
+fn xor_encrypt(plaintext, key) {
+    let key_len = len(key)
+    if key_len == 0 { return plaintext }
+    let result = list_new()
+    let i = 0
+    while i < len(plaintext) {
+        let pb = char_at(plaintext, i)
+        let kb = char_at(key, i % key_len)
+        push(result, pb ^ kb)
+        i = i + 1
+    }
+    return result
+}
+
+fn xor_decrypt(cipher_bytes, key) {
+    let key_len = len(key)
+    if key_len == 0 { return "" }
+    let result = ""
+    let i = 0
+    while i < len(cipher_bytes) {
+        let cb = cipher_bytes[i]
+        let kb = char_at(key, i % key_len)
+        let ch = cb ^ kb
+        result = result + chr(ch)
+        i = i + 1
+    }
+    return result
+}
+
+// ================================================================
+// Simple checksum (djb2 hash, fast, non-cryptographic)
+// ================================================================
+
+fn checksum(data) {
+    let hash = 5381
+    let i = 0
+    while i < len(data) {
+        hash = int_add(int_add(hash << 5, hash), char_at(data, i)) & MASK32
+        i = i + 1
+    }
+    return hash
+}
+
+fn int_eq(a, b) {
+    return int_sub(a, b) == 0
+}
+
+fn checksum_verify(data, expected) {
+    return int_eq(checksum(data), expected)
+}

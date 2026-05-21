@@ -440,3 +440,157 @@ fn scheduler_run_stream_batched(stream) {
     }
     return fed
 }
+
+// ================================================================
+// Security: Rate Limiting & Sandboxing
+// ================================================================
+
+let sched_rate_limits = 0
+let sched_blocked_routes = 0
+let sched_sec_violations = 0
+
+fn scheduler_init_security() {
+    if sched_rate_limits == 0 {
+        sched_rate_limits = list_new()
+    }
+    if sched_blocked_routes == 0 {
+        sched_blocked_routes = list_new()
+    }
+    sched_sec_violations = 0
+}
+
+fn scheduler_set_rate_limit(node_name, max_signals, window) {
+    scheduler_init_security()
+    let entry = list_new()
+    push(entry, node_name)
+    push(entry, max_signals)
+    push(entry, window)
+    push(entry, list_new())
+    push(sched_rate_limits, entry)
+}
+
+fn _sched_check_rate(dest_name) {
+    if sched_rate_limits == 0 { return 1 }
+    let i = 0
+    while i < len(sched_rate_limits) {
+        let rl = sched_rate_limits[i]
+        if rl[0] == dest_name {
+            let max_sig = rl[1]
+            let window = rl[2]
+            let times = rl[3]
+            let cutoff = sched_cycle - window
+            let new_times = list_new()
+            let j = 0
+            while j < len(times) {
+                if times[j] >= cutoff {
+                    push(new_times, times[j])
+                }
+                j = j + 1
+            }
+            rl[3] = new_times
+            if len(new_times) >= max_sig {
+                sched_sec_violations = sched_sec_violations + 1
+                return 0
+            }
+            push(new_times, sched_cycle)
+            return 1
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn scheduler_block_route(src, dst) {
+    scheduler_init_security()
+    let entry = list_new()
+    push(entry, src)
+    push(entry, dst)
+    push(sched_blocked_routes, entry)
+}
+
+fn _sched_check_route(src, dst) {
+    if sched_blocked_routes == 0 { return 1 }
+    let i = 0
+    while i < len(sched_blocked_routes) {
+        let br = sched_blocked_routes[i]
+        if br[0] == src {
+            if br[1] == dst { return 0 }
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn scheduler_dispatch_secure() {
+    let sig = signal_queue_pop(sched_queue)
+    if sig == 0 { return 0 }
+
+    let dest_name = signal_dest(sig)
+    let origin_name = signal_origin(sig)
+
+    if _sched_check_route(origin_name, dest_name) == 0 {
+        sched_dropped = sched_dropped + 1
+        sched_sec_violations = sched_sec_violations + 1
+        sched_processed = sched_processed + 1
+        return 1
+    }
+
+    if _sched_check_rate(dest_name) == 0 {
+        sched_dropped = sched_dropped + 1
+        sched_processed = sched_processed + 1
+        return 1
+    }
+
+    let dest_node = scheduler_find_node(dest_name)
+    if dest_node == 0 {
+        sched_dropped = sched_dropped + 1
+        sched_processed = sched_processed + 1
+        return 1
+    }
+
+    if signal_has_visited(sig, dest_name) == 1 {
+        sched_dropped = sched_dropped + 1
+        sched_processed = sched_processed + 1
+        return 1
+    }
+
+    node_receive(dest_node, sig)
+    node_process(dest_node)
+
+    let outputs = node_drain_outbox(dest_node)
+    let i = 0
+    while i < len(outputs) {
+        scheduler_route_output(node_name(dest_node), outputs[i])
+        i = i + 1
+    }
+
+    if sched_soul != 0 {
+        soul_tick(sched_soul, sig)
+    }
+
+    sched_processed = sched_processed + 1
+    return 1
+}
+
+fn scheduler_run_secure() {
+    sched_running = 1
+    while sched_running == 1 {
+        if len(sched_queue) == 0 {
+            sched_running = 0
+        } else {
+            sched_cycle = sched_cycle + 1
+            let count = 0
+            while len(sched_queue) > 0 {
+                scheduler_dispatch_secure()
+                count = count + 1
+                if count >= sched_max_per_cycle {
+                    return count
+                }
+            }
+        }
+    }
+}
+
+fn scheduler_security_violations() {
+    return sched_sec_violations
+}

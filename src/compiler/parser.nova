@@ -1472,6 +1472,7 @@ fn parse_mind() {
     let channels = list_new()
     let scaling = list_new()
     let persist = list_new()
+    let security = list_new()
 
     while par_peek_type() != TOK_RBRACE {
         let section_tok = par_expect(TOK_IDENT)
@@ -1572,10 +1573,40 @@ fn parse_mind() {
             }
             par_expect(TOK_RBRACE)
         }
+
+        if section == "security" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let sec_node_tok = par_expect(TOK_IDENT)
+                let sec_node = sec_node_tok[1]
+                par_expect(TOK_COLON)
+                let sec_type_tok = par_expect(TOK_IDENT)
+                let sec_type = sec_type_tok[1]
+                let sec_entry = list_new()
+                push(sec_entry, sec_node)
+                push(sec_entry, sec_type)
+                if sec_type == "rate_limit" {
+                    let max_tok = par_expect(TOK_INT)
+                    let per_tok = par_expect(TOK_IDENT)
+                    let win_tok = par_expect(TOK_INT)
+                    push(sec_entry, max_tok[1])
+                    push(sec_entry, win_tok[1])
+                }
+                if sec_type == "block" {
+                    let blk_tok = par_expect(TOK_IDENT)
+                    push(sec_entry, blk_tok[1])
+                    push(sec_entry, 0)
+                }
+                push(security, sec_entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
     }
 
     par_expect(TOK_RBRACE)
-    return ast_mind(mind_name, nodes, channels, scaling, persist)
+    let mind_node = ast_mind(mind_name, nodes, channels, scaling, persist)
+    mind_node[7] = security
+    return mind_node
 }
 
 fn parse_soul() {

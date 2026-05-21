@@ -2986,6 +2986,28 @@ fn gen_program(program) {
                 push(expanded, ast_expr_stmt(ast_call(ast_ident("db_set_autosave"), das_args)))
                 pi = pi + 1
             }
+            // Security section
+            let msecurity = ed[7]
+            let si2 = 0
+            while si2 < len(msecurity) {
+                let se = msecurity[si2]
+                let se_node = se[0]
+                let se_type = se[1]
+                if se_type == "rate_limit" {
+                    let srl_args = list_new()
+                    push(srl_args, ast_str(se_node))
+                    push(srl_args, ast_int(se[2]))
+                    push(srl_args, ast_int(se[3]))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_set_rate_limit"), srl_args)))
+                }
+                if se_type == "block" {
+                    let sbr_args = list_new()
+                    push(sbr_args, ast_str(se_node))
+                    push(sbr_args, ast_str(se[2]))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_block_route"), sbr_args)))
+                }
+                si2 = si2 + 1
+            }
         } else {
           if ast_tag(ed) == AST_SOUL {
             let sname = ed[1]
