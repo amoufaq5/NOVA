@@ -16,6 +16,7 @@ let sched_processed = 0
 let sched_dropped = 0
 let sched_max_per_cycle = 10000
 let sched_batched = 0
+let sched_soul = 0
 
 // ================================================================
 // Initialization
@@ -30,6 +31,15 @@ fn scheduler_init() {
     sched_processed = 0
     sched_dropped = 0
     sched_batched = 0
+    sched_soul = 0
+}
+
+fn scheduler_register_soul(s) {
+    sched_soul = s
+}
+
+fn scheduler_get_soul() {
+    return sched_soul
 }
 
 fn scheduler_ensure_init() {
@@ -142,6 +152,16 @@ fn scheduler_dispatch_one() {
     while i < len(outputs) {
         scheduler_route_output(node_name(dest_node), outputs[i])
         i = i + 1
+    }
+
+    if sched_soul != 0 {
+        soul_tick(sched_soul, sig)
+        let soul_signals = soul_check_drives(sched_soul)
+        let si = 0
+        while si < len(soul_signals) {
+            signal_queue_push(sched_queue, soul_signals[si])
+            si = si + 1
+        }
     }
 
     sched_processed = sched_processed + 1

@@ -1536,6 +1536,249 @@ fn parse_mind() {
     return ast_mind(mind_name, nodes, channels)
 }
 
+fn parse_soul() {
+    par_advance()
+    let name_tok = par_expect(TOK_IDENT)
+    let soul_name = name_tok[1]
+    par_expect(TOK_LBRACE)
+
+    let identity = list_new()
+    let values = list_new()
+    let drives = list_new()
+    let feelings = list_new()
+    let phases = list_new()
+    let reactions = list_new()
+
+    while par_peek_type() != TOK_RBRACE {
+        let section_tok = par_expect(TOK_IDENT)
+        let section = section_tok[1]
+
+        if section == "identity" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let key_tok = par_expect(TOK_IDENT)
+                par_expect(TOK_COLON)
+                let val_tok = par_expect(TOK_STRING)
+                let entry = list_new()
+                push(entry, key_tok[1])
+                push(entry, val_tok[1])
+                push(identity, entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
+
+        if section == "values" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let key_tok = par_expect(TOK_IDENT)
+                par_expect(TOK_COLON)
+                let val_tok = par_expect(TOK_STRING)
+                let entry = list_new()
+                push(entry, key_tok[1])
+                push(entry, val_tok[1])
+                push(values, entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
+
+        if section == "drives" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let key_tok = par_expect(TOK_IDENT)
+                par_expect(TOK_COLON)
+                let val_tok = par_expect(TOK_INT)
+                let entry = list_new()
+                push(entry, key_tok[1])
+                push(entry, val_tok[1])
+                push(drives, entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
+
+        if section == "feelings" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let key_tok = par_expect(TOK_IDENT)
+                par_expect(TOK_COLON)
+                let val_tok = par_expect(TOK_INT)
+                let entry = list_new()
+                push(entry, key_tok[1])
+                push(entry, val_tok[1])
+                push(feelings, entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
+
+        if section == "phases" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let pname_tok = par_expect(TOK_IDENT)
+                let phase_name = pname_tok[1]
+                par_expect(TOK_LBRACE)
+                let phase_when = ""
+                let phase_behavior = ""
+                let phase_boosts = list_new()
+                let phase_transition = ""
+                let phase_condition = ""
+                let phase_cond_val = 0
+                while par_peek_type() != TOK_RBRACE {
+                    let pk_type = par_peek_type()
+                    let pk = ""
+                    if pk_type == TOK_IF {
+                        par_advance()
+                        pk = "when"
+                    } else {
+                        let pk_tok = par_expect(TOK_IDENT)
+                        pk = pk_tok[1]
+                    }
+                    if pk == "when" {
+                        par_expect(TOK_COLON)
+                        let wt = par_expect(TOK_STRING)
+                        phase_when = wt[1]
+                    }
+                    if pk == "behavior" {
+                        par_expect(TOK_COLON)
+                        let bt = par_expect(TOK_STRING)
+                        phase_behavior = bt[1]
+                    }
+                    if pk == "boosts" {
+                        par_expect(TOK_COLON)
+                        let boosts_done = 0
+                        while boosts_done == 0 {
+                            if par_peek_type() != TOK_IDENT {
+                                boosts_done = 1
+                            } else {
+                                let bname = par_expect(TOK_IDENT)
+                                let bdir_tok = par_expect(TOK_IDENT)
+                                let bval_tok = par_expect(TOK_INT)
+                                let boost_entry = list_new()
+                                push(boost_entry, bname[1])
+                                push(boost_entry, bval_tok[1])
+                                push(phase_boosts, boost_entry)
+                                if par_peek_type() == TOK_COMMA {
+                                    par_advance()
+                                } else {
+                                    boosts_done = 1
+                                }
+                            }
+                        }
+                    }
+                    if pk == "transitions_to" {
+                        if par_peek_type() == TOK_COLON { par_advance() }
+                        let target_tok = par_expect(TOK_IDENT)
+                        phase_transition = target_tok[1]
+                        if par_peek_type() == TOK_IF {
+                            par_advance()
+                        } else {
+                            par_expect(TOK_IDENT)
+                        }
+                        let cond_tok = par_expect(TOK_IDENT)
+                        phase_condition = cond_tok[1]
+                        par_expect(TOK_GT)
+                        let cv_tok = par_expect(TOK_INT)
+                        phase_cond_val = cv_tok[1]
+                    }
+                }
+                par_expect(TOK_RBRACE)
+                let phase_entry = list_new()
+                push(phase_entry, phase_name)
+                push(phase_entry, phase_when)
+                push(phase_entry, phase_behavior)
+                push(phase_entry, phase_boosts)
+                push(phase_entry, phase_transition)
+                push(phase_entry, phase_condition)
+                push(phase_entry, phase_cond_val)
+                push(phases, phase_entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
+
+        if section == "reactions" {
+            par_expect(TOK_LBRACE)
+            while par_peek_type() != TOK_RBRACE {
+                let on_tok = par_expect(TOK_IDENT)
+                let trigger_tok = par_expect(TOK_IDENT)
+                let trigger_name = trigger_tok[1]
+                par_expect(TOK_LBRACE)
+                let effects = list_new()
+                while par_peek_type() != TOK_RBRACE {
+                    let eff_type = ""
+                    if par_peek_type() == TOK_IF {
+                        par_advance()
+                        eff_type = "if"
+                    } else {
+                        let eff_tok = par_expect(TOK_IDENT)
+                        eff_type = eff_tok[1]
+                    }
+                    if eff_type == "shift" {
+                        let target_tok = par_expect(TOK_IDENT)
+                        let by_tok = par_expect(TOK_IDENT)
+                        let neg = 0
+                        let amount = 0
+                        if par_peek_type() == TOK_MINUS {
+                            par_advance()
+                            neg = 1
+                        }
+                        let amt_tok = par_expect(TOK_INT)
+                        amount = amt_tok[1]
+                        if neg == 1 { amount = 0 - amount }
+                        let eff = list_new()
+                        push(eff, "shift")
+                        push(eff, target_tok[1])
+                        push(eff, amount)
+                        push(effects, eff)
+                    }
+                    if eff_type == "strengthen" {
+                        let what_tok = par_expect(TOK_IDENT)
+                        let eff = list_new()
+                        push(eff, "strengthen")
+                        push(eff, what_tok[1])
+                        push(effects, eff)
+                    }
+                    if eff_type == "reconsider" {
+                        let what_tok = par_expect(TOK_IDENT)
+                        let eff = list_new()
+                        push(eff, "reconsider")
+                        push(eff, what_tok[1])
+                        push(effects, eff)
+                    }
+                    if eff_type == "transition_to" {
+                        let target_tok = par_expect(TOK_IDENT)
+                        let eff = list_new()
+                        push(eff, "transition_to")
+                        push(eff, target_tok[1])
+                        push(effects, eff)
+                    }
+                    if eff_type == "if" {
+                        let pcond = par_expect(TOK_IDENT)
+                        par_expect(TOK_BANGEQ)
+                        let pval = par_expect(TOK_IDENT)
+                        par_expect(TOK_LBRACE)
+                        let inner_eff_tok2 = par_expect(TOK_IDENT)
+                        let inner_target = par_expect(TOK_IDENT)
+                        par_expect(TOK_RBRACE)
+                        let eff = list_new()
+                        push(eff, "conditional_transition")
+                        push(eff, pcond[1])
+                        push(eff, pval[1])
+                        push(eff, inner_target[1])
+                        push(effects, eff)
+                    }
+                }
+                par_expect(TOK_RBRACE)
+                let reaction_entry = list_new()
+                push(reaction_entry, trigger_name)
+                push(reaction_entry, effects)
+                push(reactions, reaction_entry)
+            }
+            par_expect(TOK_RBRACE)
+        }
+    }
+
+    par_expect(TOK_RBRACE)
+    return ast_soul(soul_name, identity, values, drives, feelings, phases, reactions)
+}
+
 fn parse_stmt_inner() {
     let t = par_peek_type()
     if t == TOK_AT {
@@ -1623,6 +1866,7 @@ fn parse_stmt_inner() {
     if t == TOK_THROW { return parse_throw() }
     if t == TOK_ENUM { return parse_enum() }
     if t == TOK_MIND { return parse_mind() }
+    if t == TOK_SOUL { return parse_soul() }
     if t == TOK_DO { return parse_do_while() }
     if t == TOK_ASM { return parse_asm() }
     if t == TOK_DEFER {

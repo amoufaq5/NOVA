@@ -1,0 +1,172 @@
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+
+let tests_passed = 0
+let tests_failed = 0
+
+fn assert_eq(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected ")
+        print_int(expected)
+        print(" got ")
+        print_int(got)
+        println("")
+    }
+}
+
+fn assert_str(label, got, expected) {
+    if got == expected {
+        tests_passed = tests_passed + 1
+    } else {
+        tests_failed = tests_failed + 1
+        print("FAIL: ")
+        print(label)
+        print(" - expected ")
+        print(expected)
+        print(" got ")
+        println(got)
+    }
+}
+
+fn main() {
+    println("=== Soul Tests ===")
+    println("")
+
+    // Test 1: Soul creation
+    let s = soul_new("TestSoul")
+    assert_str("soul_name", soul_name(s), "TestSoul")
+    assert_str("initial_phase", soul_get_phase(s), "")
+
+    // Test 2: Identity and values
+    soul_set_identity(s, "purpose", "test")
+    assert_str("identity", soul_get_identity(s, "purpose"), "test")
+    soul_set_value(s, "truth", "verify")
+    assert_str("value", soul_get_value(s, "truth"), "verify")
+
+    // Test 3: Drives with clamping
+    soul_set_drive(s, "curiosity", 80)
+    assert_eq("drive_set", soul_get_drive(s, "curiosity"), 80)
+    soul_shift_drive(s, "curiosity", 30)
+    assert_eq("drive_clamp_100", soul_get_drive(s, "curiosity"), 100)
+    soul_shift_drive(s, "curiosity", -150)
+    assert_eq("drive_clamp_0", soul_get_drive(s, "curiosity"), 0)
+
+    // Test 4: Feelings with clamping
+    soul_set_feeling(s, "warmth", 60)
+    assert_eq("feeling_set", soul_get_feeling(s, "warmth"), 60)
+    soul_shift_feeling(s, "warmth", -100)
+    assert_eq("feeling_clamp_0", soul_get_feeling(s, "warmth"), 0)
+
+    // Test 5: Phases and transitions
+    soul_set_drive(s, "curiosity", 50)
+    soul_set_feeling(s, "confidence", 40)
+    soul_add_phase(s, "awakening", "start", "observe")
+    soul_phase_set_transition(s, "awakening", "learning", "interactions", 3)
+    soul_add_phase(s, "learning", "learning", "absorb")
+    soul_phase_set_transition(s, "learning", "acting", "confidence", 60)
+    soul_set_phase(s, "awakening")
+    assert_str("phase_set", soul_get_phase(s), "awakening")
+
+    s[9] = 5
+    soul_check_phase_transition(s)
+    assert_str("phase_transition", soul_get_phase(s), "learning")
+
+    soul_set_feeling(s, "confidence", 65)
+    soul_check_phase_transition(s)
+    assert_str("phase_confidence", soul_get_phase(s), "acting")
+
+    // Test 6: Phase boosts
+    let s2 = soul_new("Boost")
+    soul_set_drive(s2, "curiosity", 50)
+    soul_add_phase(s2, "active", "desc", "behavior")
+    soul_add_phase_boost(s2, "active", "curiosity", 20)
+    soul_set_phase(s2, "active")
+    assert_eq("phase_boost", soul_get_drive(s2, "curiosity"), 70)
+
+    // Test 7: Reactions
+    let s3 = soul_new("React")
+    soul_set_feeling(s3, "warmth", 50)
+    soul_set_feeling(s3, "confidence", 50)
+    soul_add_reaction(s3, "positive_feedback")
+    soul_add_reaction_effect(s3, "positive_feedback", "shift", "warmth", 20)
+    soul_add_reaction_effect(s3, "positive_feedback", "shift", "confidence", 10)
+    soul_fire_reaction(s3, "positive_feedback")
+    assert_eq("reaction_warmth", soul_get_feeling(s3, "warmth"), 70)
+    assert_eq("reaction_confidence", soul_get_feeling(s3, "confidence"), 60)
+
+    // Test 8: Feeling drift
+    let s4 = soul_new("Drift")
+    soul_set_feeling(s4, "warmth", 55)
+    soul_set_feeling(s4, "alertness", 45)
+    soul_drift_feelings(s4)
+    assert_eq("drift_down", soul_get_feeling(s4, "warmth"), 54)
+    assert_eq("drift_up", soul_get_feeling(s4, "alertness"), 46)
+
+    // Test 9: Soul bias
+    let s5 = soul_new("Bias")
+    soul_set_feeling(s5, "confidence", 50)
+    soul_add_phase(s5, "acting", "desc", "exec")
+    soul_set_phase(s5, "acting")
+    let bias = soul_bias(s5)
+    assert_eq("bias_acting", bias, 120)
+
+    soul_add_phase(s5, "dreaming", "d", "d")
+    soul_set_phase(s5, "dreaming")
+    let bias2 = soul_bias(s5)
+    assert_eq("bias_dreaming", bias2, 80)
+
+    // Test 10: Preprocessing
+    let s6 = soul_new("Preproc")
+    let sig_q = soul_preprocess(s6, "why is the sky blue?")
+    assert_eq("preprocess_question", signal_type(sig_q), 2)
+    let sig_cmd = soul_preprocess(s6, "run the tests now")
+    assert_eq("preprocess_command", signal_type(sig_cmd), 4)
+    let sig_pos = soul_preprocess(s6, "great job thanks!")
+    let m_pos = signal_moment(sig_pos)
+    assert_eq("preprocess_positive", moment_valence(m_pos), 80)
+
+    // Test 11: Drive autonomous emission
+    let s7 = soul_new("AutoDrive")
+    soul_set_drive(s7, "curiosity", 95)
+    let emitted = soul_check_drives(s7)
+    assert_eq("drive_emit_count", len(emitted), 1)
+    assert_eq("drive_after_emit", soul_get_drive(s7, "curiosity"), 80)
+
+    // Test 12: Signal classification
+    let m_happy = moment_new("great!", "user", 80, 50, 0, 60)
+    let sig_happy = signal_event(m_happy, "ext", "node")
+    assert_str("classify_positive", soul_classify_signal(sig_happy), "positive_feedback")
+
+    let m_sad = moment_new("wrong!", "user", 20, 50, 0, 60)
+    let sig_sad = signal_event(m_sad, "ext", "node")
+    assert_str("classify_negative", soul_classify_signal(sig_sad), "negative_feedback")
+
+    let m_novel = moment_new("interesting", "user", 50, 50, 0, 80)
+    let sig_novel = signal_event(m_novel, "ext", "node")
+    assert_str("classify_novel", soul_classify_signal(sig_novel), "novel_input")
+
+    // Results
+    println("")
+    print("Passed: ")
+    print_int(tests_passed)
+    println("")
+    print("Failed: ")
+    print_int(tests_failed)
+    println("")
+    if tests_failed == 0 {
+        println("All soul tests passed!")
+    }
+}
+
+main()

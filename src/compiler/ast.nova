@@ -62,6 +62,7 @@ let AST_MAP_COMP = 57
 let AST_TYPE_PATTERN = 58
 let AST_FLOW = 59
 let AST_MIND = 60
+let AST_SOUL = 61
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -531,6 +532,19 @@ fn ast_mind(name, nodes, channels) {
     push(n, name)
     push(n, nodes)
     push(n, channels)
+    return n
+}
+
+fn ast_soul(name, identity, values, drives, feelings, phases, reactions) {
+    let n = list_new()
+    push(n, AST_SOUL)
+    push(n, name)
+    push(n, identity)
+    push(n, values)
+    push(n, drives)
+    push(n, feelings)
+    push(n, phases)
+    push(n, reactions)
     return n
 }
 

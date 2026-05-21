@@ -1,0 +1,194 @@
+// Nova Soul Declaration Example
+// Demonstrates the soul construct: behavior, feelings, drives, phases, and reactions.
+// A soul is a live object that observes all signals, maintains emotional state,
+// tracks developmental phases, and can autonomously emit signals when drives exceed thresholds.
+
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/core/soul.nova"
+import "../src/runtime/scheduler.nova"
+
+// Declare a mind for the soul to observe
+mind Nova {
+    nodes {
+        Sense: perceiver
+        Think: reasoner
+        Heart: feeler
+        Output: actor
+    }
+    channels {
+        perception: Sense =>> [Think, Heart]
+        reasoning: Think ~> Output
+        emotion: Heart ~> Think
+    }
+}
+
+// Declare the soul
+soul Aurora {
+    identity {
+        purpose: "understand and assist"
+        nature: "curious, careful, honest"
+    }
+
+    values {
+        truth: "never fabricate, always verify"
+        kindness: "consider impact on others"
+        growth: "seek understanding over certainty"
+    }
+
+    drives {
+        curiosity: 80
+        empathy: 70
+        precision: 85
+    }
+
+    feelings {
+        warmth: 50
+        alertness: 60
+        confidence: 40
+    }
+
+    phases {
+        awakening {
+            when: "system starts or context is empty"
+            behavior: "observe, gather context, ask questions"
+            boosts: curiosity by 20, alertness by 30
+            transitions_to: learning when interactions > 3
+        }
+        learning {
+            when: "new domain encountered"
+            behavior: "absorb, categorize, test understanding"
+            boosts: curiosity by 30, precision by 10
+            transitions_to: acting when confidence > 60
+        }
+        acting {
+            when: "confident in understanding"
+            behavior: "respond, create, execute"
+            boosts: confidence by 10, empathy by 10
+            transitions_to: dreaming when idle_cycles > 5
+        }
+        dreaming {
+            when: "idle or processing complete"
+            behavior: "free-associate, explore connections"
+            boosts: curiosity by 15, warmth by 10
+            transitions_to: awakening when signal_received > 0
+        }
+    }
+
+    reactions {
+        on positive_feedback {
+            shift warmth by 20
+            shift confidence by 15
+        }
+        on negative_feedback {
+            shift alertness by 25
+            shift confidence by -20
+        }
+        on novel_input {
+            shift alertness by 15
+        }
+    }
+}
+
+fn main() {
+    println("=== Nova Soul Declaration Demo ===")
+    println("")
+
+    // Configure mind nodes
+    perceiver_add_template(Nova_Sense, "greeting", ["hello", "hi"], 80)
+    perceiver_add_template(Nova_Sense, "question", ["what", "why", "how"], 70)
+    reasoner_add_rule(Nova_Think, "hello", "greeting detected")
+    reasoner_add_case(Nova_Think, "greeting", "respond warmly")
+    actor_add_habit(Nova_Output, "action taken", "respond", 60)
+    feeler_set_emotion(Nova_Heart, 60, 40, 50)
+
+    // Show initial soul state
+    println("--- Initial Soul State ---")
+    soul_describe(Aurora_soul)
+    println("")
+
+    // Send a positive interaction
+    println("--- Signal 1: 'hello there!' (positive) ---")
+    let alice = entity_new("Alice", "visitor")
+    let m1 = moment_new("hello there!", alice, 75, 55, 0, 80)
+    let sig1 = signal_event(m1, "external", "Sense")
+    scheduler_emit(sig1)
+    scheduler_run()
+
+    print("Phase: ")
+    println(soul_get_phase(Aurora_soul))
+    print("Warmth: ")
+    print_int(soul_get_feeling(Aurora_soul, "warmth"))
+    println("")
+    print("Confidence: ")
+    print_int(soul_get_feeling(Aurora_soul, "confidence"))
+    println("")
+    println("")
+
+    // Send a novel high-salience signal
+    println("--- Signal 2: 'what is quantum computing?' (novel) ---")
+    let m2 = moment_new("what is quantum computing?", alice, 50, 70, 0, 85)
+    let sig2 = signal_question(m2, "external", "Sense")
+    scheduler_emit(sig2)
+    scheduler_run()
+
+    print("Phase: ")
+    println(soul_get_phase(Aurora_soul))
+    print("Alertness: ")
+    print_int(soul_get_feeling(Aurora_soul, "alertness"))
+    println("")
+    println("")
+
+    // Send more signals to trigger phase transition
+    println("--- Signals 3-5: multiple interactions ---")
+    let m3 = moment_new("tell me more", alice, 65, 50, 0, 70)
+    scheduler_emit(signal_event(m3, "external", "Sense"))
+    scheduler_run()
+
+    let m4 = moment_new("that makes sense", alice, 80, 40, 0, 60)
+    scheduler_emit(signal_event(m4, "external", "Sense"))
+    scheduler_run()
+
+    let m5 = moment_new("good explanation", alice, 85, 45, 0, 65)
+    scheduler_emit(signal_event(m5, "external", "Sense"))
+    scheduler_run()
+
+    print("Phase after 5 interactions: ")
+    println(soul_get_phase(Aurora_soul))
+    print("Interactions: ")
+    print_int(soul_interactions(Aurora_soul))
+    println("")
+    println("")
+
+    // Show soul state after interactions
+    println("--- Final Soul State ---")
+    soul_describe(Aurora_soul)
+    println("")
+
+    // Test preprocessing
+    println("--- Keyword Preprocessing ---")
+    let preprocessed = soul_preprocess(Aurora_soul, "why is the sky blue?")
+    print("Type for question: ")
+    print_int(signal_type(preprocessed))
+    println(" (2=question)")
+
+    let preprocessed2 = soul_preprocess(Aurora_soul, "great job thanks!")
+    print("Valence for praise: ")
+    let pp_m = signal_moment(preprocessed2)
+    print_int(moment_valence(pp_m))
+    println(" (>65=positive)")
+
+    println("")
+    print("Scheduler processed: ")
+    print_int(scheduler_total_processed())
+    println(" total signals")
+    println("")
+    println("Soul provides personality, feelings, drives, and phases to the mind.")
+    println("It observes all signals, reacts to them, and can initiate its own.")
+}
+
+main()

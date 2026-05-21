@@ -1,0 +1,563 @@
+// Nova Core: Soul Runtime
+// A soul is a live, active construct representing behavior, feelings, initiative, and action.
+// It observes all signals, maintains emotional state, tracks phases, and can autonomously emit signals.
+
+let SOUL_TAG = 130
+let SOUL_NAME = 1
+let SOUL_IDENTITY = 2
+let SOUL_VALUES = 3
+let SOUL_DRIVES = 4
+let SOUL_FEELINGS = 5
+let SOUL_PHASES = 6
+let SOUL_REACTIONS = 7
+let SOUL_CURRENT_PHASE = 8
+let SOUL_INTERACTIONS = 9
+let SOUL_IDLE_CYCLES = 10
+let SOUL_PHASE_BOOSTS = 11
+
+let SOUL_DEFAULT_DRIVE_THRESHOLD = 90
+
+// ================================================================
+// Pair-list helpers: stores [name, value] pairs in a flat list
+// ================================================================
+
+fn _soul_plist_find(plist, name) {
+    let i = 0
+    while i < len(plist) {
+        if plist[i][0] == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _soul_plist_set(plist, name, val) {
+    let idx = _soul_plist_find(plist, name)
+    if idx >= 0 {
+        plist[idx][1] = val
+    } else {
+        let entry = list_new()
+        push(entry, name)
+        push(entry, val)
+        push(plist, entry)
+    }
+}
+
+fn _soul_plist_get(plist, name) {
+    let idx = _soul_plist_find(plist, name)
+    if idx >= 0 { return plist[idx][1] }
+    return -1
+}
+
+// ================================================================
+// Soul constructor
+// ================================================================
+
+fn soul_new(name) {
+    let s = list_new()
+    push(s, SOUL_TAG)
+    push(s, name)
+    push(s, list_new())
+    push(s, list_new())
+    push(s, list_new())
+    push(s, list_new())
+    push(s, list_new())
+    push(s, list_new())
+    push(s, "")
+    push(s, 0)
+    push(s, 0)
+    push(s, list_new())
+    return s
+}
+
+// ================================================================
+// Identity, values
+// ================================================================
+
+fn soul_name(s) { return s[SOUL_NAME] }
+
+fn soul_set_identity(s, key, val) {
+    _soul_plist_set(s[SOUL_IDENTITY], key, val)
+}
+
+fn soul_get_identity(s, key) {
+    return _soul_plist_get(s[SOUL_IDENTITY], key)
+}
+
+fn soul_set_value(s, key, val) {
+    _soul_plist_set(s[SOUL_VALUES], key, val)
+}
+
+fn soul_get_value(s, key) {
+    return _soul_plist_get(s[SOUL_VALUES], key)
+}
+
+// ================================================================
+// Drives (0-100 clamped)
+// ================================================================
+
+fn soul_set_drive(s, name, level) {
+    if level < 0 { level = 0 }
+    if level > 100 { level = 100 }
+    _soul_plist_set(s[SOUL_DRIVES], name, level)
+}
+
+fn soul_get_drive(s, name) {
+    let v = _soul_plist_get(s[SOUL_DRIVES], name)
+    if v == -1 { return 50 }
+    return v
+}
+
+fn soul_shift_drive(s, name, amount) {
+    let current = soul_get_drive(s, name)
+    soul_set_drive(s, name, current + amount)
+}
+
+// ================================================================
+// Feelings (0-100 clamped)
+// ================================================================
+
+fn soul_set_feeling(s, name, level) {
+    if level < 0 { level = 0 }
+    if level > 100 { level = 100 }
+    _soul_plist_set(s[SOUL_FEELINGS], name, level)
+}
+
+fn soul_get_feeling(s, name) {
+    let v = _soul_plist_get(s[SOUL_FEELINGS], name)
+    if v == -1 { return 50 }
+    return v
+}
+
+fn soul_shift_feeling(s, name, amount) {
+    let current = soul_get_feeling(s, name)
+    soul_set_feeling(s, name, current + amount)
+}
+
+// ================================================================
+// Phases
+// ================================================================
+
+fn soul_add_phase(s, name, when_desc, behavior) {
+    let phase = list_new()
+    push(phase, name)
+    push(phase, when_desc)
+    push(phase, behavior)
+    push(phase, "")
+    push(phase, "")
+    push(phase, 0)
+    push(s[SOUL_PHASES], phase)
+}
+
+fn soul_phase_set_transition(s, phase_name, transition_to, condition, cond_value) {
+    let phase = soul_find_phase(s, phase_name)
+    if phase == 0 { return 0 }
+    phase[3] = transition_to
+    phase[4] = condition
+    phase[5] = cond_value
+}
+
+fn soul_add_phase_boost(s, phase_name, target_name, amount) {
+    let entry = list_new()
+    push(entry, phase_name)
+    push(entry, target_name)
+    push(entry, amount)
+    push(s[SOUL_PHASE_BOOSTS], entry)
+}
+
+fn soul_set_phase(s, phase_name) {
+    s[SOUL_CURRENT_PHASE] = phase_name
+    soul_apply_phase_boosts(s, phase_name)
+}
+
+fn soul_get_phase(s) {
+    return s[SOUL_CURRENT_PHASE]
+}
+
+fn soul_find_phase(s, phase_name) {
+    let phases = s[SOUL_PHASES]
+    let i = 0
+    while i < len(phases) {
+        if phases[i][0] == phase_name {
+            return phases[i]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn soul_apply_phase_boosts(s, phase_name) {
+    let boosts = s[SOUL_PHASE_BOOSTS]
+    let i = 0
+    while i < len(boosts) {
+        let b = boosts[i]
+        if b[0] == phase_name {
+            let target = b[1]
+            let amount = b[2]
+            let dv = _soul_plist_get(s[SOUL_DRIVES], target)
+            if dv != -1 {
+                soul_shift_drive(s, target, amount)
+            } else {
+                let fv = _soul_plist_get(s[SOUL_FEELINGS], target)
+                if fv != -1 {
+                    soul_shift_feeling(s, target, amount)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// ================================================================
+// Reactions
+// ================================================================
+
+fn soul_add_reaction(s, trigger_name) {
+    let reaction = list_new()
+    push(reaction, trigger_name)
+    push(reaction, list_new())
+    push(s[SOUL_REACTIONS], reaction)
+}
+
+fn soul_add_reaction_effect(s, trigger_name, eff_type, target, amount) {
+    let reactions = s[SOUL_REACTIONS]
+    let i = len(reactions) - 1
+    while i >= 0 {
+        if reactions[i][0] == trigger_name {
+            let eff = list_new()
+            push(eff, eff_type)
+            push(eff, target)
+            push(eff, amount)
+            push(reactions[i][1], eff)
+            return 0
+        }
+        i = i - 1
+    }
+}
+
+fn soul_find_reaction(s, trigger_name) {
+    let reactions = s[SOUL_REACTIONS]
+    let i = 0
+    while i < len(reactions) {
+        if reactions[i][0] == trigger_name {
+            return reactions[i]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn soul_fire_reaction(s, trigger_name) {
+    let reaction = soul_find_reaction(s, trigger_name)
+    if reaction == 0 { return 0 }
+    let effects = reaction[1]
+    let i = 0
+    while i < len(effects) {
+        let eff = effects[i]
+        let eff_type = eff[0]
+        let target = eff[1]
+        let amount = eff[2]
+        if eff_type == "shift" {
+            soul_shift_feeling(s, target, amount)
+        }
+        if eff_type == "strengthen" {
+            soul_shift_drive(s, "precision", 5)
+        }
+        if eff_type == "reconsider" {
+            soul_shift_drive(s, "curiosity", 10)
+            soul_shift_feeling(s, "confidence", -10)
+        }
+        if eff_type == "transition_to" {
+            soul_set_phase(s, target)
+        }
+        if eff_type == "conditional_transition" {
+            soul_set_phase(s, target)
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// ================================================================
+// Classify signal for reactions
+// ================================================================
+
+fn soul_classify_signal(sig) {
+    let m = signal_moment(sig)
+    let valence = moment_valence(m)
+    let st = signal_type(sig)
+
+    if st == 7 { return "negative_feedback" }
+    if valence > 65 { return "positive_feedback" }
+    if valence < 35 { return "negative_feedback" }
+
+    let salience = moment_salience(m)
+    if salience > 70 { return "novel_input" }
+
+    return "neutral"
+}
+
+// ================================================================
+// Feeling drift: feelings naturally decay toward baseline (50)
+// ================================================================
+
+fn soul_drift_feelings(s) {
+    let feelings = s[SOUL_FEELINGS]
+    let i = 0
+    while i < len(feelings) {
+        let v = feelings[i][1]
+        if v > 50 {
+            feelings[i][1] = v - 1
+        }
+        if v < 50 {
+            feelings[i][1] = v + 1
+        }
+        i = i + 1
+    }
+}
+
+// ================================================================
+// Phase transition check
+// ================================================================
+
+fn soul_check_phase_transition(s) {
+    let current = s[SOUL_CURRENT_PHASE]
+    if current == "" { return 0 }
+    let phase = soul_find_phase(s, current)
+    if phase == 0 { return 0 }
+    let transition_to = phase[3]
+    let condition = phase[4]
+    let cond_value = phase[5]
+    if transition_to == "" { return 0 }
+
+    let should_transition = 0
+    if condition == "interactions" {
+        if s[SOUL_INTERACTIONS] > cond_value {
+            should_transition = 1
+        }
+    }
+    if condition == "confidence" {
+        let conf = soul_get_feeling(s, "confidence")
+        if conf > cond_value {
+            should_transition = 1
+        }
+    }
+    if condition == "idle_cycles" {
+        if s[SOUL_IDLE_CYCLES] > cond_value {
+            should_transition = 1
+        }
+    }
+    if condition == "signal_received" {
+        should_transition = 1
+    }
+
+    if should_transition == 1 {
+        soul_set_phase(s, transition_to)
+        return 1
+    }
+    return 0
+}
+
+// ================================================================
+// Drive-based autonomous signal emission
+// ================================================================
+
+fn soul_check_drives(s) {
+    let emitted = list_new()
+    let drives = s[SOUL_DRIVES]
+    let i = 0
+    while i < len(drives) {
+        let k = drives[i][0]
+        let v = drives[i][1]
+        if v >= SOUL_DEFAULT_DRIVE_THRESHOLD {
+            let m = moment_new(
+                "soul drive: " + k,
+                soul_name(s),
+                50, v,
+                0,
+                v
+            )
+            let st = 1
+            if k == "curiosity" { st = 2 }
+            if k == "empathy" { st = 5 }
+            if k == "precision" { st = 7 }
+            let sig = signal_new(st, m, "soul:" + soul_name(s), "", v)
+            push(emitted, sig)
+            soul_shift_drive(s, k, -15)
+        }
+        i = i + 1
+    }
+    return emitted
+}
+
+// ================================================================
+// Soul bias: influences the actor node's activation
+// ================================================================
+
+fn soul_bias(s) {
+    let phase = s[SOUL_CURRENT_PHASE]
+    let confidence = soul_get_feeling(s, "confidence")
+
+    let bias = 100
+
+    if phase == "acting" {
+        bias = bias + 20
+    }
+    if phase == "reflecting" {
+        bias = bias + 10
+    }
+    if phase == "awakening" {
+        bias = bias - 10
+    }
+    if phase == "dreaming" {
+        bias = bias - 20
+    }
+
+    if confidence > 70 {
+        bias = bias + (confidence - 70) / 3
+    }
+    if confidence < 30 {
+        bias = bias - (30 - confidence) / 3
+    }
+
+    if bias < 50 { bias = 50 }
+    if bias > 150 { bias = 150 }
+    return bias
+}
+
+// ================================================================
+// Keyword-based input preprocessing
+// ================================================================
+
+fn soul_preprocess(s, raw_input) {
+    let st = 1
+    let valence = 50
+    let arousal = 50
+    let salience = 60
+
+    if contains(raw_input, "who") == 1 { st = 2; salience = 70 }
+    if contains(raw_input, "what") == 1 { st = 2; salience = 70 }
+    if contains(raw_input, "why") == 1 { st = 2; salience = 75 }
+    if contains(raw_input, "how") == 1 { st = 2; salience = 70 }
+    if contains(raw_input, "where") == 1 { st = 2; salience = 70 }
+
+    if contains(raw_input, "do") == 1 { st = 4; arousal = 65 }
+    if contains(raw_input, "run") == 1 { st = 4; arousal = 65 }
+    if contains(raw_input, "stop") == 1 { st = 4; arousal = 70 }
+    if contains(raw_input, "make") == 1 { st = 4; arousal = 60 }
+
+    if contains(raw_input, "yes") == 1 { valence = 70 }
+    if contains(raw_input, "ok") == 1 { valence = 65 }
+    if contains(raw_input, "thanks") == 1 { valence = 80 }
+    if contains(raw_input, "good") == 1 { valence = 75 }
+    if contains(raw_input, "great") == 1 { valence = 80 }
+
+    if contains(raw_input, "wrong") == 1 { valence = 25; st = 7 }
+    if contains(raw_input, "bad") == 1 { valence = 30 }
+    if contains(raw_input, "error") == 1 { valence = 30; st = 7 }
+    if contains(raw_input, "help") == 1 { st = 5; arousal = 60 }
+
+    if contains(raw_input, "!") == 1 { arousal = arousal + 15 }
+    if contains(raw_input, "?") == 1 { st = 2 }
+    if contains(raw_input, "urgent") == 1 { arousal = 85; salience = 90 }
+
+    let m = moment_new(raw_input, "user", valence, arousal, 0, salience)
+    let sig = signal_new(st, m, "external", "", 50)
+    return sig
+}
+
+// ================================================================
+// Main tick: called by scheduler after each signal dispatch
+// ================================================================
+
+fn soul_tick(s, sig) {
+    if s == 0 { return 0 }
+    s[SOUL_INTERACTIONS] = s[SOUL_INTERACTIONS] + 1
+    s[SOUL_IDLE_CYCLES] = 0
+
+    let m = signal_moment(sig)
+    let valence = moment_valence(m)
+    let arousal = moment_arousal(m)
+
+    if valence > 60 {
+        soul_shift_feeling(s, "warmth", (valence - 50) / 5)
+    }
+    if valence < 40 {
+        soul_shift_feeling(s, "warmth", (valence - 50) / 5)
+    }
+    if arousal > 60 {
+        soul_shift_feeling(s, "alertness", (arousal - 50) / 5)
+    }
+
+    let classification = soul_classify_signal(sig)
+    soul_fire_reaction(s, classification)
+
+    soul_check_phase_transition(s)
+    soul_drift_feelings(s)
+}
+
+// ================================================================
+// Idle tick: called when scheduler has no signals
+// ================================================================
+
+fn soul_idle_tick(s) {
+    if s == 0 { return 0 }
+    s[SOUL_IDLE_CYCLES] = s[SOUL_IDLE_CYCLES] + 1
+    soul_drift_feelings(s)
+    soul_check_phase_transition(s)
+}
+
+// ================================================================
+// Query and describe
+// ================================================================
+
+fn soul_describe(s) {
+    print("Soul: ")
+    println(soul_name(s))
+    print("  Phase: ")
+    println(soul_get_phase(s))
+    print("  Interactions: ")
+    print_int(s[SOUL_INTERACTIONS])
+    println("")
+    print("  Idle cycles: ")
+    print_int(s[SOUL_IDLE_CYCLES])
+    println("")
+
+    print("  Drives: ")
+    let drives = s[SOUL_DRIVES]
+    let di = 0
+    while di < len(drives) {
+        print(drives[di][0])
+        print("=")
+        print_int(drives[di][1])
+        print(" ")
+        di = di + 1
+    }
+    println("")
+
+    print("  Feelings: ")
+    let feelings = s[SOUL_FEELINGS]
+    let fi = 0
+    while fi < len(feelings) {
+        print(feelings[fi][0])
+        print("=")
+        print_int(feelings[fi][1])
+        print(" ")
+        fi = fi + 1
+    }
+    println("")
+}
+
+fn soul_phase_behavior(s) {
+    let phase = soul_find_phase(s, soul_get_phase(s))
+    if phase == 0 { return "" }
+    return phase[2]
+}
+
+fn soul_interactions(s) {
+    return s[SOUL_INTERACTIONS]
+}
+
+fn soul_is_active(s) {
+    if s == 0 { return 0 }
+    return 1
+}

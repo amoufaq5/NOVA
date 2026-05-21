@@ -641,6 +641,11 @@ fn actor_process(node, signal) {
         reflex_match = 80
     }
     let activation = actor_compute_activation(reason_support, emotional_bias, habit_strength, reflex_match)
+    let s_soul = scheduler_get_soul()
+    if s_soul != 0 {
+        let bias = soul_bias(s_soul)
+        activation = activation * bias / 100
+    }
     let threshold = node_get_config(node, "activation_threshold")
     if threshold == 0 { threshold = 25 }
     if activation >= threshold {

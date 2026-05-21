@@ -123,6 +123,7 @@ examples: bin/nova
 agent: bin/nova
 	@cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
 		src/core/node.nova src/core/channel.nova src/core/path.nova \
+		src/core/soul.nova \
 		src/mind/academic.nova src/mind/experiential.nova src/mind/emotion.nova \
 		src/mind/memory.nova src/mind/reasoning.nova \
 		src/agent/agent.nova > /tmp/nova_agent.nova

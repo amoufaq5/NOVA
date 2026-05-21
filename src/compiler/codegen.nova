@@ -2944,7 +2944,159 @@ fn gen_program(program) {
                 ci = ci + 1
             }
         } else {
+          if ast_tag(ed) == AST_SOUL {
+            let sname = ed[1]
+            let s_identity = ed[2]
+            let s_values = ed[3]
+            let s_drives = ed[4]
+            let s_feelings = ed[5]
+            let s_phases = ed[6]
+            let s_reactions = ed[7]
+            let soul_var = sname + "_soul"
+
+            let sei_args = list_new()
+            push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_ensure_init"), sei_args)))
+
+            let sn_args = list_new()
+            push(sn_args, ast_str(sname))
+            push(expanded, ast_let(soul_var, ast_call(ast_ident("soul_new"), sn_args)))
+
+            let si = 0
+            while si < len(s_identity) {
+                let id_entry = s_identity[si]
+                let sid_args = list_new()
+                push(sid_args, ast_ident(soul_var))
+                push(sid_args, ast_str(id_entry[0]))
+                push(sid_args, ast_str(id_entry[1]))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_set_identity"), sid_args)))
+                si = si + 1
+            }
+
+            let vi = 0
+            while vi < len(s_values) {
+                let v_entry = s_values[vi]
+                let sv_args = list_new()
+                push(sv_args, ast_ident(soul_var))
+                push(sv_args, ast_str(v_entry[0]))
+                push(sv_args, ast_str(v_entry[1]))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_set_value"), sv_args)))
+                vi = vi + 1
+            }
+
+            let di = 0
+            while di < len(s_drives) {
+                let d_entry = s_drives[di]
+                let sd_args = list_new()
+                push(sd_args, ast_ident(soul_var))
+                push(sd_args, ast_str(d_entry[0]))
+                push(sd_args, ast_int(d_entry[1]))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_set_drive"), sd_args)))
+                di = di + 1
+            }
+
+            let fi = 0
+            while fi < len(s_feelings) {
+                let f_entry = s_feelings[fi]
+                let sf_args = list_new()
+                push(sf_args, ast_ident(soul_var))
+                push(sf_args, ast_str(f_entry[0]))
+                push(sf_args, ast_int(f_entry[1]))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_set_feeling"), sf_args)))
+                fi = fi + 1
+            }
+
+            let pi = 0
+            while pi < len(s_phases) {
+                let p_entry = s_phases[pi]
+                let sp_args = list_new()
+                push(sp_args, ast_ident(soul_var))
+                push(sp_args, ast_str(p_entry[0]))
+                push(sp_args, ast_str(p_entry[1]))
+                push(sp_args, ast_str(p_entry[2]))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_add_phase"), sp_args)))
+
+                if p_entry[4] != "" {
+                    let st_args = list_new()
+                    push(st_args, ast_ident(soul_var))
+                    push(st_args, ast_str(p_entry[0]))
+                    push(st_args, ast_str(p_entry[4]))
+                    push(st_args, ast_str(p_entry[5]))
+                    push(st_args, ast_int(p_entry[6]))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_phase_set_transition"), st_args)))
+                }
+
+                let phase_boosts = p_entry[3]
+                let bi = 0
+                while bi < len(phase_boosts) {
+                    let boost = phase_boosts[bi]
+                    let sb_args = list_new()
+                    push(sb_args, ast_ident(soul_var))
+                    push(sb_args, ast_str(p_entry[0]))
+                    push(sb_args, ast_str(boost[0]))
+                    push(sb_args, ast_int(boost[1]))
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_add_phase_boost"), sb_args)))
+                    bi = bi + 1
+                }
+                pi = pi + 1
+            }
+
+            let ri = 0
+            while ri < len(s_reactions) {
+                let r_entry = s_reactions[ri]
+                let trigger = r_entry[0]
+                let effects = r_entry[1]
+                let sr_args = list_new()
+                push(sr_args, ast_ident(soul_var))
+                push(sr_args, ast_str(trigger))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_add_reaction"), sr_args)))
+
+                let efi = 0
+                while efi < len(effects) {
+                    let eff = effects[efi]
+                    let se_args = list_new()
+                    push(se_args, ast_ident(soul_var))
+                    push(se_args, ast_str(trigger))
+                    push(se_args, ast_str(eff[0]))
+                    if eff[0] == "shift" {
+                        push(se_args, ast_str(eff[1]))
+                        push(se_args, ast_int(eff[2]))
+                    }
+                    if eff[0] == "strengthen" {
+                        push(se_args, ast_str(eff[1]))
+                        push(se_args, ast_int(0))
+                    }
+                    if eff[0] == "reconsider" {
+                        push(se_args, ast_str(eff[1]))
+                        push(se_args, ast_int(0))
+                    }
+                    if eff[0] == "transition_to" {
+                        push(se_args, ast_str(eff[1]))
+                        push(se_args, ast_int(0))
+                    }
+                    if eff[0] == "conditional_transition" {
+                        push(se_args, ast_str(eff[3]))
+                        push(se_args, ast_int(0))
+                    }
+                    push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_add_reaction_effect"), se_args)))
+                    efi = efi + 1
+                }
+                ri = ri + 1
+            }
+
+            if len(s_phases) > 0 {
+                let sip_args = list_new()
+                push(sip_args, ast_ident(soul_var))
+                let first_phase = s_phases[0]
+                push(sip_args, ast_str(first_phase[0]))
+                push(expanded, ast_expr_stmt(ast_call(ast_ident("soul_set_phase"), sip_args)))
+            }
+
+            let srs_args = list_new()
+            push(srs_args, ast_ident(soul_var))
+            push(expanded, ast_expr_stmt(ast_call(ast_ident("scheduler_register_soul"), srs_args)))
+          } else {
             push(expanded, ed)
+          }
         }
         ei = ei + 1
     }
