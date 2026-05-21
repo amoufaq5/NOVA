@@ -1,173 +1,220 @@
 // Nova Runtime: Signal Scheduler
-// Dispatches signals to nodes, manages processing cycles,
-// and implements the arena-per-cycle memory model.
+// Dispatches signals to nodes by priority, manages processing cycles.
+// Uses standard Nova lists and the signal priority queue from signal.nova.
+// Integrates with node_receive/node_process/node_drain_outbox for dispatch.
+// Cycle detection: signals that have already visited their destination are dropped.
+// Channel routing: outputs can be routed via channel network to next-hop nodes.
 
-// Signal queue entry: [signal_ptr: 8][dest_node: 8][priority: 8][next: 8]
-let SQ_SIGNAL = 0
-let SQ_DEST = 8
-let SQ_PRIORITY = 16
-let SQ_NEXT = 24
-let SQ_SIZE = 32
+// Scheduler state (module-level globals)
+let sched_queue = 0
+let sched_nodes = 0
+let sched_channels = 0
+let sched_cycle = 0
+let sched_running = 0
+let sched_processed = 0
+let sched_dropped = 0
+let sched_max_per_cycle = 10000
 
-// Scheduler state
-let sq_head = 0
-let sq_tail = 0
-let sq_count = 0
-let cycle_number = 0
-let scheduler_running = false
-
-// Node registry: array of [node_ptr, handler_fn]
-let node_registry = 0
-let node_count = 0
-let node_cap = 0
+// ================================================================
+// Initialization
+// ================================================================
 
 fn scheduler_init() {
-    sq_head = 0
-    sq_tail = 0
-    sq_count = 0
-    cycle_number = 0
-    node_registry = alloc(128 * 16)  // 128 slots * (ptr + handler)
-    node_count = 0
-    node_cap = 128
-    arena_init()
+    sched_queue = signal_queue_new()
+    sched_nodes = list_new()
+    sched_channels = list_new()
+    sched_cycle = 0
+    sched_running = 0
+    sched_processed = 0
+    sched_dropped = 0
 }
 
-fn register_node(node, handler) {
-    if node_count >= node_cap {
-        node_cap = node_cap * 2
-        node_registry = realloc(node_registry, node_cap * 16)
+// ================================================================
+// Node registry
+// ================================================================
+
+fn scheduler_register(node) {
+    push(sched_nodes, node)
+}
+
+fn scheduler_find_node(name) {
+    let i = 0
+    while i < len(sched_nodes) {
+        if node_name(sched_nodes[i]) == name {
+            return sched_nodes[i]
+        }
+        i = i + 1
     }
-    let offset = node_count * 16
-    __intrinsic("store64", node_registry + offset, node)
-    __intrinsic("store64", node_registry + offset + 8, handler)
-    node_count = node_count + 1
+    return 0
 }
 
-fn emit(signal, dest, priority) {
-    let entry = alloc(SQ_SIZE)
-    __intrinsic("store64", entry + SQ_SIGNAL, signal)
-    __intrinsic("store64", entry + SQ_DEST, dest)
-    __intrinsic("store64", entry + SQ_PRIORITY, priority)
-    __intrinsic("store64", entry + SQ_NEXT, 0)
+fn scheduler_node_count() {
+    return len(sched_nodes)
+}
 
-    // Insert sorted by priority (higher first)
-    if sq_head == 0 {
-        sq_head = entry
-        sq_tail = entry
-    } else {
-        let head_pri = __intrinsic("load64", sq_head + SQ_PRIORITY)
-        if priority > head_pri {
-            // Insert at head
-            __intrinsic("store64", entry + SQ_NEXT, sq_head)
-            sq_head = entry
-        } else {
-            // Find insertion point
-            let prev = sq_head
-            let curr = __intrinsic("load64", sq_head + SQ_NEXT)
-            while curr != 0 {
-                let curr_pri = __intrinsic("load64", curr + SQ_PRIORITY)
-                if priority > curr_pri {
-                    __intrinsic("store64", entry + SQ_NEXT, curr)
-                    __intrinsic("store64", prev + SQ_NEXT, entry)
-                    sq_count = sq_count + 1
-                    return
-                }
-                prev = curr
-                curr = __intrinsic("load64", curr + SQ_NEXT)
+// ================================================================
+// Channel integration
+// ================================================================
+
+fn scheduler_add_channel(ch) {
+    push(sched_channels, ch)
+}
+
+// Route a signal from source_name through configured channels.
+// Instead of delivering to node inboxes directly, creates redirected
+// signals aimed at channel destination nodes and queues them.
+// Returns the number of signals routed.
+fn scheduler_route_output(source_name, sig) {
+    let routed = 0
+    let i = 0
+    while i < len(sched_channels) {
+        let ch = sched_channels[i]
+        if channel_source(ch) == source_name {
+            let dests = channel_dests(ch)
+            let j = 0
+            while j < len(dests) {
+                let dest_node = dests[j]
+                let redirected = signal_redirect(sig, node_name(dest_node))
+                signal_queue_push(sched_queue, redirected)
+                routed = routed + 1
+                j = j + 1
             }
-            // Insert at tail
-            __intrinsic("store64", sq_tail + SQ_NEXT, entry)
-            sq_tail = entry
         }
+        i = i + 1
     }
-    sq_count = sq_count + 1
+    if routed == 0 {
+        signal_queue_push(sched_queue, sig)
+    }
+    return routed
 }
 
-fn broadcast(signal, priority) {
+// ================================================================
+// Signal submission
+// ================================================================
+
+fn scheduler_emit(signal) {
+    signal_queue_push(sched_queue, signal)
+}
+
+fn scheduler_broadcast(signal) {
     let i = 0
-    while i < node_count {
-        let offset = i * 16
-        let node = __intrinsic("load64", node_registry + offset)
-        emit(signal, node, priority)
+    while i < len(sched_nodes) {
+        let dest_name = node_name(sched_nodes[i])
+        let redirected = signal_redirect(signal, dest_name)
+        signal_queue_push(sched_queue, redirected)
         i = i + 1
     }
 }
 
-fn dequeue() {
-    if sq_head == 0 {
-        return 0
-    }
-    let entry = sq_head
-    sq_head = __intrinsic("load64", entry + SQ_NEXT)
-    if sq_head == 0 {
-        sq_tail = 0
-    }
-    sq_count = sq_count - 1
-    return entry
-}
+// ================================================================
+// Dispatch
+// ================================================================
 
-fn dispatch_one() {
-    let entry = dequeue()
-    if entry == 0 {
-        return false
-    }
-    let signal = __intrinsic("load64", entry + SQ_SIGNAL)
-    let dest = __intrinsic("load64", entry + SQ_DEST)
+fn scheduler_dispatch_one() {
+    let sig = signal_queue_pop(sched_queue)
+    if sig == 0 { return 0 }
 
-    // Find handler for destination node
+    let dest_name = signal_dest(sig)
+    let dest_node = scheduler_find_node(dest_name)
+
+    if dest_node == 0 {
+        sched_dropped = sched_dropped + 1
+        sched_processed = sched_processed + 1
+        return 1
+    }
+
+    // Cycle detection: drop signals that already visited their destination
+    if signal_has_visited(sig, dest_name) == 1 {
+        sched_dropped = sched_dropped + 1
+        sched_processed = sched_processed + 1
+        return 1
+    }
+
+    node_receive(dest_node, sig)
+    node_process(dest_node)
+
+    let outputs = node_drain_outbox(dest_node)
     let i = 0
-    while i < node_count {
-        let offset = i * 16
-        let node = __intrinsic("load64", node_registry + offset)
-        if node == dest {
-            let handler = __intrinsic("load64", node_registry + offset + 8)
-            __intrinsic("call", handler, node, signal)
-            free(entry)
-            return true
-        }
+    while i < len(outputs) {
+        scheduler_route_output(node_name(dest_node), outputs[i])
         i = i + 1
     }
-    free(entry)
-    return true
+
+    sched_processed = sched_processed + 1
+    return 1
 }
 
-fn run_cycle() {
-    cycle_number = cycle_number + 1
-    arena_reset()
+// ================================================================
+// Cycle execution
+// ================================================================
 
-    // Process all signals in current queue
-    let processed = 0
-    while sq_head != 0 {
-        dispatch_one()
-        processed = processed + 1
-        // Safety: limit signals per cycle to prevent runaway
-        if processed > 10000 {
-            eprintln("WARNING: cycle signal limit reached")
-            return processed
+fn scheduler_run_cycle() {
+    sched_cycle = sched_cycle + 1
+    let count = 0
+    while len(sched_queue) > 0 {
+        scheduler_dispatch_one()
+        count = count + 1
+        if count >= sched_max_per_cycle {
+            println("WARNING: cycle signal limit reached")
+            return count
         }
     }
-    return processed
+    return count
 }
+
+// ================================================================
+// Main loop
+// ================================================================
 
 fn scheduler_run() {
-    scheduler_running = true
-    while scheduler_running {
-        if sq_count == 0 {
-            // No signals to process, idle
-            scheduler_running = false
+    sched_running = 1
+    while sched_running == 1 {
+        if len(sched_queue) == 0 {
+            sched_running = 0
         } else {
-            run_cycle()
+            scheduler_run_cycle()
         }
     }
 }
 
 fn scheduler_stop() {
-    scheduler_running = false
+    sched_running = 0
+}
+
+// ================================================================
+// Queries
+// ================================================================
+
+fn scheduler_queue_size() {
+    return len(sched_queue)
+}
+
+fn scheduler_cycle_count() {
+    return sched_cycle
+}
+
+fn scheduler_total_processed() {
+    return sched_processed
+}
+
+fn scheduler_total_dropped() {
+    return sched_dropped
 }
 
 fn scheduler_status() {
-    println(str_concat("Cycle: ", int_to_str(cycle_number)))
-    println(str_concat("Queued signals: ", int_to_str(sq_count)))
-    println(str_concat("Registered nodes: ", int_to_str(node_count)))
-    println(str_concat("Arena used: ", int_to_str(arena_used())))
+    print("Cycle: ")
+    print_int(sched_cycle)
+    println("")
+    print("Queued signals: ")
+    print_int(len(sched_queue))
+    println("")
+    print("Registered nodes: ")
+    print_int(len(sched_nodes))
+    println("")
+    print("Total processed: ")
+    print_int(sched_processed)
+    println("")
+    print("Total dropped: ")
+    print_int(sched_dropped)
+    println("")
 }

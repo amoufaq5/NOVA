@@ -1,0 +1,332 @@
+// Test: Signal Scheduler
+// Verifies signal dispatch, priority ordering, broadcast, cycle detection,
+// channel routing, and full scheduler_run.
+
+import "../src/core/moment.nova"
+import "../src/core/signal.nova"
+import "../src/core/similarity.nova"
+import "../src/core/node.nova"
+import "../src/core/channel.nova"
+import "../src/core/path.nova"
+import "../src/runtime/scheduler.nova"
+
+fn test_init() {
+    println("--- scheduler_init ---")
+    scheduler_init()
+    if scheduler_queue_size() != 0 {
+        println("FAIL: queue should be empty")
+        exit(1)
+    }
+    if scheduler_node_count() != 0 {
+        println("FAIL: no nodes registered")
+        exit(1)
+    }
+    if scheduler_cycle_count() != 0 {
+        println("FAIL: cycle count should be 0")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_register() {
+    println("--- scheduler_register ---")
+    scheduler_init()
+    let p = node_new("Perceiver", NTYPE_PERCEIVER)
+    let r = node_new("Reasoner", NTYPE_REASONER)
+    scheduler_register(p)
+    scheduler_register(r)
+    if scheduler_node_count() != 2 {
+        println("FAIL: expected 2 nodes")
+        exit(1)
+    }
+    let found = scheduler_find_node("Perceiver")
+    if found == 0 {
+        println("FAIL: could not find Perceiver")
+        exit(1)
+    }
+    let missing = scheduler_find_node("Ghost")
+    if missing != 0 {
+        println("FAIL: should not find Ghost")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_emit_and_dispatch() {
+    println("--- emit and dispatch ---")
+    scheduler_init()
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    perceiver_add_template(perceiver, "greeting", ["hello", "hi"], 80)
+    scheduler_register(perceiver)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "reply", 70)
+    let m = moment_new("hello", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    scheduler_emit(sig)
+    if scheduler_queue_size() != 1 {
+        println("FAIL: queue should have 1 signal")
+        exit(1)
+    }
+
+    let dispatched = scheduler_dispatch_one()
+    if dispatched != 1 {
+        println("FAIL: dispatch should return 1")
+        exit(1)
+    }
+    print("  processed: ")
+    print_int(scheduler_total_processed())
+    println("")
+    println("PASS")
+}
+
+fn test_priority_ordering() {
+    println("--- priority ordering ---")
+    scheduler_init()
+    let actor = node_new("Actor", NTYPE_ACTOR)
+    scheduler_register(actor)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "test", 50)
+
+    let m_low = moment_new("low", alice, 50, 30, cons, 30)
+    let sig_low = signal_new(SIG_EVENT, m_low, "ext", "Actor", 20)
+
+    let m_high = moment_new("high", alice, 50, 30, cons, 90)
+    let sig_high = signal_new(SIG_EVENT, m_high, "ext", "Actor", 90)
+
+    let m_mid = moment_new("mid", alice, 50, 30, cons, 60)
+    let sig_mid = signal_new(SIG_EVENT, m_mid, "ext", "Actor", 50)
+
+    scheduler_emit(sig_low)
+    scheduler_emit(sig_high)
+    scheduler_emit(sig_mid)
+
+    if scheduler_queue_size() != 3 {
+        println("FAIL: expected 3 in queue")
+        exit(1)
+    }
+
+    let first = signal_queue_pop(sched_queue)
+    let first_pri = signal_priority(first)
+    print("  first priority: ")
+    print_int(first_pri)
+    println("")
+    if first_pri != 90 {
+        println("FAIL: expected 90 first")
+        exit(1)
+    }
+
+    let second = signal_queue_pop(sched_queue)
+    let second_pri = signal_priority(second)
+    print("  second priority: ")
+    print_int(second_pri)
+    println("")
+    if second_pri != 50 {
+        println("FAIL: expected 50 second")
+        exit(1)
+    }
+
+    let third = signal_queue_pop(sched_queue)
+    let third_pri = signal_priority(third)
+    print("  third priority: ")
+    print_int(third_pri)
+    println("")
+    if third_pri != 20 {
+        println("FAIL: expected 20 third")
+        exit(1)
+    }
+
+    println("PASS")
+}
+
+fn test_broadcast() {
+    println("--- broadcast ---")
+    scheduler_init()
+    let p = node_new("Perceiver", NTYPE_PERCEIVER)
+    let r = node_new("Reasoner", NTYPE_REASONER)
+    let f = node_new("Feeler", NTYPE_FEELER)
+    feeler_set_emotion(f, 50, 30, 50)
+    scheduler_register(p)
+    scheduler_register(r)
+    scheduler_register(f)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "broadcast", 70)
+    let m = moment_new("hello all", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "all")
+
+    scheduler_broadcast(sig)
+    print("  queue after broadcast: ")
+    print_int(scheduler_queue_size())
+    println("")
+    if scheduler_queue_size() != 3 {
+        println("FAIL: expected 3 signals")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_cycle_detection() {
+    println("--- cycle detection ---")
+    scheduler_init()
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    perceiver_add_template(perceiver, "greeting", ["hello"], 80)
+    scheduler_register(perceiver)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "reply", 70)
+    let m = moment_new("hello", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    // Perceiver re-emits the input signal with same destination.
+    // Cycle detection should prevent infinite loop.
+    scheduler_emit(sig)
+    scheduler_run()
+
+    print("  total processed: ")
+    print_int(scheduler_total_processed())
+    println("")
+    print("  dropped (cycles): ")
+    print_int(scheduler_total_dropped())
+    println("")
+    print("  queue remaining: ")
+    print_int(scheduler_queue_size())
+    println("")
+
+    if scheduler_queue_size() != 0 {
+        println("FAIL: queue should be empty")
+        exit(1)
+    }
+    if scheduler_total_dropped() < 1 {
+        println("FAIL: should have dropped at least 1 cyclic signal")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_channel_routing() {
+    println("--- channel routing ---")
+    scheduler_init()
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    perceiver_add_template(perceiver, "greeting", ["hello"], 80)
+    let reasoner = node_new("Reasoner", NTYPE_REASONER)
+    reasoner_add_rule(reasoner, "analysis complete", "understood")
+    scheduler_register(perceiver)
+    scheduler_register(reasoner)
+
+    // Channel: Perceiver output -> Reasoner
+    let ch = channel_direct("sense_to_reason", "Perceiver", reasoner)
+    scheduler_add_channel(ch)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "reply", 70)
+    let m = moment_new("hello", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    scheduler_emit(sig)
+    scheduler_run()
+
+    print("  total processed: ")
+    print_int(scheduler_total_processed())
+    println("")
+    print("  cycles: ")
+    print_int(scheduler_cycle_count())
+    println("")
+
+    // Signal should flow: Perceiver -> (channel) -> Reasoner -> dropped
+    if scheduler_total_processed() < 2 {
+        println("FAIL: expected at least 2 processed (perceiver + reasoner)")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_full_pipeline() {
+    println("--- full pipeline ---")
+    scheduler_init()
+    let perceiver = node_new("Perceiver", NTYPE_PERCEIVER)
+    perceiver_add_template(perceiver, "greeting", ["hello"], 80)
+    let reasoner = node_new("Reasoner", NTYPE_REASONER)
+    reasoner_add_rule(reasoner, "hello", "greeting detected")
+    let actor = node_new("Actor", NTYPE_ACTOR)
+    actor_add_habit(actor, "action taken", "wave", 60)
+    scheduler_register(perceiver)
+    scheduler_register(reasoner)
+    scheduler_register(actor)
+
+    // Channels: Perceiver -> Reasoner -> Actor
+    let ch1 = channel_direct("sense_to_reason", "Perceiver", reasoner)
+    let ch2 = channel_direct("reason_to_act", "Reasoner", actor)
+    scheduler_add_channel(ch1)
+    scheduler_add_channel(ch2)
+
+    let alice = entity_new("Alice", "user")
+    let cons = consequence_new(CTYPE_EXPECTATION, "reply", 70)
+    let m = moment_new("hello", alice, 70, 50, cons, 80)
+    let sig = signal_event(m, "external", "Perceiver")
+
+    scheduler_emit(sig)
+    scheduler_run()
+
+    print("  total processed: ")
+    print_int(scheduler_total_processed())
+    println("")
+    print("  dropped: ")
+    print_int(scheduler_total_dropped())
+    println("")
+    print("  cycles: ")
+    print_int(scheduler_cycle_count())
+    println("")
+    print("  queue remaining: ")
+    print_int(scheduler_queue_size())
+    println("")
+
+    if scheduler_queue_size() != 0 {
+        println("FAIL: queue should be empty")
+        exit(1)
+    }
+    // Perceiver -> Reasoner -> Actor -> output (dropped)
+    if scheduler_total_processed() < 3 {
+        println("FAIL: expected at least 3 processed")
+        exit(1)
+    }
+    println("PASS")
+}
+
+fn test_status() {
+    println("--- scheduler_status ---")
+    scheduler_init()
+    let p = node_new("Perceiver", NTYPE_PERCEIVER)
+    scheduler_register(p)
+    println("  Status output:")
+    scheduler_status()
+    println("PASS")
+}
+
+fn main() {
+    println("=== Scheduler Tests ===")
+    println("")
+    test_init()
+    println("")
+    test_register()
+    println("")
+    test_emit_and_dispatch()
+    println("")
+    test_priority_ordering()
+    println("")
+    test_broadcast()
+    println("")
+    test_cycle_detection()
+    println("")
+    test_channel_routing()
+    println("")
+    test_full_pipeline()
+    println("")
+    test_status()
+    println("")
+    println("All scheduler tests passed!")
+}
+
+main()

@@ -61,6 +61,14 @@ for test_file in tests/test_*.nova; do
                 "$test_file" > /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"
             ;;
+        test_scheduler)
+            cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
+                src/core/node.nova src/core/channel.nova src/core/path.nova \
+                src/runtime/scheduler.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
     esac
 
     # Compile
