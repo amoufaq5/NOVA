@@ -1,82 +1,424 @@
 // Nova Agent: Retrieval-Augmented Generation (RAG) Pipeline
-// Stores documents as moments, retrieves by similarity, builds augmented prompts.
+// Vector-based retrieval using TF-IDF embeddings and cosine similarity.
+// Documents are stored with text, tags, timestamp, and a float embedding tensor.
+// Retrieval computes cosine similarity between query and document embeddings.
 
+// -----------------------------------------------------------------------
+// Vocabulary: maps words to dimension indices for TF-IDF vectors
+// -----------------------------------------------------------------------
+let rag_vocab = 0          // list of unique words (index = dimension)
+let rag_vocab_size = 0     // number of unique words
+let rag_doc_freqs = 0      // list: how many documents contain word at index i
+
+// -----------------------------------------------------------------------
+// Document store
+// Each doc = [text, tags, timestamp, embedding_tensor, word_counts_list]
+// -----------------------------------------------------------------------
 let rag_documents = 0
 let rag_doc_count = 0
 
+// Track vocab size at last full recompute to know when to rebuild
+let _rag_last_vocab_size = 0
+
+// -----------------------------------------------------------------------
+// Initialization
+// -----------------------------------------------------------------------
 fn rag_init() {
+    rag_vocab = list_new()
+    rag_vocab_size = 0
+    rag_doc_freqs = list_new()
     rag_documents = list_new()
     rag_doc_count = 0
+    _rag_last_vocab_size = 0
 }
 
+// -----------------------------------------------------------------------
+// Tokenizer: split text into lowercase words
+// Converts uppercase A-Z (char codes 65-90) to lowercase by adding 32.
+// Splits on spaces; strips non-alpha characters from edges.
+// -----------------------------------------------------------------------
+fn _rag_tokenize(text) {
+    // First, build a lowercase version of the text
+    let lower = ""
+    let ti = 0
+    while ti < len(text) {
+        let ch = char_at(text, ti)
+        if ch >= 65 {
+            if ch <= 90 {
+                // Uppercase letter: convert to lowercase
+                ch = ch + 32
+            }
+        }
+        lower = lower + chr(ch)
+        ti = ti + 1
+    }
+
+    // Split by spaces
+    let raw_words = split(lower, " ")
+    let tokens = list_new()
+    let wi = 0
+    while wi < len(raw_words) {
+        let w = raw_words[wi]
+        // Strip non-alpha chars from start and end of each word
+        let cleaned = ""
+        let ci = 0
+        while ci < len(w) {
+            let cc = char_at(w, ci)
+            // Keep only lowercase letters a-z (97-122) and digits 0-9 (48-57)
+            if cc >= 97 {
+                if cc <= 122 {
+                    cleaned = cleaned + chr(cc)
+                }
+            } else {
+                if cc >= 48 {
+                    if cc <= 57 {
+                        cleaned = cleaned + chr(cc)
+                    }
+                }
+            }
+            ci = ci + 1
+        }
+        if len(cleaned) > 0 {
+            push(tokens, cleaned)
+        }
+        wi = wi + 1
+    }
+    return tokens
+}
+
+// -----------------------------------------------------------------------
+// Word index: find or add a word to the vocabulary, return its index
+// -----------------------------------------------------------------------
+fn _rag_word_index(word) {
+    // Linear scan through vocabulary to find existing word
+    let i = 0
+    while i < rag_vocab_size {
+        if rag_vocab[i] == word {
+            return i
+        }
+        i = i + 1
+    }
+    // Word not found: add it
+    push(rag_vocab, word)
+    push(rag_doc_freqs, 0)
+    rag_vocab_size = rag_vocab_size + 1
+    return rag_vocab_size - 1
+}
+
+// -----------------------------------------------------------------------
+// Compute TF-IDF embedding vector for a text string
+// Returns a 1 x rag_vocab_size tensor
+//
+// TF = word_count / total_words
+// IDF weight = N / df (simplified; avoids log for language constraints)
+//   where N = max(rag_doc_count, 1), df = max(doc_freq[word], 1)
+// -----------------------------------------------------------------------
+fn _rag_compute_embedding(text) {
+    let tokens = _rag_tokenize(text)
+    let num_tokens = len(tokens)
+    if num_tokens == 0 {
+        return tensor_new(1, rag_vocab_size)
+    }
+
+    // Count word frequencies using parallel lists (word_idx, count)
+    let word_indices = list_new()
+    let word_counts = list_new()
+    let ti = 0
+    while ti < num_tokens {
+        let w = tokens[ti]
+        let idx = _rag_word_index(w)
+        // Find if we already have this index in our counts
+        let found = 0
+        let fi = 0
+        while fi < len(word_indices) {
+            if word_indices[fi] == idx {
+                list_set(word_counts, fi, word_counts[fi] + 1)
+                found = 1
+                fi = len(word_indices)
+            }
+            fi = fi + 1
+        }
+        if found == 0 {
+            push(word_indices, idx)
+            push(word_counts, 1)
+        }
+        ti = ti + 1
+    }
+
+    // Create embedding tensor (1 x vocab_size)
+    let emb = tensor_new(1, rag_vocab_size)
+    let total_f = to_float(num_tokens)
+    let n_docs = rag_doc_count
+    if n_docs < 1 {
+        n_docs = 1
+    }
+    let n_docs_f = to_float(n_docs)
+
+    let wi = 0
+    while wi < len(word_indices) {
+        let widx = word_indices[wi]
+        let count = word_counts[wi]
+        // TF = count / total_words
+        let tf = float_div(to_float(count), total_f)
+        // IDF = N / df (at least 1 to avoid division by zero)
+        let df = rag_doc_freqs[widx]
+        if df < 1 {
+            df = 1
+        }
+        let idf_weight = float_div(n_docs_f, to_float(df))
+        // TF-IDF score
+        let score = float_mul(tf, idf_weight)
+        tensor_set(emb, 0, widx, score)
+        wi = wi + 1
+    }
+
+    return emb
+}
+
+// -----------------------------------------------------------------------
+// Recompute all document embeddings (called when vocab grows significantly)
+// Also updates document frequency counts from scratch.
+// -----------------------------------------------------------------------
+fn _rag_recompute_embeddings() {
+    // Reset document frequencies
+    let fi = 0
+    while fi < rag_vocab_size {
+        list_set(rag_doc_freqs, fi, 0)
+        fi = fi + 1
+    }
+
+    // First pass: recount document frequencies
+    let di = 0
+    while di < rag_doc_count {
+        let doc = rag_documents[di]
+        let text = doc[0]
+        let tokens = _rag_tokenize(text)
+        // Find unique words in this document
+        let seen_indices = list_new()
+        let ti = 0
+        while ti < len(tokens) {
+            let idx = _rag_word_index(tokens[ti])
+            // Check if we already counted this word for this doc
+            let already = 0
+            let si = 0
+            while si < len(seen_indices) {
+                if seen_indices[si] == idx {
+                    already = 1
+                    si = len(seen_indices)
+                }
+                si = si + 1
+            }
+            if already == 0 {
+                push(seen_indices, idx)
+                list_set(rag_doc_freqs, idx, rag_doc_freqs[idx] + 1)
+            }
+            ti = ti + 1
+        }
+        di = di + 1
+    }
+
+    // Second pass: recompute embeddings for all documents
+    let di2 = 0
+    while di2 < rag_doc_count {
+        let doc = rag_documents[di2]
+        let text = doc[0]
+        let new_emb = _rag_compute_embedding(text)
+        // doc layout: [text, tags, timestamp, embedding, word_counts]
+        list_set(doc, 3, new_emb)
+        di2 = di2 + 1
+    }
+
+    _rag_last_vocab_size = rag_vocab_size
+}
+
+// -----------------------------------------------------------------------
+// Add a document with computed embedding
+// -----------------------------------------------------------------------
 fn rag_add_document(text, tags) {
+    let old_vocab = rag_vocab_size
+
+    // Tokenize and update document frequencies for the new doc
+    let tokens = _rag_tokenize(text)
+    let seen_indices = list_new()
+    let ti = 0
+    while ti < len(tokens) {
+        let idx = _rag_word_index(tokens[ti])
+        let already = 0
+        let si = 0
+        while si < len(seen_indices) {
+            if seen_indices[si] == idx {
+                already = 1
+                si = len(seen_indices)
+            }
+            si = si + 1
+        }
+        if already == 0 {
+            push(seen_indices, idx)
+            list_set(rag_doc_freqs, idx, rag_doc_freqs[idx] + 1)
+        }
+        ti = ti + 1
+    }
+
+    // Compute embedding
+    let emb = _rag_compute_embedding(text)
+
+    // Build word count list for potential later use
+    let word_counts = list_new()
+    let wci = 0
+    while wci < len(seen_indices) {
+        push(word_counts, seen_indices[wci])
+        wci = wci + 1
+    }
+
+    // Create document: [text, tags, timestamp, embedding, word_counts]
     let doc = list_new()
     push(doc, text)
     push(doc, tags)
     push(doc, global_time)
+    push(doc, emb)
+    push(doc, word_counts)
     push(rag_documents, doc)
     rag_doc_count = rag_doc_count + 1
+
+    // If vocabulary grew by more than 50% since last recompute,
+    // recompute all embeddings so dimensions are consistent
+    if _rag_last_vocab_size > 0 {
+        let growth = rag_vocab_size - _rag_last_vocab_size
+        // Recompute if vocab grew by more than 50%
+        let threshold = _rag_last_vocab_size / 2
+        if growth > threshold {
+            _rag_recompute_embeddings()
+        }
+    } else {
+        _rag_last_vocab_size = rag_vocab_size
+    }
 }
 
-fn rag_doc_text(doc) { return doc[0] }
-fn rag_doc_tags(doc) { return doc[1] }
-fn rag_doc_time(doc) { return doc[2] }
+// -----------------------------------------------------------------------
+// Cosine similarity between two 1-row tensors (may have different widths)
+// Handles dimension mismatch by only comparing overlapping dimensions.
+// Returns a float bit pattern.
+// -----------------------------------------------------------------------
+fn _rag_cosine_similarity(a, b) {
+    let cols_a = tensor_cols(a)
+    let cols_b = tensor_cols(b)
+    let min_cols = cols_a
+    if cols_b < min_cols {
+        min_cols = cols_b
+    }
+    if min_cols == 0 {
+        return to_float(0)
+    }
 
-fn rag_score_doc(doc, query) {
-    let text = rag_doc_text(doc)
-    let tags = rag_doc_tags(doc)
-    let score = 0
-    // Exact match
-    if text == query { return 100 }
-    // Substring containment
-    if contains(text, query) == 1 { score = score + 50 }
-    if contains(query, text) == 1 { score = score + 30 }
-    // Word-level matching
-    let words = split(query, " ")
-    let wi = 0
-    let word_hits = 0
-    while wi < len(words) {
-        if len(words[wi]) > 2 {
-            if contains(text, words[wi]) == 1 {
-                word_hits = word_hits + 1
-            }
-        }
-        wi = wi + 1
+    let dot_sum = to_float(0)
+    let norm_a = to_float(0)
+    let norm_b = to_float(0)
+
+    let i = 0
+    while i < min_cols {
+        let va = tensor_get(a, 0, i)
+        let vb = tensor_get(b, 0, i)
+        dot_sum = float_add(dot_sum, float_mul(va, vb))
+        norm_a = float_add(norm_a, float_mul(va, va))
+        norm_b = float_add(norm_b, float_mul(vb, vb))
+        i = i + 1
     }
-    if len(words) > 0 {
-        score = score + word_hits * 40 / len(words)
+
+    // Also account for remaining dimensions in norm calculations
+    while i < cols_a {
+        let va = tensor_get(a, 0, i)
+        norm_a = float_add(norm_a, float_mul(va, va))
+        i = i + 1
     }
-    // Tag matching
-    let ti = 0
-    while ti < len(tags) {
-        if contains(query, tags[ti]) == 1 {
-            score = score + 15
-        }
-        ti = ti + 1
+    let j = min_cols
+    while j < cols_b {
+        let vb = tensor_get(b, 0, j)
+        norm_b = float_add(norm_b, float_mul(vb, vb))
+        j = j + 1
     }
-    if score > 100 { score = 100 }
-    return score
+
+    // Check for zero norms to avoid division by zero
+    let zero = to_float(0)
+    if float_cmp(norm_a, zero) == 0 {
+        return zero
+    }
+    if float_cmp(norm_b, zero) == 0 {
+        return zero
+    }
+
+    // sqrt approximation via Newton's method for floats
+    let denom = float_mul(_rag_float_sqrt(norm_a), _rag_float_sqrt(norm_b))
+    if float_cmp(denom, zero) == 0 {
+        return zero
+    }
+
+    return float_div(dot_sum, denom)
 }
 
+// -----------------------------------------------------------------------
+// Float square root via Newton's method
+// -----------------------------------------------------------------------
+fn _rag_float_sqrt(x) {
+    let zero = to_float(0)
+    if float_cmp(x, zero) <= 0 {
+        return zero
+    }
+    // Initial guess: x / 2
+    let guess = float_div(x, to_float(2))
+    let half = to_float(2)
+    // 15 iterations of Newton's method: guess = (guess + x/guess) / 2
+    let iter = 0
+    while iter < 15 {
+        let div_result = float_div(x, guess)
+        let sum_result = float_add(guess, div_result)
+        guess = float_div(sum_result, half)
+        iter = iter + 1
+    }
+    return guess
+}
+
+// -----------------------------------------------------------------------
+// Score a document against a query embedding using cosine similarity
+// Returns a float bit pattern representing the similarity score.
+// -----------------------------------------------------------------------
+fn rag_score_doc(doc, query_embedding) {
+    let doc_emb = doc[3]
+    if doc_emb == 0 {
+        return to_float(0)
+    }
+    return _rag_cosine_similarity(doc_emb, query_embedding)
+}
+
+// -----------------------------------------------------------------------
+// Retrieve top_k documents by cosine similarity to query
+// Returns a list of documents sorted by descending similarity score.
+// -----------------------------------------------------------------------
 fn rag_retrieve(query, top_k) {
+    // Compute query embedding
+    let query_emb = _rag_compute_embedding(query)
+
     let results = list_new()
     let scores = list_new()
+    let zero = to_float(0)
+
     let i = 0
     while i < rag_doc_count {
         let doc = rag_documents[i]
-        let score = rag_score_doc(doc, query)
-        if score > 0 {
-            // Insert into sorted results list, maintaining at most top_k entries
+        let score = rag_score_doc(doc, query_emb)
+
+        // Only include documents with positive similarity
+        if float_cmp(score, zero) > 0 {
+            // Insertion sort: find position in sorted results
             let pos = len(results)
             let pi = 0
             while pi < len(results) {
-                if score > scores[pi] {
+                if float_cmp(score, scores[pi]) > 0 {
                     pos = pi
                     pi = len(results)
                 }
                 pi = pi + 1
             }
-            // Insert at pos
+            // Build new sorted lists with insertion
             let new_results = list_new()
             let new_scores = list_new()
             let ni = 0
@@ -96,13 +438,13 @@ fn rag_retrieve(query, top_k) {
             // Truncate to top_k
             results = list_new()
             scores = list_new()
-            let ti = 0
-            while ti < len(new_results) {
-                if ti < top_k {
-                    push(results, new_results[ti])
-                    push(scores, new_scores[ti])
+            let ki = 0
+            while ki < len(new_results) {
+                if ki < top_k {
+                    push(results, new_results[ki])
+                    push(scores, new_scores[ki])
                 }
-                ti = ti + 1
+                ki = ki + 1
             }
         }
         i = i + 1
@@ -110,6 +452,73 @@ fn rag_retrieve(query, top_k) {
     return results
 }
 
+// -----------------------------------------------------------------------
+// Confidence-weighted retrieval: returns list of [doc, score] pairs
+// Each result is annotated with its cosine similarity as confidence.
+// -----------------------------------------------------------------------
+fn rag_retrieve_with_confidence(query, top_k) {
+    let query_emb = _rag_compute_embedding(query)
+
+    let results = list_new()
+    let scores = list_new()
+    let zero = to_float(0)
+
+    let i = 0
+    while i < rag_doc_count {
+        let doc = rag_documents[i]
+        let score = rag_score_doc(doc, query_emb)
+
+        if float_cmp(score, zero) > 0 {
+            let pos = len(results)
+            let pi = 0
+            while pi < len(results) {
+                if float_cmp(score, scores[pi]) > 0 {
+                    pos = pi
+                    pi = len(results)
+                }
+                pi = pi + 1
+            }
+            let new_results = list_new()
+            let new_scores = list_new()
+            let ni = 0
+            while ni < len(results) {
+                if ni == pos {
+                    let pair = list_new()
+                    push(pair, doc)
+                    push(pair, score)
+                    push(new_results, pair)
+                    push(new_scores, score)
+                }
+                push(new_results, results[ni])
+                push(new_scores, scores[ni])
+                ni = ni + 1
+            }
+            if pos == len(results) {
+                let pair = list_new()
+                push(pair, doc)
+                push(pair, score)
+                push(new_results, pair)
+                push(new_scores, score)
+            }
+            results = list_new()
+            scores = list_new()
+            let ki = 0
+            while ki < len(new_results) {
+                if ki < top_k {
+                    push(results, new_results[ki])
+                    push(scores, new_scores[ki])
+                }
+                ki = ki + 1
+            }
+        }
+        i = i + 1
+    }
+    return results
+}
+
+// -----------------------------------------------------------------------
+// Build a prompt from query and retrieved context documents
+// -----------------------------------------------------------------------
 fn rag_build_prompt(query, contexts) {
     let prompt = "Context:\n"
     let i = 0
@@ -122,11 +531,24 @@ fn rag_build_prompt(query, contexts) {
     return prompt
 }
 
+// -----------------------------------------------------------------------
+// Full RAG pipeline: embed query -> retrieve -> build prompt
+// -----------------------------------------------------------------------
 fn rag_query(query, top_k) {
     let contexts = rag_retrieve(query, top_k)
     return rag_build_prompt(query, contexts)
 }
 
+// -----------------------------------------------------------------------
+// Document accessors
+// -----------------------------------------------------------------------
+fn rag_doc_text(doc) { return doc[0] }
+fn rag_doc_tags(doc) { return doc[1] }
+fn rag_doc_time(doc) { return doc[2] }
+
+// -----------------------------------------------------------------------
+// Remove document at index
+// -----------------------------------------------------------------------
 fn rag_remove(index) {
     if index < 0 { return 0 }
     if index >= rag_doc_count { return 0 }
@@ -140,14 +562,28 @@ fn rag_remove(index) {
     }
     rag_documents = new_docs
     rag_doc_count = rag_doc_count - 1
+    // Recompute doc freqs and embeddings after removal
+    if rag_doc_count > 0 {
+        _rag_recompute_embeddings()
+    }
     return 1
 }
 
+// -----------------------------------------------------------------------
+// Clear all documents and reset vocabulary
+// -----------------------------------------------------------------------
 fn rag_clear() {
     rag_documents = list_new()
     rag_doc_count = 0
+    rag_vocab = list_new()
+    rag_vocab_size = 0
+    rag_doc_freqs = list_new()
+    _rag_last_vocab_size = 0
 }
 
+// -----------------------------------------------------------------------
+// Return document count
+// -----------------------------------------------------------------------
 fn rag_count() {
     return rag_doc_count
 }

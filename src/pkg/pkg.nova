@@ -18,8 +18,11 @@ let PKG_FILE = "nova.pkg"
 let PKG_DIR = "nova_packages"
 
 let STD_PACKAGES = list_new()
+let _std_initialized = 0
 
 fn pkg_init_std() {
+    if _std_initialized == 1 { return 0 }
+    _std_initialized = 1
     push(STD_PACKAGES, "json")
     push(STD_PACKAGES, "math")
     push(STD_PACKAGES, "set")
@@ -47,6 +50,8 @@ fn pkg_init_std() {
     push(STD_PACKAGES, "secure_mem")
     push(STD_PACKAGES, "python")
     push(STD_PACKAGES, "llm")
+    push(STD_PACKAGES, "mem")
+    push(STD_PACKAGES, "rag")
 }
 
 fn is_std_package(name) {

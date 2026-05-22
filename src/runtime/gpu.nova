@@ -248,3 +248,102 @@ fn compute_close() {
     }
     _gpu_backend = 0
 }
+
+// ================================================================
+// Tensor-GPU integration
+// Upload tensors to GPU, perform operations, download results.
+// Falls back to CPU SIMD when no GPU is available.
+// ================================================================
+
+fn gpu_tensor_alloc(rows, cols) {
+    return gpu_alloc(rows * cols * 8)
+}
+
+fn gpu_tensor_upload(tensor_t) {
+    let rows = tensor_t[1]
+    let cols = tensor_t[2]
+    let host_ptr = tensor_t[3]
+    let size = rows * cols * 8
+    let dev_ptr = gpu_alloc(size)
+    gpu_copy_to(dev_ptr, host_ptr, size)
+    return dev_ptr
+}
+
+fn gpu_tensor_download(dev_ptr, rows, cols) {
+    let t = tensor_new(rows, cols)
+    let host_ptr = t[3]
+    let size = rows * cols * 8
+    gpu_copy_from(host_ptr, dev_ptr, size)
+    return t
+}
+
+fn gpu_tensor_free(dev_ptr) {
+    gpu_free(dev_ptr)
+}
+
+fn gpu_tensor_add(a, b) {
+    if _gpu_backend == 3 {
+        return tensor_add(a, b)
+    }
+    let rows = a[1]
+    let cols = a[2]
+    let n = rows * cols
+    let dev_a = gpu_tensor_upload(a)
+    let dev_b = gpu_tensor_upload(b)
+    let dev_c = gpu_tensor_alloc(rows, cols)
+    if _gpu_backend == 2 {
+        let src = "__kernel void vadd(__global double* a, __global double* b, __global double* c, int n) { int i = get_global_id(0); if (i < n) c[i] = a[i] + b[i]; }"
+        let prog = gpu_create_program(src)
+        gpu_build_program(prog)
+        let kern = gpu_create_kernel(prog, "vadd")
+        let arg_a = alloc(8)
+        mem_write_i64(arg_a, dev_a)
+        let arg_b = alloc(8)
+        mem_write_i64(arg_b, dev_b)
+        let arg_c = alloc(8)
+        mem_write_i64(arg_c, dev_c)
+        let arg_n = alloc(4)
+        mem_write_i32(arg_n, n)
+        ffi_call3(_cl_set_kernel_arg, kern, 0, 8)
+        ffi_call3(_cl_set_kernel_arg, kern, 1, 8)
+        ffi_call3(_cl_set_kernel_arg, kern, 2, 8)
+        ffi_call3(_cl_set_kernel_arg, kern, 3, 4)
+        let global_size = alloc(8)
+        mem_write_i64(global_size, n)
+        ffi_calln(_cl_enqueue_kernel, [_cl_queue, kern, 1, 0, global_size, 0, 0, 0, 0])
+        gpu_sync()
+    }
+    let result = gpu_tensor_download(dev_c, rows, cols)
+    gpu_free(dev_a)
+    gpu_free(dev_b)
+    gpu_free(dev_c)
+    return result
+}
+
+fn gpu_tensor_matmul(a, b) {
+    if _gpu_backend == 3 {
+        return tensor_matmul(a, b)
+    }
+    let ar = a[1]
+    let ac = a[2]
+    let bc = b[2]
+    let dev_a = gpu_tensor_upload(a)
+    let dev_b = gpu_tensor_upload(b)
+    let dev_c = gpu_tensor_alloc(ar, bc)
+    if _gpu_backend == 2 {
+        let src = "__kernel void matmul(__global double* A, __global double* B, __global double* C, int M, int N, int K) { int row = get_global_id(0); int col = get_global_id(1); if (row < M && col < N) { double sum = 0.0; for (int k = 0; k < K; k++) sum += A[row*K+k] * B[k*N+col]; C[row*N+col] = sum; } }"
+        let prog = gpu_create_program(src)
+        gpu_build_program(prog)
+        let kern = gpu_create_kernel(prog, "matmul")
+        let global_size = alloc(16)
+        mem_write_i64(global_size, ar)
+        mem_write_i64(int_add(global_size, 8), bc)
+        ffi_calln(_cl_enqueue_kernel, [_cl_queue, kern, 2, 0, global_size, 0, 0, 0, 0])
+        gpu_sync()
+    }
+    let result = gpu_tensor_download(dev_c, ar, bc)
+    gpu_free(dev_a)
+    gpu_free(dev_b)
+    gpu_free(dev_c)
+    return result
+}

@@ -1,145 +1,417 @@
-// Nova Runtime: LLM Integration via llama.cpp FFI
-// Wraps llama.cpp's C API for inference. Requires --link-libc and libllama.so.
+// Nova Runtime: LLM Integration via llama.cpp
+//
+// Uses libnovabridge.so, a thin C bridge that handles struct-by-value
+// returns and batch manipulation that Nova's FFI cannot do directly.
+// The bridge also accepts float parameters as int64 bit patterns,
+// since Nova's ffi_call* functions only pass integer registers.
+//
+// Build the bridge first:
+//   gcc -shared -fPIC -o libnovabridge.so src/runtime/llm_bridge.c -lllama
 //
 // Usage:
+//   llm_init()
 //   let model = llm_load_model("model.gguf")
 //   let text = llm_generate(model, "Hello", 128)
+//   println(text)
 //   llm_close(model)
+//   llm_shutdown()
+//
+// With GPU offloading:
+//   llm_init()
+//   let model = llm_load_model_gpu("model.gguf", 99)
+//   let text = llm_generate(model, "Once upon a time", 256)
+//   println(text)
+//   llm_close(model)
+//   llm_shutdown()
+//
+// With custom sampling parameters (floats are Nova float literals):
+//   let text = llm_generate_with_params(model, "Hello", 128, 0.8, 40, 0.95)
+//   // temp=0.8, top_k=40, top_p=0.95
+//   // For greedy decoding, pass 0.0 as temperature:
+//   let text = llm_generate_with_params(model, "Hello", 128, 0.0, 0, 1.0)
 
-let _llm_lib = 0
-let _llm_init_fn = 0
-let _llm_free_fn = 0
-let _llm_model_load_fn = 0
-let _llm_model_free_fn = 0
-let _llm_context_new_fn = 0
-let _llm_context_free_fn = 0
-let _llm_tokenize_fn = 0
-let _llm_decode_fn = 0
-let _llm_token_to_str_fn = 0
-let _llm_sample_fn = 0
+// --- Bridge library handle and function pointers ---
 
+let _bridge_lib = 0
+
+// Model loading
+let _fn_model_default_params = 0
+let _fn_model_params_set_gpu = 0
+let _fn_load_model = 0
+
+// Context creation
+let _fn_ctx_default_params = 0
+let _fn_ctx_params_set = 0
+let _fn_create_context = 0
+
+// Tokenization
+let _fn_tokenize = 0
+
+// Batch operations
+let _fn_batch_create = 0
+let _fn_decode = 0
+let _fn_batch_add_token = 0
+let _fn_batch_clear = 0
+let _fn_batch_free = 0
+
+// Sampling
+let _fn_sampler_create = 0
+let _fn_sample = 0
+let _fn_sampler_free = 0
+
+// Token conversion
+let _fn_token_to_str = 0
+let _fn_is_eos = 0
+
+// Cleanup
+let _fn_free_model = 0
+let _fn_free_context = 0
+
+// High-level generate
+let _fn_generate = 0
+
+// --- Initialization ---
+
+// Initialize the LLM bridge by loading libnovabridge.so and resolving
+// all function pointers. Returns 1 on success, 0 on failure.
 fn llm_init() {
-    _llm_lib = ffi_open("libllama.so")
-    if _llm_lib == 0 {
-        println("ERROR: libllama.so not found")
+    if _bridge_lib != 0 { return 1 }
+
+    _bridge_lib = ffi_open("libnovabridge.so")
+    if _bridge_lib == 0 {
+        // Try current directory
+        _bridge_lib = ffi_open("./libnovabridge.so")
+    }
+    if _bridge_lib == 0 {
+        println("ERROR: libnovabridge.so not found")
+        println("Build it with: gcc -shared -fPIC -o libnovabridge.so src/runtime/llm_bridge.c -lllama")
         return 0
     }
-    _llm_init_fn = ffi_sym(_llm_lib, "llama_backend_init")
-    _llm_free_fn = ffi_sym(_llm_lib, "llama_backend_free")
-    _llm_model_load_fn = ffi_sym(_llm_lib, "llama_load_model_from_file")
-    _llm_model_free_fn = ffi_sym(_llm_lib, "llama_free_model")
-    _llm_context_new_fn = ffi_sym(_llm_lib, "llama_new_context_with_model")
-    _llm_context_free_fn = ffi_sym(_llm_lib, "llama_free")
-    _llm_tokenize_fn = ffi_sym(_llm_lib, "llama_tokenize")
-    _llm_decode_fn = ffi_sym(_llm_lib, "llama_decode")
-    _llm_token_to_str_fn = ffi_sym(_llm_lib, "llama_token_to_piece")
-    _llm_sample_fn = ffi_sym(_llm_lib, "llama_sampler_sample")
-    ffi_call0(_llm_init_fn)
+
+    // Model loading
+    _fn_model_default_params = ffi_sym(_bridge_lib, "nova_model_default_params")
+    _fn_model_params_set_gpu = ffi_sym(_bridge_lib, "nova_model_params_set_gpu")
+    _fn_load_model = ffi_sym(_bridge_lib, "nova_load_model")
+
+    // Context creation
+    _fn_ctx_default_params = ffi_sym(_bridge_lib, "nova_ctx_default_params")
+    _fn_ctx_params_set = ffi_sym(_bridge_lib, "nova_ctx_params_set")
+    _fn_create_context = ffi_sym(_bridge_lib, "nova_create_context")
+
+    // Tokenization
+    _fn_tokenize = ffi_sym(_bridge_lib, "nova_tokenize")
+
+    // Batch operations
+    _fn_batch_create = ffi_sym(_bridge_lib, "nova_batch_create")
+    _fn_decode = ffi_sym(_bridge_lib, "nova_decode")
+    _fn_batch_add_token = ffi_sym(_bridge_lib, "nova_batch_add_token")
+    _fn_batch_clear = ffi_sym(_bridge_lib, "nova_batch_clear")
+    _fn_batch_free = ffi_sym(_bridge_lib, "nova_batch_free")
+
+    // Sampling
+    _fn_sampler_create = ffi_sym(_bridge_lib, "nova_sampler_create")
+    _fn_sample = ffi_sym(_bridge_lib, "nova_sample")
+    _fn_sampler_free = ffi_sym(_bridge_lib, "nova_sampler_free")
+
+    // Token conversion
+    _fn_token_to_str = ffi_sym(_bridge_lib, "nova_token_to_str")
+    _fn_is_eos = ffi_sym(_bridge_lib, "nova_is_eos")
+
+    // Cleanup
+    _fn_free_model = ffi_sym(_bridge_lib, "nova_free_model")
+    _fn_free_context = ffi_sym(_bridge_lib, "nova_free_context")
+
+    // High-level generate
+    _fn_generate = ffi_sym(_bridge_lib, "nova_generate")
+
+    // Verify critical functions were resolved
+    if _fn_load_model == 0 {
+        println("ERROR: Failed to resolve nova_load_model from bridge")
+        ffi_close(_bridge_lib)
+        _bridge_lib = 0
+        return 0
+    }
+    if _fn_generate == 0 {
+        println("ERROR: Failed to resolve nova_generate from bridge")
+        ffi_close(_bridge_lib)
+        _bridge_lib = 0
+        return 0
+    }
+
     return 1
 }
 
+// --- Model Loading ---
+
+// Load a GGUF model file with default parameters (CPU only).
+// Returns a model pointer, or 0 on failure.
 fn llm_load_model(path) {
-    if _llm_model_load_fn == 0 {
+    if _bridge_lib == 0 {
         let ok = llm_init()
         if ok == 0 { return 0 }
     }
-    let params = mem_alloc(256)
-    let model = ffi_call2(_llm_model_load_fn, path, params)
-    mem_free(params)
+
+    // Get default model params (heap-allocated by bridge)
+    let params = ffi_call0(_fn_model_default_params)
+    if params == 0 {
+        println("ERROR: Failed to allocate model params")
+        return 0
+    }
+
+    // Load model (bridge frees params internally)
+    let model = ffi_call2(_fn_load_model, path, params)
+    if model == 0 {
+        println("ERROR: Failed to load model: " + path)
+    }
     return model
 }
 
-fn llm_close(model) {
-    if model != 0 {
-        if _llm_model_free_fn != 0 {
-            ffi_call1(_llm_model_free_fn, model)
-        }
+// Load a GGUF model with GPU layer offloading.
+// n_gpu_layers controls how many layers to offload (99 = all).
+// Returns a model pointer, or 0 on failure.
+fn llm_load_model_gpu(path, n_gpu_layers) {
+    if _bridge_lib == 0 {
+        let ok = llm_init()
+        if ok == 0 { return 0 }
     }
+
+    // Get default model params
+    let params = ffi_call0(_fn_model_default_params)
+    if params == 0 {
+        println("ERROR: Failed to allocate model params")
+        return 0
+    }
+
+    // Set GPU layers
+    ffi_call2(_fn_model_params_set_gpu, params, n_gpu_layers)
+
+    // Load model (bridge frees params internally)
+    let model = ffi_call2(_fn_load_model, path, params)
+    if model == 0 {
+        println("ERROR: Failed to load model: " + path)
+    }
+    return model
 }
 
-fn llm_create_context(model, n_ctx) {
-    if _llm_context_new_fn == 0 { return 0 }
-    // llama_context_default_params() returns a struct, but we can
-    // allocate and zero-fill a params struct (typically ~64 bytes)
-    let params = mem_alloc_zeroed(128)
-    mem_write_i32(params, n_ctx)
-    let ctx = ffi_call2(_llm_context_new_fn, model, params)
-    mem_free(params)
-    return ctx
-}
+// --- Text Generation ---
 
+// Generate text from a prompt using default sampling parameters.
+// Uses temperature=0.8, top_k=40, top_p=0.95.
+// Returns the generated text as a string, or "" on failure.
 fn llm_generate(model, prompt, max_tokens) {
+    return llm_generate_with_params(model, prompt, max_tokens, 0.8, 40, 0.95)
+}
+
+// Generate text with explicit sampling parameters.
+// temp and top_p are float literals (e.g. 0.8, 0.95).
+// top_k is a plain integer.
+// Returns the generated text as a string, or "" on failure.
+fn llm_generate_with_params(model, prompt, max_tokens, temp, top_k, top_p) {
     if model == 0 { return "" }
-    let ctx = llm_create_context(model, max_tokens + 512)
-    if ctx == 0 { return "" }
+    if _fn_generate == 0 { return "" }
 
-    // Tokenize the prompt
-    let max_toks = max_tokens + 512
-    let tokens_buf = mem_alloc(max_toks * 4)
-    let n_tokens = ffi_call5(_llm_tokenize_fn, model, prompt, len(prompt), tokens_buf, max_toks)
-    if n_tokens < 0 { n_tokens = 0 - n_tokens }
+    let prompt_len = len(prompt)
+    if prompt_len == 0 { return "" }
 
-    // Create a batch struct (simplified - allocate and set fields)
-    let batch = mem_alloc_zeroed(256)
+    // Allocate output buffer: 4 bytes per token is a reasonable estimate
+    let buf_size = max_tokens * 4
+    if buf_size < 4096 {
+        buf_size = 4096
+    }
+    let output_buf = mem_alloc(buf_size)
+    if output_buf == 0 {
+        println("ERROR: Failed to allocate output buffer")
+        return ""
+    }
 
-    // Decode prompt tokens
+    // Call nova_generate via ffi_calln (9 arguments)
+    // Signature: nova_generate(model, prompt, prompt_len,
+    //              output_buf, output_buf_size, max_tokens,
+    //              temp_bits, top_k, top_p_bits)
+    // temp and top_p are already Nova float values (int64 double bit patterns)
+    // which is exactly what the bridge expects
+    let args = [model, prompt, prompt_len, output_buf, buf_size, max_tokens, temp, top_k, top_p]
+    let bytes_written = ffi_calln(_fn_generate, args)
+
     let result = ""
-    let i = 0
-    while i < max_tokens {
-        // Sample next token
-        let next_token = 0
-        if _llm_sample_fn != 0 {
-            next_token = ffi_call2(_llm_sample_fn, ctx, 0)
-        }
-
-        // Check for end of sequence (token 2 is typically EOS)
-        if next_token <= 2 {
-            i = max_tokens
-        }
-
-        if next_token > 2 {
-            // Convert token to text
-            let piece_buf = mem_alloc(256)
-            let piece_len = ffi_call5(_llm_token_to_str_fn, model, next_token, piece_buf, 256, 0)
-            if piece_len > 0 {
-                // Read the piece as a string (piece_buf is a C string)
-                let piece = ""
-                let pi = 0
-                while pi < piece_len {
-                    let ch = mem_read_i8(int_add(piece_buf, pi))
-                    if ch > 0 {
-                        piece = piece + chr(ch)
-                    }
-                    pi = pi + 1
-                }
-                result = result + piece
+    if bytes_written > 0 {
+        // Read the output buffer byte by byte into a Nova string
+        let i = 0
+        while i < bytes_written {
+            let ch = mem_read_i8(int_add(output_buf, i))
+            if ch > 0 {
+                result = result + chr(ch)
             }
-            mem_free(piece_buf)
+            i = i + 1
         }
-        i = i + 1
     }
 
-    mem_free(tokens_buf)
-    mem_free(batch)
-    // Free context
-    if _llm_context_free_fn != 0 {
-        ffi_call1(_llm_context_free_fn, ctx)
-    }
-
+    mem_free(output_buf)
     return result
 }
 
-fn llm_available() {
-    if _llm_lib != 0 { return 1 }
+// --- Low-level API ---
+// These functions expose individual bridge operations for advanced use.
+
+// Create a context for a model with the given context size.
+// Returns a context pointer, or 0 on failure.
+fn llm_create_context(model, n_ctx) {
+    if _fn_ctx_default_params == 0 { return 0 }
+    if _fn_create_context == 0 { return 0 }
+
+    let params = ffi_call0(_fn_ctx_default_params)
+    if params == 0 { return 0 }
+
+    // Set context size, batch size 512, 4 threads
+    ffi_call4(_fn_ctx_params_set, params, n_ctx, 512, 4)
+
+    // Create context (bridge frees params internally)
+    let ctx = ffi_call2(_fn_create_context, model, params)
+    return ctx
+}
+
+// Tokenize a prompt into a token buffer.
+// Returns the number of tokens, or 0 on failure.
+// The caller must allocate tokens_buf with mem_alloc(max_tokens * 4).
+fn llm_tokenize(model, prompt, tokens_buf, max_tokens) {
+    if _fn_tokenize == 0 { return 0 }
+    let n_tokens = ffi_call5(_fn_tokenize, model, prompt, len(prompt), tokens_buf, max_tokens)
+    if n_tokens < 0 {
+        n_tokens = 0 - n_tokens
+    }
+    return n_tokens
+}
+
+// Create a batch from tokenized prompt.
+// Returns a batch pointer.
+fn llm_batch_create(tokens_buf, n_tokens) {
+    if _fn_batch_create == 0 { return 0 }
+    return ffi_call2(_fn_batch_create, tokens_buf, n_tokens)
+}
+
+// Run the forward pass (decode) on a batch.
+// Returns 0 on success.
+fn llm_decode(ctx, batch) {
+    if _fn_decode == 0 { return 0 - 1 }
+    return ffi_call2(_fn_decode, ctx, batch)
+}
+
+// Create a sampler with the given parameters.
+// temp and top_p are float literals (e.g. 0.8, 0.95).
+fn llm_sampler_create(temp, top_k, top_p) {
+    if _fn_sampler_create == 0 { return 0 }
+    return ffi_call3(_fn_sampler_create, temp, top_k, top_p)
+}
+
+// Sample a token from the context at the given index.
+// Use idx = 0 - 1 for the last position.
+fn llm_sample(sampler, ctx, idx) {
+    if _fn_sample == 0 { return 0 }
+    return ffi_call3(_fn_sample, sampler, ctx, idx)
+}
+
+// Convert a token ID to its text representation.
+// Returns the string piece, or "" on failure.
+fn llm_token_to_str(model, token) {
+    if _fn_token_to_str == 0 { return "" }
+
+    let buf = mem_alloc(256)
+    if buf == 0 { return "" }
+
+    let piece_len = ffi_call4(_fn_token_to_str, model, token, buf, 256)
+    let result = ""
+    if piece_len > 0 {
+        let i = 0
+        while i < piece_len {
+            let ch = mem_read_i8(int_add(buf, i))
+            if ch > 0 {
+                result = result + chr(ch)
+            }
+            i = i + 1
+        }
+    }
+
+    mem_free(buf)
+    return result
+}
+
+// Check if a token is end-of-generation.
+fn llm_is_eos(model, token) {
+    if _fn_is_eos == 0 { return 1 }
+    return ffi_call2(_fn_is_eos, model, token)
+}
+
+// Free a batch.
+fn llm_batch_free(batch) {
+    if _fn_batch_free == 0 { return 0 }
+    if batch != 0 {
+        ffi_call1(_fn_batch_free, batch)
+    }
     return 0
 }
 
+// Free a sampler.
+fn llm_sampler_free(sampler) {
+    if _fn_sampler_free == 0 { return 0 }
+    if sampler != 0 {
+        ffi_call1(_fn_sampler_free, sampler)
+    }
+    return 0
+}
+
+// Free a context.
+fn llm_free_context(ctx) {
+    if _fn_free_context == 0 { return 0 }
+    if ctx != 0 {
+        ffi_call1(_fn_free_context, ctx)
+    }
+    return 0
+}
+
+// --- Cleanup ---
+
+// Free a loaded model.
+fn llm_close(model) {
+    if model == 0 { return 0 }
+    if _fn_free_model != 0 {
+        ffi_call1(_fn_free_model, model)
+    }
+    return 0
+}
+
+// Shut down the bridge library.
 fn llm_shutdown() {
-    if _llm_free_fn != 0 {
-        ffi_call0(_llm_free_fn)
+    if _bridge_lib != 0 {
+        ffi_close(_bridge_lib)
+        _bridge_lib = 0
     }
-    if _llm_lib != 0 {
-        ffi_close(_llm_lib)
-        _llm_lib = 0
-    }
+
+    // Reset all function pointers
+    _fn_model_default_params = 0
+    _fn_model_params_set_gpu = 0
+    _fn_load_model = 0
+    _fn_ctx_default_params = 0
+    _fn_ctx_params_set = 0
+    _fn_create_context = 0
+    _fn_tokenize = 0
+    _fn_batch_create = 0
+    _fn_decode = 0
+    _fn_batch_add_token = 0
+    _fn_batch_clear = 0
+    _fn_batch_free = 0
+    _fn_sampler_create = 0
+    _fn_sample = 0
+    _fn_sampler_free = 0
+    _fn_token_to_str = 0
+    _fn_is_eos = 0
+    _fn_free_model = 0
+    _fn_free_context = 0
+    _fn_generate = 0
+}
+
+// Check if the bridge library is loaded and ready.
+// Returns 1 if available, 0 otherwise.
+fn llm_available() {
+    if _bridge_lib != 0 { return 1 }
+    return 0
 }

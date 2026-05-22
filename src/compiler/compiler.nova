@@ -30,9 +30,82 @@ fn starts_with_str(s, prefix) {
 
 let nova_root_dir = ""
 let imported_files = 0
+let _dep_map_keys = 0
+let _dep_map_vals = 0
+let _dep_map_count = 0
+let _import_depth = 0
 
 fn init_import_tracker() {
     imported_files = list_new()
+    _import_depth = 0
+    _dep_map_keys = list_new()
+    _dep_map_vals = list_new()
+    _dep_map_count = 0
+    _dep_add("tensor", "mem,simd")
+    _dep_add("gpu", "ffi")
+    _dep_add("llm", "ffi")
+    _dep_add("python", "ffi")
+    _dep_add("simd", "mem")
+    _dep_add("rag", "mem,simd,tensor")
+    _dep_add("crypto", "ffi")
+    _dep_add("db", "ffi")
+    _dep_add("secure_mem", "ffi")
+    _dep_add("embed", "ffi")
+    _dep_add("taskpool", "ffi")
+    _dep_add("ffi", "mem")
+}
+
+fn _dep_add(pkg, deps) {
+    push(_dep_map_keys, pkg)
+    push(_dep_map_vals, deps)
+    _dep_map_count = _dep_map_count + 1
+}
+
+fn _dep_get(pkg) {
+    let i = 0
+    while i < _dep_map_count {
+        if _dep_map_keys[i] == pkg { return _dep_map_vals[i] }
+        i = i + 1
+    }
+    return ""
+}
+
+fn _split_deps(deps_str) {
+    let result = list_new()
+    let start = 0
+    let i = 0
+    let slen = len(deps_str)
+    while i < slen {
+        if char_at(deps_str, i) == 44 {
+            if i > start {
+                push(result, substr(deps_str, start, i - start))
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if slen > start {
+        push(result, substr(deps_str, start, slen - start))
+    }
+    return result
+}
+
+fn _resolve_deps(pkg_name) {
+    let deps_str = _dep_get(pkg_name)
+    if len(deps_str) == 0 { return "" }
+    let deps = _split_deps(deps_str)
+    let result = list_new()
+    let di = 0
+    while di < len(deps) {
+        let dep = deps[di]
+        let dep_content = resolve_import("std/" + dep, ".")
+        if len(dep_content) > 0 {
+            push(result, dep_content)
+        }
+        di = di + 1
+    }
+    if len(result) == 0 { return "" }
+    return join(result, chr(10))
 }
 
 fn already_imported(fpath) {
@@ -40,6 +113,18 @@ fn already_imported(fpath) {
     while i < len(imported_files) {
         if imported_files[i] == fpath { return 1 }
         i = i + 1
+    }
+    return 0
+}
+
+fn _is_std_already_imported(pkg_name) {
+    let path1 = "nova_packages/" + pkg_name + ".nova"
+    if already_imported(path1) == 1 { return 1 }
+    let path2 = "src/runtime/" + pkg_name + ".nova"
+    if already_imported(path2) == 1 { return 1 }
+    if len(nova_root_dir) > 0 {
+        let path3 = nova_root_dir + "/src/runtime/" + pkg_name + ".nova"
+        if already_imported(path3) == 1 { return 1 }
     }
     return 0
 }
@@ -71,47 +156,39 @@ fn extract_import_path(line) {
 }
 
 fn resolve_import(imp_path, base_dir) {
+    if _import_depth > 20 {
+        print("Error: import depth exceeded for '")
+        print(imp_path)
+        println("' (circular dependency?)")
+        exit(1)
+    }
+    _import_depth = _import_depth + 1
+    let result = _resolve_import_inner(imp_path, base_dir)
+    _import_depth = _import_depth - 1
+    return result
+}
+
+fn _resolve_import_inner(imp_path, base_dir) {
     if len(imp_path) > 4 {
         if substr(imp_path, 0, 4) == "std/" {
             let pkg_name = substr(imp_path, 4, len(imp_path) - 4)
             pkg_init_std()
             if is_std_package(pkg_name) == 1 {
-                let local_path = "nova_packages/" + pkg_name + ".nova"
-                let local_content = read_file(local_path)
-                if local_content == 0 {
-                } else {
-                    if already_imported(local_path) == 0 {
-                        push(imported_files, local_path)
-                        return local_content
-                    }
+                if _is_std_already_imported(pkg_name) == 1 {
                     return ""
                 }
-                if len(nova_root_dir) > 0 {
-                    let std_path = nova_root_dir + "/src/runtime/" + pkg_name + ".nova"
-                    let std_content = read_file(std_path)
-                    if std_content == 0 {
-                    } else {
-                        if already_imported(std_path) == 0 {
-                            push(imported_files, std_path)
-                            return std_content
-                        }
-                        return ""
-                    }
+                let dep_content = _resolve_deps(pkg_name)
+                let file_content = _find_std_file(pkg_name)
+                if len(file_content) == 0 {
+                    print("Error: std package '")
+                    print(pkg_name)
+                    println("' not found")
+                    exit(1)
                 }
-                let fallback = "src/runtime/" + pkg_name + ".nova"
-                let fb_content = read_file(fallback)
-                if fb_content == 0 {
-                } else {
-                    if already_imported(fallback) == 0 {
-                        push(imported_files, fallback)
-                        return fb_content
-                    }
-                    return ""
+                if len(dep_content) > 0 {
+                    return dep_content + chr(10) + file_content
                 }
-                print("Error: std package '")
-                print(pkg_name)
-                println("' not found")
-                exit(1)
+                return file_content
             }
         }
     }
@@ -131,7 +208,8 @@ fn resolve_import(imp_path, base_dir) {
     } else {
         if already_imported(pkg_path) == 0 {
             push(imported_files, pkg_path)
-            return pkg_content
+            let processed = _recursive_import(pkg_content, extract_dir(pkg_path))
+            return processed
         }
         return ""
     }
@@ -148,9 +226,51 @@ fn resolve_import(imp_path, base_dir) {
             exit(1)
         }
         push(imported_files, imp_full)
-        return content
+        let processed = _recursive_import(content, extract_dir(imp_full))
+        return processed
     }
     return ""
+}
+
+fn _find_std_file(pkg_name) {
+    let local_path = "nova_packages/" + pkg_name + ".nova"
+    let local_content = read_file(local_path)
+    if local_content == 0 {
+    } else {
+        if already_imported(local_path) == 0 {
+            push(imported_files, local_path)
+            return local_content
+        }
+        return ""
+    }
+    if len(nova_root_dir) > 0 {
+        let std_path = nova_root_dir + "/src/runtime/" + pkg_name + ".nova"
+        let std_content = read_file(std_path)
+        if std_content == 0 {
+        } else {
+            if already_imported(std_path) == 0 {
+                push(imported_files, std_path)
+                return std_content
+            }
+            return ""
+        }
+    }
+    let fallback = "src/runtime/" + pkg_name + ".nova"
+    let fb_content = read_file(fallback)
+    if fb_content == 0 {
+    } else {
+        if already_imported(fallback) == 0 {
+            push(imported_files, fallback)
+            return fb_content
+        }
+        return ""
+    }
+    return ""
+}
+
+fn _recursive_import(content, content_dir) {
+    if has_imports(content) == 0 { return content }
+    return preprocess_imports(content, content_dir)
 }
 
 fn process_line(line, base_dir) {
@@ -362,7 +482,7 @@ fn main() {
                                         println("Mode: linking with libc (FFI enabled)")
                                     } else {
                                         if cur == "--version" {
-                                            println("Nova compiler v2.0.0 (self-hosting, x86-64, IEEE 754, FFI)")
+                                            println("Nova compiler v3.0.0 (self-hosting, x86-64, IEEE 754, FFI, SIMD)")
                                             println("Target: Linux/macOS/WASM/Windows")
                                             exit(0)
                                         } else {

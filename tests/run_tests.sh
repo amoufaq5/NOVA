@@ -94,7 +94,7 @@ for test_file in tests/test_*.nova; do
             INPUT="/tmp/nova_combined_test.nova"
             ;;
         test_tensor)
-            cat src/runtime/tensor.nova \
+            cat src/runtime/mem.nova src/runtime/simd.nova src/runtime/tensor.nova \
                 > /tmp/nova_combined_test.nova
             grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"

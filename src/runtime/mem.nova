@@ -1,0 +1,107 @@
+// Nova Runtime: Memory Access Helpers
+// Low-level memory read/write using inline assembly.
+// No external dependencies. Works without --link-libc.
+
+fn mem_read_i8(ptr) {
+    let val = 0
+    asm {
+        "mov rdi, [rbp - 8]"
+        "movsx rax, byte ptr [rdi]"
+        "mov [rbp - 16], rax"
+    }
+    return val
+}
+
+fn mem_write_i8(ptr, val) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rax, [rbp - 16]"
+        "mov byte ptr [rdi], al"
+    }
+}
+
+fn mem_read_i16(ptr) {
+    let val = 0
+    asm {
+        "mov rdi, [rbp - 8]"
+        "movsx rax, word ptr [rdi]"
+        "mov [rbp - 16], rax"
+    }
+    return val
+}
+
+fn mem_write_i16(ptr, val) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rax, [rbp - 16]"
+        "mov word ptr [rdi], ax"
+    }
+}
+
+fn mem_read_i32(ptr) {
+    let val = 0
+    asm {
+        "mov rdi, [rbp - 8]"
+        "movsxd rax, dword ptr [rdi]"
+        "mov [rbp - 16], rax"
+    }
+    return val
+}
+
+fn mem_write_i32(ptr, val) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rax, [rbp - 16]"
+        "mov dword ptr [rdi], eax"
+    }
+}
+
+fn mem_read_i64(ptr) {
+    let val = 0
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rax, [rdi]"
+        "mov [rbp - 16], rax"
+    }
+    return val
+}
+
+fn mem_write_i64(ptr, val) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rax, [rbp - 16]"
+        "mov [rdi], rax"
+    }
+}
+
+fn mem_read_ptr(ptr) {
+    return mem_read_i64(ptr)
+}
+
+fn mem_write_ptr(ptr, val) {
+    mem_write_i64(ptr, val)
+}
+
+fn mem_read_f64(ptr) {
+    let val = 0
+    asm {
+        "mov rdi, [rbp - 8]"
+        "movsd xmm0, [rdi]"
+        "movq rax, xmm0"
+        "mov [rbp - 16], rax"
+    }
+    return val
+}
+
+fn mem_write_f64(ptr, val) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rax, [rbp - 16]"
+        "movq xmm0, rax"
+        "movsd [rdi], xmm0"
+    }
+}
+
+fn mem_offset(ptr, offset) {
+    return int_add(ptr, offset)
+}

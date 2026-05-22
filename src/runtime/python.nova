@@ -1,20 +1,65 @@
-// Nova Standard Library: Python Interop
-// Load and call Python via FFI.
+// Nova Standard Library: Python Interop (Bidirectional)
+// Full CPython FFI with type conversion in both directions.
 // Requires: --link-libc flag and libpython3 installed.
 //
 // Usage:
 //   py_init()
 //   py_exec("print('Hello from Python!')")
+//   let val = py_eval_int("2 + 3")       // val = 5
+//   let s = py_eval_str("'hello'.upper()") // s = "HELLO"
+//   let math = py_import("math")
+//   let sqrt_fn = py_getattr(math, "sqrt")
+//   let result = py_call1(sqrt_fn, py_float(to_float(16)))
+//   let answer = py_to_float(result)       // answer = 4.0
+//   py_decref(result)
 //   py_close()
 
+// -----------------------------------------------------------------------
+// Library handle and core function pointers
+// -----------------------------------------------------------------------
 let _py_lib = 0
 let _py_init_fn = 0
 let _py_run_fn = 0
 let _py_finalize_fn = 0
 let _py_initialized = 0
 
+// Type conversion function pointers
+let _py_long_from_long_fn = 0
+let _py_long_as_long_fn = 0
+let _py_float_from_double_fn = 0
+let _py_float_as_double_fn = 0
+let _py_unicode_from_str_fn = 0
+let _py_as_utf8_fn = 0
+
+// Object manipulation function pointers
+let _py_getattr_fn = 0
+let _py_call_object_fn = 0
+let _py_import_fn = 0
+
+// Tuple function pointers
+let _py_tuple_new_fn = 0
+let _py_tuple_set_fn = 0
+
+// List function pointers
+let _py_list_new_fn = 0
+let _py_list_set_fn = 0
+let _py_list_get_fn = 0
+let _py_list_size_fn = 0
+
+// Reference counting
+let _py_decref_fn = 0
+
+// Error handling
+let _py_err_occurred_fn = 0
+let _py_err_clear_fn = 0
+
+// -----------------------------------------------------------------------
+// Initialization: load libpython and resolve all symbols
+// -----------------------------------------------------------------------
 fn py_init() {
     if _py_initialized == 1 { return 1 }
+
+    // Try to load libpython3 with various version suffixes
     _py_lib = ffi_open("libpython3.so")
     if _py_lib == 0 {
         _py_lib = ffi_open("libpython3.12.so")
@@ -26,12 +71,25 @@ fn py_init() {
         _py_lib = ffi_open("libpython3.10.so")
     }
     if _py_lib == 0 {
+        _py_lib = ffi_open("libpython3.13.so")
+    }
+    if _py_lib == 0 {
+        // Try versioned .so with full suffix
+        _py_lib = ffi_open("libpython3.12.so.1")
+    }
+    if _py_lib == 0 {
+        _py_lib = ffi_open("libpython3.11.so.1")
+    }
+    if _py_lib == 0 {
         println("Error: Could not load libpython3")
         return 0
     }
+
+    // Core functions
     _py_init_fn = ffi_sym(_py_lib, "Py_Initialize")
     _py_run_fn = ffi_sym(_py_lib, "PyRun_SimpleString")
     _py_finalize_fn = ffi_sym(_py_lib, "Py_FinalizeEx")
+
     if _py_init_fn == 0 {
         println("Error: Could not resolve Py_Initialize")
         return 0
@@ -40,11 +98,50 @@ fn py_init() {
         println("Error: Could not resolve PyRun_SimpleString")
         return 0
     }
+
+    // Integer conversion
+    _py_long_from_long_fn = ffi_sym(_py_lib, "PyLong_FromLong")
+    _py_long_as_long_fn = ffi_sym(_py_lib, "PyLong_AsLong")
+
+    // Float conversion (these take/return doubles via xmm0)
+    _py_float_from_double_fn = ffi_sym(_py_lib, "PyFloat_FromDouble")
+    _py_float_as_double_fn = ffi_sym(_py_lib, "PyFloat_AsDouble")
+
+    // String conversion
+    _py_unicode_from_str_fn = ffi_sym(_py_lib, "PyUnicode_FromString")
+    _py_as_utf8_fn = ffi_sym(_py_lib, "PyUnicode_AsUTF8")
+
+    // Object manipulation
+    _py_getattr_fn = ffi_sym(_py_lib, "PyObject_GetAttrString")
+    _py_call_object_fn = ffi_sym(_py_lib, "PyObject_CallObject")
+    _py_import_fn = ffi_sym(_py_lib, "PyImport_ImportModule")
+
+    // Tuple operations
+    _py_tuple_new_fn = ffi_sym(_py_lib, "PyTuple_New")
+    _py_tuple_set_fn = ffi_sym(_py_lib, "PyTuple_SetItem")
+
+    // List operations
+    _py_list_new_fn = ffi_sym(_py_lib, "PyList_New")
+    _py_list_set_fn = ffi_sym(_py_lib, "PyList_SetItem")
+    _py_list_get_fn = ffi_sym(_py_lib, "PyList_GetItem")
+    _py_list_size_fn = ffi_sym(_py_lib, "PyList_Size")
+
+    // Reference counting
+    _py_decref_fn = ffi_sym(_py_lib, "Py_DecRef")
+
+    // Error handling
+    _py_err_occurred_fn = ffi_sym(_py_lib, "PyErr_Occurred")
+    _py_err_clear_fn = ffi_sym(_py_lib, "PyErr_Clear")
+
+    // Initialize the Python interpreter
     ffi_call0(_py_init_fn)
     _py_initialized = 1
     return 1
 }
 
+// -----------------------------------------------------------------------
+// Execute Python code string (returns 0 on success, -1 on failure)
+// -----------------------------------------------------------------------
 fn py_exec(code) {
     if _py_initialized == 0 {
         println("Error: Python not initialized. Call py_init() first.")
@@ -53,6 +150,9 @@ fn py_exec(code) {
     return ffi_call1(_py_run_fn, code)
 }
 
+// -----------------------------------------------------------------------
+// Shutdown Python interpreter
+// -----------------------------------------------------------------------
 fn py_close() {
     if _py_initialized == 0 { return 0 }
     if _py_finalize_fn != 0 {
@@ -61,4 +161,478 @@ fn py_close() {
     ffi_close(_py_lib)
     _py_initialized = 0
     return 0
+}
+
+// -----------------------------------------------------------------------
+// Type conversion: Nova -> Python
+// -----------------------------------------------------------------------
+
+// Create a Python int (PyLong) from a Nova integer
+fn py_int(value) {
+    if _py_initialized == 0 { return 0 }
+    return ffi_call1(_py_long_from_long_fn, value)
+}
+
+// Create a Python float (PyFloat) from a Nova float (IEEE 754 bit pattern)
+fn py_float(value) {
+    if _py_initialized == 0 { return 0 }
+    // value is an IEEE 754 double bit pattern; PyFloat_FromDouble expects
+    // the double in xmm0 register, so we use ffi_callf1
+    return ffi_callf1(_py_float_from_double_fn, value)
+}
+
+// Create a Python string (PyUnicode) from a Nova string
+fn py_str(s) {
+    if _py_initialized == 0 { return 0 }
+    return ffi_call1(_py_unicode_from_str_fn, s)
+}
+
+// -----------------------------------------------------------------------
+// Type conversion: Python -> Nova
+// -----------------------------------------------------------------------
+
+// Extract a Nova integer from a Python int (PyLong)
+fn py_to_int(obj) {
+    if _py_initialized == 0 { return 0 }
+    if obj == 0 { return 0 }
+    return ffi_call1(_py_long_as_long_fn, obj)
+}
+
+// Extract a Nova float (IEEE 754 bit pattern) from a Python float (PyFloat)
+fn py_to_float(obj) {
+    if _py_initialized == 0 { return to_float(0) }
+    if obj == 0 { return to_float(0) }
+    // PyFloat_AsDouble returns a double in xmm0; ffi_callf1 handles this
+    return ffi_callf1(_py_float_as_double_fn, obj)
+}
+
+// Extract a Nova string from a Python string (PyUnicode)
+// Reads the C string byte-by-byte from the pointer returned by PyUnicode_AsUTF8
+fn py_to_str(obj) {
+    if _py_initialized == 0 { return "" }
+    if obj == 0 { return "" }
+    let cstr = ffi_call1(_py_as_utf8_fn, obj)
+    if cstr == 0 { return "" }
+    let result = ""
+    let i = 0
+    let ch = mem_read_i8(int_add(cstr, i))
+    while ch != 0 {
+        result = result + chr(ch)
+        i = i + 1
+        ch = mem_read_i8(int_add(cstr, i))
+    }
+    return result
+}
+
+// -----------------------------------------------------------------------
+// Module importing
+// -----------------------------------------------------------------------
+
+// Import a Python module by name, returns PyObject* or 0 on failure
+fn py_import(module_name) {
+    if _py_initialized == 0 { return 0 }
+    let result = ffi_call1(_py_import_fn, module_name)
+    if result == 0 {
+        py_error_clear()
+    }
+    return result
+}
+
+// -----------------------------------------------------------------------
+// Attribute access
+// -----------------------------------------------------------------------
+
+// Get an attribute from a Python object by name
+fn py_getattr(obj, name) {
+    if _py_initialized == 0 { return 0 }
+    if obj == 0 { return 0 }
+    let result = ffi_call2(_py_getattr_fn, obj, name)
+    if result == 0 {
+        py_error_clear()
+    }
+    return result
+}
+
+// -----------------------------------------------------------------------
+// Function calling
+// -----------------------------------------------------------------------
+
+// Call a Python callable with a Nova list of PyObject* arguments
+// Builds a Python tuple from the list, then calls PyObject_CallObject
+fn py_call(func, args_list) {
+    if _py_initialized == 0 { return 0 }
+    if func == 0 { return 0 }
+    let n = len(args_list)
+    let tuple = ffi_call1(_py_tuple_new_fn, n)
+    if tuple == 0 { return 0 }
+    let i = 0
+    while i < n {
+        // PyTuple_SetItem steals a reference, so we don't need to decref args
+        ffi_call3(_py_tuple_set_fn, tuple, i, args_list[i])
+        i = i + 1
+    }
+    let result = ffi_call2(_py_call_object_fn, func, tuple)
+    // Decref the tuple (but not the items, since SetItem stole references)
+    ffi_call1(_py_decref_fn, tuple)
+    if result == 0 {
+        py_error_clear()
+    }
+    return result
+}
+
+// Call a Python callable with no arguments
+fn py_call0(func) {
+    if _py_initialized == 0 { return 0 }
+    if func == 0 { return 0 }
+    let result = ffi_call2(_py_call_object_fn, func, 0)
+    if result == 0 {
+        py_error_clear()
+    }
+    return result
+}
+
+// Call a Python callable with 1 argument
+fn py_call1(func, arg) {
+    if _py_initialized == 0 { return 0 }
+    if func == 0 { return 0 }
+    let tuple = ffi_call1(_py_tuple_new_fn, 1)
+    if tuple == 0 { return 0 }
+    ffi_call3(_py_tuple_set_fn, tuple, 0, arg)
+    let result = ffi_call2(_py_call_object_fn, func, tuple)
+    ffi_call1(_py_decref_fn, tuple)
+    if result == 0 {
+        py_error_clear()
+    }
+    return result
+}
+
+// Call a Python callable with 2 arguments
+fn py_call2(func, arg1, arg2) {
+    if _py_initialized == 0 { return 0 }
+    if func == 0 { return 0 }
+    let tuple = ffi_call1(_py_tuple_new_fn, 2)
+    if tuple == 0 { return 0 }
+    ffi_call3(_py_tuple_set_fn, tuple, 0, arg1)
+    ffi_call3(_py_tuple_set_fn, tuple, 1, arg2)
+    let result = ffi_call2(_py_call_object_fn, func, tuple)
+    ffi_call1(_py_decref_fn, tuple)
+    if result == 0 {
+        py_error_clear()
+    }
+    return result
+}
+
+// -----------------------------------------------------------------------
+// Python list operations
+// -----------------------------------------------------------------------
+
+// Create a new Python list of given size (elements initialized to NULL)
+fn py_list_new(size) {
+    if _py_initialized == 0 { return 0 }
+    return ffi_call1(_py_list_new_fn, size)
+}
+
+// Set item in a Python list (steals a reference to val)
+fn py_list_set(list, idx, val) {
+    if _py_initialized == 0 { return 0 }
+    if list == 0 { return 0 }
+    return ffi_call3(_py_list_set_fn, list, idx, val)
+}
+
+// Get item from a Python list (returns borrowed reference)
+fn py_list_get(list, idx) {
+    if _py_initialized == 0 { return 0 }
+    if list == 0 { return 0 }
+    return ffi_call2(_py_list_get_fn, list, idx)
+}
+
+// Get length of a Python list
+fn py_list_len(list) {
+    if _py_initialized == 0 { return 0 }
+    if list == 0 { return 0 }
+    return ffi_call1(_py_list_size_fn, list)
+}
+
+// -----------------------------------------------------------------------
+// Reference management
+// -----------------------------------------------------------------------
+
+// Decrement the reference count of a Python object
+fn py_decref(obj) {
+    if obj == 0 { return 0 }
+    if _py_initialized == 0 { return 0 }
+    ffi_call1(_py_decref_fn, obj)
+    return 0
+}
+
+// -----------------------------------------------------------------------
+// Error handling
+// -----------------------------------------------------------------------
+
+// Check if a Python exception has been raised (returns nonzero if yes)
+fn py_error_occurred() {
+    if _py_initialized == 0 { return 0 }
+    return ffi_call0(_py_err_occurred_fn)
+}
+
+// Clear any pending Python exception
+fn py_error_clear() {
+    if _py_initialized == 0 { return 0 }
+    if _py_err_clear_fn != 0 {
+        ffi_call0(_py_err_clear_fn)
+    }
+    return 0
+}
+
+// -----------------------------------------------------------------------
+// High-level convenience: evaluate expression and get result
+// Strategy:
+//   1. PyRun_SimpleString("_nova_result = <expr>")
+//   2. Import __main__ module
+//   3. Get _nova_result attribute
+//   4. Convert to Nova type
+// -----------------------------------------------------------------------
+
+// Evaluate a Python expression and return the result as a Nova integer
+fn py_eval_int(expr) {
+    if _py_initialized == 0 { return 0 }
+    // Build assignment: _nova_result = <expr>
+    let code = "_nova_result = " + expr
+    let rc = ffi_call1(_py_run_fn, code)
+    if rc != 0 { return 0 }
+    // Get __main__ module
+    let main_mod = ffi_call1(_py_import_fn, "__main__")
+    if main_mod == 0 { return 0 }
+    // Get _nova_result attribute
+    let result_obj = ffi_call2(_py_getattr_fn, main_mod, "_nova_result")
+    if result_obj == 0 {
+        py_error_clear()
+        return 0
+    }
+    // Convert to int
+    let value = ffi_call1(_py_long_as_long_fn, result_obj)
+    ffi_call1(_py_decref_fn, result_obj)
+    return value
+}
+
+// Evaluate a Python expression and return the result as a Nova string
+fn py_eval_str(expr) {
+    if _py_initialized == 0 { return "" }
+    // Build assignment: _nova_result = <expr>
+    let code = "_nova_result = str(" + expr + ")"
+    let rc = ffi_call1(_py_run_fn, code)
+    if rc != 0 { return "" }
+    // Get __main__ module
+    let main_mod = ffi_call1(_py_import_fn, "__main__")
+    if main_mod == 0 { return "" }
+    // Get _nova_result attribute
+    let result_obj = ffi_call2(_py_getattr_fn, main_mod, "_nova_result")
+    if result_obj == 0 {
+        py_error_clear()
+        return ""
+    }
+    // Convert to string using py_to_str
+    let value = py_to_str(result_obj)
+    ffi_call1(_py_decref_fn, result_obj)
+    return value
+}
+
+// -----------------------------------------------------------------------
+// PyTorch/NumPy integration helpers
+// -----------------------------------------------------------------------
+
+// Convert a NumPy array (PyObject*) to a Nova tensor
+// Assumes the array is 1D or 2D and contains float64 values.
+// Uses Python to extract shape and flat data, then builds tensor.
+fn py_numpy_array_to_tensor(np_array) {
+    if _py_initialized == 0 { return 0 }
+    if np_array == 0 { return 0 }
+
+    // Get shape via Python attribute access
+    let shape_obj = py_getattr(np_array, "shape")
+    if shape_obj == 0 { return 0 }
+
+    // Get ndim
+    let ndim_obj = py_getattr(np_array, "ndim")
+    if ndim_obj == 0 {
+        py_decref(shape_obj)
+        return 0
+    }
+    let ndim = py_to_int(ndim_obj)
+    py_decref(ndim_obj)
+
+    let rows = 1
+    let cols = 1
+
+    // Use Python to extract shape dimensions
+    // shape[0] gives first dimension
+    let shape0_obj = py_getattr(np_array, "size")
+    let total_size = py_to_int(shape0_obj)
+    py_decref(shape0_obj)
+
+    if ndim == 1 {
+        rows = 1
+        cols = total_size
+    } else {
+        // For 2D: use _nova_result trick to get shape
+        // Store the array in a temp variable, then query shape
+        py_exec("import numpy as _np_tmp")
+        // We need to get shape[0] and shape[1]
+        // Use the array's shape attribute via tuple indexing
+        let shape_len = ffi_call1(_py_list_size_fn, shape_obj)
+        if shape_len < 0 {
+            // shape is a tuple, not a list; use indexing via Python exec
+            // Store array reference as _nova_arr, extract shape
+            py_exec("_nova_shp = _nova_arr.shape if hasattr(_nova_arr, 'shape') else (1,1)")
+            let rows_result = py_eval_int("_nova_shp[0]")
+            let cols_result = py_eval_int("_nova_shp[1]")
+            if rows_result > 0 { rows = rows_result }
+            if cols_result > 0 { cols = cols_result }
+        } else {
+            rows = total_size
+            cols = 1
+        }
+    }
+
+    py_decref(shape_obj)
+
+    // Flatten the array and extract values via Python
+    // Use tolist() to convert to Python list, then read element by element
+    let tolist_fn = py_getattr(np_array, "tolist")
+    if tolist_fn == 0 { return 0 }
+    let py_list = py_call0(tolist_fn)
+    py_decref(tolist_fn)
+    if py_list == 0 { return 0 }
+
+    // Flatten if needed via Python
+    let flat_fn = py_getattr(np_array, "flatten")
+    if flat_fn != 0 {
+        let flat_arr = py_call0(flat_fn)
+        py_decref(flat_fn)
+        if flat_arr != 0 {
+            let flat_tolist = py_getattr(flat_arr, "tolist")
+            if flat_tolist != 0 {
+                py_decref(py_list)
+                py_list = py_call0(flat_tolist)
+                py_decref(flat_tolist)
+            }
+            py_decref(flat_arr)
+        }
+    }
+
+    if py_list == 0 { return 0 }
+
+    // Now py_list is a flat Python list of numbers
+    let n = ffi_call1(_py_list_size_fn, py_list)
+    if n <= 0 {
+        py_decref(py_list)
+        return tensor_new(rows, cols)
+    }
+
+    // Adjust rows/cols if we got actual element count
+    if ndim == 1 {
+        cols = n
+        rows = 1
+    } else {
+        if rows * cols != n {
+            // Fallback: treat as 1D
+            rows = 1
+            cols = n
+        }
+    }
+
+    let t = tensor_new(rows, cols)
+    let i = 0
+    while i < n {
+        let elem = ffi_call2(_py_list_get_fn, py_list, i)
+        if elem != 0 {
+            // Try to read as float
+            let fval = ffi_callf1(_py_float_as_double_fn, elem)
+            let r = i / cols
+            let c = i - r * cols
+            tensor_set(t, r, c, fval)
+            // elem is borrowed from list, don't decref
+        }
+        i = i + 1
+    }
+
+    py_decref(py_list)
+    return t
+}
+
+// Convert a Nova tensor to a NumPy array (returns PyObject*)
+// Creates a flat Python list, then reshapes via numpy.array().reshape()
+fn py_tensor_to_numpy(tensor) {
+    if _py_initialized == 0 { return 0 }
+    if tensor == 0 { return 0 }
+
+    let rows = tensor_rows(tensor)
+    let cols = tensor_cols(tensor)
+    let n = rows * cols
+
+    // Import numpy
+    let np_mod = ffi_call1(_py_import_fn, "numpy")
+    if np_mod == 0 {
+        py_error_clear()
+        return 0
+    }
+
+    // Create a Python list with all tensor values
+    let py_list = ffi_call1(_py_list_new_fn, n)
+    if py_list == 0 {
+        py_decref(np_mod)
+        return 0
+    }
+
+    let i = 0
+    while i < n {
+        let r = i / cols
+        let c = i - r * cols
+        let fval = tensor_get(tensor, r, c)
+        // Create PyFloat from the IEEE 754 bit pattern
+        let py_fval = ffi_callf1(_py_float_from_double_fn, fval)
+        // PyList_SetItem steals reference
+        ffi_call3(_py_list_set_fn, py_list, i, py_fval)
+        i = i + 1
+    }
+
+    // Call numpy.array(py_list)
+    let array_fn = py_getattr(np_mod, "array")
+    if array_fn == 0 {
+        py_decref(py_list)
+        py_decref(np_mod)
+        return 0
+    }
+
+    let np_arr = py_call1(array_fn, py_list)
+    py_decref(array_fn)
+    // py_list reference was stolen by py_call1's tuple, but we need to handle
+    // the case where it wasn't. py_call1 builds a tuple and the tuple steals
+    // the ref via SetItem, so py_list is now owned by the tuple.
+
+    if np_arr == 0 {
+        py_decref(np_mod)
+        return 0
+    }
+
+    // Reshape to (rows, cols) if 2D
+    if rows > 1 {
+        let reshape_fn = py_getattr(np_arr, "reshape")
+        if reshape_fn != 0 {
+            let py_rows = ffi_call1(_py_long_from_long_fn, rows)
+            let py_cols = ffi_call1(_py_long_from_long_fn, cols)
+            let args = list_new()
+            push(args, py_rows)
+            push(args, py_cols)
+            let reshaped = py_call(reshape_fn, args)
+            py_decref(reshape_fn)
+            if reshaped != 0 {
+                py_decref(np_arr)
+                np_arr = reshaped
+            }
+        }
+    }
+
+    py_decref(np_mod)
+    return np_arr
 }
