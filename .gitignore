@@ -5,6 +5,8 @@
 a.out
 output
 output.s
+bin/nova
+bin/nova.exe
 
 # Bootstrap build intermediates
 boot/nova_boot.o
