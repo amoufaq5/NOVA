@@ -1,0 +1,59 @@
+// Nova FFI Demo: Calling C Standard Library Functions
+// Compile with: make ffi FILE=examples/ffi_demo_libc.nova
+// Requires: --link-libc flag
+
+fn main() {
+    println("=== Nova FFI Demo ===")
+    println("")
+
+    // Load libc
+    let libc = ffi_open("libc.so.6")
+    if libc == 0 {
+        println("Failed to load libc.so.6")
+        exit(1)
+    }
+    println("Loaded libc successfully")
+
+    // getpid - get current process ID
+    let getpid = ffi_sym(libc, "getpid")
+    let pid = ffi_call0(getpid)
+    print("Process ID: ")
+    print_int(pid)
+    println("")
+
+    // strlen - measure string length
+    let strlen = ffi_sym(libc, "strlen")
+    let msg = "Hello from Nova FFI!"
+    let slen = ffi_call1(strlen, msg)
+    print("strlen(\"Hello from Nova FFI!\") = ")
+    print_int(slen)
+    println("")
+
+    // getenv - read environment variable
+    let getenv = ffi_sym(libc, "getenv")
+    let home = ffi_call1(getenv, "HOME")
+    if home != 0 {
+        print("HOME = ")
+        println(home)
+    }
+
+    // time - get current Unix timestamp
+    let time_fn = ffi_sym(libc, "time")
+    let now = ffi_call1(time_fn, 0)
+    print("Unix timestamp: ")
+    print_int(now)
+    println("")
+
+    // abs
+    let abs_fn = ffi_sym(libc, "abs")
+    let neg = 0 - 99
+    print("abs(-99) = ")
+    print_int(ffi_call1(abs_fn, neg))
+    println("")
+
+    ffi_close(libc)
+    println("")
+    println("=== FFI Demo Complete ===")
+}
+
+main()

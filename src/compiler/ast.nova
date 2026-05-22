@@ -176,10 +176,12 @@ fn ast_int(value) {
     return n
 }
 
-fn ast_float(value) {
+fn ast_float(int_part, frac_part, frac_digits) {
     let n = list_new()
     push(n, AST_FLOAT_LIT)
-    push(n, value)
+    push(n, int_part)
+    push(n, frac_part)
+    push(n, frac_digits)
     return n
 }
 

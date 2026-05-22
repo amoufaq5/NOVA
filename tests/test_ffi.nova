@@ -1,0 +1,63 @@
+fn main() {
+    println("=== FFI Test ===")
+
+    // Load libc
+    println("--- Loading libc ---")
+    let libc = ffi_open("libc.so.6")
+    if libc == 0 {
+        println("Trying alternative libc path...")
+        libc = ffi_open("libc.so")
+    }
+    if libc == 0 {
+        println("ERROR: Could not load libc")
+        exit(1)
+    }
+    println("libc loaded successfully")
+
+    // Resolve getpid
+    println("")
+    println("--- Resolving symbols ---")
+    let getpid_fn = ffi_sym(libc, "getpid")
+    if getpid_fn == 0 {
+        println("ERROR: Could not resolve getpid")
+        exit(1)
+    }
+    println("getpid resolved")
+
+    // Call getpid
+    let pid = ffi_call0(getpid_fn)
+    print("Current PID: ")
+    print_int(pid)
+    println("")
+
+    // Resolve and call strlen
+    let strlen_fn = ffi_sym(libc, "strlen")
+    if strlen_fn == 0 {
+        println("ERROR: Could not resolve strlen")
+        exit(1)
+    }
+    let test_str = "Hello, FFI World!"
+    let slen = ffi_call1(strlen_fn, test_str)
+    print("strlen(\"Hello, FFI World!\") = ")
+    print_int(slen)
+    println("")
+
+    // Resolve and call abs
+    let abs_fn = ffi_sym(libc, "abs")
+    if abs_fn == 0 {
+        println("ERROR: Could not resolve abs")
+        exit(1)
+    }
+    let neg = 0 - 42
+    let pos = ffi_call1(abs_fn, neg)
+    print("abs(-42) = ")
+    print_int(pos)
+    println("")
+
+    // Close libc
+    ffi_close(libc)
+    println("")
+    println("=== All FFI tests passed! ===")
+}
+
+main()

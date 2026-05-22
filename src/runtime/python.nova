@@ -1,0 +1,64 @@
+// Nova Standard Library: Python Interop
+// Load and call Python via FFI.
+// Requires: --link-libc flag and libpython3 installed.
+//
+// Usage:
+//   py_init()
+//   py_exec("print('Hello from Python!')")
+//   py_close()
+
+let _py_lib = 0
+let _py_init_fn = 0
+let _py_run_fn = 0
+let _py_finalize_fn = 0
+let _py_initialized = 0
+
+fn py_init() {
+    if _py_initialized == 1 { return 1 }
+    _py_lib = ffi_open("libpython3.so")
+    if _py_lib == 0 {
+        _py_lib = ffi_open("libpython3.12.so")
+    }
+    if _py_lib == 0 {
+        _py_lib = ffi_open("libpython3.11.so")
+    }
+    if _py_lib == 0 {
+        _py_lib = ffi_open("libpython3.10.so")
+    }
+    if _py_lib == 0 {
+        println("Error: Could not load libpython3")
+        return 0
+    }
+    _py_init_fn = ffi_sym(_py_lib, "Py_Initialize")
+    _py_run_fn = ffi_sym(_py_lib, "PyRun_SimpleString")
+    _py_finalize_fn = ffi_sym(_py_lib, "Py_FinalizeEx")
+    if _py_init_fn == 0 {
+        println("Error: Could not resolve Py_Initialize")
+        return 0
+    }
+    if _py_run_fn == 0 {
+        println("Error: Could not resolve PyRun_SimpleString")
+        return 0
+    }
+    ffi_call0(_py_init_fn)
+    _py_initialized = 1
+    return 1
+}
+
+fn py_exec(code) {
+    if _py_initialized == 0 {
+        println("Error: Python not initialized. Call py_init() first.")
+        return 0 - 1
+    }
+    return ffi_call1(_py_run_fn, code)
+}
+
+fn py_close() {
+    if _py_initialized == 0 { return 0 }
+    if _py_finalize_fn != 0 {
+        ffi_call0(_py_finalize_fn)
+    }
+    ffi_close(_py_lib)
+    _py_initialized = 0
+    return 0
+}

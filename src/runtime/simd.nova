@@ -1,0 +1,150 @@
+// Nova Standard Library: SIMD Vector Operations
+// CPU-based vectorized math using SSE2/AVX instructions.
+// Falls back gracefully on all x86-64 processors (SSE2 is mandatory).
+//
+// All functions operate on arrays of IEEE 754 doubles stored in memory.
+// Use alloc(n * 8) to create float arrays, mem_write_f64/mem_read_f64 to access.
+
+fn simd_vec_new(count) {
+    return alloc(count * 8)
+}
+
+fn simd_vec_set(vec, idx, val) {
+    mem_write_f64(int_add(vec, idx * 8), val)
+}
+
+fn simd_vec_get(vec, idx) {
+    return mem_read_f64(int_add(vec, idx * 8))
+}
+
+fn simd_add_f64(a_ptr, b_ptr, c_ptr, n) {
+    // Process 2 doubles at a time with SSE2 (addpd)
+    let pairs = n / 2
+    let remainder = n % 2
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov rcx, [rbp - 32]"
+        "shr rcx, 1"
+        ".simd_add_loop:"
+        "test rcx, rcx"
+        "jz .simd_add_tail"
+        "movupd xmm0, [rdi]"
+        "movupd xmm1, [rsi]"
+        "addpd xmm0, xmm1"
+        "movupd [rdx], xmm0"
+        "add rdi, 16"
+        "add rsi, 16"
+        "add rdx, 16"
+        "dec rcx"
+        "jmp .simd_add_loop"
+        ".simd_add_tail:"
+    }
+    // Handle remaining element
+    if remainder == 1 {
+        let last_idx = n - 1
+        let a_val = mem_read_f64(int_add(a_ptr, last_idx * 8))
+        let b_val = mem_read_f64(int_add(b_ptr, last_idx * 8))
+        mem_write_f64(int_add(c_ptr, last_idx * 8), float_add(a_val, b_val))
+    }
+}
+
+fn simd_mul_f64(a_ptr, b_ptr, c_ptr, n) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov rcx, [rbp - 32]"
+        "shr rcx, 1"
+        ".simd_mul_loop:"
+        "test rcx, rcx"
+        "jz .simd_mul_tail"
+        "movupd xmm0, [rdi]"
+        "movupd xmm1, [rsi]"
+        "mulpd xmm0, xmm1"
+        "movupd [rdx], xmm0"
+        "add rdi, 16"
+        "add rsi, 16"
+        "add rdx, 16"
+        "dec rcx"
+        "jmp .simd_mul_loop"
+        ".simd_mul_tail:"
+    }
+    let remainder = n % 2
+    if remainder == 1 {
+        let last_idx = n - 1
+        let a_val = mem_read_f64(int_add(a_ptr, last_idx * 8))
+        let b_val = mem_read_f64(int_add(b_ptr, last_idx * 8))
+        mem_write_f64(int_add(c_ptr, last_idx * 8), float_mul(a_val, b_val))
+    }
+}
+
+fn simd_sub_f64(a_ptr, b_ptr, c_ptr, n) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov rcx, [rbp - 32]"
+        "shr rcx, 1"
+        ".simd_sub_loop:"
+        "test rcx, rcx"
+        "jz .simd_sub_tail"
+        "movupd xmm0, [rdi]"
+        "movupd xmm1, [rsi]"
+        "subpd xmm0, xmm1"
+        "movupd [rdx], xmm0"
+        "add rdi, 16"
+        "add rsi, 16"
+        "add rdx, 16"
+        "dec rcx"
+        "jmp .simd_sub_loop"
+        ".simd_sub_tail:"
+    }
+    let remainder = n % 2
+    if remainder == 1 {
+        let last_idx = n - 1
+        let a_val = mem_read_f64(int_add(a_ptr, last_idx * 8))
+        let b_val = mem_read_f64(int_add(b_ptr, last_idx * 8))
+        mem_write_f64(int_add(c_ptr, last_idx * 8), float_sub(a_val, b_val))
+    }
+}
+
+fn simd_dot_f64(a_ptr, b_ptr, n) {
+    // Dot product: sum of element-wise products
+    let acc = to_float(0)
+    let i = 0
+    while i < n {
+        let a_val = mem_read_f64(int_add(a_ptr, i * 8))
+        let b_val = mem_read_f64(int_add(b_ptr, i * 8))
+        acc = float_add(acc, float_mul(a_val, b_val))
+        i = i + 1
+    }
+    return acc
+}
+
+fn simd_scale_f64(ptr, scalar, n) {
+    // Multiply all elements by scalar
+    let i = 0
+    while i < n {
+        let val = mem_read_f64(int_add(ptr, i * 8))
+        mem_write_f64(int_add(ptr, i * 8), float_mul(val, scalar))
+        i = i + 1
+    }
+}
+
+fn simd_sum_f64(ptr, n) {
+    let acc = to_float(0)
+    let i = 0
+    while i < n {
+        acc = float_add(acc, mem_read_f64(int_add(ptr, i * 8)))
+        i = i + 1
+    }
+    return acc
+}
+
+fn simd_norm_f64(ptr, n) {
+    // Euclidean norm: sqrt(sum of squares)
+    let dot = simd_dot_f64(ptr, ptr, n)
+    return math_sqrt(dot)
+}

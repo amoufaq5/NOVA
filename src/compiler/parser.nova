@@ -308,7 +308,8 @@ fn parse_primary() {
     }
     if t == TOK_FLOAT {
         let tok = par_advance()
-        return ast_float(tok[1])
+        let finfo = tok[1]
+        return ast_float(finfo[0], finfo[1], finfo[2])
     }
     if t == TOK_STRING {
         let tok = par_advance()

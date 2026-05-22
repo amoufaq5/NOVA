@@ -93,6 +93,14 @@ wasm: bin/nova
 	$(AS) -o /tmp/$*.o /tmp/$*.s
 	$(LD) -o $@ /tmp/$*.o
 
+# Compile a .nova file with FFI support (links libc + libdl)
+ffi: bin/nova
+	@if [ -z "$(FILE)" ]; then echo "Usage: make ffi FILE=path/to/file.nova"; exit 1; fi
+	@bin/nova $(FILE) --link-libc -o /tmp/nova_ffi.s && \
+	$(AS) -o /tmp/nova_ffi.o /tmp/nova_ffi.s && \
+	gcc -o /tmp/nova_ffi /tmp/nova_ffi.o -ldl -no-pie && \
+	/tmp/nova_ffi
+
 # Run individual tests
 test: bin/nova
 	@echo "--- test_add ---"

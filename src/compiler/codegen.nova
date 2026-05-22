@@ -45,6 +45,14 @@ let cg_current_fn = ""
 let cg_tco_label = ""
 let cg_defers = 0
 let cg_defer_count = 0
+let cg_link_libc = 0
+let cg_float_consts = 0
+let cg_float_int_parts = 0
+let cg_float_frac_parts = 0
+let cg_float_frac_digits = 0
+let cg_float_count = 0
+let cg_float_vars = 0
+let cg_float_var_count = 0
 
 fn cg_init() {
     cg_output = list_new()
@@ -72,6 +80,13 @@ fn cg_init() {
     cg_extern_count = 0
     cg_last_debug_line = 0
     cg_has_flow = 0
+    cg_float_consts = list_new()
+    cg_float_int_parts = list_new()
+    cg_float_frac_parts = list_new()
+    cg_float_frac_digits = list_new()
+    cg_float_count = 0
+    cg_float_vars = list_new()
+    cg_float_var_count = 0
 }
 
 fn out(s) {
@@ -178,6 +193,26 @@ fn add_string(s) {
     let idx = cg_str_count
     push(cg_strings, s)
     cg_str_count = cg_str_count + 1
+    return idx
+}
+
+fn add_float_const(int_p, frac_p, frac_d) {
+    let fi = 0
+    while fi < cg_float_count {
+        if cg_float_int_parts[fi] == int_p {
+            if cg_float_frac_parts[fi] == frac_p {
+                if cg_float_frac_digits[fi] == frac_d {
+                    return fi
+                }
+            }
+        }
+        fi = fi + 1
+    }
+    let idx = cg_float_count
+    push(cg_float_int_parts, int_p)
+    push(cg_float_frac_parts, frac_p)
+    push(cg_float_frac_digits, frac_d)
+    cg_float_count = cg_float_count + 1
     return idx
 }
 
@@ -852,9 +887,24 @@ fn is_builtin_fn(name) {
     if name == "sort" { return 1 }
     if name == "float_mul" { return 1 }
     if name == "float_div" { return 1 }
+    if name == "float_add" { return 1 }
+    if name == "float_sub" { return 1 }
+    if name == "float_cmp" { return 1 }
     if name == "float_to_str" { return 1 }
     if name == "to_float" { return 1 }
     if name == "from_float" { return 1 }
+    if name == "math_sqrt" { return 1 }
+    if cg_link_libc == 1 {
+        if name == "ffi_open" { return 1 }
+        if name == "ffi_sym" { return 1 }
+        if name == "ffi_close" { return 1 }
+        if name == "ffi_call0" { return 1 }
+        if name == "ffi_call1" { return 1 }
+        if name == "ffi_call2" { return 1 }
+        if name == "ffi_call3" { return 1 }
+        if name == "ffi_call4" { return 1 }
+        if name == "ffi_call5" { return 1 }
+    }
     if name == "to_str" { return 1 }
     if name == "get_error" { return 1 }
     if name == "map_list" { return 1 }
@@ -932,6 +982,67 @@ fn is_known_function(name) {
     return 0
 }
 
+fn mark_float_var(name) {
+    let i = 0
+    while i < cg_float_var_count {
+        if cg_float_vars[i] == name { return 0 }
+        i = i + 1
+    }
+    push(cg_float_vars, name)
+    cg_float_var_count = cg_float_var_count + 1
+    return 0
+}
+
+fn is_float_var(name) {
+    let i = 0
+    while i < cg_float_var_count {
+        if cg_float_vars[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn is_float_expr(nd) {
+    let tag = ast_tag(nd)
+    if tag == AST_FLOAT_LIT { return 1 }
+    if tag == AST_IDENT {
+        if is_float_var(nd[1]) == 1 { return 1 }
+    }
+    if tag == AST_PAREN {
+        return is_float_expr(nd[1])
+    }
+    if tag == AST_BIN_OP {
+        if is_float_expr(nd[2]) == 1 { return 1 }
+        if is_float_expr(nd[3]) == 1 { return 1 }
+    }
+    if tag == AST_UNARY_OP {
+        if nd[1] == "-" {
+            if is_float_expr(nd[2]) == 1 { return 1 }
+        }
+    }
+    if tag == AST_CALL {
+        let cn = nd[1]
+        if ast_tag(cn) == AST_IDENT {
+            let fname = cn[1]
+            if fname == "to_float" { return 1 }
+            if fname == "float_add" { return 1 }
+            if fname == "float_sub" { return 1 }
+            if fname == "float_mul" { return 1 }
+            if fname == "float_div" { return 1 }
+            if fname == "math_sqrt" { return 1 }
+            if fname == "math_sin" { return 1 }
+            if fname == "math_cos" { return 1 }
+            if fname == "math_exp" { return 1 }
+            if fname == "math_log" { return 1 }
+            if fname == "math_pow" { return 1 }
+            if fname == "math_abs" { return 1 }
+            if fname == "math_floor" { return 1 }
+            if fname == "math_ceil" { return 1 }
+        }
+    }
+    return 0
+}
+
 // --- Optimization: Constant Folding Helpers ---
 // Sentinel value indicating a node cannot be constant-folded.
 // Using a large negative value that is unlikely to appear in real code.
@@ -958,7 +1069,7 @@ fn log2_exact(v) {
 fn try_fold(nd) {
     let tag = ast_tag(nd)
     if tag == AST_INT_LIT { return nd[1] }
-    if tag == AST_FLOAT_LIT { return nd[1] }
+    if tag == AST_FLOAT_LIT { return FOLD_SENTINEL }
     if tag == AST_BOOL_LIT { return nd[1] }
     if tag == AST_NONE_LIT { return 0 }
     if tag == AST_UNARY_OP {
@@ -1023,6 +1134,96 @@ fn is_foldable(val) {
     return 1
 }
 
+fn gen_float_operand(nd, xmm_reg) {
+    let tag = ast_tag(nd)
+    if tag == AST_FLOAT_LIT {
+        let fc_idx = add_float_const(nd[1], nd[2], nd[3])
+        out("    movsd " + xmm_reg + ", [rip + _fc_" + int_to_str(fc_idx) + "]")
+        return 0
+    }
+    if tag == AST_INT_LIT {
+        out("    mov rax, " + int_to_str(nd[1]))
+        out("    cvtsi2sd " + xmm_reg + ", rax")
+        return 0
+    }
+    gen_expr(nd)
+    // In float context, assume rax holds IEEE 754 bits (movq, not cvtsi2sd)
+    out("    movq " + xmm_reg + ", rax")
+    return 0
+}
+
+fn gen_float_binop(nd) {
+    let op = nd[1]
+    gen_float_operand(nd[3], "xmm1")
+    out("    sub rsp, 8")
+    out("    movsd [rsp], xmm1")
+    gen_float_operand(nd[2], "xmm0")
+    out("    movsd xmm1, [rsp]")
+    out("    add rsp, 8")
+    if op == "+" {
+        out("    addsd xmm0, xmm1")
+        out("    movq rax, xmm0")
+        return 0
+    }
+    if op == "-" {
+        out("    subsd xmm0, xmm1")
+        out("    movq rax, xmm0")
+        return 0
+    }
+    if op == "*" {
+        out("    mulsd xmm0, xmm1")
+        out("    movq rax, xmm0")
+        return 0
+    }
+    if op == "/" {
+        out("    divsd xmm0, xmm1")
+        out("    movq rax, xmm0")
+        return 0
+    }
+    if op == "==" {
+        out("    ucomisd xmm0, xmm1")
+        out("    sete al")
+        out("    setnp cl")
+        out("    and al, cl")
+        out("    movzx rax, al")
+        return 0
+    }
+    if op == "!=" {
+        out("    ucomisd xmm0, xmm1")
+        out("    setne al")
+        out("    setp cl")
+        out("    or al, cl")
+        out("    movzx rax, al")
+        return 0
+    }
+    if op == "<" {
+        out("    ucomisd xmm0, xmm1")
+        out("    setb al")
+        out("    movzx rax, al")
+        return 0
+    }
+    if op == ">" {
+        out("    ucomisd xmm0, xmm1")
+        out("    seta al")
+        out("    movzx rax, al")
+        return 0
+    }
+    if op == "<=" {
+        out("    ucomisd xmm0, xmm1")
+        out("    setbe al")
+        out("    movzx rax, al")
+        return 0
+    }
+    if op == ">=" {
+        out("    ucomisd xmm0, xmm1")
+        out("    setae al")
+        out("    movzx rax, al")
+        return 0
+    }
+    out("    movq rax, xmm0")
+    return 0
+}
+
 fn gen_expr(nd) {
     let tag = ast_tag(nd)
 
@@ -1032,7 +1233,9 @@ fn gen_expr(nd) {
     }
 
     if tag == AST_FLOAT_LIT {
-        out("    mov rax, " + int_to_str(nd[1]))
+        let fc_idx = add_float_const(nd[1], nd[2], nd[3])
+        out("    movsd xmm0, [rip + _fc_" + int_to_str(fc_idx) + "]")
+        out("    movq rax, xmm0")
         return 0
     }
 
@@ -1078,6 +1281,11 @@ fn gen_expr(nd) {
 
     if tag == AST_BIN_OP {
         let op = nd[1]
+
+        if is_float_expr(nd) == 1 {
+            gen_float_binop(nd)
+            return 0
+        }
 
         // --- Optimization: Constant Folding ---
         // If both operands are constant literals, compute at compile time.
@@ -1280,6 +1488,17 @@ fn gen_expr(nd) {
 
     if tag == AST_UNARY_OP {
         let op = nd[1]
+        if op == "-" {
+            if is_float_expr(nd[2]) == 1 {
+                gen_float_operand(nd[2], "xmm0")
+                out("    mov rax, 1")
+                out("    shl rax, 63")
+                out("    movq xmm1, rax")
+                out("    xorpd xmm0, xmm1")
+                out("    movq rax, xmm0")
+                return 0
+            }
+        }
         gen_expr(nd[2])
         if op == "-" {
             out("    neg rax")
@@ -1433,7 +1652,13 @@ fn gen_expr(nd) {
             if argc > 3 { out("    pop rcx") }
             if argc > 4 { out("    pop r8") }
             if argc > 5 { out("    pop r9") }
-            out("    call " + callee_name)
+            let call_target = callee_name
+            if cg_link_libc == 1 {
+                if callee_name == "main" {
+                    call_target = "_user_main"
+                }
+            }
+            out("    call " + call_target)
         } else {
             // Indirect call through a function pointer variable
             // Evaluate args first, push onto stack
@@ -1959,6 +2184,9 @@ fn gen_stmt(nd) {
     if tag == AST_LET_STMT {
         let name = nd[1]
         let value = nd[2]
+        if is_float_expr(value) == 1 {
+            mark_float_var(name)
+        }
         gen_expr(value)
         if is_global(name) == 1 {
             out("    mov [rip + _g_" + name + "], rax")
@@ -1972,6 +2200,9 @@ fn gen_stmt(nd) {
     if tag == AST_ASSIGN_STMT {
         let name = nd[1]
         let value = nd[2]
+        if is_float_expr(value) == 1 {
+            mark_float_var(name)
+        }
         gen_expr(value)
         if has_local(name) == 1 {
             let off = local_offset(name)
@@ -2781,6 +3012,8 @@ fn gen_function(nd) {
     cg_param_count = len(params)
     cg_defers = list_new()
     cg_defer_count = 0
+    cg_float_vars = list_new()
+    cg_float_var_count = 0
 
     let pi = 0
     while pi < cg_param_count {
@@ -2792,9 +3025,15 @@ fn gen_function(nd) {
     collect_locals(body)
 
     out("")
-    out_globl(name)
+    let emit_name = name
+    if cg_link_libc == 1 {
+        if name == "main" {
+            emit_name = "_user_main"
+        }
+    }
+    out_globl(emit_name)
     cg_emit_loc(nd)
-    out_label(name)
+    out_label(emit_name)
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
@@ -3418,6 +3657,8 @@ fn gen_program(program) {
     cg_local_count = 0
     cg_params = list_new()
     cg_param_count = 0
+    cg_float_vars = list_new()
+    cg_float_var_count = 0
 
     // Collect top-level locals (non-global let inside if/while)
     i = 0
@@ -3469,8 +3710,13 @@ fn gen_program(program) {
             out(".globl mainCRTStartup")
             out("mainCRTStartup:")
         } else {
-            out(".globl _start")
-            out("_start:")
+            if cg_link_libc == 1 {
+                out(".globl main")
+                out("main:")
+            } else {
+                out(".globl _start")
+                out("_start:")
+            }
         }
     }
     if cg_target == 3 {
@@ -3480,15 +3726,22 @@ fn gen_program(program) {
         out("    mov [rip + _g___argv], rsi")
         out("    mov [rip + _g___envp], rsi")
     } else {
-        out("    mov rdi, [rsp]")
-        out("    lea rsi, [rsp + 8]")
-        out("    mov [rip + _g___argc], rdi")
-        out("    mov [rip + _g___argv], rsi")
-        // envp is after argv: at rsp + 8 + (argc+1)*8
-        out("    mov rax, rdi")
-        out("    inc rax")
-        out("    lea rax, [rsp + 8 + rax*8]")
-        out("    mov [rip + _g___envp], rax")
+        if cg_link_libc == 1 {
+            // libc main(argc, argv, envp)
+            out("    mov [rip + _g___argc], rdi")
+            out("    mov [rip + _g___argv], rsi")
+            out("    mov [rip + _g___envp], rdx")
+        } else {
+            out("    mov rdi, [rsp]")
+            out("    lea rsi, [rsp + 8]")
+            out("    mov [rip + _g___argc], rdi")
+            out("    mov [rip + _g___argv], rsi")
+            // envp is after argv: at rsp + 8 + (argc+1)*8
+            out("    mov rax, rdi")
+            out("    inc rax")
+            out("    lea rax, [rsp + 8 + rax*8]")
+            out("    mov [rip + _g___envp], rax")
+        }
     }
     out("    push rbp")
     out("    mov rbp, rsp")
@@ -3500,6 +3753,11 @@ fn gen_program(program) {
     }
     if frame_size > 0 {
         out("    sub rsp, " + int_to_str(frame_size))
+    }
+
+    // Initialize IEEE 754 float constants at program startup
+    if cg_float_count > 0 {
+        out("    call _nova_init_floats")
     }
 
     // Generate top-level statements (skip function and method declarations)
@@ -3521,8 +3779,15 @@ fn gen_program(program) {
         out("    xor ecx, ecx")
         out("    call [rip + __imp_ExitProcess]")
     } else {
-        out("    mov rdi, 0")
-        emit_syscall(60)
+        if cg_link_libc == 1 {
+            out("    xor eax, eax")
+            out("    mov rsp, rbp")
+            out("    pop rbp")
+            out("    ret")
+        } else {
+            out("    mov rdi, 0")
+            emit_syscall(60)
+        }
     }
 
     // Emit string data section
@@ -3533,6 +3798,19 @@ fn gen_program(program) {
         out_label("_str_" + int_to_str(i))
         out("    .asciz " + DQ + escape_for_asm(cg_strings[i]) + DQ)
         i = i + 1
+    }
+
+    // Emit float constant slots in data section (initialized at startup)
+    if cg_float_count > 0 {
+        out("")
+        out_section("bss")
+        i = 0
+        while i < cg_float_count {
+            out("    .align 8")
+            out_label("_fc_" + int_to_str(i))
+            out("    .quad 0")
+            i = i + 1
+        }
     }
 
     // Emit globals in .bss
@@ -3581,10 +3859,20 @@ fn gen_program(program) {
         out(".extern __imp_GetSystemTimeAsFileTime")
     }
 
+    // Emit FFI extern declarations when linking with libc
+    if cg_link_libc == 1 {
+        out("")
+        out(".extern dlopen")
+        out(".extern dlsym")
+        out(".extern dlclose")
+        out(".extern exit")
+    }
+
     // Emit runtime library
     out("")
     out_section("text")
     gen_runtime()
+
 
     peephole_optimize()
 
@@ -3787,7 +4075,15 @@ fn wasm_gen_expr(nd) {
     }
 
     if tag == AST_FLOAT_LIT {
-        wi("i64.const " + int_to_str(nd[1]))
+        // WASM: approximate float as scaled integer for now
+        let fscale = 1
+        let fdi = 0
+        while fdi < nd[3] {
+            fscale = fscale * 10
+            fdi = fdi + 1
+        }
+        let wasm_fval = nd[1] * 1000 + (nd[2] * 1000 / fscale)
+        wi("i64.const " + int_to_str(wasm_fval))
         return 0
     }
 
@@ -6123,7 +6419,12 @@ fn gen_runtime() {
         out("    mov ecx, edi")
         win_call("ExitProcess")
     } else {
-        emit_syscall(60)
+        if cg_link_libc == 1 {
+            out("    and rsp, -16")
+            out("    call exit")
+        } else {
+            emit_syscall(60)
+        }
     }
 
     // --- read_file(path) -> string ptr or 0 ---
@@ -7843,65 +8144,114 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
-    // --- float_mul(a, b) -> (a * b) / 1000 ---
+    // --- IEEE 754 float_mul(a, b): rdi=double bits, rsi=double bits ---
     out("")
     out_label("_nova_float_mul")
-    out("    mov rax, rdi")
-    out("    imul rsi")
-    out("    mov rcx, 1000")
-    out("    cqo")
-    out("    idiv rcx")
+    out("    movq xmm0, rdi")
+    out("    movq xmm1, rsi")
+    out("    mulsd xmm0, xmm1")
+    out("    movq rax, xmm0")
     out("    ret")
 
-    // --- float_div(a, b) -> (a * 1000) / b ---
+    // --- IEEE 754 float_div(a, b) ---
     out("")
     out_label("_nova_float_div")
-    out("    mov rax, rdi")
-    out("    mov rcx, 1000")
-    out("    imul rcx")
-    out("    idiv rsi")
+    out("    movq xmm0, rdi")
+    out("    movq xmm1, rsi")
+    out("    divsd xmm0, xmm1")
+    out("    movq rax, xmm0")
     out("    ret")
 
-    // --- to_float(n) -> n * 1000 ---
+    // --- IEEE 754 float_add(a, b) ---
+    out("")
+    out_label("_nova_float_add")
+    out("    movq xmm0, rdi")
+    out("    movq xmm1, rsi")
+    out("    addsd xmm0, xmm1")
+    out("    movq rax, xmm0")
+    out("    ret")
+
+    // --- IEEE 754 float_sub(a, b) ---
+    out("")
+    out_label("_nova_float_sub")
+    out("    movq xmm0, rdi")
+    out("    movq xmm1, rsi")
+    out("    subsd xmm0, xmm1")
+    out("    movq rax, xmm0")
+    out("    ret")
+
+    // --- IEEE 754 float_cmp(a, b) -> -1, 0, or 1 ---
+    out("")
+    out_label("_nova_float_cmp")
+    out("    movq xmm0, rdi")
+    out("    movq xmm1, rsi")
+    out("    ucomisd xmm0, xmm1")
+    out("    jp .fcmp_neq")
+    out("    je .fcmp_eq")
+    out(".fcmp_neq:")
+    out("    ja .fcmp_gt")
+    out("    mov rax, -1")
+    out("    ret")
+    out(".fcmp_gt:")
+    out("    mov rax, 1")
+    out("    ret")
+    out(".fcmp_eq:")
+    out("    xor eax, eax")
+    out("    ret")
+
+    // --- IEEE 754 math_sqrt(a) ---
+    out("")
+    out_label("_nova_math_sqrt")
+    out("    movq xmm0, rdi")
+    out("    sqrtsd xmm0, xmm0")
+    out("    movq rax, xmm0")
+    out("    ret")
+
+    // --- to_float(n) -> convert integer to IEEE 754 double ---
     out("")
     out_label("_nova_to_float")
-    out("    mov rax, rdi")
-    out("    imul rax, 1000")
+    out("    cvtsi2sd xmm0, rdi")
+    out("    movq rax, xmm0")
     out("    ret")
 
-    // --- from_float(f) -> f / 1000 ---
+    // --- from_float(f) -> convert IEEE 754 double to integer (truncate) ---
     out("")
     out_label("_nova_from_float")
-    out("    mov rax, rdi")
-    out("    cqo")
-    out("    mov rcx, 1000")
-    out("    idiv rcx")
+    out("    movq xmm0, rdi")
+    out("    cvttsd2si rax, xmm0")
     out("    ret")
 
-    // --- float_to_str(n) -> string like "3.140" ---
-    // Uses only stack slots (no callee-saved regs, since runtime clobbers them)
-    // [rbp-8]=frac, [rbp-16]=neg_flag, [rbp-24]=result_str
-    // [rbp-32..rbp-29]=frac digit buffer
+    // --- float_to_str(f) -> string representation of IEEE 754 double ---
     out("")
     out_label("_nova_float_to_str")
     out("    push rbp")
     out("    mov rbp, rsp")
-    out("    sub rsp, 48")
-    // Handle negative: store flag at [rbp-16]
+    out("    sub rsp, 64")
+    // [rbp-8]=original bits, [rbp-16]=neg_flag, [rbp-24]=result_str, [rbp-32..]=digit buf
+    out("    mov [rbp - 8], rdi")
     out("    mov qword ptr [rbp - 16], 0")
+    // Check sign bit
+    out("    movq xmm0, rdi")
     out("    test rdi, rdi")
     out("    jns .fts_pos")
+    // Check if negative (bit 63)
+    out("    bt rdi, 63")
+    out("    jnc .fts_pos")
     out("    mov qword ptr [rbp - 16], 1")
-    out("    neg rdi")
-    out(".fts_pos:")
-    // Split: integer = rdi/1000, frac = rdi%1000
+    // Negate: clear sign bit
     out("    mov rax, rdi")
-    out("    xor edx, edx")
-    out("    mov rcx, 1000")
-    out("    div rcx")
-    out("    mov [rbp - 8], rdx")
+    out("    mov rcx, 1")
+    out("    shl rcx, 63")
+    out("    xor rax, rcx")
+    out("    movq xmm0, rax")
+    out(".fts_pos:")
+    // xmm0 = absolute value
+    // Get integer part
+    out("    cvttsd2si rdi, xmm0")
+    out("    mov [rbp - 40], rdi")
+    // Save abs float
+    out("    movsd [rbp - 48], xmm0")
     // Convert integer part to string
-    out("    mov rdi, rax")
     out("    call _nova_int_to_str")
     out("    mov [rbp - 24], rax")
     // If negative, prepend "-"
@@ -7917,26 +8267,92 @@ fn gen_runtime() {
     out("    lea rsi, [rip + _float_dot]")
     out("    call _nova_concat")
     out("    mov [rbp - 24], rax")
-    // Compute 3 fractional digits from [rbp-8] (0..999)
-    out("    mov rax, [rbp - 8]")
+    // Get fractional part: (abs_float - integer_part) * 1000000
+    out("    movsd xmm0, [rbp - 48]")
+    out("    cvtsi2sd xmm1, qword ptr [rbp - 40]")
+    out("    subsd xmm0, xmm1")
+    // Multiply by 1000000 for 6 decimal digits
+    out("    mov rax, 1000000")
+    out("    cvtsi2sd xmm1, rax")
+    out("    mulsd xmm0, xmm1")
+    out("    cvttsd2si rax, xmm0")
+    // Ensure non-negative
+    out("    test rax, rax")
+    out("    jns .fts_frac_pos")
+    out("    neg rax")
+    out(".fts_frac_pos:")
+    // Extract 6 digits into buffer at [rbp-32]
+    out("    mov rcx, 100000")
     out("    xor edx, edx")
-    out("    mov rcx, 100")
     out("    div rcx")
     out("    add al, 48")
     out("    mov [rbp - 32], al")
     out("    mov rax, rdx")
+    out("    mov rcx, 10000")
     out("    xor edx, edx")
-    out("    mov rcx, 10")
     out("    div rcx")
     out("    add al, 48")
     out("    mov [rbp - 31], al")
+    out("    mov rax, rdx")
+    out("    mov rcx, 1000")
+    out("    xor edx, edx")
+    out("    div rcx")
+    out("    add al, 48")
+    out("    mov [rbp - 30], al")
+    out("    mov rax, rdx")
+    out("    mov rcx, 100")
+    out("    xor edx, edx")
+    out("    div rcx")
+    out("    add al, 48")
+    out("    mov [rbp - 29], al")
+    out("    mov rax, rdx")
+    out("    mov rcx, 10")
+    out("    xor edx, edx")
+    out("    div rcx")
+    out("    add al, 48")
+    out("    mov [rbp - 28], al")
     out("    add dl, 48")
-    out("    mov [rbp - 30], dl")
-    out("    mov byte ptr [rbp - 29], 0")
+    out("    mov [rbp - 27], dl")
+    out("    mov byte ptr [rbp - 26], 0")
     // Append fractional digits
     out("    mov rdi, [rbp - 24]")
     out("    lea rsi, [rbp - 32]")
     out("    call _nova_concat")
+    out("    mov rsp, rbp")
+    out("    pop rbp")
+    out("    ret")
+
+    // --- _nova_init_floats: initialize float constant pool at startup ---
+    out("")
+    out_label("_nova_init_floats")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    sub rsp, 16")
+    let fi = 0
+    while fi < cg_float_count {
+        // Convert (int_part, frac_part, frac_digits) to IEEE 754 double
+        let ip = cg_float_int_parts[fi]
+        let fp = cg_float_frac_parts[fi]
+        let fd = cg_float_frac_digits[fi]
+        // Compute divisor = 10^frac_digits
+        let divisor = 1
+        let di = 0
+        while di < fd {
+            divisor = divisor * 10
+            di = di + 1
+        }
+        // xmm0 = int_part, xmm1 = frac_part / divisor, xmm0 = sum
+        out("    mov rax, " + int_to_str(ip))
+        out("    cvtsi2sd xmm0, rax")
+        out("    mov rax, " + int_to_str(fp))
+        out("    cvtsi2sd xmm1, rax")
+        out("    mov rax, " + int_to_str(divisor))
+        out("    cvtsi2sd xmm2, rax")
+        out("    divsd xmm1, xmm2")
+        out("    addsd xmm0, xmm1")
+        out("    movsd [rip + _fc_" + int_to_str(fi) + "], xmm0")
+        fi = fi + 1
+    }
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
@@ -9500,12 +9916,20 @@ fn gen_runtime() {
     out("    jmp _nova_float_mul")
     out_label("float_div")
     out("    jmp _nova_float_div")
+    out_label("float_add")
+    out("    jmp _nova_float_add")
+    out_label("float_sub")
+    out("    jmp _nova_float_sub")
+    out_label("float_cmp")
+    out("    jmp _nova_float_cmp")
     out_label("float_to_str")
     out("    jmp _nova_float_to_str")
     out_label("to_float")
     out("    jmp _nova_to_float")
     out_label("from_float")
     out("    jmp _nova_from_float")
+    out_label("math_sqrt")
+    out("    jmp _nova_math_sqrt")
     out_label("to_str")
     out("    jmp _nova_to_str")
 
@@ -10051,4 +10475,158 @@ fn gen_runtime() {
     out("    .space 56")
     out_label("_current_coro")
     out("    .quad 0")
+
+    // --- FFI Runtime (only when --link-libc is used) ---
+    if cg_link_libc == 1 {
+        out("")
+        out_section("text")
+
+        // ffi_open(lib_path) -> handle
+        out("")
+        out_label("_nova_ffi_open")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov rsi, 1")
+        out("    call dlopen")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_sym(handle, name) -> fn_ptr
+        out("")
+        out_label("_nova_ffi_sym")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    call dlsym")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_close(handle)
+        out("")
+        out_label("_nova_ffi_close")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    call dlclose")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_call0(fn_ptr) -> result
+        out("")
+        out_label("_nova_ffi_call0")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    xor eax, eax")
+        out("    call r11")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_call1(fn_ptr, a1) -> result
+        out("")
+        out_label("_nova_ffi_call1")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    mov rdi, rsi")
+        out("    xor eax, eax")
+        out("    call r11")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_call2(fn_ptr, a1, a2) -> result
+        out("")
+        out_label("_nova_ffi_call2")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    mov rdi, rsi")
+        out("    mov rsi, rdx")
+        out("    xor eax, eax")
+        out("    call r11")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_call3(fn_ptr, a1, a2, a3) -> result
+        out("")
+        out_label("_nova_ffi_call3")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    mov rdi, rsi")
+        out("    mov rsi, rdx")
+        out("    mov rdx, rcx")
+        out("    xor eax, eax")
+        out("    call r11")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_call4(fn_ptr, a1, a2, a3, a4) -> result
+        out("")
+        out_label("_nova_ffi_call4")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    mov rdi, rsi")
+        out("    mov rsi, rdx")
+        out("    mov rdx, rcx")
+        out("    mov rcx, r8")
+        out("    xor eax, eax")
+        out("    call r11")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_call5(fn_ptr, a1, a2, a3, a4, a5) -> result
+        out("")
+        out_label("_nova_ffi_call5")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    mov rdi, rsi")
+        out("    mov rsi, rdx")
+        out("    mov rdx, rcx")
+        out("    mov rcx, r8")
+        out("    mov r8, r9")
+        out("    xor eax, eax")
+        out("    call r11")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // Dispatch trampolines for user-facing names
+        out("")
+        out_label("ffi_open")
+        out("    jmp _nova_ffi_open")
+        out_label("ffi_sym")
+        out("    jmp _nova_ffi_sym")
+        out_label("ffi_close")
+        out("    jmp _nova_ffi_close")
+        out_label("ffi_call0")
+        out("    jmp _nova_ffi_call0")
+        out_label("ffi_call1")
+        out("    jmp _nova_ffi_call1")
+        out_label("ffi_call2")
+        out("    jmp _nova_ffi_call2")
+        out_label("ffi_call3")
+        out("    jmp _nova_ffi_call3")
+        out_label("ffi_call4")
+        out("    jmp _nova_ffi_call4")
+        out_label("ffi_call5")
+        out("    jmp _nova_ffi_call5")
+    }
 }

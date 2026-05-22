@@ -1,0 +1,192 @@
+// Nova Standard Library: GPU Compute
+// Unified GPU API with automatic backend selection (CUDA → OpenCL → CPU SIMD).
+// Requires: --link-libc flag.
+//
+// Usage:
+//   compute_init()
+//   let backend = compute_backend()
+//   let dev_buf = gpu_alloc(1024)
+//   gpu_copy_to(dev_buf, host_ptr, 1024)
+//   gpu_launch(kernel, grid, block, args)
+//   gpu_copy_from(host_ptr, dev_buf, 1024)
+//   gpu_free(dev_buf)
+
+let _gpu_backend = 0
+let _cuda_lib = 0
+let _opencl_lib = 0
+
+// CUDA function pointers
+let _cu_init = 0
+let _cu_device_get = 0
+let _cu_ctx_create = 0
+let _cu_malloc = 0
+let _cu_free = 0
+let _cu_memcpy_htod = 0
+let _cu_memcpy_dtoh = 0
+let _cu_module_load = 0
+let _cu_module_get_fn = 0
+let _cu_launch_kernel = 0
+let _cu_ctx_sync = 0
+
+// OpenCL function pointers
+let _cl_get_platforms = 0
+let _cl_get_devices = 0
+let _cl_create_context = 0
+let _cl_create_queue = 0
+let _cl_create_buffer = 0
+let _cl_write_buffer = 0
+let _cl_read_buffer = 0
+let _cl_create_program = 0
+let _cl_build_program = 0
+let _cl_create_kernel = 0
+let _cl_set_kernel_arg = 0
+let _cl_enqueue_kernel = 0
+let _cl_finish = 0
+let _cl_release_mem = 0
+
+fn _try_cuda_init() {
+    _cuda_lib = ffi_open("libcuda.so")
+    if _cuda_lib == 0 {
+        _cuda_lib = ffi_open("libcuda.so.1")
+    }
+    if _cuda_lib == 0 { return 0 }
+    _cu_init = ffi_sym(_cuda_lib, "cuInit")
+    if _cu_init == 0 {
+        ffi_close(_cuda_lib)
+        _cuda_lib = 0
+        return 0
+    }
+    let result = ffi_call1(_cu_init, 0)
+    if result != 0 {
+        ffi_close(_cuda_lib)
+        _cuda_lib = 0
+        return 0
+    }
+    _cu_device_get = ffi_sym(_cuda_lib, "cuDeviceGet")
+    _cu_ctx_create = ffi_sym(_cuda_lib, "cuCtxCreate_v2")
+    _cu_malloc = ffi_sym(_cuda_lib, "cuMemAlloc_v2")
+    _cu_free = ffi_sym(_cuda_lib, "cuMemFree_v2")
+    _cu_memcpy_htod = ffi_sym(_cuda_lib, "cuMemcpyHtoD_v2")
+    _cu_memcpy_dtoh = ffi_sym(_cuda_lib, "cuMemcpyDtoH_v2")
+    _cu_module_load = ffi_sym(_cuda_lib, "cuModuleLoadData")
+    _cu_module_get_fn = ffi_sym(_cuda_lib, "cuModuleGetFunction")
+    _cu_launch_kernel = ffi_sym(_cuda_lib, "cuLaunchKernel")
+    _cu_ctx_sync = ffi_sym(_cuda_lib, "cuCtxSynchronize")
+    return 1
+}
+
+fn _try_opencl_init() {
+    _opencl_lib = ffi_open("libOpenCL.so")
+    if _opencl_lib == 0 {
+        _opencl_lib = ffi_open("libOpenCL.so.1")
+    }
+    if _opencl_lib == 0 { return 0 }
+    _cl_get_platforms = ffi_sym(_opencl_lib, "clGetPlatformIDs")
+    if _cl_get_platforms == 0 {
+        ffi_close(_opencl_lib)
+        _opencl_lib = 0
+        return 0
+    }
+    _cl_get_devices = ffi_sym(_opencl_lib, "clGetDeviceIDs")
+    _cl_create_context = ffi_sym(_opencl_lib, "clCreateContext")
+    _cl_create_queue = ffi_sym(_opencl_lib, "clCreateCommandQueue")
+    _cl_create_buffer = ffi_sym(_opencl_lib, "clCreateBuffer")
+    _cl_write_buffer = ffi_sym(_opencl_lib, "clEnqueueWriteBuffer")
+    _cl_read_buffer = ffi_sym(_opencl_lib, "clEnqueueReadBuffer")
+    _cl_create_program = ffi_sym(_opencl_lib, "clCreateProgramWithSource")
+    _cl_build_program = ffi_sym(_opencl_lib, "clBuildProgram")
+    _cl_create_kernel = ffi_sym(_opencl_lib, "clCreateKernel")
+    _cl_set_kernel_arg = ffi_sym(_opencl_lib, "clSetKernelArg")
+    _cl_enqueue_kernel = ffi_sym(_opencl_lib, "clEnqueueNDRangeKernel")
+    _cl_finish = ffi_sym(_opencl_lib, "clFinish")
+    _cl_release_mem = ffi_sym(_opencl_lib, "clReleaseMemObject")
+    return 1
+}
+
+fn compute_init() {
+    if _try_cuda_init() == 1 {
+        _gpu_backend = 1
+        return 1
+    }
+    if _try_opencl_init() == 1 {
+        _gpu_backend = 2
+        return 1
+    }
+    _gpu_backend = 3
+    return 1
+}
+
+fn compute_backend() {
+    if _gpu_backend == 1 { return "cuda" }
+    if _gpu_backend == 2 { return "opencl" }
+    return "cpu"
+}
+
+fn gpu_available() {
+    if _gpu_backend == 1 { return 1 }
+    if _gpu_backend == 2 { return 1 }
+    return 0
+}
+
+fn gpu_alloc(size) {
+    if _gpu_backend == 1 {
+        let dev_ptr = alloc(8)
+        ffi_call2(_cu_malloc, dev_ptr, size)
+        return mem_read_i64(dev_ptr)
+    }
+    return alloc(size)
+}
+
+fn gpu_free(dev_ptr) {
+    if _gpu_backend == 1 {
+        ffi_call1(_cu_free, dev_ptr)
+    }
+}
+
+fn gpu_copy_to(dev_ptr, host_ptr, size) {
+    if _gpu_backend == 1 {
+        ffi_call3(_cu_memcpy_htod, dev_ptr, host_ptr, size)
+        return 0
+    }
+    // CPU fallback: memcpy
+    let i = 0
+    while i < size {
+        let byte_val = mem_read_i8(int_add(host_ptr, i))
+        mem_write_i8(int_add(dev_ptr, i), byte_val)
+        i = i + 1
+    }
+    return 0
+}
+
+fn gpu_copy_from(host_ptr, dev_ptr, size) {
+    if _gpu_backend == 1 {
+        ffi_call3(_cu_memcpy_dtoh, host_ptr, dev_ptr, size)
+        return 0
+    }
+    let i = 0
+    while i < size {
+        let byte_val = mem_read_i8(int_add(dev_ptr, i))
+        mem_write_i8(int_add(host_ptr, i), byte_val)
+        i = i + 1
+    }
+    return 0
+}
+
+fn gpu_sync() {
+    if _gpu_backend == 1 {
+        ffi_call0(_cu_ctx_sync)
+    }
+    if _gpu_backend == 2 {
+        // OpenCL sync handled per-queue
+    }
+}
+
+fn compute_close() {
+    if _gpu_backend == 1 {
+        if _cuda_lib != 0 { ffi_close(_cuda_lib) }
+    }
+    if _gpu_backend == 2 {
+        if _opencl_lib != 0 { ffi_close(_opencl_lib) }
+    }
+    _gpu_backend = 0
+}

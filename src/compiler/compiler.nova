@@ -357,12 +357,17 @@ fn main() {
                                 if cur == "--check" {
                                     cg_check_only = 1
                                 } else {
-                                    if cur == "--version" {
-                                        println("Nova compiler v1.0.0 (self-hosting, x86-64)")
-                                        println("Target: Linux/macOS/WASM/Windows")
-                                        exit(0)
+                                    if cur == "--link-libc" {
+                                        cg_link_libc = 1
+                                        println("Mode: linking with libc (FFI enabled)")
                                     } else {
-                                        input_file = cur
+                                        if cur == "--version" {
+                                            println("Nova compiler v2.0.0 (self-hosting, x86-64, IEEE 754, FFI)")
+                                            println("Target: Linux/macOS/WASM/Windows")
+                                            exit(0)
+                                        } else {
+                                            input_file = cur
+                                        }
                                     }
                                 }
                             }

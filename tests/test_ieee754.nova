@@ -1,0 +1,109 @@
+fn main() {
+    println("=== IEEE 754 Float Tests ===")
+
+    // Test 1: Float literal loading
+    println("--- Float literals ---")
+    let x = 3.14
+    print("3.14 = ")
+    println(float_to_str(x))
+
+    let y = 2.0
+    print("2.0 = ")
+    println(float_to_str(y))
+
+    let z = 0.5
+    print("0.5 = ")
+    println(float_to_str(z))
+
+    // Test 2: Float arithmetic via operators
+    println("")
+    println("--- Float arithmetic (operators) ---")
+    let sum = 3.14 + 2.0
+    print("3.14 + 2.0 = ")
+    println(float_to_str(sum))
+
+    let diff = 10.5 - 3.2
+    print("10.5 - 3.2 = ")
+    println(float_to_str(diff))
+
+    let prod = 2.5 * 4.0
+    print("2.5 * 4.0 = ")
+    println(float_to_str(prod))
+
+    let quot = 10.0 / 3.0
+    print("10.0 / 3.0 = ")
+    println(float_to_str(quot))
+
+    // Test 3: Float arithmetic via builtin functions
+    println("")
+    println("--- Float arithmetic (builtins) ---")
+    let a = to_float(42)
+    print("to_float(42) = ")
+    println(float_to_str(a))
+
+    let b = to_float(10)
+    let c = float_div(a, b)
+    print("42.0 / 10.0 = ")
+    println(float_to_str(c))
+
+    // Test 4: Conversions
+    println("")
+    println("--- Conversions ---")
+    let f = 7.85
+    let i = from_float(f)
+    print("from_float(7.85) = ")
+    print_int(i)
+    println("")
+
+    let g = to_float(100)
+    print("to_float(100) = ")
+    println(float_to_str(g))
+
+    // Test 5: Float comparison
+    println("")
+    println("--- Float comparisons ---")
+    let p = 3.14
+    let q = 2.71
+    if p > q {
+        println("3.14 > 2.71: true")
+    } else {
+        println("3.14 > 2.71: false (ERROR)")
+    }
+
+    if q < p {
+        println("2.71 < 3.14: true")
+    } else {
+        println("2.71 < 3.14: false (ERROR)")
+    }
+
+    let r = 1.0
+    let s = 1.0
+    if r == s {
+        println("1.0 == 1.0: true")
+    } else {
+        println("1.0 == 1.0: false (ERROR)")
+    }
+
+    // Test 6: Negation
+    println("")
+    println("--- Negation ---")
+    let neg = -5.5
+    print("-5.5 = ")
+    println(float_to_str(neg))
+
+    // Test 7: Math sqrt
+    println("")
+    println("--- Math functions ---")
+    let sq = math_sqrt(to_float(4))
+    print("sqrt(4) = ")
+    println(float_to_str(sq))
+
+    let sq2 = math_sqrt(to_float(9))
+    print("sqrt(9) = ")
+    println(float_to_str(sq2))
+
+    println("")
+    println("=== All IEEE 754 tests passed! ===")
+}
+
+main()

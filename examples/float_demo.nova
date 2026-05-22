@@ -1,0 +1,81 @@
+// Nova IEEE 754 Float Demo
+// Demonstrates real double-precision floating-point arithmetic.
+
+fn main() {
+    println("=== Nova IEEE 754 Float Demo ===")
+    println("")
+
+    // Basic arithmetic
+    println("--- Basic Arithmetic ---")
+    let a = 3.14159
+    let b = 2.71828
+    print("pi ≈ ") ; println(float_to_str(a))
+    print("e  ≈ ") ; println(float_to_str(b))
+    print("pi + e  = ") ; println(float_to_str(a + b))
+    print("pi * e  = ") ; println(float_to_str(a * b))
+    print("pi / e  = ") ; println(float_to_str(a / b))
+    println("")
+
+    // Conversions
+    println("--- Conversions ---")
+    let x = to_float(42)
+    print("to_float(42) = ") ; println(float_to_str(x))
+    let y = 99.9
+    print("from_float(99.9) = ") ; print_int(from_float(y)) ; println("")
+    println("")
+
+    // Square root
+    println("--- Square Root ---")
+    let nums = list_new()
+    push(nums, 2)
+    push(nums, 3)
+    push(nums, 4)
+    push(nums, 16)
+    push(nums, 100)
+    let i = 0
+    while i < len(nums) {
+        let n = nums[i]
+        let sq = math_sqrt(to_float(n))
+        print("sqrt(") ; print_int(n) ; print(") = ") ; println(float_to_str(sq))
+        i = i + 1
+    }
+    println("")
+
+    // Temperature conversion
+    println("--- Temperature Conversion ---")
+    let temps_f = list_new()
+    push(temps_f, 32.0)
+    push(temps_f, 72.0)
+    push(temps_f, 98.6)
+    push(temps_f, 212.0)
+    i = 0
+    while i < len(temps_f) {
+        let f = temps_f[i]
+        let c = (f - 32.0) * 0.5555
+        print(float_to_str(f))
+        print("°F = ")
+        print(float_to_str(c))
+        println("°C")
+        i = i + 1
+    }
+    println("")
+
+    // Compound interest
+    println("--- Compound Interest ---")
+    let principal = 1000.0
+    let rate = 0.05
+    let years = 10
+    let amount = principal
+    i = 0
+    while i < years {
+        amount = amount * (1.0 + rate)
+        i = i + 1
+    }
+    print("$1000 at 5% for 10 years = $")
+    println(float_to_str(amount))
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

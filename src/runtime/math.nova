@@ -1,5 +1,5 @@
 // Nova Standard Library: Math Utilities
-// Integer math functions. Floats use fixed-point (scale 1000).
+// Integer math functions + IEEE 754 float math via SSE2.
 
 fn math_abs(x) {
     if x < 0 { return 0 - x }
@@ -60,7 +60,7 @@ fn math_lcm(a, b) {
     return math_abs(a / g * b)
 }
 
-fn math_sqrt(n) {
+fn math_isqrt(n) {
     if n <= 0 { return 0 }
     if n == 1 { return 1 }
     let x = n
@@ -193,4 +193,150 @@ fn math_digital_root(n) {
     let r = n % 9
     if r == 0 { return 9 }
     return r
+}
+
+// === IEEE 754 Float Math Functions ===
+// All take/return IEEE 754 double bit patterns (64-bit ints).
+// Use to_float(n) to convert integers, from_float(f) to truncate back.
+
+fn math_pi() {
+    return 3.14159265358979
+}
+
+fn math_e() {
+    return 2.71828182845904
+}
+
+fn math_fabs(x) {
+    // Clear sign bit (bit 63)
+    let bits = x
+    if from_float(x) < 0 {
+        return float_sub(to_float(0), x)
+    }
+    // Check via comparison with zero
+    let zero = to_float(0)
+    let cmp = float_cmp(x, zero)
+    if cmp < 0 {
+        return float_sub(zero, x)
+    }
+    return x
+}
+
+fn math_floor_f(x) {
+    let i = from_float(x)
+    let fi = to_float(i)
+    let cmp = float_cmp(x, fi)
+    if cmp < 0 {
+        return to_float(i - 1)
+    }
+    return fi
+}
+
+fn math_ceil_f(x) {
+    let i = from_float(x)
+    let fi = to_float(i)
+    let cmp = float_cmp(x, fi)
+    if cmp > 0 {
+        return to_float(i + 1)
+    }
+    return fi
+}
+
+fn math_fmod(a, b) {
+    let q = from_float(float_div(a, b))
+    return float_sub(a, float_mul(to_float(q), b))
+}
+
+fn math_sin(x) {
+    // Reduce x to [-pi, pi]
+    let pi = math_pi()
+    let two_pi = float_mul(pi, to_float(2))
+    // Reduce: x = x mod 2*pi
+    let q = from_float(float_div(x, two_pi))
+    x = float_sub(x, float_mul(to_float(q), two_pi))
+    // Taylor series: sin(x) = x - x^3/3! + x^5/5! - x^7/7! + ...
+    let x2 = float_mul(x, x)
+    let term = x
+    let result = x
+    let i = 1
+    while i < 10 {
+        let n = i * 2
+        let n1 = n + 1
+        term = float_mul(term, x2)
+        term = float_div(term, to_float(0 - n * n1))
+        term = float_mul(term, to_float(0 - 1))
+        // Alternate sign: odd iterations negate
+        if i % 2 == 1 {
+            result = float_sub(result, float_div(float_mul(term, to_float(n * n1)), to_float(n * n1)))
+        } else {
+            result = float_add(result, float_div(float_mul(term, to_float(n * n1)), to_float(n * n1)))
+        }
+        i = i + 1
+    }
+    // Simplified: use direct term accumulation
+    let x3 = float_mul(x2, x)
+    let x5 = float_mul(x3, x2)
+    let x7 = float_mul(x5, x2)
+    let x9 = float_mul(x7, x2)
+    let x11 = float_mul(x9, x2)
+    result = x
+    result = float_sub(result, float_div(x3, to_float(6)))
+    result = float_add(result, float_div(x5, to_float(120)))
+    result = float_sub(result, float_div(x7, to_float(5040)))
+    result = float_add(result, float_div(x9, to_float(362880)))
+    result = float_sub(result, float_div(x11, to_float(39916800)))
+    return result
+}
+
+fn math_cos(x) {
+    // cos(x) = sin(x + pi/2)
+    let pi_half = float_div(math_pi(), to_float(2))
+    return math_sin(float_add(x, pi_half))
+}
+
+fn math_exp_f(x) {
+    // Taylor series: exp(x) = 1 + x + x^2/2! + x^3/3! + ...
+    let result = to_float(1)
+    let term = to_float(1)
+    let i = 1
+    while i <= 20 {
+        term = float_div(float_mul(term, x), to_float(i))
+        result = float_add(result, term)
+        i = i + 1
+    }
+    return result
+}
+
+fn math_log_f(x) {
+    // Natural log via series: ln(x) for x > 0
+    // Use ln(x) = 2 * atanh((x-1)/(x+1)) for convergence
+    let one = to_float(1)
+    let two = to_float(2)
+    let num = float_sub(x, one)
+    let den = float_add(x, one)
+    let z = float_div(num, den)
+    let z2 = float_mul(z, z)
+    let term = z
+    let result = z
+    let i = 1
+    while i <= 30 {
+        term = float_mul(term, z2)
+        let denom = to_float(i * 2 + 1)
+        result = float_add(result, float_div(term, denom))
+        i = i + 1
+    }
+    return float_mul(two, result)
+}
+
+fn math_pow_f(base, exp_val) {
+    // base^exp = e^(exp * ln(base))
+    let zero = to_float(0)
+    let cmp = float_cmp(exp_val, zero)
+    if cmp == 0 { return to_float(1) }
+    return math_exp_f(float_mul(exp_val, math_log_f(base)))
+}
+
+fn math_tan(x) {
+    let c = math_cos(x)
+    return float_div(math_sin(x), c)
 }
