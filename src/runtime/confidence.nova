@@ -45,3 +45,45 @@ fn conf_describe(c) {
     result = result + " @ " + float_to_str(conf_level(c)) + ")"
     return result
 }
+
+fn conf_map(c, func) {
+    return conf_new(func(conf_value(c)), conf_level(c))
+}
+
+fn conf_combine(a, b, combiner) {
+    let result_val = combiner(conf_value(a), conf_value(b))
+    let a_conf = conf_level(a)
+    let b_conf = conf_level(b)
+    let min_conf = a_conf
+    if float_cmp(b_conf, a_conf) < 0 {
+        min_conf = b_conf
+    }
+    return conf_new(result_val, min_conf)
+}
+
+fn conf_max(a, b) {
+    let a_conf = conf_level(a)
+    let b_conf = conf_level(b)
+    if float_cmp(a_conf, b_conf) >= 0 {
+        return a
+    }
+    return b
+}
+
+fn conf_decay(c, factor) {
+    return conf_new(conf_value(c), float_mul(conf_level(c), factor))
+}
+
+fn conf_is_certain(c) {
+    if float_cmp(conf_level(c), to_float(1)) >= 0 {
+        return 1
+    }
+    return 0
+}
+
+fn conf_is_uncertain(c, threshold) {
+    if float_cmp(conf_level(c), threshold) < 0 {
+        return 1
+    }
+    return 0
+}

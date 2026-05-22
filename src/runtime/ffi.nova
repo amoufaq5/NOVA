@@ -17,6 +17,7 @@ fn mem_read_i8(ptr) {
     asm {
         "mov rdi, [rbp - 8]"
         "movsx rax, byte ptr [rdi]"
+        "mov [rbp - 16], rax"
     }
     return val
 }
@@ -34,6 +35,7 @@ fn mem_read_i16(ptr) {
     asm {
         "mov rdi, [rbp - 8]"
         "movsx rax, word ptr [rdi]"
+        "mov [rbp - 16], rax"
     }
     return val
 }
@@ -51,6 +53,7 @@ fn mem_read_i32(ptr) {
     asm {
         "mov rdi, [rbp - 8]"
         "movsxd rax, dword ptr [rdi]"
+        "mov [rbp - 16], rax"
     }
     return val
 }
@@ -68,6 +71,7 @@ fn mem_read_i64(ptr) {
     asm {
         "mov rdi, [rbp - 8]"
         "mov rax, [rdi]"
+        "mov [rbp - 16], rax"
     }
     return val
 }
@@ -94,6 +98,7 @@ fn mem_read_f64(ptr) {
         "mov rdi, [rbp - 8]"
         "movsd xmm0, [rdi]"
         "movq rax, xmm0"
+        "mov [rbp - 16], rax"
     }
     return val
 }
@@ -121,25 +126,31 @@ fn ffi_call_float2(fn_ptr, a, b) {
     return ffi_callf2(fn_ptr, a, b)
 }
 
+let _ffi_libc = 0
+let _ffi_malloc_fn = 0
+let _ffi_free_fn = 0
+let _ffi_calloc_fn = 0
+
+fn _ffi_ensure_libc() {
+    if _ffi_libc == 0 {
+        _ffi_libc = ffi_open(0)
+        _ffi_malloc_fn = ffi_sym(_ffi_libc, "malloc")
+        _ffi_free_fn = ffi_sym(_ffi_libc, "free")
+        _ffi_calloc_fn = ffi_sym(_ffi_libc, "calloc")
+    }
+}
+
 fn mem_alloc(size) {
-    let libc = ffi_open(0)
-    let malloc_fn = ffi_sym(libc, "malloc")
-    let ptr = ffi_call1(malloc_fn, size)
-    ffi_close(libc)
-    return ptr
+    _ffi_ensure_libc()
+    return ffi_call1(_ffi_malloc_fn, size)
 }
 
 fn mem_free(ptr) {
-    let libc = ffi_open(0)
-    let free_fn = ffi_sym(libc, "free")
-    ffi_call1(free_fn, ptr)
-    ffi_close(libc)
+    _ffi_ensure_libc()
+    ffi_call1(_ffi_free_fn, ptr)
 }
 
 fn mem_alloc_zeroed(size) {
-    let libc = ffi_open(0)
-    let calloc_fn = ffi_sym(libc, "calloc")
-    let ptr = ffi_call2(calloc_fn, size, 1)
-    ffi_close(libc)
-    return ptr
+    _ffi_ensure_libc()
+    return ffi_call2(_ffi_calloc_fn, size, 1)
 }

@@ -26,13 +26,27 @@ fn rag_score_doc(doc, query) {
     let text = rag_doc_text(doc)
     let tags = rag_doc_tags(doc)
     let score = 0
-    if text == query { score = 100 }
-    if score == 0 {
-        if contains(text, query) == 1 { score = 60 }
+    // Exact match
+    if text == query { return 100 }
+    // Substring containment
+    if contains(text, query) == 1 { score = score + 50 }
+    if contains(query, text) == 1 { score = score + 30 }
+    // Word-level matching
+    let words = split(query, " ")
+    let wi = 0
+    let word_hits = 0
+    while wi < len(words) {
+        if len(words[wi]) > 2 {
+            if contains(text, words[wi]) == 1 {
+                word_hits = word_hits + 1
+            }
+        }
+        wi = wi + 1
     }
-    if score == 0 {
-        if contains(query, text) == 1 { score = 40 }
+    if len(words) > 0 {
+        score = score + word_hits * 40 / len(words)
     }
+    // Tag matching
     let ti = 0
     while ti < len(tags) {
         if contains(query, tags[ti]) == 1 {
@@ -45,40 +59,53 @@ fn rag_score_doc(doc, query) {
 }
 
 fn rag_retrieve(query, top_k) {
-    let scored = list_new()
+    let results = list_new()
+    let scores = list_new()
     let i = 0
     while i < rag_doc_count {
         let doc = rag_documents[i]
         let score = rag_score_doc(doc, query)
         if score > 0 {
-            let entry = list_new()
-            push(entry, score)
-            push(entry, doc)
-            push(scored, entry)
+            // Insert into sorted results list, maintaining at most top_k entries
+            let pos = len(results)
+            let pi = 0
+            while pi < len(results) {
+                if score > scores[pi] {
+                    pos = pi
+                    pi = len(results)
+                }
+                pi = pi + 1
+            }
+            // Insert at pos
+            let new_results = list_new()
+            let new_scores = list_new()
+            let ni = 0
+            while ni < len(results) {
+                if ni == pos {
+                    push(new_results, doc)
+                    push(new_scores, score)
+                }
+                push(new_results, results[ni])
+                push(new_scores, scores[ni])
+                ni = ni + 1
+            }
+            if pos == len(results) {
+                push(new_results, doc)
+                push(new_scores, score)
+            }
+            // Truncate to top_k
+            results = list_new()
+            scores = list_new()
+            let ti = 0
+            while ti < len(new_results) {
+                if ti < top_k {
+                    push(results, new_results[ti])
+                    push(scores, new_scores[ti])
+                }
+                ti = ti + 1
+            }
         }
         i = i + 1
-    }
-    let si = 0
-    while si < len(scored) {
-        let sj = si + 1
-        while sj < len(scored) {
-            if scored[sj][0] > scored[si][0] {
-                let tmp = scored[si]
-                list_set(scored, si, scored[sj])
-                list_set(scored, sj, tmp)
-            }
-            sj = sj + 1
-        }
-        si = si + 1
-    }
-    let results = list_new()
-    let ri = 0
-    while ri < len(scored) {
-        if ri >= top_k { ri = len(scored) }
-        if ri < top_k {
-            push(results, scored[ri][1])
-            ri = ri + 1
-        }
     }
     return results
 }
@@ -98,6 +125,27 @@ fn rag_build_prompt(query, contexts) {
 fn rag_query(query, top_k) {
     let contexts = rag_retrieve(query, top_k)
     return rag_build_prompt(query, contexts)
+}
+
+fn rag_remove(index) {
+    if index < 0 { return 0 }
+    if index >= rag_doc_count { return 0 }
+    let new_docs = list_new()
+    let i = 0
+    while i < rag_doc_count {
+        if i != index {
+            push(new_docs, rag_documents[i])
+        }
+        i = i + 1
+    }
+    rag_documents = new_docs
+    rag_doc_count = rag_doc_count - 1
+    return 1
+}
+
+fn rag_clear() {
+    rag_documents = list_new()
+    rag_doc_count = 0
 }
 
 fn rag_count() {

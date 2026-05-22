@@ -40,7 +40,7 @@ fn db_open(filepath) {
                 let eq_pos = str_find(line, "=")
                 if eq_pos > 0 {
                     let key = substr(line, 0, eq_pos)
-                    let val = substr(line, eq_pos + 1, len(line))
+                    let val = substr(line, eq_pos + 1, len(line) - eq_pos - 1)
                     push(d[DB_KEYS], key)
                     push(d[DB_VALS], val)
                     d[DB_COUNT] = d[DB_COUNT] + 1

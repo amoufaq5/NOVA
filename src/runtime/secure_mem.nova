@@ -123,13 +123,22 @@ fn sbuf_to_str(buf) {
 // Secure Token Generation (simple PRNG-based)
 // ================================================================
 
-let _sec_seed = 12345
+let _sec_seed = 0
+let _sec_seeded = 0
 
 fn secure_seed(s) {
     _sec_seed = s
 }
 
+fn _sec_auto_seed() {
+    if _sec_seeded == 0 {
+        _sec_seed = global_time ^ 48271
+        _sec_seeded = 1
+    }
+}
+
 fn _sec_next() {
+    _sec_auto_seed()
     _sec_seed = int_add(int_mul(_sec_seed, 1103515245), 12345) & 2147483647
     return _sec_seed
 }

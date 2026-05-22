@@ -30,6 +30,10 @@ fn llm_init() {
     _llm_model_free_fn = ffi_sym(_llm_lib, "llama_free_model")
     _llm_context_new_fn = ffi_sym(_llm_lib, "llama_new_context_with_model")
     _llm_context_free_fn = ffi_sym(_llm_lib, "llama_free")
+    _llm_tokenize_fn = ffi_sym(_llm_lib, "llama_tokenize")
+    _llm_decode_fn = ffi_sym(_llm_lib, "llama_decode")
+    _llm_token_to_str_fn = ffi_sym(_llm_lib, "llama_token_to_piece")
+    _llm_sample_fn = ffi_sym(_llm_lib, "llama_sampler_sample")
     ffi_call0(_llm_init_fn)
     return 1
 }
@@ -51,6 +55,83 @@ fn llm_close(model) {
             ffi_call1(_llm_model_free_fn, model)
         }
     }
+}
+
+fn llm_create_context(model, n_ctx) {
+    if _llm_context_new_fn == 0 { return 0 }
+    // llama_context_default_params() returns a struct, but we can
+    // allocate and zero-fill a params struct (typically ~64 bytes)
+    let params = mem_alloc_zeroed(128)
+    mem_write_i32(params, n_ctx)
+    let ctx = ffi_call2(_llm_context_new_fn, model, params)
+    mem_free(params)
+    return ctx
+}
+
+fn llm_generate(model, prompt, max_tokens) {
+    if model == 0 { return "" }
+    let ctx = llm_create_context(model, max_tokens + 512)
+    if ctx == 0 { return "" }
+
+    // Tokenize the prompt
+    let max_toks = max_tokens + 512
+    let tokens_buf = mem_alloc(max_toks * 4)
+    let n_tokens = ffi_call5(_llm_tokenize_fn, model, prompt, len(prompt), tokens_buf, max_toks)
+    if n_tokens < 0 { n_tokens = 0 - n_tokens }
+
+    // Create a batch struct (simplified - allocate and set fields)
+    let batch = mem_alloc_zeroed(256)
+
+    // Decode prompt tokens
+    let result = ""
+    let i = 0
+    while i < max_tokens {
+        // Sample next token
+        let next_token = 0
+        if _llm_sample_fn != 0 {
+            next_token = ffi_call2(_llm_sample_fn, ctx, 0)
+        }
+
+        // Check for end of sequence (token 2 is typically EOS)
+        if next_token <= 2 {
+            i = max_tokens
+        }
+
+        if next_token > 2 {
+            // Convert token to text
+            let piece_buf = mem_alloc(256)
+            let piece_len = ffi_call5(_llm_token_to_str_fn, model, next_token, piece_buf, 256, 0)
+            if piece_len > 0 {
+                // Read the piece as a string (piece_buf is a C string)
+                let piece = ""
+                let pi = 0
+                while pi < piece_len {
+                    let ch = mem_read_i8(int_add(piece_buf, pi))
+                    if ch > 0 {
+                        piece = piece + chr(ch)
+                    }
+                    pi = pi + 1
+                }
+                result = result + piece
+            }
+            mem_free(piece_buf)
+        }
+        i = i + 1
+    }
+
+    mem_free(tokens_buf)
+    mem_free(batch)
+    // Free context
+    if _llm_context_free_fn != 0 {
+        ffi_call1(_llm_context_free_fn, ctx)
+    }
+
+    return result
+}
+
+fn llm_available() {
+    if _llm_lib != 0 { return 1 }
+    return 0
 }
 
 fn llm_shutdown() {

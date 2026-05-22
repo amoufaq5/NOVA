@@ -1,6 +1,6 @@
 // Nova Standard Library: CSV Parser
-// Parses CSV text into a list of rows (each row is a list of strings).
-// Simple format: comma-delimited, newline-separated, no quoted fields.
+// csv_parse: simple comma-delimited, newline-separated
+// csv_parse_quoted: handles RFC 4180 quoted fields ("hello, world")
 
 fn csv_parse(text) {
     let rows = list_new()
@@ -84,4 +84,70 @@ fn csv_to_string(data) {
         r = r + 1
     }
     return result
+}
+
+fn csv_parse_quoted(text) {
+    let rows = list_new()
+    let row = list_new()
+    let field = ""
+    let in_quotes = 0
+    let i = 0
+    let tlen = len(text)
+    while i < tlen {
+        let c = char_at(text, i)
+        if in_quotes == 1 {
+            if c == 34 {
+                if i + 1 < tlen {
+                    if char_at(text, i + 1) == 34 {
+                        field = field + chr(34)
+                        i = i + 1
+                    } else {
+                        in_quotes = 0
+                    }
+                } else {
+                    in_quotes = 0
+                }
+            } else {
+                field = field + chr(c)
+            }
+        } else {
+            if c == 34 {
+                in_quotes = 1
+            } else {
+                if c == 44 {
+                    push(row, field)
+                    field = ""
+                } else {
+                    if c == 10 {
+                        push(row, field)
+                        push(rows, row)
+                        row = list_new()
+                        field = ""
+                    } else {
+                        if c == 13 {
+                            push(row, field)
+                            push(rows, row)
+                            row = list_new()
+                            field = ""
+                            if i + 1 < tlen {
+                                if char_at(text, i + 1) == 10 {
+                                    i = i + 1
+                                }
+                            }
+                        } else {
+                            field = field + chr(c)
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if len(field) > 0 {
+        push(row, field)
+    }
+    if len(row) > 0 {
+        push(rows, row)
+    }
+    return rows
 }

@@ -34,6 +34,19 @@ fn pkg_init_std() {
     push(STD_PACKAGES, "alloc")
     push(STD_PACKAGES, "syscall")
     push(STD_PACKAGES, "scheduler")
+    push(STD_PACKAGES, "tensor")
+    push(STD_PACKAGES, "csv")
+    push(STD_PACKAGES, "confidence")
+    push(STD_PACKAGES, "ffi")
+    push(STD_PACKAGES, "gpu")
+    push(STD_PACKAGES, "simd")
+    push(STD_PACKAGES, "crypto")
+    push(STD_PACKAGES, "db")
+    push(STD_PACKAGES, "embed")
+    push(STD_PACKAGES, "validate")
+    push(STD_PACKAGES, "secure_mem")
+    push(STD_PACKAGES, "python")
+    push(STD_PACKAGES, "llm")
 }
 
 fn is_std_package(name) {

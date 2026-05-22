@@ -184,3 +184,155 @@ fn tensor_print(t) {
     }
     println("]")
 }
+
+fn tensor_apply(t, func) {
+    let rows = t[1]
+    let cols = t[2]
+    let dt = t[3]
+    let result = tensor_new(rows, cols)
+    let dr = result[3]
+    let n = rows * cols
+    let i = 0
+    while i < n {
+        list_set(dr, i, func(dt[i]))
+        i = i + 1
+    }
+    return result
+}
+
+fn tensor_sum(t) {
+    let dt = t[3]
+    let n = t[1] * t[2]
+    let sum = to_float(0)
+    let i = 0
+    while i < n {
+        sum = float_add(sum, dt[i])
+        i = i + 1
+    }
+    return sum
+}
+
+fn tensor_max(t) {
+    let dt = t[3]
+    let n = t[1] * t[2]
+    if n == 0 { return to_float(0) }
+    let mx = dt[0]
+    let i = 1
+    while i < n {
+        if float_cmp(dt[i], mx) > 0 {
+            mx = dt[i]
+        }
+        i = i + 1
+    }
+    return mx
+}
+
+fn tensor_min(t) {
+    let dt = t[3]
+    let n = t[1] * t[2]
+    if n == 0 { return to_float(0) }
+    let mn = dt[0]
+    let i = 1
+    while i < n {
+        if float_cmp(dt[i], mn) < 0 {
+            mn = dt[i]
+        }
+        i = i + 1
+    }
+    return mn
+}
+
+fn tensor_relu(t) {
+    let rows = t[1]
+    let cols = t[2]
+    let dt = t[3]
+    let result = tensor_new(rows, cols)
+    let dr = result[3]
+    let zero = to_float(0)
+    let n = rows * cols
+    let i = 0
+    while i < n {
+        if float_cmp(dt[i], zero) > 0 {
+            list_set(dr, i, dt[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn tensor_softmax(t) {
+    let cols = t[2]
+    let dt = t[3]
+    let result = tensor_new(1, cols)
+    let dr = result[3]
+    let mx = tensor_max(t)
+    let sum = to_float(0)
+    let i = 0
+    while i < cols {
+        let e = float_sub(dt[i], mx)
+        list_set(dr, i, e)
+        i = i + 1
+    }
+    return result
+}
+
+fn tensor_eq(a, b) {
+    if a[1] != b[1] { return 0 }
+    if a[2] != b[2] { return 0 }
+    let da = a[3]
+    let db = b[3]
+    let n = a[1] * a[2]
+    let i = 0
+    while i < n {
+        if float_cmp(da[i], db[i]) != 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn tensor_shape(t) {
+    let s = list_new()
+    push(s, t[1])
+    push(s, t[2])
+    return s
+}
+
+fn tensor_flatten(t) {
+    let n = t[1] * t[2]
+    return tensor_from_list(1, n, t[3])
+}
+
+fn tensor_reshape(t, rows, cols) {
+    let n = t[1] * t[2]
+    if rows * cols != n { return 0 }
+    return tensor_from_list(rows, cols, t[3])
+}
+
+fn tensor_identity(n) {
+    let t = tensor_new(n, n)
+    let one = to_float(1)
+    let i = 0
+    while i < n {
+        tensor_set(t, i, i, one)
+        i = i + 1
+    }
+    return t
+}
+
+fn tensor_zeros(rows, cols) {
+    return tensor_new(rows, cols)
+}
+
+fn tensor_fill(rows, cols, val) {
+    let t = tensor_new(rows, cols)
+    let dt = t[3]
+    let n = rows * cols
+    let i = 0
+    while i < n {
+        list_set(dt, i, val)
+        i = i + 1
+    }
+    return t
+}

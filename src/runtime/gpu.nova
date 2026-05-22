@@ -44,6 +44,9 @@ let _cl_enqueue_kernel = 0
 let _cl_finish = 0
 let _cl_release_mem = 0
 
+let _cl_context = 0
+let _cl_queue = 0
+
 fn _try_cuda_init() {
     _cuda_lib = ffi_open("libcuda.so")
     if _cuda_lib == 0 {
@@ -100,6 +103,17 @@ fn _try_opencl_init() {
     _cl_enqueue_kernel = ffi_sym(_opencl_lib, "clEnqueueNDRangeKernel")
     _cl_finish = ffi_sym(_opencl_lib, "clFinish")
     _cl_release_mem = ffi_sym(_opencl_lib, "clReleaseMemObject")
+    // Create context and command queue
+    let platform = mem_alloc(8)
+    ffi_call3(_cl_get_platforms, 1, platform, 0)
+    let plat = mem_read_i64(platform)
+    let device = mem_alloc(8)
+    ffi_call5(_cl_get_devices, plat, 1, 1, device, 0)
+    let dev = mem_read_i64(device)
+    _cl_context = ffi_call5(_cl_create_context, 0, 1, device, 0, 0)
+    _cl_queue = ffi_call3(_cl_create_queue, _cl_context, dev, 0)
+    mem_free(platform)
+    mem_free(device)
     return 1
 }
 
@@ -177,14 +191,15 @@ fn gpu_sync() {
         ffi_call0(_cu_ctx_sync)
     }
     if _gpu_backend == 2 {
-        // OpenCL sync handled per-queue
+        if _cl_finish != 0 {
+            ffi_call1(_cl_finish, _cl_queue)
+        }
     }
 }
 
 fn gpu_load_module(ptx_source) {
     if _gpu_backend != 1 { return 0 }
     let module_ptr = alloc(8)
-    let args = [_cu_module_load, module_ptr, ptx_source]
     ffi_calln(_cu_module_load, [module_ptr, ptx_source])
     return mem_read_i64(module_ptr)
 }
@@ -200,6 +215,28 @@ fn gpu_launch(kernel_fn, grid_x, block_x, params_ptr) {
     if _gpu_backend != 1 { return 0 }
     let args = [kernel_fn, grid_x, 1, 1, block_x, 1, 1, 0, 0, params_ptr, 0]
     return ffi_calln(_cu_launch_kernel, args)
+}
+
+fn gpu_create_program(source) {
+    if _gpu_backend == 2 {
+        let src_len = len(source)
+        return ffi_call5(_cl_create_program, _cl_context, 1, source, src_len, 0)
+    }
+    return 0
+}
+
+fn gpu_build_program(program) {
+    if _gpu_backend == 2 {
+        return ffi_call5(_cl_build_program, program, 0, 0, 0, 0)
+    }
+    return 0
+}
+
+fn gpu_create_kernel(program, name) {
+    if _gpu_backend == 2 {
+        return ffi_call3(_cl_create_kernel, program, name, 0)
+    }
+    return 0
 }
 
 fn compute_close() {
