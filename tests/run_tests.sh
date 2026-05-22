@@ -25,6 +25,11 @@ for test_file in tests/test_*.nova; do
             SKIP=$((SKIP + 1))
             continue
             ;;
+        test_ffi)
+            echo "  SKIP  $test_name (requires --link-libc; run via 'make ffi FILE=tests/test_ffi.nova')"
+            SKIP=$((SKIP + 1))
+            continue
+            ;;
     esac
 
     # M7/M8/M9 tests need combined source files (strip import lines to avoid double-include)

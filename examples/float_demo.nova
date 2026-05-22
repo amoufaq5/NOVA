@@ -35,7 +35,7 @@ fn main() {
     let i = 0
     while i < len(nums) {
         let n = nums[i]
-        let sq = math_sqrt(to_float(n))
+        let sq = fsqrt(to_float(n))
         print("sqrt(") ; print_int(n) ; print(") = ") ; println(float_to_str(sq))
         i = i + 1
     }

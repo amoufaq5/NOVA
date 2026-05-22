@@ -94,11 +94,11 @@ fn main() {
     // Test 7: Math sqrt
     println("")
     println("--- Math functions ---")
-    let sq = math_sqrt(to_float(4))
+    let sq = fsqrt(to_float(4))
     print("sqrt(4) = ")
     println(float_to_str(sq))
 
-    let sq2 = math_sqrt(to_float(9))
+    let sq2 = fsqrt(to_float(9))
     print("sqrt(9) = ")
     println(float_to_str(sq2))
 

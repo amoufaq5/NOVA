@@ -60,7 +60,7 @@ fn math_lcm(a, b) {
     return math_abs(a / g * b)
 }
 
-fn math_isqrt(n) {
+fn math_sqrt(n) {
     if n <= 0 { return 0 }
     if n == 1 { return 1 }
     let x = n

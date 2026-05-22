@@ -893,7 +893,7 @@ fn is_builtin_fn(name) {
     if name == "float_to_str" { return 1 }
     if name == "to_float" { return 1 }
     if name == "from_float" { return 1 }
-    if name == "math_sqrt" { return 1 }
+    if name == "fsqrt" { return 1 }
     if cg_link_libc == 1 {
         if name == "ffi_open" { return 1 }
         if name == "ffi_sym" { return 1 }
@@ -1029,15 +1029,7 @@ fn is_float_expr(nd) {
             if fname == "float_sub" { return 1 }
             if fname == "float_mul" { return 1 }
             if fname == "float_div" { return 1 }
-            if fname == "math_sqrt" { return 1 }
-            if fname == "math_sin" { return 1 }
-            if fname == "math_cos" { return 1 }
-            if fname == "math_exp" { return 1 }
-            if fname == "math_log" { return 1 }
-            if fname == "math_pow" { return 1 }
-            if fname == "math_abs" { return 1 }
-            if fname == "math_floor" { return 1 }
-            if fname == "math_ceil" { return 1 }
+            if fname == "fsqrt" { return 1 }
         }
     }
     return 0
@@ -8335,10 +8327,11 @@ fn gen_runtime() {
         let fp = cg_float_frac_parts[fi]
         let fd = cg_float_frac_digits[fi]
         // Compute divisor = 10^frac_digits
-        let divisor = 1
+        // Build divisor=10^fd as a decimal string (avoid Nova int overflow at 0x100000)
+        let divisor_str = "1"
         let di = 0
         while di < fd {
-            divisor = divisor * 10
+            divisor_str = divisor_str + "0"
             di = di + 1
         }
         // xmm0 = int_part, xmm1 = frac_part / divisor, xmm0 = sum
@@ -8346,7 +8339,7 @@ fn gen_runtime() {
         out("    cvtsi2sd xmm0, rax")
         out("    mov rax, " + int_to_str(fp))
         out("    cvtsi2sd xmm1, rax")
-        out("    mov rax, " + int_to_str(divisor))
+        out("    mov rax, " + divisor_str)
         out("    cvtsi2sd xmm2, rax")
         out("    divsd xmm1, xmm2")
         out("    addsd xmm0, xmm1")
@@ -9928,7 +9921,7 @@ fn gen_runtime() {
     out("    jmp _nova_to_float")
     out_label("from_float")
     out("    jmp _nova_from_float")
-    out_label("math_sqrt")
+    out_label("fsqrt")
     out("    jmp _nova_math_sqrt")
     out_label("to_str")
     out("    jmp _nova_to_str")
