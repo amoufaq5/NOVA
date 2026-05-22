@@ -413,8 +413,8 @@ fn test_cross_system_integration() {
     let reasoner = node_new("Reasoner", NTYPE_REASONER)
     let feeler = node_new("Feeler", NTYPE_FEELER)
 
-    perceiver_add_template(perceiver, "question", 80)
-    perceiver_add_template(perceiver, "statement", 50)
+    perceiver_add_template(perceiver, "question", ["what", "why", "how"], 80)
+    perceiver_add_template(perceiver, "statement", ["said", "told", "stated"], 50)
 
     // Wire a channel
     let ch = channel_broadcast("main_bus", "Perceiver")

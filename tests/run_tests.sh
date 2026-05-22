@@ -38,6 +38,7 @@ for test_file in tests/test_*.nova; do
         test_m7_core)
             cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
                 src/core/node.nova src/core/channel.nova src/core/path.nova \
+                src/core/soul.nova src/runtime/scheduler.nova \
                 > /tmp/nova_combined_test.nova
             grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"
@@ -45,6 +46,7 @@ for test_file in tests/test_*.nova; do
         test_m8_mind)
             cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
                 src/core/node.nova src/core/channel.nova src/core/path.nova \
+                src/core/soul.nova src/runtime/scheduler.nova \
                 src/mind/academic.nova src/mind/experiential.nova src/mind/emotion.nova \
                 src/mind/memory.nova src/mind/reasoning.nova \
                 > /tmp/nova_combined_test.nova
@@ -54,6 +56,7 @@ for test_file in tests/test_*.nova; do
         test_flow_ops)
             cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
                 src/core/node.nova src/core/channel.nova src/core/path.nova \
+                src/core/soul.nova src/runtime/scheduler.nova \
                 > /tmp/nova_combined_test.nova
             grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"
@@ -61,6 +64,7 @@ for test_file in tests/test_*.nova; do
         test_m9_fullsystem)
             cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
                 src/core/node.nova src/core/channel.nova src/core/path.nova \
+                src/core/soul.nova src/runtime/scheduler.nova \
                 src/mind/academic.nova src/mind/experiential.nova src/mind/emotion.nova \
                 src/mind/memory.nova src/mind/reasoning.nova \
                 "$test_file" > /tmp/nova_combined_test.nova
