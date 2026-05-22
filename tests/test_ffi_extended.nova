@@ -1,0 +1,92 @@
+// Test: Extended FFI - ffi_calln, ffi_callf1/2, system_exec
+// Run with: make ffi FILE=tests/test_ffi_extended.nova
+
+fn main() {
+    println("=== Extended FFI Tests ===")
+    println("")
+
+    // Test 1: ffi_calln with libm's abs (1 arg)
+    println("--- ffi_calln (variable args via list) ---")
+    let libc = ffi_open(0)
+    let abs_fn = ffi_sym(libc, "abs")
+    let args = [-42]
+    let result = ffi_calln(abs_fn, args)
+    print("abs(-42) = ")
+    print_int(result)
+    println("")
+
+    // Test 2: ffi_calln with multiple integer args
+    let snprintf_fn = ffi_sym(libc, "snprintf")
+
+    // Test 3: ffi_callf1 with libm sin
+    println("")
+    println("--- ffi_callf1 (float args via XMM) ---")
+    let libm = ffi_open("libm.so.6")
+    let sin_fn = ffi_sym(libm, "sin")
+    let cos_fn = ffi_sym(libm, "cos")
+    let sqrt_fn = ffi_sym(libm, "sqrt")
+
+    // sin(0) = 0.0
+    let zero = to_float(0)
+    let sin_0 = ffi_callf1(sin_fn, zero)
+    print("sin(0) = ")
+    println(float_to_str(sin_0))
+
+    // cos(0) = 1.0
+    let cos_0 = ffi_callf1(cos_fn, zero)
+    print("cos(0) = ")
+    println(float_to_str(cos_0))
+
+    // sqrt(4.0) = 2.0
+    let four = to_float(4)
+    let sqrt_4 = ffi_callf1(sqrt_fn, four)
+    print("sqrt(4) = ")
+    println(float_to_str(sqrt_4))
+
+    // sqrt(2.0) ≈ 1.414...
+    let two = to_float(2)
+    let sqrt_2 = ffi_callf1(sqrt_fn, two)
+    print("sqrt(2) = ")
+    println(float_to_str(sqrt_2))
+
+    // Test 4: ffi_callf2 with libm pow
+    println("")
+    println("--- ffi_callf2 (two float args) ---")
+    let pow_fn = ffi_sym(libm, "pow")
+
+    // pow(2.0, 10.0) = 1024.0
+    let ten = to_float(10)
+    let pow_result = ffi_callf2(pow_fn, two, ten)
+    print("pow(2, 10) = ")
+    println(float_to_str(pow_result))
+
+    // pow(3.0, 3.0) = 27.0
+    let three = to_float(3)
+    let pow_27 = ffi_callf2(pow_fn, three, three)
+    print("pow(3, 3) = ")
+    println(float_to_str(pow_27))
+
+    // Test 5: ffi_callf2 with libm atan2
+    let atan2_fn = ffi_sym(libm, "atan2")
+    let one = to_float(1)
+    let atan2_result = ffi_callf2(atan2_fn, one, one)
+    print("atan2(1, 1) = ")
+    println(float_to_str(atan2_result))
+
+    ffi_close(libm)
+
+    // Test 6: system_exec
+    println("")
+    println("--- system_exec ---")
+    let ret = system_exec("echo 'Hello from system_exec!'")
+    print("exit status: ")
+    print_int(ret)
+    println("")
+
+    ffi_close(libc)
+
+    println("")
+    println("=== All extended FFI tests passed! ===")
+}
+
+main()

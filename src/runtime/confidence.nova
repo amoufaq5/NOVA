@@ -1,0 +1,47 @@
+// Nova Runtime: Confidence Values
+// A confidence-annotated value is a 2-element list: [value, confidence_float]
+// Created by the @ operator: expr @ 0.87
+
+fn conf_new(value, level) {
+    let c = list_new()
+    push(c, value)
+    push(c, level)
+    return c
+}
+
+fn conf_value(c) {
+    return c[0]
+}
+
+fn conf_level(c) {
+    return c[1]
+}
+
+fn conf_merge(a, b) {
+    let a_conf = conf_level(a)
+    let b_conf = conf_level(b)
+    let min_conf = a_conf
+    if float_cmp(b_conf, a_conf) < 0 {
+        min_conf = b_conf
+    }
+    return conf_new(conf_value(a), min_conf)
+}
+
+fn conf_above(c, threshold) {
+    if float_cmp(conf_level(c), threshold) > 0 {
+        return 1
+    }
+    return 0
+}
+
+fn conf_describe(c) {
+    let result = "("
+    let v = conf_value(c)
+    if v > 65535 {
+        result = result + "[complex]"
+    } else {
+        result = result + int_to_str(v)
+    }
+    result = result + " @ " + float_to_str(conf_level(c)) + ")"
+    return result
+}

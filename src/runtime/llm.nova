@@ -1,0 +1,64 @@
+// Nova Runtime: LLM Integration via llama.cpp FFI
+// Wraps llama.cpp's C API for inference. Requires --link-libc and libllama.so.
+//
+// Usage:
+//   let model = llm_load_model("model.gguf")
+//   let text = llm_generate(model, "Hello", 128)
+//   llm_close(model)
+
+let _llm_lib = 0
+let _llm_init_fn = 0
+let _llm_free_fn = 0
+let _llm_model_load_fn = 0
+let _llm_model_free_fn = 0
+let _llm_context_new_fn = 0
+let _llm_context_free_fn = 0
+let _llm_tokenize_fn = 0
+let _llm_decode_fn = 0
+let _llm_token_to_str_fn = 0
+let _llm_sample_fn = 0
+
+fn llm_init() {
+    _llm_lib = ffi_open("libllama.so")
+    if _llm_lib == 0 {
+        println("ERROR: libllama.so not found")
+        return 0
+    }
+    _llm_init_fn = ffi_sym(_llm_lib, "llama_backend_init")
+    _llm_free_fn = ffi_sym(_llm_lib, "llama_backend_free")
+    _llm_model_load_fn = ffi_sym(_llm_lib, "llama_load_model_from_file")
+    _llm_model_free_fn = ffi_sym(_llm_lib, "llama_free_model")
+    _llm_context_new_fn = ffi_sym(_llm_lib, "llama_new_context_with_model")
+    _llm_context_free_fn = ffi_sym(_llm_lib, "llama_free")
+    ffi_call0(_llm_init_fn)
+    return 1
+}
+
+fn llm_load_model(path) {
+    if _llm_model_load_fn == 0 {
+        let ok = llm_init()
+        if ok == 0 { return 0 }
+    }
+    let params = mem_alloc(256)
+    let model = ffi_call2(_llm_model_load_fn, path, params)
+    mem_free(params)
+    return model
+}
+
+fn llm_close(model) {
+    if model != 0 {
+        if _llm_model_free_fn != 0 {
+            ffi_call1(_llm_model_free_fn, model)
+        }
+    }
+}
+
+fn llm_shutdown() {
+    if _llm_free_fn != 0 {
+        ffi_call0(_llm_free_fn)
+    }
+    if _llm_lib != 0 {
+        ffi_close(_llm_lib)
+        _llm_lib = 0
+    }
+}

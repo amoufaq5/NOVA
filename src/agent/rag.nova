@@ -1,0 +1,105 @@
+// Nova Agent: Retrieval-Augmented Generation (RAG) Pipeline
+// Stores documents as moments, retrieves by similarity, builds augmented prompts.
+
+let rag_documents = 0
+let rag_doc_count = 0
+
+fn rag_init() {
+    rag_documents = list_new()
+    rag_doc_count = 0
+}
+
+fn rag_add_document(text, tags) {
+    let doc = list_new()
+    push(doc, text)
+    push(doc, tags)
+    push(doc, global_time)
+    push(rag_documents, doc)
+    rag_doc_count = rag_doc_count + 1
+}
+
+fn rag_doc_text(doc) { return doc[0] }
+fn rag_doc_tags(doc) { return doc[1] }
+fn rag_doc_time(doc) { return doc[2] }
+
+fn rag_score_doc(doc, query) {
+    let text = rag_doc_text(doc)
+    let tags = rag_doc_tags(doc)
+    let score = 0
+    if text == query { score = 100 }
+    if score == 0 {
+        if contains(text, query) == 1 { score = 60 }
+    }
+    if score == 0 {
+        if contains(query, text) == 1 { score = 40 }
+    }
+    let ti = 0
+    while ti < len(tags) {
+        if contains(query, tags[ti]) == 1 {
+            score = score + 15
+        }
+        ti = ti + 1
+    }
+    if score > 100 { score = 100 }
+    return score
+}
+
+fn rag_retrieve(query, top_k) {
+    let scored = list_new()
+    let i = 0
+    while i < rag_doc_count {
+        let doc = rag_documents[i]
+        let score = rag_score_doc(doc, query)
+        if score > 0 {
+            let entry = list_new()
+            push(entry, score)
+            push(entry, doc)
+            push(scored, entry)
+        }
+        i = i + 1
+    }
+    let si = 0
+    while si < len(scored) {
+        let sj = si + 1
+        while sj < len(scored) {
+            if scored[sj][0] > scored[si][0] {
+                let tmp = scored[si]
+                list_set(scored, si, scored[sj])
+                list_set(scored, sj, tmp)
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    let results = list_new()
+    let ri = 0
+    while ri < len(scored) {
+        if ri >= top_k { ri = len(scored) }
+        if ri < top_k {
+            push(results, scored[ri][1])
+            ri = ri + 1
+        }
+    }
+    return results
+}
+
+fn rag_build_prompt(query, contexts) {
+    let prompt = "Context:\n"
+    let i = 0
+    while i < len(contexts) {
+        let doc = contexts[i]
+        prompt = prompt + "- " + rag_doc_text(doc) + "\n"
+        i = i + 1
+    }
+    prompt = prompt + "\nQuery: " + query
+    return prompt
+}
+
+fn rag_query(query, top_k) {
+    let contexts = rag_retrieve(query, top_k)
+    return rag_build_prompt(query, contexts)
+}
+
+fn rag_count() {
+    return rag_doc_count
+}

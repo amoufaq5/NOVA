@@ -594,3 +594,60 @@ fn scheduler_run_secure() {
 fn scheduler_security_violations() {
     return sched_sec_violations
 }
+
+// Temporal events
+let sched_delayed = 0
+let sched_recurring = 0
+
+fn scheduler_init_temporal() {
+    sched_delayed = list_new()
+    sched_recurring = list_new()
+}
+
+fn scheduler_after(ticks, callback) {
+    if sched_delayed == 0 { scheduler_init_temporal() }
+    let entry = list_new()
+    push(entry, sched_cycle + ticks)
+    push(entry, callback)
+    push(sched_delayed, entry)
+}
+
+fn scheduler_every(interval, callback) {
+    if sched_recurring == 0 { scheduler_init_temporal() }
+    let entry = list_new()
+    push(entry, interval)
+    push(entry, callback)
+    push(entry, sched_cycle + interval)
+    push(sched_recurring, entry)
+}
+
+fn scheduler_tick_temporal() {
+    if sched_delayed == 0 { return 0 }
+    let fired = 0
+    let remaining = list_new()
+    let i = 0
+    while i < len(sched_delayed) {
+        let entry = sched_delayed[i]
+        if sched_cycle >= entry[0] {
+            let cb = entry[1]
+            cb()
+            fired = fired + 1
+        } else {
+            push(remaining, entry)
+        }
+        i = i + 1
+    }
+    sched_delayed = remaining
+    i = 0
+    while i < len(sched_recurring) {
+        let entry = sched_recurring[i]
+        if sched_cycle >= entry[2] {
+            let cb = entry[1]
+            cb()
+            entry[2] = sched_cycle + entry[0]
+            fired = fired + 1
+        }
+        i = i + 1
+    }
+    return fired
+}

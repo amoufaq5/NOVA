@@ -629,6 +629,78 @@ fn reasoning_process(signal, episodes) {
 // 13. reasoning_count_rules — return total rules
 // ---------------------------------------------------------------------------
 
+fn reasoning_forward_chain(initial_facts, max_depth) {
+    let known = list_new()
+    let i = 0
+    while i < len(initial_facts) {
+        push(known, initial_facts[i])
+        i = i + 1
+    }
+    let all_conclusions = list_new()
+    let depth = 0
+    while depth < max_depth {
+        let new_facts = list_new()
+        let ki = 0
+        while ki < len(known) {
+            let fact = known[ki]
+            let derived = reasoning_deduce(fact, 0)
+            let di = 0
+            while di < len(derived) {
+                let content = conclusion_content(derived[di])
+                let already = 0
+                let ai = 0
+                while ai < len(known) {
+                    if known[ai] == content { already = 1 }
+                    ai = ai + 1
+                }
+                let ni = 0
+                while ni < len(new_facts) {
+                    if new_facts[ni] == content { already = 1 }
+                    ni = ni + 1
+                }
+                if already == 0 {
+                    push(new_facts, content)
+                    push(all_conclusions, derived[di])
+                }
+                di = di + 1
+            }
+            ki = ki + 1
+        }
+        if len(new_facts) == 0 {
+            depth = max_depth
+        } else {
+            let fi = 0
+            while fi < len(new_facts) {
+                push(known, new_facts[fi])
+                fi = fi + 1
+            }
+        }
+        depth = depth + 1
+    }
+    return all_conclusions
+}
+
+fn reasoning_backward_chain(goal, max_depth) {
+    return reasoning_abduce(goal, max_depth)
+}
+
+fn reasoning_explain(conclusion) {
+    if conclusion == 0 { return "no conclusion to explain" }
+    let result = "Reasoning trace for: " + conclusion_content(conclusion)
+    result = result + " (confidence: " + int_to_str(conclusion_confidence(conclusion)) + ")"
+    let trace = conclusion_trace(conclusion)
+    if trace == 0 { return result }
+    let i = 0
+    while i < len(trace) {
+        let step = trace[i]
+        result = result + "\n  " + int_to_str(i + 1) + ". "
+        result = result + step[0] + ": " + step[1] + " -> " + step[2]
+        result = result + " (conf: " + int_to_str(step[3]) + ")"
+        i = i + 1
+    }
+    return result
+}
+
 fn reasoning_count_rules() {
     return reasoning_rule_count
 }

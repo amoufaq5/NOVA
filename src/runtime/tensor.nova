@@ -1,0 +1,186 @@
+// Nova Standard Library: Tensor/Matrix Operations
+// Tensor layout: [TENSOR_TAG, rows, cols, data]
+// data is a flat list of IEEE 754 float bit patterns.
+
+let TENSOR_TAG = 200
+
+fn tensor_new(rows, cols) {
+    let t = list_new()
+    push(t, TENSOR_TAG)
+    push(t, rows)
+    push(t, cols)
+    let data = list_new()
+    let zero = to_float(0)
+    let n = rows * cols
+    let i = 0
+    while i < n {
+        push(data, zero)
+        i = i + 1
+    }
+    push(t, data)
+    return t
+}
+
+fn tensor_from_list(rows, cols, data) {
+    let t = list_new()
+    push(t, TENSOR_TAG)
+    push(t, rows)
+    push(t, cols)
+    let d = list_new()
+    let n = rows * cols
+    let i = 0
+    while i < n {
+        push(d, data[i])
+        i = i + 1
+    }
+    push(t, d)
+    return t
+}
+
+fn tensor_rows(t) {
+    return t[1]
+}
+
+fn tensor_cols(t) {
+    return t[2]
+}
+
+fn tensor_get(t, r, c) {
+    let cols = t[2]
+    let data = t[3]
+    return data[r * cols + c]
+}
+
+fn tensor_set(t, r, c, val) {
+    let cols = t[2]
+    let data = t[3]
+    list_set(data, r * cols + c, val)
+}
+
+fn tensor_add(a, b) {
+    let rows = a[1]
+    let cols = a[2]
+    let da = a[3]
+    let db = b[3]
+    let result = tensor_new(rows, cols)
+    let dr = result[3]
+    let n = rows * cols
+    let i = 0
+    while i < n {
+        list_set(dr, i, float_add(da[i], db[i]))
+        i = i + 1
+    }
+    return result
+}
+
+fn tensor_sub(a, b) {
+    let rows = a[1]
+    let cols = a[2]
+    let da = a[3]
+    let db = b[3]
+    let result = tensor_new(rows, cols)
+    let dr = result[3]
+    let n = rows * cols
+    let i = 0
+    while i < n {
+        list_set(dr, i, float_sub(da[i], db[i]))
+        i = i + 1
+    }
+    return result
+}
+
+fn tensor_scale(t, scalar) {
+    let rows = t[1]
+    let cols = t[2]
+    let dt = t[3]
+    let result = tensor_new(rows, cols)
+    let dr = result[3]
+    let n = rows * cols
+    let i = 0
+    while i < n {
+        list_set(dr, i, float_mul(dt[i], scalar))
+        i = i + 1
+    }
+    return result
+}
+
+fn tensor_matmul(a, b) {
+    let ar = a[1]
+    let ac = a[2]
+    let br = b[1]
+    let bc = b[2]
+    let da = a[3]
+    let db = b[3]
+    let result = tensor_new(ar, bc)
+    let dr = result[3]
+    let i = 0
+    while i < ar {
+        let j = 0
+        while j < bc {
+            let sum = to_float(0)
+            let k = 0
+            while k < ac {
+                sum = float_add(sum, float_mul(da[i * ac + k], db[k * bc + j]))
+                k = k + 1
+            }
+            list_set(dr, i * bc + j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn tensor_transpose(t) {
+    let rows = t[1]
+    let cols = t[2]
+    let dt = t[3]
+    let result = tensor_new(cols, rows)
+    let dr = result[3]
+    let r = 0
+    while r < rows {
+        let c = 0
+        while c < cols {
+            list_set(dr, c * rows + r, dt[r * cols + c])
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return result
+}
+
+fn tensor_dot(a, b) {
+    let da = a[3]
+    let db = b[3]
+    let n = a[2]
+    let sum = to_float(0)
+    let i = 0
+    while i < n {
+        sum = float_add(sum, float_mul(da[i], db[i]))
+        i = i + 1
+    }
+    return sum
+}
+
+fn tensor_print(t) {
+    let rows = t[1]
+    let cols = t[2]
+    let dt = t[3]
+    println("[")
+    let r = 0
+    while r < rows {
+        let line = "  ["
+        let c = 0
+        while c < cols {
+            if c > 0 {
+                line = line + ", "
+            }
+            line = line + float_to_str(dt[r * cols + c])
+            c = c + 1
+        }
+        line = line + "]"
+        println(line)
+        r = r + 1
+    }
+    println("]")
+}

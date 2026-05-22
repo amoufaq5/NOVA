@@ -1,0 +1,66 @@
+// Test: impl blocks
+
+struct Point {
+    x, y
+}
+
+impl Point {
+    fn describe(self) {
+        print("Point(")
+        print_int(self.x)
+        print(", ")
+        print_int(self.y)
+        println(")")
+    }
+
+    fn distance_sq(self) {
+        return self.x * self.x + self.y * self.y
+    }
+
+    fn translate(self, dx, dy) {
+        self.x = self.x + dx
+        self.y = self.y + dy
+    }
+}
+
+struct Color {
+    r, g, b
+}
+
+impl Color {
+    fn hex(self) {
+        return self.r * 65536 + self.g * 256 + self.b
+    }
+}
+
+fn main() {
+    println("=== Impl Block Tests ===")
+
+    // Test 1: Basic method call
+    println("--- Basic methods ---")
+    let p = Point(3, 4)
+    p.describe()
+
+    // Test 2: Return value from method
+    let d = p.distance_sq()
+    print("distance_sq: ") ; print_int(d) ; println("")
+    if d != 25 { println("FAIL") ; exit(1) }
+
+    // Test 3: Mutation
+    println("--- Mutation ---")
+    p.translate(10, 20)
+    p.describe()
+    if p.x != 13 { println("FAIL") ; exit(1) }
+    if p.y != 24 { println("FAIL") ; exit(1) }
+
+    // Test 4: Different struct
+    println("--- Different struct ---")
+    let c = Color(255, 128, 0)
+    let hex = c.hex()
+    print("hex: ") ; print_int(hex) ; println("")
+
+    println("")
+    println("=== All impl block tests passed! ===")
+}
+
+main()

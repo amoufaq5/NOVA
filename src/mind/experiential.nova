@@ -448,3 +448,48 @@ fn experiential_describe_tendency(t) {
 fn experiential_count() {
     return len(experiential_patterns) + len(experiential_tendencies)
 }
+
+fn experiential_crystallize_all() {
+    let promoted = 0
+    let i = 0
+    while i < len(experiential_patterns) {
+        let p = experiential_patterns[i]
+        if p[PAT_COUNT] >= experiential_threshold {
+            let trigger = p[PAT_TRIGGER]
+            let already = experiential_check_tendency(trigger)
+            if already == 0 {
+                experiential_promote(p)
+                promoted = promoted + 1
+            }
+        }
+        i = i + 1
+    }
+    return promoted
+}
+
+fn experiential_generalize(trigger1, trigger2) {
+    let p1 = experiential_find_pattern(trigger1)
+    let p2 = experiential_find_pattern(trigger2)
+    if p1 == 0 { return 0 }
+    if p2 == 0 { return 0 }
+    let merged_trigger = trigger1 + "/" + trigger2
+    let avg_valence = (p1[PAT_VALENCE] + p2[PAT_VALENCE]) / 2
+    let bias = "approach"
+    if avg_valence < 50 { bias = "avoid" }
+    let merged = pattern_new(merged_trigger, bias, avg_valence)
+    merged[PAT_COUNT] = p1[PAT_COUNT] + p2[PAT_COUNT]
+    let t1 = p1[PAT_TAGS]
+    let i = 0
+    while i < len(t1) {
+        pattern_add_tag(merged, t1[i])
+        i = i + 1
+    }
+    let t2 = p2[PAT_TAGS]
+    i = 0
+    while i < len(t2) {
+        pattern_add_tag(merged, t2[i])
+        i = i + 1
+    }
+    push(experiential_patterns, merged)
+    return merged
+}

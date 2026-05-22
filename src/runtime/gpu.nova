@@ -181,6 +181,27 @@ fn gpu_sync() {
     }
 }
 
+fn gpu_load_module(ptx_source) {
+    if _gpu_backend != 1 { return 0 }
+    let module_ptr = alloc(8)
+    let args = [_cu_module_load, module_ptr, ptx_source]
+    ffi_calln(_cu_module_load, [module_ptr, ptx_source])
+    return mem_read_i64(module_ptr)
+}
+
+fn gpu_get_function(module, name) {
+    if _gpu_backend != 1 { return 0 }
+    let fn_ptr = alloc(8)
+    ffi_calln(_cu_module_get_fn, [fn_ptr, module, name])
+    return mem_read_i64(fn_ptr)
+}
+
+fn gpu_launch(kernel_fn, grid_x, block_x, params_ptr) {
+    if _gpu_backend != 1 { return 0 }
+    let args = [kernel_fn, grid_x, 1, 1, block_x, 1, 1, 0, 0, params_ptr, 0]
+    return ffi_calln(_cu_launch_kernel, args)
+}
+
 fn compute_close() {
     if _gpu_backend == 1 {
         if _cuda_lib != 0 { ffi_close(_cuda_lib) }

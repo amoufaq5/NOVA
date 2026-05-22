@@ -984,6 +984,16 @@ fn parse_expr() {
         let else_val = parse_expr()
         return ast_ternary(left, then_val, else_val)
     }
+    if par_peek_type() == TOK_AT {
+        if par_peek_at_type(1) == TOK_INT {
+            par_advance()
+            return ast_confidence(left, parse_primary())
+        }
+        if par_peek_at_type(1) == TOK_FLOAT {
+            par_advance()
+            return ast_confidence(left, parse_primary())
+        }
+    }
     return left
 }
 
@@ -2240,6 +2250,38 @@ fn parse_enum() {
     return ast_enum_decl(name, variants)
 }
 
+fn parse_impl_block(decls) {
+    par_advance()
+    let impl_name_tok = par_expect(TOK_IDENT)
+    let impl_name = impl_name_tok[1]
+    par_expect(TOK_LBRACE)
+    while par_peek_type() != TOK_RBRACE {
+        if par_peek_type() == TOK_FN {
+            let stmt_line = par_peek()[2]
+            par_advance()
+            let meth_tok = par_expect(TOK_IDENT)
+            let meth_name = meth_tok[1]
+            par_expect(TOK_LPAREN)
+            let mpi = parse_param_list()
+            let mparams = mpi[0]
+            let mdefaults = mpi[1]
+            par_expect(TOK_RPAREN)
+            if par_peek_type() == TOK_COLON {
+                par_advance()
+                par_skip_type()
+            }
+            let mbody = parse_block()
+            mbody = inject_defaults(mbody, mdefaults)
+            let mdecl = ast_method_decl(impl_name, meth_name, mparams, mbody)
+            push(mdecl, stmt_line)
+            push(decls, mdecl)
+        } else {
+            par_error("impl block expects fn declarations")
+        }
+    }
+    par_expect(TOK_RBRACE)
+}
+
 fn parse_program(tokens) {
     par_init(tokens)
     let decls = list_new()
@@ -2251,7 +2293,11 @@ fn parse_program(tokens) {
             if par_peek_type() == TOK_SEMI {
                 par_advance()
             } else {
-                push(decls, parse_stmt())
+                if par_peek_type() == TOK_IMPL {
+                    parse_impl_block(decls)
+                } else {
+                    push(decls, parse_stmt())
+                }
             }
         }
     }

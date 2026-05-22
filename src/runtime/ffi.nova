@@ -110,3 +110,36 @@ fn mem_write_f64(ptr, val) {
 fn mem_offset(ptr, offset) {
     return int_add(ptr, offset)
 }
+
+// Higher-level FFI wrappers
+
+fn ffi_call_float(fn_ptr, arg) {
+    return ffi_callf1(fn_ptr, arg)
+}
+
+fn ffi_call_float2(fn_ptr, a, b) {
+    return ffi_callf2(fn_ptr, a, b)
+}
+
+fn mem_alloc(size) {
+    let libc = ffi_open(0)
+    let malloc_fn = ffi_sym(libc, "malloc")
+    let ptr = ffi_call1(malloc_fn, size)
+    ffi_close(libc)
+    return ptr
+}
+
+fn mem_free(ptr) {
+    let libc = ffi_open(0)
+    let free_fn = ffi_sym(libc, "free")
+    ffi_call1(free_fn, ptr)
+    ffi_close(libc)
+}
+
+fn mem_alloc_zeroed(size) {
+    let libc = ffi_open(0)
+    let calloc_fn = ffi_sym(libc, "calloc")
+    let ptr = ffi_call2(calloc_fn, size, 1)
+    ffi_close(libc)
+    return ptr
+}

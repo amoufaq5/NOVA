@@ -25,8 +25,8 @@ for test_file in tests/test_*.nova; do
             SKIP=$((SKIP + 1))
             continue
             ;;
-        test_ffi)
-            echo "  SKIP  $test_name (requires --link-libc; run via 'make ffi FILE=tests/test_ffi.nova')"
+        test_ffi|test_ffi_extended)
+            echo "  SKIP  $test_name (requires --link-libc; run via 'make ffi FILE=tests/$test_name.nova')"
             SKIP=$((SKIP + 1))
             continue
             ;;
@@ -89,6 +89,18 @@ for test_file in tests/test_*.nova; do
         test_runtime)
             cat src/runtime/syscall.nova src/runtime/alloc.nova \
                 src/runtime/string.nova src/runtime/io.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+        test_tensor)
+            cat src/runtime/tensor.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+        test_csv)
+            cat src/runtime/csv.nova \
                 > /tmp/nova_combined_test.nova
             grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"

@@ -144,7 +144,133 @@ fn simd_sum_f64(ptr, n) {
 }
 
 fn simd_norm_f64(ptr, n) {
-    // Euclidean norm: sqrt(sum of squares)
     let dot = simd_dot_f64(ptr, ptr, n)
-    return math_sqrt(dot)
+    return fsqrt(dot)
+}
+
+fn simd_div_f64(a_ptr, b_ptr, c_ptr, n) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov rcx, [rbp - 32]"
+        "shr rcx, 1"
+        ".simd_div_loop:"
+        "test rcx, rcx"
+        "jz .simd_div_tail"
+        "movupd xmm0, [rdi]"
+        "movupd xmm1, [rsi]"
+        "divpd xmm0, xmm1"
+        "movupd [rdx], xmm0"
+        "add rdi, 16"
+        "add rsi, 16"
+        "add rdx, 16"
+        "dec rcx"
+        "jmp .simd_div_loop"
+        ".simd_div_tail:"
+    }
+    let remainder = n % 2
+    if remainder == 1 {
+        let last_idx = n - 1
+        let a_val = mem_read_f64(int_add(a_ptr, last_idx * 8))
+        let b_val = mem_read_f64(int_add(b_ptr, last_idx * 8))
+        mem_write_f64(int_add(c_ptr, last_idx * 8), float_div(a_val, b_val))
+    }
+}
+
+fn simd_fma_f64(a_ptr, b_ptr, c_ptr, out_ptr, n) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov rcx, [rbp - 32]"
+        "mov r8, [rbp - 40]"
+        "shr r8, 1"
+        ".simd_fma_loop:"
+        "test r8, r8"
+        "jz .simd_fma_tail"
+        "movupd xmm0, [rdi]"
+        "movupd xmm1, [rsi]"
+        "mulpd xmm0, xmm1"
+        "movupd xmm1, [rdx]"
+        "addpd xmm0, xmm1"
+        "movupd [rcx], xmm0"
+        "add rdi, 16"
+        "add rsi, 16"
+        "add rdx, 16"
+        "add rcx, 16"
+        "dec r8"
+        "jmp .simd_fma_loop"
+        ".simd_fma_tail:"
+    }
+    let remainder = n % 2
+    if remainder == 1 {
+        let last_idx = n - 1
+        let a_val = mem_read_f64(int_add(a_ptr, last_idx * 8))
+        let b_val = mem_read_f64(int_add(b_ptr, last_idx * 8))
+        let c_val = mem_read_f64(int_add(c_ptr, last_idx * 8))
+        mem_write_f64(int_add(out_ptr, last_idx * 8), float_add(float_mul(a_val, b_val), c_val))
+    }
+}
+
+fn simd_relu_f64(ptr, n) {
+    let zero = to_float(0)
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rcx, [rbp - 16]"
+        "shr rcx, 1"
+        "pxor xmm1, xmm1"
+        ".simd_relu_loop:"
+        "test rcx, rcx"
+        "jz .simd_relu_tail"
+        "movupd xmm0, [rdi]"
+        "maxpd xmm0, xmm1"
+        "movupd [rdi], xmm0"
+        "add rdi, 16"
+        "dec rcx"
+        "jmp .simd_relu_loop"
+        ".simd_relu_tail:"
+    }
+    let remainder = n % 2
+    if remainder == 1 {
+        let last_idx = n - 1
+        let val = mem_read_f64(int_add(ptr, last_idx * 8))
+        if float_cmp(val, zero) < 0 {
+            mem_write_f64(int_add(ptr, last_idx * 8), zero)
+        }
+    }
+}
+
+fn simd_max_f64(a_ptr, b_ptr, c_ptr, n) {
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov rcx, [rbp - 32]"
+        "shr rcx, 1"
+        ".simd_max_loop:"
+        "test rcx, rcx"
+        "jz .simd_max_tail"
+        "movupd xmm0, [rdi]"
+        "movupd xmm1, [rsi]"
+        "maxpd xmm0, xmm1"
+        "movupd [rdx], xmm0"
+        "add rdi, 16"
+        "add rsi, 16"
+        "add rdx, 16"
+        "dec rcx"
+        "jmp .simd_max_loop"
+        ".simd_max_tail:"
+    }
+    let remainder = n % 2
+    if remainder == 1 {
+        let last_idx = n - 1
+        let a_val = mem_read_f64(int_add(a_ptr, last_idx * 8))
+        let b_val = mem_read_f64(int_add(b_ptr, last_idx * 8))
+        if float_cmp(a_val, b_val) >= 0 {
+            mem_write_f64(int_add(c_ptr, last_idx * 8), a_val)
+        } else {
+            mem_write_f64(int_add(c_ptr, last_idx * 8), b_val)
+        }
+    }
 }

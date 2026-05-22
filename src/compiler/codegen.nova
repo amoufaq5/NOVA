@@ -904,6 +904,12 @@ fn is_builtin_fn(name) {
         if name == "ffi_call3" { return 1 }
         if name == "ffi_call4" { return 1 }
         if name == "ffi_call5" { return 1 }
+        if name == "ffi_calln" { return 1 }
+        if name == "ffi_callf1" { return 1 }
+        if name == "ffi_callf2" { return 1 }
+        if name == "ffi_callf3" { return 1 }
+        if name == "ffi_callf4" { return 1 }
+        if name == "system_exec" { return 1 }
     }
     if name == "to_str" { return 1 }
     if name == "get_error" { return 1 }
@@ -1832,6 +1838,21 @@ fn gen_expr(nd) {
         out_label(else_lbl)
         gen_expr(nd[3])
         out_label(end_lbl)
+        return 0
+    }
+
+    if tag == AST_CONFIDENCE {
+        out("    call _nova_list_new")
+        out("    push rax")
+        gen_expr(nd[1])
+        out("    mov rsi, rax")
+        out("    mov rdi, [rsp]")
+        out("    call _nova_push")
+        gen_expr(nd[2])
+        out("    mov rsi, rax")
+        out("    mov rdi, [rsp]")
+        out("    call _nova_push")
+        out("    pop rax")
         return 0
     }
 
@@ -3858,6 +3879,7 @@ fn gen_program(program) {
         out(".extern dlsym")
         out(".extern dlclose")
         out(".extern exit")
+        out(".extern system")
     }
 
     // Emit runtime library
@@ -10601,6 +10623,148 @@ fn gen_runtime() {
         out("    pop rbp")
         out("    ret")
 
+        // ffi_calln(fn_ptr, args_list) -> result
+        // Loads args from list: 0-5 into rdi-r9, 6+ onto stack
+        out("")
+        out_label("_nova_ffi_calln")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    push r12")
+        out("    push r13")
+        out("    push r14")
+        out("    push r15")
+        out("    mov r12, rdi")
+        out("    mov r13, rsi")
+        out("    mov r14, [r13 + 8]")
+        out("    mov r15, [r13 + 24]")
+        out("    mov rax, r14")
+        out("    cmp rax, 6")
+        out("    jle .ffi_calln_no_stack")
+        out("    sub rax, 6")
+        out("    test rax, 1")
+        out("    jz .ffi_calln_no_pad")
+        out("    sub rsp, 8")
+        out(".ffi_calln_no_pad:")
+        out("    mov rcx, r14")
+        out("    dec rcx")
+        out(".ffi_calln_push:")
+        out("    cmp rcx, 5")
+        out("    jle .ffi_calln_no_stack")
+        out("    push qword ptr [r15 + rcx*8]")
+        out("    dec rcx")
+        out("    jmp .ffi_calln_push")
+        out(".ffi_calln_no_stack:")
+        out("    cmp r14, 6")
+        out("    jl .ffi_calln_s6")
+        out("    mov r9, [r15 + 40]")
+        out(".ffi_calln_s6:")
+        out("    cmp r14, 5")
+        out("    jl .ffi_calln_s5")
+        out("    mov r8, [r15 + 32]")
+        out(".ffi_calln_s5:")
+        out("    cmp r14, 4")
+        out("    jl .ffi_calln_s4")
+        out("    mov rcx, [r15 + 24]")
+        out(".ffi_calln_s4:")
+        out("    cmp r14, 3")
+        out("    jl .ffi_calln_s3")
+        out("    mov rdx, [r15 + 16]")
+        out(".ffi_calln_s3:")
+        out("    cmp r14, 2")
+        out("    jl .ffi_calln_s2")
+        out("    mov rsi, [r15 + 8]")
+        out(".ffi_calln_s2:")
+        out("    cmp r14, 1")
+        out("    jl .ffi_calln_call")
+        out("    mov rdi, [r15]")
+        out(".ffi_calln_call:")
+        out("    xor eax, eax")
+        out("    call r12")
+        out("    lea rsp, [rbp - 32]")
+        out("    pop r15")
+        out("    pop r14")
+        out("    pop r13")
+        out("    pop r12")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_callf1(fn_ptr, f1) -> float result
+        out("")
+        out_label("_nova_ffi_callf1")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    movq xmm0, rsi")
+        out("    mov al, 1")
+        out("    call r11")
+        out("    movq rax, xmm0")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_callf2(fn_ptr, f1, f2) -> float result
+        out("")
+        out_label("_nova_ffi_callf2")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    movq xmm0, rsi")
+        out("    movq xmm1, rdx")
+        out("    mov al, 2")
+        out("    call r11")
+        out("    movq rax, xmm0")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_callf3(fn_ptr, f1, f2, f3) -> float result
+        out("")
+        out_label("_nova_ffi_callf3")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    movq xmm0, rsi")
+        out("    movq xmm1, rdx")
+        out("    movq xmm2, rcx")
+        out("    mov al, 3")
+        out("    call r11")
+        out("    movq rax, xmm0")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // ffi_callf4(fn_ptr, f1, f2, f3, f4) -> float result
+        out("")
+        out_label("_nova_ffi_callf4")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    mov r11, rdi")
+        out("    movq xmm0, rsi")
+        out("    movq xmm1, rdx")
+        out("    movq xmm2, rcx")
+        out("    movq xmm3, r8")
+        out("    mov al, 4")
+        out("    call r11")
+        out("    movq rax, xmm0")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
+        // system_exec(cmd_str) -> exit status
+        out("")
+        out_label("_nova_system_exec")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    and rsp, -16")
+        out("    call system")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+
         // Dispatch trampolines for user-facing names
         out("")
         out_label("ffi_open")
@@ -10621,5 +10785,17 @@ fn gen_runtime() {
         out("    jmp _nova_ffi_call4")
         out_label("ffi_call5")
         out("    jmp _nova_ffi_call5")
+        out_label("ffi_calln")
+        out("    jmp _nova_ffi_calln")
+        out_label("ffi_callf1")
+        out("    jmp _nova_ffi_callf1")
+        out_label("ffi_callf2")
+        out("    jmp _nova_ffi_callf2")
+        out_label("ffi_callf3")
+        out("    jmp _nova_ffi_callf3")
+        out_label("ffi_callf4")
+        out("    jmp _nova_ffi_callf4")
+        out_label("system_exec")
+        out("    jmp _nova_system_exec")
     }
 }

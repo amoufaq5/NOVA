@@ -1,0 +1,95 @@
+// Test: Tensor/Matrix Operations
+
+fn main() {
+    println("=== Tensor Tests ===")
+
+    // Test 1: Create and access
+    println("--- Create and access ---")
+    let t = tensor_new(2, 3)
+    tensor_set(t, 0, 0, to_float(1))
+    tensor_set(t, 0, 1, to_float(2))
+    tensor_set(t, 0, 2, to_float(3))
+    tensor_set(t, 1, 0, to_float(4))
+    tensor_set(t, 1, 1, to_float(5))
+    tensor_set(t, 1, 2, to_float(6))
+    print("rows: ") ; print_int(tensor_rows(t)) ; println("")
+    print("cols: ") ; print_int(tensor_cols(t)) ; println("")
+    print("[0,0]: ") ; println(float_to_str(tensor_get(t, 0, 0)))
+    print("[1,2]: ") ; println(float_to_str(tensor_get(t, 1, 2)))
+
+    // Test 2: From list
+    println("--- From list ---")
+    let data = [to_float(10), to_float(20), to_float(30), to_float(40)]
+    let t2 = tensor_from_list(2, 2, data)
+    print("[0,0]: ") ; println(float_to_str(tensor_get(t2, 0, 0)))
+    print("[1,1]: ") ; println(float_to_str(tensor_get(t2, 1, 1)))
+
+    // Test 3: Addition
+    println("--- Addition ---")
+    let a = tensor_from_list(2, 2, [to_float(1), to_float(2), to_float(3), to_float(4)])
+    let b = tensor_from_list(2, 2, [to_float(10), to_float(20), to_float(30), to_float(40)])
+    let c = tensor_add(a, b)
+    print("[0,0]: ") ; println(float_to_str(tensor_get(c, 0, 0)))
+    print("[1,1]: ") ; println(float_to_str(tensor_get(c, 1, 1)))
+
+    // Test 4: Matrix multiply
+    println("--- Matrix multiply ---")
+    // [[1,2],[3,4]] * [[5,6],[7,8]] = [[19,22],[43,50]]
+    let m1 = tensor_from_list(2, 2, [to_float(1), to_float(2), to_float(3), to_float(4)])
+    let m2 = tensor_from_list(2, 2, [to_float(5), to_float(6), to_float(7), to_float(8)])
+    let m3 = tensor_matmul(m1, m2)
+    print("[0,0] (expect 19): ") ; println(float_to_str(tensor_get(m3, 0, 0)))
+    print("[0,1] (expect 22): ") ; println(float_to_str(tensor_get(m3, 0, 1)))
+    print("[1,0] (expect 43): ") ; println(float_to_str(tensor_get(m3, 1, 0)))
+    print("[1,1] (expect 50): ") ; println(float_to_str(tensor_get(m3, 1, 1)))
+
+    // Verify correctness
+    let ok = 1
+    if from_float(tensor_get(m3, 0, 0)) != 19 { ok = 0 }
+    if from_float(tensor_get(m3, 0, 1)) != 22 { ok = 0 }
+    if from_float(tensor_get(m3, 1, 0)) != 43 { ok = 0 }
+    if from_float(tensor_get(m3, 1, 1)) != 50 { ok = 0 }
+    if ok == 1 {
+        println("matmul CORRECT")
+    } else {
+        println("matmul WRONG")
+        exit(1)
+    }
+
+    // Test 5: Transpose
+    println("--- Transpose ---")
+    let t3 = tensor_from_list(2, 3, [to_float(1), to_float(2), to_float(3), to_float(4), to_float(5), to_float(6)])
+    let t4 = tensor_transpose(t3)
+    print("transposed rows: ") ; print_int(tensor_rows(t4)) ; println("")
+    print("transposed cols: ") ; print_int(tensor_cols(t4)) ; println("")
+    print("[0,0]: ") ; println(float_to_str(tensor_get(t4, 0, 0)))
+    print("[0,1]: ") ; println(float_to_str(tensor_get(t4, 0, 1)))
+    print("[1,0]: ") ; println(float_to_str(tensor_get(t4, 1, 0)))
+
+    // Test 6: Scale
+    println("--- Scale ---")
+    let t5 = tensor_from_list(1, 3, [to_float(2), to_float(4), to_float(6)])
+    let t6 = tensor_scale(t5, to_float(3))
+    print("[0,0] (expect 6): ") ; println(float_to_str(tensor_get(t6, 0, 0)))
+    print("[0,2] (expect 18): ") ; println(float_to_str(tensor_get(t6, 0, 2)))
+
+    // Test 7: Dot product
+    println("--- Dot product ---")
+    let v1 = tensor_from_list(1, 3, [to_float(1), to_float(2), to_float(3)])
+    let v2 = tensor_from_list(1, 3, [to_float(4), to_float(5), to_float(6)])
+    let dp = tensor_dot(v1, v2)
+    print("dot product (expect 32): ") ; println(float_to_str(dp))
+    if from_float(dp) != 32 {
+        println("WRONG")
+        exit(1)
+    }
+
+    // Test 8: Print
+    println("--- Print ---")
+    tensor_print(m3)
+
+    println("")
+    println("=== All tensor tests passed! ===")
+}
+
+main()

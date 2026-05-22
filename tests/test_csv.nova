@@ -1,0 +1,55 @@
+// Test: CSV Parser
+
+fn main() {
+    println("=== CSV Tests ===")
+
+    // Test 1: Basic parse
+    println("--- Basic parse ---")
+    let text = "name,age,city\nAlice,30,Paris\nBob,25,London\n"
+    let data = csv_parse(text)
+    print("rows: ") ; print_int(csv_row_count(data)) ; println("")
+    print("cols: ") ; print_int(csv_col_count(data, 0)) ; println("")
+
+    // Test 2: Access values
+    println("--- Access values ---")
+    print("header[0]: ") ; println(csv_get(data, 0, 0))
+    print("header[2]: ") ; println(csv_get(data, 0, 2))
+    print("row1[0]: ") ; println(csv_get(data, 1, 0))
+    print("row1[1]: ") ; println(csv_get(data, 1, 1))
+    print("row2[2]: ") ; println(csv_get(data, 2, 2))
+
+    // Verify
+    if csv_get(data, 1, 0) != "Alice" { println("FAIL") ; exit(1) }
+    if csv_get(data, 2, 1) != "25" { println("FAIL") ; exit(1) }
+    if csv_row_count(data) != 3 { println("FAIL") ; exit(1) }
+
+    // Test 3: No trailing newline
+    println("--- No trailing newline ---")
+    let text2 = "a,b\n1,2"
+    let data2 = csv_parse(text2)
+    print("rows: ") ; print_int(csv_row_count(data2)) ; println("")
+    if csv_row_count(data2) != 2 { println("FAIL") ; exit(1) }
+    if csv_get(data2, 1, 1) != "2" { println("FAIL") ; exit(1) }
+
+    // Test 4: Single column
+    println("--- Single column ---")
+    let text3 = "hello\nworld\n"
+    let data3 = csv_parse(text3)
+    print("rows: ") ; print_int(csv_row_count(data3)) ; println("")
+    print("[0,0]: ") ; println(csv_get(data3, 0, 0))
+    if csv_get(data3, 0, 0) != "hello" { println("FAIL") ; exit(1) }
+    if csv_get(data3, 1, 0) != "world" { println("FAIL") ; exit(1) }
+
+    // Test 5: Round-trip
+    println("--- Round-trip ---")
+    let recon = csv_to_string(data)
+    let data_rt = csv_parse(recon)
+    if csv_get(data_rt, 1, 0) != "Alice" { println("FAIL: round-trip") ; exit(1) }
+    if csv_get(data_rt, 2, 2) != "London" { println("FAIL: round-trip") ; exit(1) }
+    println("round-trip OK")
+
+    println("")
+    println("=== All CSV tests passed! ===")
+}
+
+main()
