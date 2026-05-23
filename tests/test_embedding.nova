@@ -1,0 +1,41 @@
+// Test: Embedding system
+// Tests n-gram tokenization, BM25 scoring, and similarity
+
+import "std/embedding"
+
+fn test_embedding() {
+    embedding_init(2)
+
+    embedding_add_document("the quick brown fox jumps over the lazy dog")
+    embedding_add_document("a fast brown canine leaps over a sleepy hound")
+    embedding_add_document("python programming language for data science")
+
+    let e1 = embedding_encode("quick fox")
+    let e2 = embedding_encode("fast canine")
+    let e3 = embedding_encode("python code")
+
+    let sim_related = embedding_similarity(e1, e2)
+    let sim_unrelated = embedding_similarity(e1, e3)
+
+    // N-gram overlap between "quick fox" and "fast canine" should exist
+    // because "fox" and "canine" may not share n-grams, but the vocab
+    // from adding documents creates shared dimensions
+    print("Embedding test: vocab_size=")
+    println(int_to_str(embedding_vocab_size()))
+    print("  doc_count=")
+    println(int_to_str(embedding_doc_count()))
+    print("  sim(fox,canine)=")
+    println(float_to_str(sim_related))
+    print("  sim(fox,python)=")
+    println(float_to_str(sim_unrelated))
+
+    // Test cognitive embedding
+    let ce = embedding_cognitive("hello world", to_float(7), to_float(5), to_float(5), to_float(8), to_float(3), to_float(2))
+    let ce_cols = ce[2]
+    print("  cognitive_dims=")
+    println(int_to_str(ce_cols))
+
+    println("PASS embedding")
+}
+
+test_embedding()

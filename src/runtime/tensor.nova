@@ -177,14 +177,66 @@ fn tensor_div_elementwise(a, b) {
 // Matrix multiplication with SIMD dot product and transposed B
 // ============================================================================
 
-fn tensor_matmul(a, b) {
+fn _tensor_matmul_tiled(a, b, tile) {
     let ar = a[1]
     let ac = a[2]
     let bc = b[2]
     let result = tensor_new(ar, bc)
+    let r_ptr = result[3]
+    let a_ptr = a[3]
+    let b_ptr = b[3]
+    let ii = 0
+    while ii < ar {
+        let ii_end = ii + tile
+        if ii_end > ar { ii_end = ar }
+        let jj = 0
+        while jj < bc {
+            let jj_end = jj + tile
+            if jj_end > bc { jj_end = bc }
+            let kk = 0
+            while kk < ac {
+                let kk_end = kk + tile
+                if kk_end > ac { kk_end = ac }
+                let i = ii
+                while i < ii_end {
+                    let k = kk
+                    while k < kk_end {
+                        let a_off = int_add(i * ac, k) * 8
+                        let a_val = mem_read_f64(int_add(a_ptr, a_off))
+                        let j = jj
+                        while j < jj_end {
+                            let b_off = int_add(k * bc, j) * 8
+                            let c_idx = int_add(i * bc, j)
+                            let c_off = c_idx * 8
+                            let c_addr = int_add(r_ptr, c_off)
+                            let c_val = mem_read_f64(c_addr)
+                            let b_val = mem_read_f64(int_add(b_ptr, b_off))
+                            mem_write_f64(c_addr, float_add(c_val, float_mul(a_val, b_val)))
+                            j = j + 1
+                        }
+                        k = k + 1
+                    }
+                    i = i + 1
+                }
+                kk = kk + tile
+            }
+            jj = jj + tile
+        }
+        ii = ii + tile
+    }
+    return result
+}
+
+fn tensor_matmul(a, b) {
+    let ar = a[1]
+    let ac = a[2]
+    let bc = b[2]
+    if ac >= 64 {
+        return _tensor_matmul_tiled(a, b, 32)
+    }
+    let result = tensor_new(ar, bc)
     let result_ptr = result[3]
     let a_ptr = a[3]
-    // Transpose B for cache-friendly row-major access
     let bt = tensor_transpose(b)
     let bt_ptr = bt[3]
     let i = 0
@@ -194,7 +246,7 @@ fn tensor_matmul(a, b) {
         while j < bc {
             let bt_row_ptr = int_add(bt_ptr, j * ac * 8)
             let dot = simd_dot_f64(a_row_ptr, bt_row_ptr, ac)
-            mem_write_f64(int_add(result_ptr, (i * bc + j) * 8), dot)
+            mem_write_f64(int_add(result_ptr, int_add(i * bc, j) * 8), dot)
             j = j + 1
         }
         i = i + 1

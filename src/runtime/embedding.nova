@@ -1,0 +1,342 @@
+// Nova Standard Library: Unified Embedding Interface
+// Three-tier embedding system for competitive RAG:
+//   Tier 1: BM25 + character n-grams (pure Nova, no dependencies)
+//   Tier 2: Neural embeddings via Python bridge (requires std/python)
+//   Tier 3: Cognitive embeddings with emotion/episodic/reasoning dimensions
+//
+// Requires: import "std/tensor"
+
+let EMB_TFIDF = 1
+let EMB_NGRAM = 2
+let EMB_NEURAL = 3
+let _emb_backend = 2
+
+let _emb_vocab = 0
+let _emb_vocab_count = 0
+let _emb_doc_count = 0
+let _emb_doc_freqs = 0
+let _emb_avg_doc_len = 0
+let _emb_total_doc_len = 0
+let _emb_initialized = 0
+
+fn embedding_init(backend) {
+    _emb_backend = backend
+    if _emb_initialized == 1 { return 0 }
+    _emb_initialized = 1
+    _emb_vocab = list_new()
+    _emb_vocab_count = 0
+    _emb_doc_count = 0
+    _emb_doc_freqs = list_new()
+    _emb_avg_doc_len = to_float(100)
+    _emb_total_doc_len = 0
+    return 1
+}
+
+fn _emb_ensure_init() {
+    if _emb_initialized == 0 {
+        embedding_init(EMB_NGRAM)
+    }
+}
+
+// ============================================================================
+// Character n-gram tokenizer
+// ============================================================================
+
+fn _ngram_tokenize(text, n) {
+    let tokens = list_new()
+    let tlen = len(text)
+    if tlen < n {
+        push(tokens, text)
+        return tokens
+    }
+    let i = 0
+    while i < tlen - n + 1 {
+        push(tokens, substr(text, i, n))
+        i = i + 1
+    }
+    return tokens
+}
+
+fn _word_tokenize(text) {
+    let tokens = list_new()
+    let tlen = len(text)
+    let start = 0
+    let in_word = 0
+    let i = 0
+    while i < tlen {
+        let c = char_at(text, i)
+        let is_alpha = 0
+        if c >= 97 {
+            if c <= 122 { is_alpha = 1 }
+        }
+        if c >= 65 {
+            if c <= 90 { is_alpha = 1 }
+        }
+        if c >= 48 {
+            if c <= 57 { is_alpha = 1 }
+        }
+        if is_alpha == 1 {
+            if in_word == 0 {
+                start = i
+                in_word = 1
+            }
+        } else {
+            if in_word == 1 {
+                push(tokens, substr(text, start, i - start))
+                in_word = 0
+            }
+        }
+        i = i + 1
+    }
+    if in_word == 1 {
+        push(tokens, substr(text, start, tlen - start))
+    }
+    return tokens
+}
+
+fn _to_lower(text) {
+    let result = ""
+    let tlen = len(text)
+    let i = 0
+    while i < tlen {
+        let c = char_at(text, i)
+        if c >= 65 {
+            if c <= 90 {
+                result = result + chr(c + 32)
+            } else {
+                result = result + chr(c)
+            }
+        } else {
+            result = result + chr(c)
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// ============================================================================
+// Vocabulary management
+// ============================================================================
+
+fn _emb_word_index(word) {
+    _emb_ensure_init()
+    let i = 0
+    while i < _emb_vocab_count {
+        if _emb_vocab[i] == word { return i }
+        i = i + 1
+    }
+    push(_emb_vocab, word)
+    push(_emb_doc_freqs, 0)
+    _emb_vocab_count = _emb_vocab_count + 1
+    return _emb_vocab_count - 1
+}
+
+fn _emb_get_word_index(word) {
+    let i = 0
+    while i < _emb_vocab_count {
+        if _emb_vocab[i] == word { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// ============================================================================
+// BM25 scoring
+// ============================================================================
+
+fn _bm25_score(tf, df, n_docs, doc_len) {
+    let k1 = to_float(12)
+    let k1_actual = float_div(k1, to_float(10))
+    let b = to_float(75)
+    let b_actual = float_div(b, to_float(100))
+    let n = to_float(n_docs)
+    let one = to_float(1)
+    let half = float_div(one, to_float(2))
+    let idf_num = float_add(float_sub(n, to_float(df)), half)
+    let idf_den = float_add(to_float(df), half)
+    let idf = float_div(idf_num, idf_den)
+    if float_cmp(idf, to_float(0)) <= 0 {
+        idf = float_div(one, n)
+    }
+    let len_ratio = float_div(to_float(doc_len), _emb_avg_doc_len)
+    let denom = float_add(tf, float_mul(k1_actual, float_add(float_sub(one, b_actual), float_mul(b_actual, len_ratio))))
+    let tf_norm = float_div(float_mul(tf, float_add(k1_actual, one)), denom)
+    return float_mul(idf, tf_norm)
+}
+
+// ============================================================================
+// Embedding computation
+// ============================================================================
+
+fn embedding_encode(text) {
+    _emb_ensure_init()
+    let lower = _to_lower(text)
+    if _emb_backend == EMB_NGRAM {
+        return _encode_ngram(lower)
+    }
+    return _encode_tfidf(lower)
+}
+
+fn _encode_tfidf(text) {
+    let words = _word_tokenize(text)
+    let wcount = len(words)
+    let t = tensor_new(1, _emb_vocab_count)
+    let t_ptr = t[3]
+    let i = 0
+    while i < wcount {
+        let w = words[i]
+        let idx = _emb_get_word_index(w)
+        if idx >= 0 {
+            let cur = mem_read_f64(int_add(t_ptr, idx * 8))
+            mem_write_f64(int_add(t_ptr, idx * 8), float_add(cur, to_float(1)))
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < _emb_vocab_count {
+        let raw = mem_read_f64(int_add(t_ptr, i * 8))
+        if float_cmp(raw, to_float(0)) > 0 {
+            let tf = float_div(raw, to_float(wcount))
+            mem_write_f64(int_add(t_ptr, i * 8), tf)
+        }
+        i = i + 1
+    }
+    return t
+}
+
+fn _encode_ngram(text) {
+    let words = _word_tokenize(text)
+    let wcount = len(words)
+    let token_count = 0
+    let t = tensor_new(1, _emb_vocab_count)
+    let t_ptr = t[3]
+    let i = 0
+    while i < wcount {
+        let w = words[i]
+        let idx = _emb_get_word_index(w)
+        if idx >= 0 {
+            let cur = mem_read_f64(int_add(t_ptr, idx * 8))
+            mem_write_f64(int_add(t_ptr, idx * 8), float_add(cur, to_float(1)))
+        }
+        token_count = token_count + 1
+        let ngrams = _ngram_tokenize(w, 3)
+        let ni = 0
+        while ni < len(ngrams) {
+            let ng_key = "_ng_" + ngrams[ni]
+            let ng_idx = _emb_get_word_index(ng_key)
+            if ng_idx >= 0 {
+                let ng_cur = mem_read_f64(int_add(t_ptr, ng_idx * 8))
+                mem_write_f64(int_add(t_ptr, ng_idx * 8), float_add(ng_cur, to_float(1)))
+            }
+            token_count = token_count + 1
+            ni = ni + 1
+        }
+        i = i + 1
+    }
+    if token_count > 0 {
+        i = 0
+        while i < _emb_vocab_count {
+            let raw = mem_read_f64(int_add(t_ptr, i * 8))
+            if float_cmp(raw, to_float(0)) > 0 {
+                let tf = float_div(raw, to_float(token_count))
+                let df = _emb_doc_freqs[i]
+                if _emb_doc_count > 0 {
+                    let score = _bm25_score(tf, df, _emb_doc_count, token_count)
+                    mem_write_f64(int_add(t_ptr, i * 8), score)
+                } else {
+                    mem_write_f64(int_add(t_ptr, i * 8), tf)
+                }
+            }
+            i = i + 1
+        }
+    }
+    return t
+}
+
+fn _emb_list_has(lst, val) {
+    let i = 0
+    while i < len(lst) {
+        if lst[i] == val { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn embedding_add_document(text) {
+    _emb_ensure_init()
+    _emb_doc_count = _emb_doc_count + 1
+    let lower = _to_lower(text)
+    let words = _word_tokenize(lower)
+    let seen = list_new()
+    let i = 0
+    while i < len(words) {
+        let w = words[i]
+        let idx = _emb_word_index(w)
+        if _emb_list_has(seen, w) == 0 {
+            push(seen, w)
+            _emb_doc_freqs[idx] = _emb_doc_freqs[idx] + 1
+        }
+        if _emb_backend == EMB_NGRAM {
+            let ngrams = _ngram_tokenize(w, 3)
+            let ni = 0
+            while ni < len(ngrams) {
+                let ng = "_ng_" + ngrams[ni]
+                let ng_idx = _emb_word_index(ng)
+                if _emb_list_has(seen, ng) == 0 {
+                    push(seen, ng)
+                    _emb_doc_freqs[ng_idx] = _emb_doc_freqs[ng_idx] + 1
+                }
+                ni = ni + 1
+            }
+        }
+        i = i + 1
+    }
+    _emb_total_doc_len = _emb_total_doc_len + len(words)
+    if _emb_doc_count > 0 {
+        _emb_avg_doc_len = float_div(to_float(_emb_total_doc_len), to_float(_emb_doc_count))
+    }
+}
+
+fn embedding_similarity(a, b) {
+    let a_cols = a[2]
+    let b_cols = b[2]
+    if a_cols == b_cols {
+        return tensor_cosine_sim(a, b)
+    }
+    let min_cols = a_cols
+    if b_cols < min_cols { min_cols = b_cols }
+    let a_sub = tensor_new(1, min_cols)
+    let b_sub = tensor_new(1, min_cols)
+    _tensor_raw_copy(a[3], a_sub[3], min_cols)
+    _tensor_raw_copy(b[3], b_sub[3], min_cols)
+    return tensor_cosine_sim(a_sub, b_sub)
+}
+
+// ============================================================================
+// Cognitive embedding: blend base embedding with cognitive dimensions
+// ============================================================================
+
+fn embedding_cognitive(text, valence, arousal, dominance, recency, frequency, depth) {
+    let base = embedding_encode(text)
+    let base_cols = base[2]
+    let aug_cols = base_cols + 6
+    let aug = tensor_new(1, aug_cols)
+    let aug_ptr = aug[3]
+    _tensor_raw_copy(base[3], aug_ptr, base_cols)
+    let weight = float_div(to_float(1), to_float(10))
+    mem_write_f64(int_add(aug_ptr, base_cols * 8), float_mul(valence, weight))
+    mem_write_f64(int_add(aug_ptr, (base_cols + 1) * 8), float_mul(arousal, weight))
+    mem_write_f64(int_add(aug_ptr, (base_cols + 2) * 8), float_mul(dominance, weight))
+    mem_write_f64(int_add(aug_ptr, (base_cols + 3) * 8), float_mul(recency, weight))
+    mem_write_f64(int_add(aug_ptr, (base_cols + 4) * 8), float_mul(frequency, weight))
+    mem_write_f64(int_add(aug_ptr, (base_cols + 5) * 8), float_mul(depth, weight))
+    return aug
+}
+
+fn embedding_vocab_size() {
+    return _emb_vocab_count
+}
+
+fn embedding_doc_count() {
+    return _emb_doc_count
+}

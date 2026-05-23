@@ -52,6 +52,9 @@ fn pkg_init_std() {
     push(STD_PACKAGES, "llm")
     push(STD_PACKAGES, "mem")
     push(STD_PACKAGES, "rag")
+    push(STD_PACKAGES, "blas")
+    push(STD_PACKAGES, "embedding")
+    push(STD_PACKAGES, "cognitive_llm")
 }
 
 fn is_std_package(name) {

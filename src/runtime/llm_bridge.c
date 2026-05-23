@@ -324,3 +324,25 @@ int nova_generate(struct llama_model* model, const char* prompt, int prompt_len,
 
     return output_pos;
 }
+
+// --- Embedding extraction ---
+
+int64_t nova_n_embd(int64_t model_ptr) {
+    struct llama_model* model = (struct llama_model*)model_ptr;
+    if (!model) return 0;
+    return (int64_t)llama_n_embd(model);
+}
+
+int64_t nova_get_embeddings(int64_t ctx_ptr, int64_t out_buf, int64_t buf_size) {
+    struct llama_context* ctx = (struct llama_context*)ctx_ptr;
+    if (!ctx) return -1;
+    const float* emb = llama_get_embeddings(ctx);
+    if (!emb) return -1;
+    int n = llama_n_embd(llama_get_model(ctx));
+    if (n > (int)buf_size) n = (int)buf_size;
+    float* out = (float*)out_buf;
+    for (int i = 0; i < n; i++) {
+        out[i] = emb[i];
+    }
+    return (int64_t)n;
+}

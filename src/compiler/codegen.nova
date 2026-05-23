@@ -973,7 +973,6 @@ fn is_builtin_fn(name) {
 }
 
 fn is_known_function(name) {
-    // Check user-defined functions
     let fi = 0
     while fi < len(cg_fns) {
         if cg_fns[fi] == name {
@@ -981,7 +980,6 @@ fn is_known_function(name) {
         }
         fi = fi + 1
     }
-    // Check builtins
     if is_builtin_fn(name) == 1 {
         return 1
     }

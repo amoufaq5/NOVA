@@ -415,3 +415,19 @@ fn llm_available() {
     if _bridge_lib != 0 { return 1 }
     return 0
 }
+
+// Get the embedding dimension for a model
+fn llm_embedding_dim(model) {
+    if _bridge_lib == 0 { return 0 }
+    let fn_n_embd = ffi_sym(_bridge_lib, "nova_n_embd")
+    if fn_n_embd == 0 { return 0 }
+    return ffi_call1(fn_n_embd, model)
+}
+
+// Extract embeddings from a context into a float buffer
+fn llm_get_embeddings(ctx, out_buf, buf_size) {
+    if _bridge_lib == 0 { return 0 - 1 }
+    let fn_get_emb = ffi_sym(_bridge_lib, "nova_get_embeddings")
+    if fn_get_emb == 0 { return 0 - 1 }
+    return ffi_call3(fn_get_emb, ctx, out_buf, buf_size)
+}

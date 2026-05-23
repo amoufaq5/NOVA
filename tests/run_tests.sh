@@ -105,10 +105,30 @@ for test_file in tests/test_*.nova; do
             grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"
             ;;
+        test_embedding)
+            cat src/runtime/mem.nova src/runtime/simd.nova src/runtime/tensor.nova \
+                src/runtime/embedding.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+        test_cognitive_llm)
+            cat src/runtime/mem.nova src/runtime/simd.nova src/runtime/tensor.nova \
+                src/runtime/confidence.nova src/agent/cognitive_llm.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+        test_channel)
+            cat src/runtime/chan.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
     esac
 
-    # Compile
-    $NOVA "$INPUT" -o /tmp/nova_test.s 2>/tmp/nova_test_err.txt
+    # Compile (with timeout to prevent hangs)
+    timeout 60 $NOVA "$INPUT" -o /tmp/nova_test.s 2>/tmp/nova_test_err.txt
     if [ $? -ne 0 ]; then
         echo "  FAIL  $test_name (compile error)"
         cat /tmp/nova_test_err.txt

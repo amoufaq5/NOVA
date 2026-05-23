@@ -1,0 +1,81 @@
+// Nova Standard Library: OpenBLAS Integration
+// Auto-detects libopenblas.so at runtime via FFI.
+// Provides hardware-optimized matrix multiplication for large matrices.
+// Requires: import "std/ffi", import "std/tensor"
+// Build with: --link-libc
+
+let _blas_lib = 0
+let _blas_dgemm_fn = 0
+let _blas_available = 0
+let _blas_init_done = 0
+
+fn blas_init() {
+    if _blas_init_done == 1 { return _blas_available }
+    _blas_init_done = 1
+    _blas_lib = ffi_open("libopenblas.so")
+    if _blas_lib == 0 {
+        _blas_lib = ffi_open("libopenblas.so.0")
+    }
+    if _blas_lib == 0 {
+        _blas_lib = ffi_open("libblas.so")
+    }
+    if _blas_lib == 0 {
+        _blas_lib = ffi_open("libblas.so.3")
+    }
+    if _blas_lib == 0 {
+        _blas_available = 0
+        return 0
+    }
+    _blas_dgemm_fn = ffi_sym(_blas_lib, "cblas_dgemm")
+    if _blas_dgemm_fn == 0 {
+        _blas_available = 0
+        return 0
+    }
+    _blas_available = 1
+    return 1
+}
+
+fn blas_available() {
+    return _blas_available
+}
+
+fn _blas_dgemm_call(fn_ptr, m, n, k, alpha, a_ptr, lda, b_ptr, ldb, beta, c_ptr, ldc) {
+    asm {
+        "mov r10, [rbp - 8]"
+        "mov rdi, 101"
+        "mov rsi, 111"
+        "mov rdx, 111"
+        "mov rcx, [rbp - 16]"
+        "mov r8, [rbp - 24]"
+        "mov r9, [rbp - 32]"
+        "movq xmm0, [rbp - 40]"
+        "movq xmm1, [rbp - 80]"
+        "sub rsp, 48"
+        "mov rax, [rbp - 48]"
+        "mov [rsp], rax"
+        "mov rax, [rbp - 56]"
+        "mov [rsp + 8], rax"
+        "mov rax, [rbp - 64]"
+        "mov [rsp + 16], rax"
+        "mov rax, [rbp - 72]"
+        "mov [rsp + 24], rax"
+        "mov rax, [rbp - 88]"
+        "mov [rsp + 32], rax"
+        "mov rax, [rbp - 96]"
+        "mov [rsp + 40], rax"
+        "mov rax, 2"
+        "call r10"
+        "add rsp, 48"
+    }
+}
+
+fn blas_matmul(a, b) {
+    let ar = a[1]
+    let ac = a[2]
+    let bc = b[2]
+    let result = tensor_new(ar, bc)
+    let one = to_float(1)
+    let zero = to_float(0)
+    _blas_dgemm_call(_blas_dgemm_fn, ar, bc, ac, one, a[3], ac, b[3], bc, zero, result[3], bc)
+    return result
+}

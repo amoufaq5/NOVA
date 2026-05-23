@@ -53,6 +53,9 @@ fn init_import_tracker() {
     _dep_add("embed", "ffi")
     _dep_add("taskpool", "ffi")
     _dep_add("ffi", "mem")
+    _dep_add("blas", "ffi,mem,simd,tensor")
+    _dep_add("embedding", "mem,simd,tensor")
+    _dep_add("cognitive_llm", "ffi,mem,simd,tensor,confidence")
 }
 
 fn _dep_add(pkg, deps) {
@@ -482,7 +485,7 @@ fn main() {
                                         println("Mode: linking with libc (FFI enabled)")
                                     } else {
                                         if cur == "--version" {
-                                            println("Nova compiler v3.0.0 (self-hosting, x86-64, IEEE 754, FFI, SIMD)")
+                                            println("Nova compiler v4.0.0 (self-hosting, x86-64, SSE2 SIMD, FFI, BLAS, cognitive LLM)")
                                             println("Target: Linux/macOS/WASM/Windows")
                                             exit(0)
                                         } else {

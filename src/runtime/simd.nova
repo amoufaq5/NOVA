@@ -111,36 +111,101 @@ fn simd_sub_f64(a_ptr, b_ptr, c_ptr, n) {
 }
 
 fn simd_dot_f64(a_ptr, b_ptr, n) {
-    // Dot product: sum of element-wise products
-    let acc = to_float(0)
-    let i = 0
-    while i < n {
-        let a_val = mem_read_f64(int_add(a_ptr, i * 8))
-        let b_val = mem_read_f64(int_add(b_ptr, i * 8))
-        acc = float_add(acc, float_mul(a_val, b_val))
-        i = i + 1
+    let result = to_float(0)
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rcx, [rbp - 24]"
+        "xorpd xmm0, xmm0"
+        "xorpd xmm2, xmm2"
+        "shr rcx, 2"
+        ".simd_dot4_loop:"
+        "test rcx, rcx"
+        "jz .simd_dot4_done"
+        "movupd xmm1, [rdi]"
+        "movupd xmm4, [rsi]"
+        "mulpd xmm1, xmm4"
+        "movupd xmm3, [rdi+16]"
+        "movupd xmm5, [rsi+16]"
+        "mulpd xmm3, xmm5"
+        "addpd xmm0, xmm1"
+        "addpd xmm2, xmm3"
+        "add rdi, 32"
+        "add rsi, 32"
+        "dec rcx"
+        "jmp .simd_dot4_loop"
+        ".simd_dot4_done:"
+        "addpd xmm0, xmm2"
+        "movapd xmm1, xmm0"
+        "shufpd xmm1, xmm1, 1"
+        "addsd xmm0, xmm1"
+        "movq rax, xmm0"
+        "mov [rbp - 32], rax"
     }
-    return acc
+    let processed = (n / 4) * 4
+    while processed < n {
+        let a_val = mem_read_f64(int_add(a_ptr, processed * 8))
+        let b_val = mem_read_f64(int_add(b_ptr, processed * 8))
+        result = float_add(result, float_mul(a_val, b_val))
+        processed = processed + 1
+    }
+    return result
 }
 
 fn simd_scale_f64(ptr, scalar, n) {
-    // Multiply all elements by scalar
-    let i = 0
-    while i < n {
-        let val = mem_read_f64(int_add(ptr, i * 8))
-        mem_write_f64(int_add(ptr, i * 8), float_mul(val, scalar))
-        i = i + 1
+    asm {
+        "mov rdi, [rbp - 8]"
+        "movq xmm1, [rbp - 16]"
+        "unpcklpd xmm1, xmm1"
+        "mov rcx, [rbp - 24]"
+        "shr rcx, 1"
+        ".simd_scale_loop:"
+        "test rcx, rcx"
+        "jz .simd_scale_tail"
+        "movupd xmm0, [rdi]"
+        "mulpd xmm0, xmm1"
+        "movupd [rdi], xmm0"
+        "add rdi, 16"
+        "dec rcx"
+        "jmp .simd_scale_loop"
+        ".simd_scale_tail:"
+    }
+    let remainder = n % 2
+    if remainder == 1 {
+        let last_idx = n - 1
+        let val = mem_read_f64(int_add(ptr, last_idx * 8))
+        mem_write_f64(int_add(ptr, last_idx * 8), float_mul(val, scalar))
     }
 }
 
 fn simd_sum_f64(ptr, n) {
-    let acc = to_float(0)
-    let i = 0
-    while i < n {
-        acc = float_add(acc, mem_read_f64(int_add(ptr, i * 8)))
-        i = i + 1
+    let result = to_float(0)
+    asm {
+        "mov rdi, [rbp - 8]"
+        "mov rcx, [rbp - 16]"
+        "xorpd xmm0, xmm0"
+        "shr rcx, 1"
+        ".simd_sum2_loop:"
+        "test rcx, rcx"
+        "jz .simd_sum2_done"
+        "movupd xmm1, [rdi]"
+        "addpd xmm0, xmm1"
+        "add rdi, 16"
+        "dec rcx"
+        "jmp .simd_sum2_loop"
+        ".simd_sum2_done:"
+        "movapd xmm1, xmm0"
+        "shufpd xmm1, xmm1, 1"
+        "addsd xmm0, xmm1"
+        "movq rax, xmm0"
+        "mov [rbp - 24], rax"
     }
-    return acc
+    let remainder = n % 2
+    if remainder == 1 {
+        let last_idx = n - 1
+        result = float_add(result, mem_read_f64(int_add(ptr, last_idx * 8)))
+    }
+    return result
 }
 
 fn simd_norm_f64(ptr, n) {

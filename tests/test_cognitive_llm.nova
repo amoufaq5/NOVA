@@ -1,0 +1,59 @@
+// Test: Cognitive LLM Pipeline
+// Tests confidence estimation, history, and cognitive chat
+
+import "std/cognitive_llm"
+
+fn test_cognitive_llm() {
+    cognitive_llm_init()
+
+    // Test confidence estimation
+    let r1 = cognitive_generate("The answer is definitely 42.", 100)
+    let c1 = conf_level(r1)
+    print("Confident text level: ")
+    println(float_to_str(c1))
+
+    let r2 = cognitive_generate("Maybe the answer might possibly be 42.", 100)
+    let c2 = conf_level(r2)
+    print("Uncertain text level: ")
+    println(float_to_str(c2))
+
+    // Confident text should score higher
+    if float_cmp(c1, c2) > 0 {
+        println("  PASS: confident > uncertain")
+    } else {
+        println("  FAIL: expected confident > uncertain")
+        exit(1)
+    }
+
+    // Test history
+    let msgs = list_new()
+    push(msgs, "What is machine learning?")
+    let chat_r = cognitive_chat(msgs, 3)
+    print("Chat confidence: ")
+    println(float_to_str(conf_level(chat_r)))
+
+    print("History count: ")
+    println(int_to_str(cognitive_history_count()))
+
+    // Test evaluation
+    let eval = cognitive_evaluate("This is a well-formed response with details.")
+    let is_coherent = eval[0]
+    if is_coherent == 1 {
+        println("  PASS: coherent text detected")
+    } else {
+        println("  FAIL: should be coherent")
+        exit(1)
+    }
+
+    cognitive_clear_history()
+    if cognitive_history_count() == 0 {
+        println("  PASS: history cleared")
+    } else {
+        println("  FAIL: history not cleared")
+        exit(1)
+    }
+
+    println("PASS cognitive_llm")
+}
+
+test_cognitive_llm()
