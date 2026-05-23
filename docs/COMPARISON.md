@@ -17,7 +17,7 @@ languages in systems programming and general-purpose development, respectively.
 | **Garbage collection** | None (bump/arena allocator) | None (manual malloc/free) | Reference counting + generational GC |
 | **Runtime dependencies** | Zero -- direct Linux syscalls, no libc | libc (glibc, musl, etc.) | CPython interpreter + libpython |
 | **Binary size** | Minimal static binary (no runtime) | Small static or dynamic binary | N/A (requires interpreter + stdlib) |
-| **Self-hosting** | Yes (~65,000 lines Nova + 106K lines asm) | Yes (GCC: ~15 million lines) | No (CPython is written in C) |
+| **Self-hosting** | Yes (~68,000 lines Nova + 106K lines asm) | Yes (GCC: ~15 million lines) | No (CPython is written in C) |
 | **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) | Bootstrapped from earlier C compilers | N/A |
 | **Memory model** | Bump allocator, arena reset | Manual (malloc/free/calloc/realloc) | Automatic (GC managed) |
 | **Integers** | 64-bit signed | Platform-dependent (int, long, etc.) | Arbitrary precision |
@@ -25,11 +25,11 @@ languages in systems programming and general-purpose development, respectively.
 | **Collections** | Dynamic lists, hash maps | Arrays, manual linked structures | list, dict, set, tuple, etc. |
 | **Error handling** | try/catch/finally, throw | Return codes, errno, setjmp/longjmp | try/except/finally, raise |
 | **Inline assembly** | Built-in `asm {}` blocks | Compiler-specific (__asm__, asm) | Not available |
-| **Cognitive primitives** | Built-in (moments, signals, nodes, channels, minds, souls, systems, knowledge graphs, embeddings, SIMD tensors, cognitive LLM, RAG, security) | Not available (requires libraries) | Not available (requires libraries) |
+| **Cognitive primitives** | Built-in (moments, signals, nodes, channels, minds, souls, systems, knowledge graphs, embeddings, SIMD tensors, cognitive LLM, RAG, security, beliefs, goals, safety, imagination, concepts) | Not available (requires libraries) | Not available (requires libraries) |
 | **Flow operators** | `~>`, `<~`, `=>>`, `<<~`, `~~>`, `<=>`, `\|~>` | Not available | Not available |
 | **Package manager** | Built-in (`nova pkg`) | Third-party (apt, vcpkg, conan) | pip / PyPI |
 | **Target platforms** | Linux x86-64, macOS x86-64, WebAssembly, Windows x86-64 | Every major platform and architecture | Every major platform (via interpreter) |
-| **First release** | 2024 | 1972 | 1991 |
+| **First release** | 2024-2025 | 1972 | 1991 |
 | **Ecosystem maturity** | Young, growing | 50+ years, massive | 30+ years, massive |
 
 ---
@@ -705,10 +705,13 @@ episodic similarity, reasoners apply multi-strategy inference (deductive,
 abductive, analogical), feelers drift emotional dimensions, and actors resolve
 competing activations. None of this requires external libraries.
 
-Nova now also supports `soul` and `system` declarations for even more declarative
-cognitive architectures beyond the single `mind` shown here. A `system` composes
-multiple minds with cross-mind bridges, and a `soul` attaches behavioral identity
-(drives, values, feelings) that biases processing across the entire system.
+Nova now also supports `soul` and `system` declarations for declarative
+cognitive architectures. A `system` composes multiple minds with cross-mind bridges,
+a `soul` attaches behavioral identity with OCEAN personality vectors, constitutional
+rules, identity themes, and a loyalty hierarchy. v4.1 adds Bayesian beliefs, a goal
+engine with autonomous drive generators, a safety/audit layer, an imagination subsystem,
+and a concept hierarchy with schemas and multi-vector embeddings -- all integrated into
+the multi-loop agent architecture.
 
 ---
 
@@ -815,6 +818,19 @@ cognitive system with cross-mind bridges. A `soul` declaration attaches behavior
 identity -- drives, values, feelings -- that biases processing across the entire
 system. This allows building layered AGI architectures (perception mind + reasoning
 mind + emotion mind) wired together declaratively.
+
+### Cognitive Architecture Completeness
+Nova v4.1 provides a complete cognitive architecture out of the box:
+- **Bayesian beliefs** -- Beta distribution (α, β) pseudocounts for probabilistic reasoning, replacing flat 0-100 confidence scores. Beliefs accumulate evidence, decay with prior floor protection, and detect conflicts between opposing sources.
+- **Goal engine** -- autonomous drive generators (curiosity, social, task, homeostasis) create goals without explicit programming. Goals are priority-sorted, support hierarchical subgoals, and modulate reasoning attention.
+- **Safety/audit layer** -- three permission tiers (observe/respond/full), reversibility classification for actions, circular-buffer decision logging, one-shot override mechanism, and rate limiting. No equivalent exists in C or Python without building from scratch or importing a framework.
+- **Imagination subsystem** -- world model with causal patterns, forward simulation, counterfactual reasoning ("what if I had done X instead?"), dream recombination, and scenario planning with valence scoring.
+- **Concept hierarchy** -- `is_a` inheritance chains with property propagation, taxonomic similarity via lowest common ancestor, schemas for entity type validation, and multi-vector embeddings for rich multi-faceted semantic representation.
+- **Constitutional rules** -- hard safety constraints baked into the soul (warn/block/override_only severity), OCEAN personality vectors that bias signal processing, identity themes with reinforcement, and a loyalty hierarchy that governs action permissions.
+- **Structural analogy** -- Jaccard similarity on content words with word-pair order bonus, replacing naive substring matching for analogical reasoning.
+- **Multi-loop agent** -- concurrent perception/memory/reasoning/emotion/action/goal loops with signal queues, replacing the sequential pipeline.
+
+In C, building equivalent functionality requires SOAR (~100K lines C++), ACT-R (custom Lisp), or months of custom engineering. Python has PyClarion and pyACTR but they are research prototypes, not production systems. Nova provides all of this as built-in language modules in ~5,300 lines of Nova.
 
 ### SIMD-Accelerated Tensor Math
 Nova v4.0 includes SSE2-vectorized SIMD operations (`simd_dot_f64` processes 4
@@ -969,7 +985,7 @@ you can build a self-contained AGI agent in a single binary.
 
 Nova is a young language. Choosing it means accepting these trade-offs:
 
-- **Small ecosystem**: Hundreds of packages, not hundreds of thousands.
+- **Small ecosystem**: Growing ecosystem of modules, not hundreds of thousands.
 - **Limited platform support**: Linux x86-64 is the primary target. macOS x86-64, WebAssembly, and Windows x86-64 cross-compilation are supported but less mature.
 - **Young optimizer**: The code generator does not yet match GCC or LLVM in optimization sophistication.
 - **Small community**: Finding help, tutorials, and Stack Overflow answers is harder than with C or Python.

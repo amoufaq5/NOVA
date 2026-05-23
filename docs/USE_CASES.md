@@ -545,6 +545,220 @@ system Agent {
 }
 ```
 
+### Bayesian Belief System
+
+```nova
+import "src/core/belief.nova"
+
+fn main() {
+    // Uniform prior: equal evidence for/against
+    let b = belief_new(1000, 1000)
+    println("Prior mean: " + int_to_str(belief_mean(b)))  // 500
+
+    // Observe positive evidence
+    belief_update_positive(b, 3000)
+    println("After positive evidence: " + int_to_str(belief_mean(b)))  // ~750
+
+    // Conflict detection between opposing beliefs
+    let optimist = belief_new(8000, 2000)
+    let pessimist = belief_new(2000, 8000)
+    let conflict = belief_conflict(optimist, pessimist)
+    println("Conflict score: " + int_to_str(conflict))  // High
+
+    // Beliefs decay but respect a prior floor
+    let fading = belief_new(5000, 2000)
+    belief_decay(fading, 900)
+    println("After decay: " + int_to_str(belief_strength(fading)))  // >= 2000
+}
+
+main()
+```
+
+### Goal Engine with Autonomous Drives
+
+```nova
+import "src/core/goal.nova"
+
+fn main() {
+    let engine = goal_engine_init()
+
+    // Manually created goals
+    let g1 = goal_new("learn_nova", 80, 0)
+    let g2 = goal_new("help_user", 90, 0)
+    goal_engine_add(engine, g1)
+    goal_engine_add(engine, g2)
+
+    // Autonomous drive generators create goals based on internal state
+    let pending = list_new()
+    push(pending, "answer_question")
+    goal_engine_generate_drives(engine, 5, 1, time() - 7200, pending, 40, 85)
+
+    // Top goals by priority
+    let top = goal_engine_top(engine, 3)
+    for i, g in top {
+        println(int_to_str(i + 1) + ". " + goal_name(g) +
+                " (priority=" + int_to_str(goal_priority(g)) + ")")
+    }
+
+    // Goal-reasoning integration
+    let boost = goal_influences_reasoning(g1)
+    println("Reasoning boost from learn_nova: " + int_to_str(boost))
+}
+
+main()
+```
+
+### Safety & Audit Layer
+
+```nova
+import "src/core/safety.nova"
+
+fn main() {
+    safety_init()
+
+    // Default: observe-only
+    println("Can respond? " + int_to_str(safety_check(PERM_RESPOND)))  // 0
+
+    // Upgrade permission
+    safety_set_permission(PERM_FULL)
+    println("Can respond? " + int_to_str(safety_check(PERM_RESPOND)))  // 1
+
+    // Classify action reversibility
+    let r = safety_classify_action("delete user data")
+    println("Delete is irreversible: " + int_to_str(r == IRREVERSIBLE))  // 1
+
+    // Decision logging (circular buffer, max 500)
+    safety_log_decision("respond", "answered question", 85, REVERSIBLE)
+    safety_log_decision("learn", "stored new fact", 70, PARTIALLY_REVERSIBLE)
+    println("Logged decisions: " + int_to_str(safety_log_count()))
+
+    // One-shot override
+    safety_request_override("special_action", "testing")
+    safety_grant_override("special_action")
+    println("Override available: " + int_to_str(safety_has_override("special_action")))  // 1
+    println("Override consumed: " + int_to_str(safety_has_override("special_action")))   // 0
+}
+
+main()
+```
+
+### Imagination & Mental Simulation
+
+```nova
+import "src/core/imagination.nova"
+
+fn main() {
+    random_seed(42)
+    imagination_init()
+
+    // Build a world model
+    world_model_add_entity("robot", list_new())
+    world_model_add_entity("box", list_new())
+
+    // Forward simulation
+    let predictions = imagine_action("robot", "move", 3)
+    println("Simulation steps: " + int_to_str(len(predictions)))
+
+    // Consequence prediction from causal patterns
+    let c = imagine_consequence("break the window")
+    println("Consequence: " + c)  // "object broken"
+
+    // Counterfactual reasoning
+    let cf = imagine_counterfactual("attack the enemy", "heal the ally")
+    println("Original outcome: " + cf[0])
+    println("Alternative outcome: " + cf[1])
+    println("Divergence: " + int_to_str(cf[2]))
+
+    // Dream recombination
+    let episodes = list_new()
+    let ep1 = list_new()
+    push(ep1, "dog chased cat")
+    push(ep1, 80)
+    push(episodes, ep1)
+    let ep2 = list_new()
+    push(ep2, "rain fell hard")
+    push(ep2, 60)
+    push(episodes, ep2)
+    let dreams = imagine_dream(episodes, 50)
+    if len(dreams) > 0 {
+        println("Dream: " + imagine_dream_narrative(dreams))
+    }
+
+    // Scenario planning
+    let scenarios = imagine_scenarios("approaching deadline", 3)
+    let best = imagine_best_scenario(scenarios)
+    println("Best scenario: " + best[0])
+}
+
+main()
+```
+
+### Concept Hierarchy & Schemas
+
+```nova
+import "src/runtime/embed.nova"
+import "src/core/knowledge.nova"
+import "src/core/concept.nova"
+
+fn main() {
+    concept_init()
+
+    // Build a concept hierarchy
+    concept_new("thing", "")
+    concept_new("living_thing", "thing")
+    let animal = concept_new("animal", "living_thing")
+    let mammal = concept_new("mammal", "animal")
+    concept_new("dog", "mammal")
+    concept_new("cat", "mammal")
+
+    // Property inheritance
+    concept_set_property(animal, "can_move", 1)
+    concept_set_property(mammal, "warm_blooded", 1)
+
+    // Dog inherits warm_blooded from mammal
+    let wb = concept_get_inherited("dog", "warm_blooded")
+    println("Dog is warm-blooded: " + int_to_str(wb))  // 1
+
+    // Taxonomic similarity via lowest common ancestor
+    let sim = concept_taxonomic_similarity("dog", "cat")
+    println("Dog-cat similarity: " + int_to_str(sim))  // 750
+
+    // Schema validation
+    let person = schema_new("person")
+    schema_add_required(person, "name", "string")
+    schema_add_required(person, "age", "int")
+    schema_add_optional(person, "role", "string", "unknown")
+    schema_add_constraint(person, "age", "min", 0)
+
+    let vals = list_new()
+    let v1 = list_new()
+    push(v1, "name")
+    push(v1, "Alice")
+    push(vals, v1)
+    let v2 = list_new()
+    push(v2, "age")
+    push(v2, 30)
+    push(vals, v2)
+    let instance = schema_instantiate(person, vals)
+    let errors = schema_validate(person, instance)
+    println("Valid instance: " + int_to_str(len(errors) == 0))
+
+    // Multi-vector embeddings
+    let me = multi_embed_new("dog")
+    let sem = embed_new(4)
+    embed_set(sem, 0, 80)
+    embed_set(sem, 1, 60)
+    multi_embed_add_facet(me, "semantic", sem)
+    let emo = embed_new(4)
+    embed_set(emo, 0, 90)
+    embed_set(emo, 1, 30)
+    multi_embed_add_facet(me, "emotional", emo)
+    println("Facets: " + int_to_str(multi_embed_facet_count(me)))
+}
+
+main()
+```
+
 ---
 
 ## 5. Signal Processing
@@ -1400,7 +1614,7 @@ import "std/python"
 fn main() {
     py_init()
     py_exec("import json")
-    py_exec("data = json.dumps({'name': 'Nova', 'version': '4.0'})")
+    py_exec("data = json.dumps({'name': 'Nova', 'version': '4.1'})")
     let result = py_eval("data")
     println("From Python: " + result)
 }
@@ -1429,4 +1643,5 @@ main()
 | ML & Tensors | `simd_dot_f64`, `tensor_matmul`, `blas_matmul`, `embedding_encode`, `cognitive_generate` |
 | FFI & Python | `ffi_open`, `ffi_call`, `py_init`, `py_exec`, `llm_generate` |
 | Multi-Mind Systems | `soul` declaration, `system` declaration, bridges, `system_resolve_node` |
+| Cognitive Architecture (v4.1) | `belief_new`, `goal_engine_init`, `safety_init`, `imagination_init`, `concept_init`, `soul_set_personality`, `soul_add_constitution` |
 | Windows Deployment | `--target=windows`, `make cross-windows`, PE32+ executables |

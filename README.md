@@ -32,7 +32,7 @@ The language is **fully self-hosting**: the Nova compiler is written in Nova, bo
 
 **New in v4.1:** Bayesian belief system (Beta distribution replacing flat 0-100 confidence), goal engine with four drive generators (curiosity, social, task, homeostasis), safety/audit layer with permission tiers and reversibility classification, imagination subsystem (world model, forward simulation, counterfactual reasoning, dream recombination), concept hierarchy with property inheritance and taxonomic similarity, schema system for entity type validation, multi-vector embeddings for rich semantic representation, OCEAN personality vectors and constitutional rules in the soul, multi-loop agent architecture replacing the sequential pipeline, and structural analogy via Jaccard similarity replacing substring matching.
 
-At its foundation, Nova is a practical systems language with structs, enums, lambdas, coroutines, pattern matching, try/catch/finally, 100+ built-in functions, and an arena allocator for deterministic memory management. You can write a TCP server with raw syscalls, parse JSON, manage processes, or do bitwise manipulation -- all without any external dependency.
+At its foundation, Nova is a practical systems language with structs, enums, lambdas, coroutines, pattern matching, try/catch/finally, 270+ built-in functions, and an arena allocator for deterministic memory management. You can write a TCP server with raw syscalls, parse JSON, manage processes, or do bitwise manipulation -- all without any external dependency.
 
 What sets Nova apart is its first-class support for cognitive computing. Where other languages treat AI as a library concern, Nova builds it into the language itself:
 
@@ -714,7 +714,7 @@ That's it. No C compiler. No package manager. No downloads.
 ```bash
 make                # Build bin/nova
 make self-host      # Verify self-hosting (stage2.s == stage3.s)
-make test-all       # Run all 130 tests
+make test-all       # Run all 135 tests
 make run FILE=path  # Compile and run a .nova file
 make examples       # Build and run all 29 examples
 make agent          # Run the cognitive agent
@@ -762,7 +762,7 @@ bin/nova examples/hello.nova --target=windows -o hello_win.s
 make wasm FILE=examples/hello.nova
 ```
 
-## Built-in Functions (180+)
+## Built-in Functions (270+)
 
 ### I/O
 `print` `println` `print_int` `read_line` `read_file` `write_file`
@@ -814,6 +814,9 @@ make wasm FILE=examples/hello.nova
 
 ### Concepts
 `concept_init` `concept_new` `concept_find` `concept_set_property` `concept_get_inherited` `concept_is_a` `concept_children` `concept_descendants` `concept_common_ancestor` `concept_taxonomic_similarity` `schema_new` `schema_add_required` `schema_add_optional` `schema_validate` `schema_instantiate` `multi_embed_new` `multi_embed_add_facet` `multi_embed_similarity` `multi_embed_blended_similarity`
+
+### Preprocessing
+`preprocess_init` `preprocess_canonicalize` `preprocess_split_sentences` `preprocess_extract_keywords` `preprocess_ingest_text` `preprocess_ingest_file` `preprocess_deduplicate` `preprocess_consolidate` `preprocess_batch`
 
 ### Database
 `db_open` `db_put` `db_get` `db_prefix` `db_close`

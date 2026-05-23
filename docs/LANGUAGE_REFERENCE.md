@@ -404,6 +404,58 @@ soul Aurora {
 - **drives**: Persistent motivational intensities, each an integer from 0 to 100.
 - **feelings**: Short-term emotional state, each an integer from 0 to 100.
 
+### Soul Extensions (v4.1)
+
+Soul extensions add richer personality modeling, ethical constraints, thematic
+identity, and loyalty hierarchies to the soul system.
+
+#### OCEAN Personality
+
+Model personality using the Big Five (OCEAN) dimensions, each 0-100:
+
+| Function | Description |
+|----------|-------------|
+| `soul_set_personality(s, O, C, E, A, N)` | Set all five personality dimensions |
+| `soul_get_personality(s)` | Get personality as list `[O, C, E, A, N]` |
+| `soul_personality_openness(s)` | Get Openness dimension |
+| `soul_personality_conscientiousness(s)` | Get Conscientiousness dimension |
+| `soul_personality_extraversion(s)` | Get Extraversion dimension |
+| `soul_personality_agreeableness(s)` | Get Agreeableness dimension |
+| `soul_personality_neuroticism(s)` | Get Neuroticism dimension |
+| `soul_personality_bias_signal(s, sig)` | Bias a signal based on personality profile |
+
+#### Constitutional Rules
+
+Define ethical guardrails that constrain behavior:
+
+| Function | Description |
+|----------|-------------|
+| `soul_add_constitution(s, rule_text, severity)` | Add rule (severity: 1=warn, 2=block, 3=override_only) |
+| `soul_check_constitution(s, action_text)` | Check action against all rules (returns 1 if permitted) |
+| `soul_constitution_count(s)` | Number of constitutional rules |
+
+#### Identity Themes
+
+Persistent thematic elements that define the soul's character:
+
+| Function | Description |
+|----------|-------------|
+| `soul_add_theme(s, name, strength, description)` | Add identity theme |
+| `soul_theme_strength(s, name)` | Get theme strength |
+| `soul_reinforce_theme(s, name, amount)` | Reinforce theme (capped at 100) |
+| `soul_dominant_theme(s)` | Get name of strongest theme |
+
+#### Loyalty Hierarchy
+
+Define and query prioritized loyalties:
+
+| Function | Description |
+|----------|-------------|
+| `soul_add_loyalty(s, entity_name, level)` | Add loyalty entry (higher level = higher priority) |
+| `soul_loyalty_level(s, name)` | Get loyalty level for entity |
+| `soul_loyalty_rank(s, name)` | Get rank position (1 = highest) |
+| `soul_loyalty_permits(s, entity_name, action)` | Check if loyalty permits action (returns 1 or 0) |
+
 ## System Declaration
 
 System declarations compose multiple minds into a unified cognitive architecture.
@@ -684,6 +736,126 @@ let m = {k: v * 2 for k, v in items}
 | `soul_bias(soul)` | Get activation bias for actor nodes |
 | `soul_tick(soul, signal)` | Process one signal through the soul |
 | `soul_preprocess(soul, input)` | Classify raw input by keywords |
+
+### Belief
+| Function | Description |
+|----------|-------------|
+| `belief_new(alpha, beta)` | Create belief with pseudocounts (scaled by 1000) |
+| `belief_mean(b)` | Mean = alpha*1000/(alpha+beta) |
+| `belief_variance(b)` | Variance of Beta distribution |
+| `belief_strength(b)` | Total evidence (alpha + beta) |
+| `belief_update_positive(b, weight)` | Add positive evidence |
+| `belief_update_negative(b, weight)` | Add negative evidence |
+| `belief_decay(b, rate)` | Decay toward prior floor (min 2000 total) |
+| `belief_is_uncertain(b, threshold)` | 1 if variance exceeds threshold |
+| `belief_entropy(b)` | Information entropy estimate |
+| `belief_combine(a, b)` | Merge two beliefs |
+| `belief_conflict(a, b)` | Conflict score between opposing beliefs |
+| `belief_to_confidence(b)` | Convert to 0-100 confidence |
+| `confidence_to_belief(conf)` | Convert 0-100 confidence to belief |
+
+### Goal Engine
+| Function | Description |
+|----------|-------------|
+| `goal_new(name, priority, deadline)` | Create goal (priority 0-100, deadline=0 for none) |
+| `goal_name(g)` | Get goal name |
+| `goal_priority(g)` | Get priority |
+| `goal_status(g)` | Status: GOAL_ACTIVE=1, GOAL_SUSPENDED=2, GOAL_COMPLETE=3, GOAL_FAILED=4 |
+| `goal_set_status(g, status)` | Update status |
+| `goal_set_progress(g, pct)` | Set progress (0-100, auto-completes at 100) |
+| `goal_add_subgoal(parent, child)` | Attach subgoal |
+| `goal_engine_init()` | Create goal engine |
+| `goal_engine_add(e, g)` | Add goal to engine |
+| `goal_engine_tick(e)` | Update deadlines, aggregate subgoal progress |
+| `goal_engine_top(e, n)` | Get top n goals by priority |
+| `goal_engine_complete(e, name)` | Mark goal complete |
+| `goal_engine_active_count(e)` | Count active/suspended goals |
+| `goal_engine_generate_drives(e, knowledge_count, interaction_count, last_interaction, pending, valence, memory_load)` | Generate goals from 4 drives |
+| `drive_curiosity(knowledge_count, novelty_score)` | Generate curiosity goals |
+| `drive_social(interaction_count, last_interaction_time)` | Generate social goals |
+| `drive_task(pending_requests)` | Generate task goals |
+| `drive_homeostasis(emotion_valence, memory_load)` | Generate homeostasis goals |
+| `goal_influences_reasoning(g)` | Reasoning boost from active goal |
+| `goal_evaluate_action(g, action_description)` | Score action relevance to goal |
+
+### Safety & Audit
+| Function | Description |
+|----------|-------------|
+| `safety_init()` | Initialize safety subsystem |
+| `safety_set_permission(tier)` | Set permission: PERM_OBSERVE=1, PERM_RESPOND=2, PERM_FULL=3 |
+| `safety_check(required_tier)` | 1 if current permission >= required |
+| `safety_classify_action(action_type)` | Returns REVERSIBLE=1, PARTIALLY_REVERSIBLE=2, or IRREVERSIBLE=3 |
+| `safety_require_confirmation(action_type)` | 1 if action is irreversible |
+| `safety_log_decision(action, reason, confidence, reversibility)` | Log a decision (circular buffer, max 500) |
+| `safety_log_count()` | Number of logged decisions |
+| `safety_log_recent(n)` | Get n most recent log entries |
+| `safety_request_override(action, reason)` | Request one-shot override |
+| `safety_grant_override(action)` | Grant override |
+| `safety_has_override(action)` | Check and consume override (one-shot) |
+| `safety_check_content(text)` | Content filter (0=blocked, 1=pass) |
+| `safety_sanitize_output(text)` | Strip non-printable characters |
+| `safety_rate_check(action_type, window_seconds, max_count)` | Rate limiting |
+
+### Imagination
+| Function | Description |
+|----------|-------------|
+| `imagination_init()` | Initialize imagination subsystem |
+| `world_model_add_entity(name, properties)` | Add entity to world model |
+| `world_model_set_relation(entity_a, relation, entity_b)` | Set relation between entities |
+| `world_model_get_property(entity_name, prop_name)` | Get entity property |
+| `world_model_entities()` | List all entity names |
+| `imagine_action(entity, action, steps)` | Forward simulate action for n steps |
+| `imagine_consequence(action_desc)` | Predict consequence from causal patterns |
+| `imagine_counterfactual(original, alternative)` | Compare outcomes: returns [orig_outcome, alt_outcome, divergence] |
+| `imagine_dream(episodes, creativity)` | Recombine episodes into dreams (creativity 0-100) |
+| `imagine_dream_narrative(dreams)` | Convert dreams to narrative text |
+| `imagine_scenarios(situation, num)` | Generate n scenarios for a situation |
+| `imagine_best_scenario(scenarios)` | Select highest-scored scenario |
+| `imagine_worst_scenario(scenarios)` | Select lowest-scored scenario |
+
+### Concept Layer
+| Function | Description |
+|----------|-------------|
+| `concept_init()` | Initialize concept hierarchy |
+| `concept_new(name, parent_name)` | Create concept (parent="" for root) |
+| `concept_find(name)` | Find concept by name |
+| `concept_set_property(concept, key, value)` | Set property on concept |
+| `concept_get_property(concept, key)` | Get direct property |
+| `concept_get_inherited(name, key)` | Get property walking up hierarchy |
+| `concept_is_a(child, ancestor)` | Check inheritance (transitive) |
+| `concept_children(name)` | Get direct children |
+| `concept_descendants(name)` | Get all descendants (BFS) |
+| `concept_ancestors(name)` | Get ancestor chain |
+| `concept_depth(name)` | Depth in hierarchy |
+| `concept_common_ancestor(name1, name2)` | Lowest common ancestor |
+| `concept_taxonomic_similarity(name1, name2)` | Similarity via LCA (0-1000) |
+| `concept_count()` | Total concepts |
+| `concept_all_properties(name)` | All properties with inheritance |
+| `schema_new(name)` | Create schema |
+| `schema_add_required(schema, field_name, field_type)` | Add required field |
+| `schema_add_optional(schema, field_name, field_type, default)` | Add optional field with default |
+| `schema_add_constraint(schema, field_name, constraint_type, value)` | Add constraint (min/max) |
+| `schema_validate(schema, props)` | Validate against schema (returns error list) |
+| `schema_instantiate(schema, values)` | Create instance with defaults |
+| `multi_embed_new(name)` | Create multi-vector embedding |
+| `multi_embed_add_facet(me, facet_name, embedding)` | Add embedding facet |
+| `multi_embed_get_facet(me, facet_name)` | Get specific facet |
+| `multi_embed_facet_count(me)` | Number of facets |
+| `multi_embed_facet_names(me)` | List facet names |
+| `multi_embed_similarity(me1, me2, facet_name)` | Cosine similarity on one facet |
+| `multi_embed_blended_similarity(me1, me2, weights)` | Weighted multi-facet similarity |
+| `multi_embed_merge(me1, me2, ratio)` | Blend two multi-embeddings |
+
+### Preprocessing
+| Function | Description |
+|----------|-------------|
+| `preprocess_init()` | Initialize preprocessing pipeline |
+| `preprocess_canonicalize(text)` | Lowercase, normalize whitespace |
+| `preprocess_sentences(text)` | Split text into sentences |
+| `preprocess_keywords(text)` | Extract significant keywords |
+| `preprocess_triples(text)` | Extract [subject, relation, object] triples |
+| `preprocess_consolidate(triples)` | Deduplicate and merge triples |
+| `preprocess_batch(texts)` | Process multiple texts |
 
 ### Database
 | Function | Description |
@@ -1004,6 +1176,40 @@ Cognitive LLM pipeline integrating LLM generation with Nova's cognitive architec
 
 ### `src/agent/rag.nova`
 RAG (Retrieval-Augmented Generation) pipeline for document retrieval and context augmentation.
+
+### `src/core/belief.nova`
+Bayesian belief system using Beta distributions (α, β pseudocounts). All values
+integer-scaled by 1000 (0.5 = 500, 1.0 = 1000). Beliefs accumulate evidence via
+`belief_update_positive`/`belief_update_negative`, decay with prior floor protection,
+and detect conflicts between opposing beliefs.
+
+### `src/core/goal.nova`
+Goal engine with hierarchical goals, deadline tracking, and four autonomous drive
+generators (curiosity, social, task, homeostasis). Goals are priority-sorted,
+auto-complete when progress reaches 100%, and integrate with reasoning via
+`goal_influences_reasoning` for attention modulation.
+
+### `src/core/safety.nova`
+Safety and audit layer with three permission tiers (observe/respond/full),
+reversibility classification for 8 action types, circular-buffer decision logging
+(500 entries), one-shot override mechanism, content filtering, and rate limiting.
+
+### `src/core/imagination.nova`
+Mental simulation engine with a world model (entities + causal patterns), forward
+simulation, consequence prediction, counterfactual reasoning, dream recombination
+(random episode blending with creativity parameter), and scenario planning with
+valence scoring.
+
+### `src/core/concept.nova`
+Concept hierarchy with `is_a` inheritance, property propagation, taxonomic similarity
+via lowest common ancestor, schema system for entity type validation with required/optional
+fields and min/max constraints, and multi-vector embeddings with per-facet and blended
+similarity computation.
+
+### `src/agent/preprocess.nova`
+Text preprocessing pipeline for corpus ingestion: canonicalization (lowercase, whitespace
+normalization), sentence splitting, keyword extraction (stop-word filtered), triple
+extraction ([subject, relation, object]), deduplication, and batch processing.
 
 ## Compilation
 
