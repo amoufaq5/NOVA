@@ -1214,6 +1214,202 @@ secure_free(secret, 256)   // zeroes memory before freeing
 
 ---
 
+---
+
+## 13. Machine Learning & Tensor Computing
+
+Nova v4.0 includes SIMD-backed tensor operations, tiled matrix multiplication,
+and optional OpenBLAS dispatch for large matrices -- all without external
+dependencies.
+
+### SIMD-Vectorized Matrix Multiply
+
+```nova
+import "std/simd"
+import "std/tensor"
+
+fn main() {
+    // Create 4x4 matrices
+    let a = tensor_new(4, 4)
+    let b = tensor_new(4, 4)
+
+    // Fill with values
+    let i = 0
+    while i < 4 {
+        let j = 0
+        while j < 4 {
+            tensor_set(a, i, j, to_float(i * 4 + j + 1))
+            tensor_set(b, i, j, to_float((i + j) % 4 + 1))
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Matrix multiply -- uses SSE2 dot product internally
+    let c = tensor_matmul(a, b)
+    println("Result:")
+    tensor_print(c)
+
+    // Cosine similarity
+    let row1 = tensor_new(1, 4)
+    let row2 = tensor_new(1, 4)
+    tensor_set(row1, 0, 0, to_float(1))
+    tensor_set(row1, 0, 1, to_float(2))
+    tensor_set(row2, 0, 0, to_float(2))
+    tensor_set(row2, 0, 1, to_float(4))
+    let sim = tensor_cosine_sim(row1, row2)
+    print("Cosine similarity: ")
+    println(float_to_str(sim))
+}
+
+main()
+```
+
+### Embedding-Based Document Retrieval (RAG)
+
+```nova
+import "std/embedding"
+
+fn main() {
+    embedding_init(2)  // EMB_NGRAM backend with BM25 scoring
+
+    // Index documents
+    embedding_add_document("The quick brown fox jumps over the lazy dog")
+    embedding_add_document("Machine learning is a branch of artificial intelligence")
+    embedding_add_document("The lazy brown dog sleeps in the sun")
+    embedding_add_document("Neural networks learn from training data")
+
+    // Encode query
+    let query = embedding_encode("brown dog")
+
+    // Encode and compare each document
+    let doc1 = embedding_encode("The quick brown fox jumps over the lazy dog")
+    let doc3 = embedding_encode("The lazy brown dog sleeps in the sun")
+    let doc2 = embedding_encode("Machine learning is a branch of artificial intelligence")
+
+    let sim1 = embedding_similarity(query, doc1)
+    let sim2 = embedding_similarity(query, doc2)
+    let sim3 = embedding_similarity(query, doc3)
+
+    print("Query 'brown dog' vs fox doc: ")
+    println(float_to_str(sim1))
+    print("Query 'brown dog' vs ML doc: ")
+    println(float_to_str(sim2))
+    print("Query 'brown dog' vs dog doc: ")
+    println(float_to_str(sim3))
+    // dog doc should score highest due to n-gram overlap
+}
+
+main()
+```
+
+### Cognitive LLM Pipeline
+
+```nova
+import "std/cognitive_llm"
+
+fn main() {
+    cognitive_llm_init()
+
+    // Generate with confidence estimation
+    let r1 = cognitive_generate("The answer is definitely 42.", 100)
+    print("Confident text confidence: ")
+    println(float_to_str(conf_level(r1)))
+
+    let r2 = cognitive_generate("Maybe the answer might be 42.", 100)
+    print("Uncertain text confidence: ")
+    println(float_to_str(conf_level(r2)))
+
+    // Multi-turn chat with episodic memory
+    let msgs = list_new()
+    push(msgs, "What is machine learning?")
+    let chat_r = cognitive_chat(msgs, 3)
+    print("Chat confidence: ")
+    println(float_to_str(conf_level(chat_r)))
+
+    // History is maintained across calls
+    print("Interactions stored: ")
+    println(int_to_str(cognitive_history_count()))
+
+    cognitive_clear_history()
+}
+
+main()
+```
+
+### OpenBLAS for Large Matrices
+
+```nova
+import "std/blas"
+import "std/tensor"
+
+fn main() {
+    blas_init()
+    if blas_available() == 1 {
+        println("OpenBLAS detected -- using cblas_dgemm")
+        let a = tensor_new(100, 100)
+        let b = tensor_new(100, 100)
+        // Fill matrices...
+        let c = blas_matmul(a, b)  // calls cblas_dgemm via FFI
+        println("100x100 matmul complete")
+    } else {
+        println("No BLAS found -- using Nova's tiled matmul")
+        let a = tensor_new(100, 100)
+        let b = tensor_new(100, 100)
+        let c = tensor_matmul(a, b)  // uses 32x32 tiled multiply
+        println("100x100 matmul complete (tiled)")
+    }
+}
+
+main()
+```
+
+---
+
+## 14. Foreign Function Interface
+
+Nova can load and call C shared libraries at runtime, enabling integration
+with the broader systems ecosystem.
+
+### Calling C Libraries
+
+```nova
+import "std/ffi"
+
+fn main() {
+    let lib = ffi_open("libm.so.6")
+    if lib != 0 {
+        let sqrt_fn = ffi_sym(lib, "sqrt")
+        let result = ffi_call(sqrt_fn, to_float(144))
+        print("sqrt(144) = ")
+        println(float_to_str(result))
+        ffi_close(lib)
+    } else {
+        println("Could not load libm")
+    }
+}
+
+main()
+```
+
+### Python Interop
+
+```nova
+import "std/python"
+
+fn main() {
+    py_init()
+    py_exec("import json")
+    py_exec("data = json.dumps({'name': 'Nova', 'version': '4.0'})")
+    let result = py_eval("data")
+    println("From Python: " + result)
+}
+
+main()
+```
+
+---
+
 ## Summary
 
 | Use Case | Key Nova Features Used |
@@ -1230,5 +1426,7 @@ secure_free(secret, 256)   // zeroes memory before freeing
 | Educational | Self-hosting, visible pipeline, cognitive science mapping |
 | Knowledge & Persistence | `db_open`, `db_put`, `embed_new`, `embed_cosine`, `kg_new`, `kg_nearest` |
 | Security | `sha256`, `sanitize`, `validate_range`, `secure_alloc`, `secure_free` |
+| ML & Tensors | `simd_dot_f64`, `tensor_matmul`, `blas_matmul`, `embedding_encode`, `cognitive_generate` |
+| FFI & Python | `ffi_open`, `ffi_call`, `py_init`, `py_exec`, `llm_generate` |
 | Multi-Mind Systems | `soul` declaration, `system` declaration, bridges, `system_resolve_node` |
 | Windows Deployment | `--target=windows`, `make cross-windows`, PE32+ executables |

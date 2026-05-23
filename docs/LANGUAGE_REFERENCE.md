@@ -729,6 +729,112 @@ let m = {k: v * 2 for k, v in items}
 | `secure_alloc(size)` | Allocate zeroed memory |
 | `secure_free(ptr, size)` | Zero memory before freeing |
 
+### SIMD (SSE2 Vectorized)
+| Function | Description |
+|----------|-------------|
+| `simd_vec_new(count)` | Allocate float64 array |
+| `simd_vec_set(vec, idx, val)` | Set element |
+| `simd_vec_get(vec, idx)` | Get element |
+| `simd_add_f64(a, b, c, n)` | Element-wise add: c = a + b |
+| `simd_sub_f64(a, b, c, n)` | Element-wise subtract: c = a - b |
+| `simd_mul_f64(a, b, c, n)` | Element-wise multiply: c = a * b |
+| `simd_div_f64(a, b, c, n)` | Element-wise divide: c = a / b |
+| `simd_dot_f64(a, b, n)` | Dot product (4 doubles/iter) |
+| `simd_scale_f64(ptr, scalar, n)` | Scale all elements by scalar |
+| `simd_sum_f64(ptr, n)` | Sum all elements |
+| `simd_norm_f64(ptr, n)` | L2 norm (sqrt of dot with self) |
+| `simd_fma_f64(a, b, c, out, n)` | Fused multiply-add: out = a*b + c |
+| `simd_relu_f64(ptr, n)` | ReLU activation (max(0, x)) in place |
+| `simd_max_f64(a, b, c, n)` | Element-wise max: c = max(a, b) |
+
+### Tensor
+| Function | Description |
+|----------|-------------|
+| `tensor_new(rows, cols)` | Create zero tensor |
+| `tensor_set(t, row, col, val)` | Set element |
+| `tensor_get(t, row, col)` | Get element |
+| `tensor_matmul(a, b)` | Matrix multiply (auto-dispatches tiled/simple) |
+| `tensor_add(a, b)` | Element-wise add |
+| `tensor_sub(a, b)` | Element-wise subtract |
+| `tensor_scale(t, scalar)` | Scale all elements |
+| `tensor_relu(t)` | ReLU activation |
+| `tensor_softmax(t)` | Row-wise softmax |
+| `tensor_transpose(t)` | Matrix transpose |
+| `tensor_cosine_sim(a, b)` | Cosine similarity |
+| `tensor_print(t)` | Print tensor to stdout |
+
+### BLAS
+| Function | Description |
+|----------|-------------|
+| `blas_init()` | Load OpenBLAS shared library |
+| `blas_available()` | Returns 1 if BLAS loaded, 0 otherwise |
+| `blas_matmul(a, b)` | Matrix multiply via cblas_dgemm |
+
+### Embedding (v4.0)
+| Function | Description |
+|----------|-------------|
+| `embedding_init(backend)` | Initialize with EMB_TFIDF, EMB_NGRAM, or EMB_NEURAL |
+| `embedding_encode(text)` | Encode text to embedding tensor |
+| `embedding_add_document(text)` | Index document (builds vocab + IDF stats) |
+| `embedding_similarity(a, b)` | Cosine similarity between embeddings |
+| `embedding_cognitive(text, v, a, d, r, f, depth)` | Cognitive embedding with 6 extra dimensions |
+| `embedding_vocab_size()` | Current vocabulary size |
+| `embedding_doc_count()` | Number of indexed documents |
+
+### Cognitive LLM
+| Function | Description |
+|----------|-------------|
+| `cognitive_llm_init()` | Initialize cognitive LLM pipeline |
+| `cognitive_generate(text, max_tokens)` | Generate with confidence estimation |
+| `cognitive_evaluate(text)` | Evaluate coherence and confidence |
+| `cognitive_chat(messages, context_limit)` | Chat with episodic memory context |
+| `cognitive_embed_text(text)` | Hash-based 64-dim text embedding |
+| `cognitive_history_count()` | Number of stored interactions |
+| `cognitive_clear_history()` | Clear interaction history |
+
+### Confidence
+| Function | Description |
+|----------|-------------|
+| `conf_new(value, level)` | Create confidence-annotated value |
+| `conf_value(c)` | Get the wrapped value |
+| `conf_level(c)` | Get confidence level (0.0-1.0) |
+| `conf_is_uncertain(c, threshold)` | Check if below threshold |
+| `conf_is_confident(c, threshold)` | Check if above threshold |
+
+### FFI
+| Function | Description |
+|----------|-------------|
+| `ffi_open(path)` | Load shared library (.so/.dylib) |
+| `ffi_sym(lib, name)` | Get function pointer by name |
+| `ffi_call(fn, arg)` | Call with 1 argument |
+| `ffi_call2(fn, a, b)` | Call with 2 arguments |
+| `ffi_call3(fn, a, b, c)` | Call with 3 arguments |
+| `ffi_close(lib)` | Unload shared library |
+
+### Python Bridge
+| Function | Description |
+|----------|-------------|
+| `py_init()` | Initialize Python interpreter |
+| `py_exec(code)` | Execute Python code string |
+| `py_eval(expr)` | Evaluate Python expression |
+| `py_import(module)` | Import Python module |
+| `py_call(fn, args)` | Call Python function |
+| `py_getattr(obj, name)` | Get Python object attribute |
+| `py_list_len(list)` | Get Python list length |
+| `py_list_get(list, idx)` | Get Python list element |
+
+### LLM Bridge
+| Function | Description |
+|----------|-------------|
+| `llm_load_model(path)` | Load GGUF model via llama.cpp |
+| `llm_new_context(model, n_ctx)` | Create inference context |
+| `llm_generate(ctx, prompt, max)` | Generate text |
+| `llm_tokenize(ctx, text)` | Tokenize text |
+| `llm_embedding_dim(model)` | Get embedding dimensions |
+| `llm_get_embeddings(ctx, buf, n)` | Extract hidden state embeddings |
+| `llm_free_context(ctx)` | Free inference context |
+| `llm_free_model(model)` | Free model |
+
 ### Streams
 | Function | Description |
 |----------|-------------|
@@ -836,6 +942,68 @@ Used internally; prefer built-in map operations for most code.
 ### `src/runtime/taskpool.nova`
 Process-based parallelism using `fork`/`pipe`:
 `task_run`, `parallel_map_int`, `parallel_run_all`, `parallel_reduce_int`
+
+### `src/runtime/simd.nova`
+SSE2-vectorized SIMD operations on IEEE 754 double arrays. All functions
+process 2-4 doubles per iteration via inline assembly with scalar tail handling.
+- **Vector management**: `simd_vec_new(n)`, `simd_vec_set(v, i, val)`, `simd_vec_get(v, i)`
+- **Element-wise**: `simd_add_f64`, `simd_sub_f64`, `simd_mul_f64`, `simd_div_f64`
+- **Reduction**: `simd_dot_f64` (4 doubles/iter, 2x unrolled), `simd_sum_f64`, `simd_norm_f64`
+- **Transform**: `simd_scale_f64` (broadcast multiply), `simd_fma_f64` (fused multiply-add), `simd_relu_f64`, `simd_max_f64`
+
+### `src/runtime/tensor.nova`
+Tensor library built on SIMD operations, storing IEEE 754 doubles in contiguous
+memory via `alloc`. Tensors are 4-element lists: `[rows, cols, cols, data_ptr]`.
+- **Creation**: `tensor_new(rows, cols)`, `tensor_set`, `tensor_get`, `tensor_print`
+- **Arithmetic**: `tensor_add`, `tensor_sub`, `tensor_scale`, `tensor_matmul`
+- **ML ops**: `tensor_relu`, `tensor_softmax`, `tensor_cosine_sim`, `tensor_transpose`
+- **Matrix multiply dispatch**: tiled (32x32 blocks) for >= 64 cols, transpose+dot for smaller
+
+### `src/runtime/blas.nova`
+OpenBLAS FFI wrapper for high-performance matrix multiplication on large matrices.
+Auto-detects `libopenblas.so` or `libblas.so` at runtime.
+`blas_init`, `blas_available`, `blas_matmul`
+
+### `src/runtime/embedding.nova`
+Three-tier embedding system for competitive RAG:
+- **Tier 1**: TF-IDF with word tokenization
+- **Tier 2**: BM25-scored character n-grams (captures subword similarity)
+- **Tier 3**: Cognitive embeddings with emotion/episodic/reasoning dimensions
+- **Functions**: `embedding_init(backend)`, `embedding_encode(text)`, `embedding_add_document(text)`, `embedding_similarity(a, b)`, `embedding_cognitive(text, valence, arousal, dominance, recency, frequency, depth)`, `embedding_vocab_size()`, `embedding_doc_count()`
+
+### `src/runtime/confidence.nova`
+Confidence-annotated values for uncertainty-aware computation:
+`conf_new(value, level)`, `conf_value(c)`, `conf_level(c)`, `conf_is_uncertain(c, threshold)`, `conf_is_confident(c, threshold)`
+
+### `src/runtime/ffi.nova`
+Foreign function interface for calling C shared libraries at runtime:
+`ffi_open(path)`, `ffi_sym(lib, name)`, `ffi_call(fn, arg)`, `ffi_call2(fn, a, b)`, `ffi_call3(fn, a, b, c)`, `ffi_close(lib)`
+
+### `src/runtime/python.nova`
+Bidirectional Python bridge via libpython FFI:
+`py_init`, `py_exec(code)`, `py_eval(expr)`, `py_import(module)`, `py_call(fn, args)`, `py_getattr(obj, name)`, `py_list_len(list)`, `py_list_get(list, idx)`
+
+### `src/runtime/llm.nova`
+LLM model loading and text generation via C bridge to llama.cpp:
+`llm_load_model(path)`, `llm_new_context(model, n_ctx)`, `llm_generate(ctx, prompt, max_tokens)`, `llm_tokenize(ctx, text)`, `llm_embedding_dim(model)`, `llm_get_embeddings(ctx, buf, size)`, `llm_free_context(ctx)`, `llm_free_model(model)`
+
+### `src/runtime/mem.nova`
+IEEE 754 double-precision memory operations:
+`mem_read_f64(addr)`, `mem_write_f64(addr, val)`, `float_add`, `float_sub`, `float_mul`, `float_div`, `float_cmp`, `fsqrt`
+
+### `src/runtime/gpu.nova`
+GPU compute interface for offloading tensor operations.
+
+### `src/agent/cognitive_llm.nova`
+Cognitive LLM pipeline integrating LLM generation with Nova's cognitive architecture:
+- **Generation**: `cognitive_generate(text, max_tokens)` -- estimates confidence from text markers (certainty/uncertainty keywords, length)
+- **Chat**: `cognitive_chat(messages, context_limit)` -- retrieves similar past interactions for context augmentation, self-corrects on low confidence
+- **Evaluation**: `cognitive_evaluate(text)` -- returns `[is_coherent, confidence, text]`
+- **Embedding**: `cognitive_embed_text(text)` -- hash-based 64-dim embedding with SIMD-normalized output
+- **History**: `cognitive_history_count()`, `cognitive_clear_history()` -- episodic interaction memory (max 100 entries)
+
+### `src/agent/rag.nova`
+RAG (Retrieval-Augmented Generation) pipeline for document retrieval and context augmentation.
 
 ## Compilation
 
