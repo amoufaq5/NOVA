@@ -9,15 +9,15 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | | |
 |---|---|
 | **Status** | Self-hosting verified (`stage2.s == stage3.s`) |
-| **Version** | 4.0.0 |
+| **Version** | 4.1.0 |
 | **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) |
 | **Compiler** | 16,467 lines of Nova (lexer, parser, AST, IR, register allocator, x86-64 lowering, codegen) |
-| **Core Types** | 3,559 lines (moment, signal, node, channel, path, similarity, soul, system) |
-| **Mind Systems** | 2,690 lines (academic, experiential, emotion, memory, reasoning) |
+| **Core Types** | 5,306 lines (moment, signal, node, channel, path, similarity, soul, system, belief, goal, safety, imagination, concept) |
+| **Mind Systems** | 2,800 lines (academic, experiential, emotion, memory, reasoning) |
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
-| **Agent** | 1,693 lines (cognitive agent, cognitive LLM pipeline, RAG) |
-| **Total Nova** | ~65,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 130 tests (124 pass, 6 skip) |
+| **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
+| **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
+| **Tests** | 135 tests (129 pass, 6 skip) |
 | **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64 |
 
 ---
@@ -29,6 +29,8 @@ Nova is a compiled programming language designed for building AGI systems throug
 The language is **fully self-hosting**: the Nova compiler is written in Nova, bootstrapped from handwritten x86-64 assembly. The resulting native binary compiles its own source code to produce byte-identical output -- a verified fixed point.
 
 **New in v4.0:** SSE2-vectorized SIMD operations, tiled matrix multiplication for cache efficiency, OpenBLAS FFI for large matrices, a cognitive LLM pipeline with confidence annotation and episodic memory, BM25-scored n-gram embeddings for competitive RAG, and a unified embedding interface with cognitive dimensions.
+
+**New in v4.1:** Bayesian belief system (Beta distribution replacing flat 0-100 confidence), goal engine with four drive generators (curiosity, social, task, homeostasis), safety/audit layer with permission tiers and reversibility classification, imagination subsystem (world model, forward simulation, counterfactual reasoning, dream recombination), concept hierarchy with property inheritance and taxonomic similarity, schema system for entity type validation, multi-vector embeddings for rich semantic representation, OCEAN personality vectors and constitutional rules in the soul, multi-loop agent architecture replacing the sequential pipeline, and structural analogy via Jaccard similarity replacing substring matching.
 
 At its foundation, Nova is a practical systems language with structs, enums, lambdas, coroutines, pattern matching, try/catch/finally, 100+ built-in functions, and an arena allocator for deterministic memory management. You can write a TCP server with raw syscalls, parse JSON, manage processes, or do bitwise manipulation -- all without any external dependency.
 
@@ -42,6 +44,11 @@ What sets Nova apart is its first-class support for cognitive computing. Where o
 - **Soul declarations** define first-class identity and behavior constructs -- purpose, values, drives, and feelings -- giving each agent a persistent personality.
 - **System declarations** compose multiple minds, bridges between them, and a soul into a unified multi-mind agent.
 - **Knowledge persistence** provides file-based key-value stores and knowledge graphs for long-term memory across sessions.
+- **Concept hierarchy** with `is_a` inheritance, property propagation, taxonomic similarity, schemas for entity type validation, and multi-vector embeddings for rich multi-faceted semantic representation.
+- **Bayesian belief system** using Beta distributions (alpha/beta pseudocounts) for probabilistic belief representation, with evidence accumulation, decay with prior floors, conflict detection, and confidence conversion.
+- **Goal engine** with priority-sorted goals, hierarchical subgoals, four drive generators (curiosity, social, task, homeostasis), and goal-reasoning integration.
+- **Safety/audit layer** with three permission tiers (observe, respond, full), reversibility classification, circular-buffer decision logging, one-shot override mechanism, content filtering, and rate limiting.
+- **Imagination subsystem** with a world model (entities, relations, causal patterns), forward simulation, consequence prediction, counterfactual reasoning, dream recombination, and scenario planning.
 - **Security primitives** include SHA-256 hashing, input validation, secure memory allocation, and rate limiting.
 - **SIMD-accelerated tensor math** provides SSE2-vectorized dot product, element-wise operations, and tiled matrix multiplication with automatic OpenBLAS dispatch for large matrices.
 - **Cognitive LLM pipeline** routes LLM output through confidence estimation, episodic memory, and symbolic reasoning -- not just wrapping llama.cpp, but integrating it into Nova's cognitive architecture.
@@ -63,7 +70,7 @@ make
 # Compile and run a program
 make run FILE=examples/hello.nova
 
-# Run all 130 tests
+# Run all 135 tests
 make test-all
 
 # Verify self-hosting (stage2.s == stage3.s)
@@ -104,6 +111,13 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - **Signal scheduler** -- priority-based dispatch with batching for cache-friendly processing
 - **Path declarations** -- named signal processing pipelines with enrichment stages
 - **5 mind systems** -- academic learning, experiential learning, emotion modeling, memory, reasoning
+- **Bayesian beliefs** -- Beta distribution (α, β) pseudocounts with evidence accumulation, decay floors, and conflict detection
+- **Goal engine** -- priority-sorted goals, hierarchical subgoals, four drive generators (curiosity, social, task, homeostasis)
+- **Safety layer** -- permission tiers (observe/respond/full), reversibility classification, decision logging, override mechanism
+- **Imagination** -- world model with causal patterns, forward simulation, consequence prediction, counterfactual reasoning, dream recombination
+- **Concept hierarchy** -- `is_a` inheritance with property propagation, taxonomic similarity, schemas, multi-vector embeddings
+- **Multi-loop agent** -- concurrent perception/memory/reasoning/emotion/action/goal loops with signal queues
+- **Structural analogy** -- Jaccard similarity on content words with word-pair order bonus, replacing substring matching
 
 ### SIMD & Tensor Math
 
@@ -342,6 +356,8 @@ soul Aurora {
 
 Soul values bias signal processing (`soul_bias`), drives modulate attention (`soul_drive_level`), and feelings evolve over time (`soul_tick`). The `soul_preprocess` function applies the soul's personality to incoming signals before they reach cognitive nodes.
 
+**New in v4.1:** Souls now support OCEAN personality vectors (`soul_set_personality` with openness, conscientiousness, extraversion, agreeableness, neuroticism dimensions), constitutional rules with severity levels (`soul_add_constitution` for warn/block/override_only enforcement), identity themes with reinforcement (`soul_add_theme`, `soul_reinforce_theme`), and a loyalty hierarchy (`soul_add_loyalty` with insertion-sorted priority levels).
+
 ### System Declarations -- Multi-Mind Composition
 
 A `system` declaration composes multiple minds, bridges between them, and a soul into a unified agent:
@@ -578,16 +594,21 @@ src/compiler/              Self-hosting compiler in Nova            16,467 lines
   lower_x64.nova             x86-64 lowering                          684 lines
   codegen.nova               Code generation + runtime stubs       10,799 lines
   compiler.nova              Entry point, CLI, import resolution      547 lines
-src/core/                  Cognitive architecture types              3,559 lines
+src/core/                  Cognitive architecture types              5,306 lines
   moment.nova                Experience records, entities, emotions
   signal.nova                Typed message passing with priority
   node.nova                  6 cognitive processor types
   channel.nova               Signal routing between nodes
   path.nova                  Named processing pipelines
   similarity.nova            Similarity computation for matching
-  soul.nova                  Identity, values, drives, feelings
+  soul.nova                  Identity, values, drives, feelings, personality, constitution
   system.nova                Multi-mind composition with bridges
-src/mind/                  Mind systems                              2,690 lines
+  belief.nova                Bayesian belief system (Beta distribution) (v4.1)
+  goal.nova                  Goal engine with drive generators (v4.1)
+  safety.nova                Safety/audit layer with permission tiers (v4.1)
+  imagination.nova           World model, forward sim, counterfactual, dreams (v4.1)
+  concept.nova               Concept hierarchy, schemas, multi-vector embeddings (v4.1)
+src/mind/                  Mind systems                              2,800 lines
   academic.nova              Knowledge from axioms and rules
   experiential.nova          Learning from lived moments
   emotion.nova               Emotional state modeling
@@ -627,16 +648,17 @@ src/runtime/               Runtime library                          7,717 lines
   llm_bridge.c               C bridge to llama.cpp
   python.nova                Bidirectional Python interop
   csv.nova                   CSV parsing
-src/agent/                 Agent systems                             1,693 lines
-  agent.nova                 Cognitive agent                           773 lines
+src/agent/                 Agent systems                             2,151 lines
+  agent.nova                 Multi-loop cognitive agent (v4.1)         952 lines
   cognitive_llm.nova         Cognitive LLM pipeline (v4.0)             331 lines
   rag.nova                   RAG retrieval pipeline                    589 lines
+  preprocess.nova            Corpus ingestion and canonicalization (v4.1)
 src/pkg/pkg.nova           Package manager                            487 lines
 examples/                  31 example programs                       3,125 lines
-tests/                     130 test programs                         9,854 lines
+tests/                     135 test programs                        10,416 lines
 ```
 
-**Total: ~65,000 lines of Nova + 106,045 lines of bootstrap assembly.**
+**Total: ~68,000 lines of Nova + 106,045 lines of bootstrap assembly.**
 
 ## How It Works
 
@@ -776,7 +798,22 @@ make wasm FILE=examples/hello.nova
 `store64` `load64` `store8` `load8` `memcpy_raw`
 
 ### Soul
-`soul_new` `soul_feel` `soul_drive_level` `soul_bias` `soul_tick` `soul_preprocess`
+`soul_new` `soul_feel` `soul_drive_level` `soul_bias` `soul_tick` `soul_preprocess` `soul_set_personality` `soul_get_personality` `soul_add_constitution` `soul_check_constitution` `soul_add_theme` `soul_dominant_theme` `soul_add_loyalty` `soul_loyalty_level`
+
+### Belief
+`belief_new` `belief_mean` `belief_variance` `belief_strength` `belief_update_positive` `belief_update_negative` `belief_decay` `belief_combine` `belief_conflict` `belief_to_confidence` `confidence_to_belief`
+
+### Goal Engine
+`goal_new` `goal_engine_init` `goal_engine_add` `goal_engine_tick` `goal_engine_top` `goal_engine_complete` `goal_engine_active_count` `goal_influences_reasoning` `drive_curiosity` `drive_social` `drive_task` `drive_homeostasis`
+
+### Safety
+`safety_init` `safety_set_permission` `safety_check` `safety_classify_action` `safety_log_decision` `safety_log_count` `safety_log_recent` `safety_request_override` `safety_grant_override` `safety_has_override` `safety_check_content`
+
+### Imagination
+`imagination_init` `world_model_add_entity` `world_model_set_relation` `world_model_entities` `imagine_action` `imagine_consequence` `imagine_counterfactual` `imagine_dream` `imagine_scenarios` `imagine_best_scenario`
+
+### Concepts
+`concept_init` `concept_new` `concept_find` `concept_set_property` `concept_get_inherited` `concept_is_a` `concept_children` `concept_descendants` `concept_common_ancestor` `concept_taxonomic_similarity` `schema_new` `schema_add_required` `schema_add_optional` `schema_validate` `schema_instantiate` `multi_embed_new` `multi_embed_add_facet` `multi_embed_similarity` `multi_embed_blended_similarity`
 
 ### Database
 `db_open` `db_put` `db_get` `db_prefix` `db_close`
@@ -837,7 +874,7 @@ To get started:
 1. Read the code -- start with `src/compiler/compiler.nova` (entry point, 547 lines) and work outward
 2. Make your changes
 3. Run `make self-host` to verify the compiler can still compile itself
-4. Run `make test-all` to check for regressions (124 of 130 tests should pass)
+4. Run `make test-all` to check for regressions (129 of 135 tests should pass)
 
 The cognitive architecture lives in `src/core/` (types, soul, system) and `src/mind/` (systems). The runtime is in `src/runtime/`. The agent systems (cognitive LLM, RAG) are in `src/agent/`. The 31 examples in `examples/` demonstrate most language features.
 

@@ -1,0 +1,510 @@
+// Nova Core: Concept Layer
+// Adds concept hierarchy with inheritance, schemas for entity types,
+// and multi-vector embeddings for rich semantic representation.
+// Uses lists throughout (no maps) to avoid 16-slot limit.
+
+let CONCEPT_TAG = 290
+let CONCEPT_NAME = 0
+let CONCEPT_PARENT = 1
+let CONCEPT_PROPS = 2
+let CONCEPT_DEPTH = 3
+
+let SCHEMA_TAG = 291
+let SCHEMA_NAME = 0
+let SCHEMA_REQUIRED = 1
+let SCHEMA_OPTIONAL = 2
+let SCHEMA_CONSTRAINTS = 3
+
+let MULTI_EMB_TAG = 292
+
+// Global concept store (list of concept entries)
+let _concepts = 0
+let _schemas = 0
+
+fn concept_init() {
+    _concepts = list_new()
+    _schemas = list_new()
+}
+
+// -- Concept Hierarchy ---------------------------------------------------
+
+fn concept_new(name, parent_name) {
+    let c = list_new()
+    push(c, name)
+    push(c, parent_name)
+    push(c, list_new())
+    let depth = 0
+    if parent_name != "" {
+        let p = concept_find(parent_name)
+        if p != 0 { depth = p[CONCEPT_DEPTH] + 1 }
+    }
+    push(c, depth)
+    push(_concepts, c)
+    return c
+}
+
+fn concept_find(name) {
+    let i = 0
+    while i < len(_concepts) {
+        if _concepts[i][CONCEPT_NAME] == name { return _concepts[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+fn concept_set_property(concept, key, value) {
+    let props = concept[CONCEPT_PROPS]
+    let i = 0
+    while i < len(props) {
+        if props[i][0] == key {
+            props[i][1] = value
+            return 1
+        }
+        i = i + 1
+    }
+    let pair = list_new()
+    push(pair, key)
+    push(pair, value)
+    push(props, pair)
+    return 1
+}
+
+fn concept_get_property(concept, key) {
+    let props = concept[CONCEPT_PROPS]
+    let i = 0
+    while i < len(props) {
+        if props[i][0] == key { return props[i][1] }
+        i = i + 1
+    }
+    return 0
+}
+
+fn concept_get_inherited(name, key) {
+    let c = concept_find(name)
+    while c != 0 {
+        let val = concept_get_property(c, key)
+        if val != 0 { return val }
+        let parent = c[CONCEPT_PARENT]
+        if parent == "" { return 0 }
+        c = concept_find(parent)
+    }
+    return 0
+}
+
+fn concept_is_a(child_name, ancestor_name) {
+    if child_name == ancestor_name { return 1 }
+    let c = concept_find(child_name)
+    let max_depth = 20
+    let steps = 0
+    while c != 0 {
+        if steps > max_depth { return 0 }
+        let parent = c[CONCEPT_PARENT]
+        if parent == ancestor_name { return 1 }
+        if parent == "" { return 0 }
+        c = concept_find(parent)
+        steps = steps + 1
+    }
+    return 0
+}
+
+fn concept_children(name) {
+    let result = list_new()
+    let i = 0
+    while i < len(_concepts) {
+        if _concepts[i][CONCEPT_PARENT] == name {
+            push(result, _concepts[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn concept_descendants(name) {
+    let result = list_new()
+    let queue = list_new()
+    push(queue, name)
+    let qi = 0
+    while qi < len(queue) {
+        let current = queue[qi]
+        let children = concept_children(current)
+        let ci = 0
+        while ci < len(children) {
+            push(result, children[ci])
+            push(queue, children[ci][CONCEPT_NAME])
+            ci = ci + 1
+        }
+        qi = qi + 1
+    }
+    return result
+}
+
+fn concept_ancestors(name) {
+    let result = list_new()
+    let c = concept_find(name)
+    let max_depth = 20
+    let steps = 0
+    while c != 0 {
+        if steps > max_depth { return result }
+        let parent = c[CONCEPT_PARENT]
+        if parent == "" { return result }
+        let p = concept_find(parent)
+        if p != 0 { push(result, p) }
+        c = p
+        steps = steps + 1
+    }
+    return result
+}
+
+fn concept_depth(name) {
+    let c = concept_find(name)
+    if c == 0 { return -1 }
+    return c[CONCEPT_DEPTH]
+}
+
+fn concept_common_ancestor(name1, name2) {
+    let a1 = concept_ancestors(name1)
+    let chain1 = list_new()
+    push(chain1, name1)
+    let i = 0
+    while i < len(a1) {
+        push(chain1, a1[i][CONCEPT_NAME])
+        i = i + 1
+    }
+    let current = name2
+    let c = concept_find(name2)
+    let steps = 0
+    while steps < 20 {
+        let j = 0
+        while j < len(chain1) {
+            if chain1[j] == current { return current }
+            j = j + 1
+        }
+        if c == 0 { return "" }
+        current = c[CONCEPT_PARENT]
+        if current == "" { return "" }
+        c = concept_find(current)
+        steps = steps + 1
+    }
+    return ""
+}
+
+fn concept_taxonomic_similarity(name1, name2) {
+    if name1 == name2 { return 1000 }
+    let ca = concept_common_ancestor(name1, name2)
+    if ca == "" { return 0 }
+    let d1 = concept_depth(name1)
+    let d2 = concept_depth(name2)
+    let da = concept_depth(ca)
+    if da < 0 { return 0 }
+    let total_depth = d1 + d2
+    if total_depth == 0 { return 1000 }
+    return 2 * da * 1000 / total_depth
+}
+
+fn concept_count() {
+    return len(_concepts)
+}
+
+fn concept_all_properties(name) {
+    let result = list_new()
+    let visited_keys = list_new()
+    let c = concept_find(name)
+    let steps = 0
+    while c != 0 {
+        if steps > 20 { return result }
+        let props = c[CONCEPT_PROPS]
+        let i = 0
+        while i < len(props) {
+            let key = props[i][0]
+            let already = 0
+            let j = 0
+            while j < len(visited_keys) {
+                if visited_keys[j] == key { already = 1 }
+                j = j + 1
+            }
+            if already == 0 {
+                let pair = list_new()
+                push(pair, key)
+                push(pair, props[i][1])
+                push(result, pair)
+                push(visited_keys, key)
+            }
+            i = i + 1
+        }
+        let parent = c[CONCEPT_PARENT]
+        if parent == "" { return result }
+        c = concept_find(parent)
+        steps = steps + 1
+    }
+    return result
+}
+
+// -- Schema System -------------------------------------------------------
+
+fn schema_new(name) {
+    let s = list_new()
+    push(s, name)
+    push(s, list_new())
+    push(s, list_new())
+    push(s, list_new())
+    push(_schemas, s)
+    return s
+}
+
+fn schema_find(name) {
+    let i = 0
+    while i < len(_schemas) {
+        if _schemas[i][SCHEMA_NAME] == name { return _schemas[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+fn schema_add_required(schema, field_name, field_type) {
+    let entry = list_new()
+    push(entry, field_name)
+    push(entry, field_type)
+    push(schema[SCHEMA_REQUIRED], entry)
+}
+
+fn schema_add_optional(schema, field_name, field_type, default_val) {
+    let entry = list_new()
+    push(entry, field_name)
+    push(entry, field_type)
+    push(entry, default_val)
+    push(schema[SCHEMA_OPTIONAL], entry)
+}
+
+fn schema_add_constraint(schema, field_name, constraint_type, value) {
+    let entry = list_new()
+    push(entry, field_name)
+    push(entry, constraint_type)
+    push(entry, value)
+    push(schema[SCHEMA_CONSTRAINTS], entry)
+}
+
+fn _schema_has_field(props, field_name) {
+    let i = 0
+    while i < len(props) {
+        if props[i][0] == field_name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn schema_validate(schema, props) {
+    let errors = list_new()
+    let required = schema[SCHEMA_REQUIRED]
+    let i = 0
+    while i < len(required) {
+        let field = required[i][0]
+        if _schema_has_field(props, field) == 0 {
+            push(errors, "missing required field: " + field)
+        }
+        i = i + 1
+    }
+    let constraints = schema[SCHEMA_CONSTRAINTS]
+    let ci = 0
+    while ci < len(constraints) {
+        let field = constraints[ci][0]
+        let ctype = constraints[ci][1]
+        let cval = constraints[ci][2]
+        let j = 0
+        while j < len(props) {
+            if props[j][0] == field {
+                if ctype == "min" {
+                    if props[j][1] < cval {
+                        push(errors, field + " below minimum")
+                    }
+                }
+                if ctype == "max" {
+                    if props[j][1] > cval {
+                        push(errors, field + " above maximum")
+                    }
+                }
+            }
+            j = j + 1
+        }
+        ci = ci + 1
+    }
+    return errors
+}
+
+fn schema_instantiate(schema, values) {
+    let props = list_new()
+    let i = 0
+    while i < len(values) {
+        let pair = list_new()
+        push(pair, values[i][0])
+        push(pair, values[i][1])
+        push(props, pair)
+        i = i + 1
+    }
+    let optional = schema[SCHEMA_OPTIONAL]
+    let oi = 0
+    while oi < len(optional) {
+        let fname = optional[oi][0]
+        if _schema_has_field(props, fname) == 0 {
+            let pair = list_new()
+            push(pair, fname)
+            push(pair, optional[oi][2])
+            push(props, pair)
+        }
+        oi = oi + 1
+    }
+    return props
+}
+
+fn schema_required_count(schema) {
+    return len(schema[SCHEMA_REQUIRED])
+}
+
+fn schema_optional_count(schema) {
+    return len(schema[SCHEMA_OPTIONAL])
+}
+
+// -- Multi-Vector Embeddings ---------------------------------------------
+
+fn multi_embed_new(name) {
+    let me = list_new()
+    push(me, MULTI_EMB_TAG)
+    push(me, name)
+    push(me, list_new())
+    return me
+}
+
+fn multi_embed_add_facet(me, facet_name, embedding) {
+    let facets = me[2]
+    let i = 0
+    while i < len(facets) {
+        if facets[i][0] == facet_name {
+            facets[i][1] = embedding
+            return 1
+        }
+        i = i + 1
+    }
+    let f = list_new()
+    push(f, facet_name)
+    push(f, embedding)
+    push(facets, f)
+    return 1
+}
+
+fn multi_embed_get_facet(me, facet_name) {
+    let facets = me[2]
+    let i = 0
+    while i < len(facets) {
+        if facets[i][0] == facet_name { return facets[i][1] }
+        i = i + 1
+    }
+    return 0
+}
+
+fn multi_embed_facet_count(me) {
+    return len(me[2])
+}
+
+fn multi_embed_facet_names(me) {
+    let result = list_new()
+    let facets = me[2]
+    let i = 0
+    while i < len(facets) {
+        push(result, facets[i][0])
+        i = i + 1
+    }
+    return result
+}
+
+fn multi_embed_similarity(me1, me2, facet_name) {
+    let e1 = multi_embed_get_facet(me1, facet_name)
+    let e2 = multi_embed_get_facet(me2, facet_name)
+    if e1 == 0 { return 0 }
+    if e2 == 0 { return 0 }
+    return embed_cosine(e1, e2)
+}
+
+fn multi_embed_blended_similarity(me1, me2, facet_weights) {
+    let total_sim = 0
+    let total_weight = 0
+    let i = 0
+    while i < len(facet_weights) {
+        let fname = facet_weights[i][0]
+        let weight = facet_weights[i][1]
+        let sim = multi_embed_similarity(me1, me2, fname)
+        total_sim = total_sim + sim * weight
+        total_weight = total_weight + weight
+        i = i + 1
+    }
+    if total_weight == 0 { return 0 }
+    return total_sim / total_weight
+}
+
+fn multi_embed_merge(me1, me2, ratio) {
+    let result = multi_embed_new(me1[1] + "+" + me2[1])
+    let facets1 = me1[2]
+    let i = 0
+    while i < len(facets1) {
+        let fname = facets1[i][0]
+        let e1 = facets1[i][1]
+        let e2 = multi_embed_get_facet(me2, fname)
+        if e2 != 0 {
+            let blended = embed_lerp(e1, e2, ratio)
+            multi_embed_add_facet(result, fname, blended)
+        } else {
+            multi_embed_add_facet(result, fname, e1)
+        }
+        i = i + 1
+    }
+    let facets2 = me2[2]
+    let j = 0
+    while j < len(facets2) {
+        let fname2 = facets2[j][0]
+        if multi_embed_get_facet(result, fname2) == 0 {
+            multi_embed_add_facet(result, fname2, facets2[j][1])
+        }
+        j = j + 1
+    }
+    return result
+}
+
+// -- Integration: concept + KG bridge ------------------------------------
+
+fn concept_register_in_kg(kg, concept_name, embedding) {
+    kg_add_entity(kg, concept_name, embedding)
+    let c = concept_find(concept_name)
+    if c != 0 {
+        let parent = c[CONCEPT_PARENT]
+        if parent != "" {
+            kg_add_relation(kg, concept_name, "is_a", parent, 100)
+        }
+    }
+}
+
+fn concept_kg_query_type(kg, type_name) {
+    let result = list_new()
+    let all_desc = concept_descendants(type_name)
+    let i = 0
+    while i < len(all_desc) {
+        let name = all_desc[i][CONCEPT_NAME]
+        let ent = kg_get_entity(kg, name)
+        if ent != 0 { push(result, name) }
+        i = i + 1
+    }
+    let direct_rels = kg_get_reverse(kg, type_name)
+    let j = 0
+    while j < len(direct_rels) {
+        let r = direct_rels[j]
+        if r[1] == "is_a" {
+            let name = r[0]
+            let already = 0
+            let k = 0
+            while k < len(result) {
+                if result[k] == name { already = 1 }
+                k = k + 1
+            }
+            if already == 0 { push(result, name) }
+        }
+        j = j + 1
+    }
+    return result
+}

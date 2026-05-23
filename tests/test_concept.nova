@@ -1,0 +1,265 @@
+// Test: Concept layer (hierarchy, schemas, multi-vector embeddings)
+
+fn test_concept() {
+    concept_init()
+
+    // -- Concept Hierarchy --
+    let thing = concept_new("thing", "")
+    let living = concept_new("living_thing", "thing")
+    let animal = concept_new("animal", "living_thing")
+    let mammal = concept_new("mammal", "animal")
+    let dog = concept_new("dog", "mammal")
+    let cat = concept_new("cat", "mammal")
+    let plant = concept_new("plant", "living_thing")
+
+    if concept_count() != 7 {
+        println("FAIL: expected 7 concepts, got " + int_to_str(concept_count()))
+        exit(1)
+    }
+    println("  PASS: created 7 concepts")
+
+    // is_a checks
+    if concept_is_a("dog", "animal") != 1 {
+        println("FAIL: dog should be an animal")
+        exit(1)
+    }
+    if concept_is_a("dog", "living_thing") != 1 {
+        println("FAIL: dog should be a living_thing")
+        exit(1)
+    }
+    if concept_is_a("dog", "plant") != 0 {
+        println("FAIL: dog should not be a plant")
+        exit(1)
+    }
+    println("  PASS: is_a inheritance works")
+
+    // Depth
+    if concept_depth("thing") != 0 {
+        println("FAIL: thing should be depth 0")
+        exit(1)
+    }
+    if concept_depth("dog") != 4 {
+        println("FAIL: dog should be depth 4, got " + int_to_str(concept_depth("dog")))
+        exit(1)
+    }
+    println("  PASS: concept depth correct")
+
+    // Property inheritance
+    concept_set_property(thing, "exists", 1)
+    concept_set_property(animal, "can_move", 1)
+    concept_set_property(mammal, "warm_blooded", 1)
+    concept_set_property(dog, "sound", "bark")
+
+    if concept_get_inherited("dog", "warm_blooded") != 1 {
+        println("FAIL: dog should inherit warm_blooded from mammal")
+        exit(1)
+    }
+    if concept_get_inherited("dog", "can_move") != 1 {
+        println("FAIL: dog should inherit can_move from animal")
+        exit(1)
+    }
+    if concept_get_inherited("cat", "warm_blooded") != 1 {
+        println("FAIL: cat should inherit warm_blooded from mammal")
+        exit(1)
+    }
+    println("  PASS: property inheritance works")
+
+    // All properties (with inheritance)
+    let all_props = concept_all_properties("dog")
+    if len(all_props) < 3 {
+        println("FAIL: dog should have at least 3 inherited properties")
+        exit(1)
+    }
+    println("  PASS: all_properties returns " + int_to_str(len(all_props)) + " properties")
+
+    // Children and descendants
+    let mammal_children = concept_children("mammal")
+    if len(mammal_children) != 2 {
+        println("FAIL: mammal should have 2 children, got " + int_to_str(len(mammal_children)))
+        exit(1)
+    }
+    let living_desc = concept_descendants("living_thing")
+    if len(living_desc) < 5 {
+        println("FAIL: living_thing should have 5+ descendants, got " + int_to_str(len(living_desc)))
+        exit(1)
+    }
+    println("  PASS: children=" + int_to_str(len(mammal_children)) + " descendants=" + int_to_str(len(living_desc)))
+
+    // Common ancestor
+    let ca = concept_common_ancestor("dog", "cat")
+    if ca != "mammal" {
+        println("FAIL: common ancestor of dog/cat should be mammal, got " + ca)
+        exit(1)
+    }
+    let ca2 = concept_common_ancestor("dog", "plant")
+    if ca2 != "living_thing" {
+        println("FAIL: common ancestor of dog/plant should be living_thing, got " + ca2)
+        exit(1)
+    }
+    println("  PASS: common ancestor works")
+
+    // Taxonomic similarity
+    let sim1 = concept_taxonomic_similarity("dog", "cat")
+    let sim2 = concept_taxonomic_similarity("dog", "plant")
+    if sim1 <= sim2 {
+        println("FAIL: dog-cat should be more similar than dog-plant")
+        exit(1)
+    }
+    println("  PASS: taxonomic similarity dog-cat=" + int_to_str(sim1) + " dog-plant=" + int_to_str(sim2))
+
+    // -- Schema System --
+    let person_schema = schema_new("person")
+    schema_add_required(person_schema, "name", "string")
+    schema_add_required(person_schema, "age", "int")
+    schema_add_optional(person_schema, "occupation", "string", "unknown")
+    schema_add_optional(person_schema, "score", "int", 50)
+    schema_add_constraint(person_schema, "age", "min", 0)
+    schema_add_constraint(person_schema, "age", "max", 200)
+
+    if schema_required_count(person_schema) != 2 {
+        println("FAIL: expected 2 required fields")
+        exit(1)
+    }
+    if schema_optional_count(person_schema) != 2 {
+        println("FAIL: expected 2 optional fields")
+        exit(1)
+    }
+    println("  PASS: schema created with 2 required, 2 optional fields")
+
+    // Valid instance
+    let vals = list_new()
+    let v1 = list_new()
+    push(v1, "name")
+    push(v1, "Alice")
+    push(vals, v1)
+    let v2 = list_new()
+    push(v2, "age")
+    push(v2, 30)
+    push(vals, v2)
+    let instance = schema_instantiate(person_schema, vals)
+    let errors = schema_validate(person_schema, instance)
+    if len(errors) != 0 {
+        println("FAIL: valid instance should have 0 errors, got " + int_to_str(len(errors)))
+        exit(1)
+    }
+    println("  PASS: schema validation passes for valid instance")
+
+    // Check defaults filled in
+    if len(instance) != 4 {
+        println("FAIL: instance should have 4 fields (2 given + 2 defaults)")
+        exit(1)
+    }
+    println("  PASS: optional defaults filled in")
+
+    // Missing required field
+    let bad_vals = list_new()
+    let bv1 = list_new()
+    push(bv1, "name")
+    push(bv1, "Bob")
+    push(bad_vals, bv1)
+    let bad_errors = schema_validate(person_schema, bad_vals)
+    if len(bad_errors) < 1 {
+        println("FAIL: missing age should cause validation error")
+        exit(1)
+    }
+    println("  PASS: validation catches missing required field")
+
+    // Constraint violation
+    let neg_vals = list_new()
+    let nv1 = list_new()
+    push(nv1, "name")
+    push(nv1, "X")
+    push(neg_vals, nv1)
+    let nv2 = list_new()
+    push(nv2, "age")
+    push(nv2, -5)
+    push(neg_vals, nv2)
+    let neg_errors = schema_validate(person_schema, neg_vals)
+    if len(neg_errors) < 1 {
+        println("FAIL: negative age should violate min constraint")
+        exit(1)
+    }
+    println("  PASS: constraint violation detected")
+
+    // -- Multi-Vector Embeddings --
+    let me1 = multi_embed_new("dog_concept")
+    let semantic = embed_new(4)
+    embed_set(semantic, 0, 80)
+    embed_set(semantic, 1, 60)
+    embed_set(semantic, 2, 40)
+    embed_set(semantic, 3, 70)
+    multi_embed_add_facet(me1, "semantic", semantic)
+
+    let emotional = embed_new(4)
+    embed_set(emotional, 0, 90)
+    embed_set(emotional, 1, 30)
+    embed_set(emotional, 2, 50)
+    embed_set(emotional, 3, 80)
+    multi_embed_add_facet(me1, "emotional", emotional)
+
+    if multi_embed_facet_count(me1) != 2 {
+        println("FAIL: should have 2 facets")
+        exit(1)
+    }
+    println("  PASS: multi-embedding has 2 facets")
+
+    let me2 = multi_embed_new("cat_concept")
+    let sem2 = embed_new(4)
+    embed_set(sem2, 0, 75)
+    embed_set(sem2, 1, 55)
+    embed_set(sem2, 2, 45)
+    embed_set(sem2, 3, 65)
+    multi_embed_add_facet(me2, "semantic", sem2)
+
+    let emo2 = embed_new(4)
+    embed_set(emo2, 0, 70)
+    embed_set(emo2, 1, 50)
+    embed_set(emo2, 2, 60)
+    embed_set(emo2, 3, 40)
+    multi_embed_add_facet(me2, "emotional", emo2)
+
+    // Single-facet similarity
+    let sem_sim = multi_embed_similarity(me1, me2, "semantic")
+    if sem_sim < 80 {
+        println("FAIL: similar semantics should have high similarity, got " + int_to_str(sem_sim))
+        exit(1)
+    }
+    println("  PASS: semantic similarity = " + int_to_str(sem_sim))
+
+    // Blended similarity
+    let weights = list_new()
+    let w1 = list_new()
+    push(w1, "semantic")
+    push(w1, 70)
+    push(weights, w1)
+    let w2 = list_new()
+    push(w2, "emotional")
+    push(w2, 30)
+    push(weights, w2)
+    let blended = multi_embed_blended_similarity(me1, me2, weights)
+    if blended < 50 {
+        println("FAIL: blended similarity too low: " + int_to_str(blended))
+        exit(1)
+    }
+    println("  PASS: blended similarity = " + int_to_str(blended))
+
+    // Merge embeddings
+    let merged = multi_embed_merge(me1, me2, 50)
+    if multi_embed_facet_count(merged) != 2 {
+        println("FAIL: merged should have 2 facets")
+        exit(1)
+    }
+    println("  PASS: embedding merge works")
+
+    // Facet names
+    let names = multi_embed_facet_names(me1)
+    if len(names) != 2 {
+        println("FAIL: should list 2 facet names")
+        exit(1)
+    }
+    println("  PASS: facet names listed")
+
+    println("PASS concept")
+}
+
+test_concept()

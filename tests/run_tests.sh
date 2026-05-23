@@ -149,6 +149,12 @@ for test_file in tests/test_*.nova; do
             grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"
             ;;
+        test_concept)
+            cat src/runtime/embed.nova src/core/knowledge.nova src/core/concept.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
     esac
 
     # Compile (with timeout to prevent hangs)
