@@ -1,0 +1,69 @@
+// Test: Belief system (Beta distribution)
+
+fn test_belief() {
+    // Create uniform prior
+    let b = belief_new(1000, 1000)
+    let mean = belief_mean(b)
+    if mean != 500 {
+        println("FAIL: expected mean 500, got " + int_to_str(mean))
+        exit(1)
+    }
+    println("  PASS: uniform prior mean = 500")
+
+    // Update with positive evidence
+    belief_update_positive(b, 3000)
+    let mean2 = belief_mean(b)
+    if mean2 <= 500 {
+        println("FAIL: mean should increase after positive evidence")
+        exit(1)
+    }
+    println("  PASS: positive evidence increases mean to " + int_to_str(mean2))
+
+    // Strength increases with evidence
+    let s1 = belief_strength(belief_new(1000, 1000))
+    let b2 = belief_new(1000, 1000)
+    belief_update_positive(b2, 5000)
+    let s2 = belief_strength(b2)
+    if s2 <= s1 {
+        println("FAIL: strength should increase with evidence")
+        exit(1)
+    }
+    println("  PASS: strength increases: " + int_to_str(s1) + " -> " + int_to_str(s2))
+
+    // Decay doesn't go below floor
+    let b3 = belief_new(1000, 1000)
+    belief_decay(b3, 900)
+    let s3 = belief_strength(b3)
+    if s3 < 2000 {
+        println("FAIL: decay went below floor")
+        exit(1)
+    }
+    println("  PASS: decay respects prior floor")
+
+    // Confidence conversion roundtrip
+    let b4 = confidence_to_belief(75)
+    let conf = belief_to_confidence(b4)
+    if conf < 70 {
+        println("FAIL: confidence roundtrip too low: " + int_to_str(conf))
+        exit(1)
+    }
+    if conf > 80 {
+        println("FAIL: confidence roundtrip too high: " + int_to_str(conf))
+        exit(1)
+    }
+    println("  PASS: confidence roundtrip: 75 -> " + int_to_str(conf))
+
+    // Conflict detection
+    let high = belief_new(8000, 2000)
+    let low = belief_new(2000, 8000)
+    let conflict = belief_conflict(high, low)
+    if conflict < 300 {
+        println("FAIL: opposing beliefs should show high conflict")
+        exit(1)
+    }
+    println("  PASS: conflict between opposing beliefs = " + int_to_str(conflict))
+
+    println("PASS belief")
+}
+
+test_belief()

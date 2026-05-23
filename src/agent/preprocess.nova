@@ -1,0 +1,279 @@
+// Nova Cognitive Preprocessing / Ingestion Pipeline
+// Canonicalizes text, extracts [subject, relation, object] triples,
+// deduplicates, and consolidates facts into per-subject summaries.
+
+// -----------------------------------------------------------------------
+// Stop-word list (initialized by preprocess_init)
+// -----------------------------------------------------------------------
+let _pp_stop_words = 0
+let _pp_initialized = 0
+
+fn preprocess_init() {
+    if _pp_initialized == 1 { return 0 }
+    _pp_initialized = 1
+    let sw = "the a an is are was were be been being have has had do does did"
+    sw = sw + " will would could should may might can shall of to in for on"
+    sw = sw + " with at by from as into through during before after above"
+    sw = sw + " below between and but or nor not so yet both either neither"
+    sw = sw + " each every all any few more most other some such no only same"
+    sw = sw + " than too very just also then about up out if it its i me my"
+    sw = sw + " we us our you your he she they them this that these those"
+    _pp_stop_words = split(sw, " ")
+    return 1
+}
+
+// -----------------------------------------------------------------------
+// Internal helpers
+// -----------------------------------------------------------------------
+fn _pp_is_stop_word(word) {
+    let i = 0
+    while i < len(_pp_stop_words) {
+        if word == _pp_stop_words[i] { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _pp_collapse_spaces(text) {
+    let out = ""
+    let prev_sp = 1
+    let i = 0
+    while i < len(text) {
+        let ch = char_at(text, i)
+        if ch == 32 {
+            if prev_sp == 0 { out = out + " " }
+            prev_sp = 1
+        } else {
+            out = out + chr(ch)
+            prev_sp = 0
+        }
+        i = i + 1
+    }
+    return str_trim(out)
+}
+
+fn _pp_normalize_punct(text) {
+    let out = ""
+    let i = 0
+    while i < len(text) {
+        let ch = char_at(text, i)
+        // semicolon(59)->period, newline(10)/tab(9)->space, CR(13)->skip
+        if ch == 59 { out = out + "." }
+        else { if ch == 10 { out = out + " " }
+        else { if ch == 9 { out = out + " " }
+        else { if ch != 13 { out = out + chr(ch) } } } }
+        i = i + 1
+    }
+    return out
+}
+
+fn _pp_strip_article(text) {
+    let t = str_trim(text)
+    let tl = len(t)
+    if tl > 2 {
+        if char_at(t, 0) == 97 {
+            if char_at(t, 1) == 32 { return str_trim(substr(t, 2, tl - 2)) }
+            if tl > 3 {
+                if char_at(t, 1) == 110 {
+                    if char_at(t, 2) == 32 { return str_trim(substr(t, 3, tl - 3)) }
+                }
+            }
+        }
+    }
+    if tl > 4 {
+        if char_at(t, 0) == 116 {
+            if char_at(t, 1) == 104 {
+                if char_at(t, 2) == 101 {
+                    if char_at(t, 3) == 32 { return str_trim(substr(t, 4, tl - 4)) }
+                }
+            }
+        }
+    }
+    return t
+}
+
+// -----------------------------------------------------------------------
+// 1. Text canonicalization
+// -----------------------------------------------------------------------
+fn preprocess_canonicalize(text) {
+    return _pp_collapse_spaces(_pp_normalize_punct(str_lower(text)))
+}
+
+fn preprocess_split_sentences(text) {
+    let sentences = list_new()
+    let cur = ""
+    let i = 0
+    while i < len(text) {
+        let ch = char_at(text, i)
+        // split on period(46), question(63), exclamation(33)
+        if ch == 46 { let s = str_trim(cur)
+            if len(s) > 0 { push(sentences, s) }
+            cur = ""
+        } else { if ch == 63 { let s = str_trim(cur)
+            if len(s) > 0 { push(sentences, s) }
+            cur = ""
+        } else { if ch == 33 { let s = str_trim(cur)
+            if len(s) > 0 { push(sentences, s) }
+            cur = ""
+        } else { cur = cur + chr(ch) } } }
+        i = i + 1
+    }
+    let s = str_trim(cur)
+    if len(s) > 0 { push(sentences, s) }
+    return sentences
+}
+
+fn preprocess_extract_keywords(text) {
+    let words = split(str_lower(text), " ")
+    let kw = list_new()
+    let i = 0
+    while i < len(words) {
+        let w = str_trim(words[i])
+        if len(w) > 1 {
+            if _pp_is_stop_word(w) == 0 {
+                let dup = 0
+                let j = 0
+                while j < len(kw) {
+                    if kw[j] == w { dup = 1 }
+                    j = j + 1
+                }
+                if dup == 0 { push(kw, w) }
+            }
+        }
+        i = i + 1
+    }
+    return kw
+}
+
+// -----------------------------------------------------------------------
+// 2. Fact extraction — looks for relational patterns in a sentence
+// -----------------------------------------------------------------------
+fn _pp_extract_triples(sentence) {
+    let triples = list_new()
+    let pats = [" is ", " are ", " has ", " can ", " contains ", " causes ", " requires "]
+    let rels = ["is", "are", "has", "can", "contains", "causes", "requires"]
+    let pi = 0
+    while pi < len(pats) {
+        let pat = pats[pi]
+        if contains(sentence, pat) {
+            let idx = str_find(sentence, pat)
+            let subj = _pp_strip_article(str_trim(substr(sentence, 0, idx)))
+            let obj = _pp_strip_article(str_trim(substr(sentence, idx + len(pat), len(sentence) - idx - len(pat))))
+            if len(subj) > 0 {
+                if len(obj) > 0 {
+                    let triple = list_new()
+                    push(triple, subj)
+                    push(triple, rels[pi])
+                    push(triple, obj)
+                    push(triples, triple)
+                }
+            }
+        }
+        pi = pi + 1
+    }
+    return triples
+}
+
+// -----------------------------------------------------------------------
+// 3. Document ingestion
+// -----------------------------------------------------------------------
+fn preprocess_ingest_text(text, source_name) {
+    let canon = preprocess_canonicalize(text)
+    let sentences = preprocess_split_sentences(canon)
+    let all = list_new()
+    let si = 0
+    while si < len(sentences) {
+        let triples = _pp_extract_triples(sentences[si])
+        let ti = 0
+        while ti < len(triples) {
+            push(all, triples[ti])
+            ti = ti + 1
+        }
+        si = si + 1
+    }
+    return all
+}
+
+fn preprocess_ingest_file(path, source_name) {
+    return preprocess_ingest_text(read_file(path), source_name)
+}
+
+// -----------------------------------------------------------------------
+// 4. Deduplication
+// -----------------------------------------------------------------------
+fn preprocess_deduplicate(facts) {
+    let unique = list_new()
+    let i = 0
+    while i < len(facts) {
+        let f = facts[i]
+        let dup = 0
+        let j = 0
+        while j < len(unique) {
+            let u = unique[j]
+            if u[0] == f[0] {
+                if u[1] == f[1] {
+                    if u[2] == f[2] { dup = 1 }
+                }
+            }
+            j = j + 1
+        }
+        if dup == 0 { push(unique, f) }
+        i = i + 1
+    }
+    return unique
+}
+
+// -----------------------------------------------------------------------
+// 5. Narrative consolidation — group triples by subject
+// -----------------------------------------------------------------------
+fn preprocess_consolidate(facts) {
+    let subjects = list_new()
+    let summaries = list_new()
+    let i = 0
+    while i < len(facts) {
+        let f = facts[i]
+        let entry = f[1] + " " + f[2]
+        let found = 0
+        let j = 0
+        while j < len(subjects) {
+            if subjects[j] == f[0] {
+                list_set(summaries, j, summaries[j] + ", " + entry)
+                found = 1
+            }
+            j = j + 1
+        }
+        if found == 0 {
+            push(subjects, f[0])
+            push(summaries, entry)
+        }
+        i = i + 1
+    }
+    let result = list_new()
+    let k = 0
+    while k < len(subjects) {
+        let pair = list_new()
+        push(pair, subjects[k])
+        push(pair, summaries[k])
+        push(result, pair)
+        k = k + 1
+    }
+    return result
+}
+
+// -----------------------------------------------------------------------
+// 6. Batch processing
+// -----------------------------------------------------------------------
+fn preprocess_batch(texts, source_name) {
+    let all = list_new()
+    let i = 0
+    while i < len(texts) {
+        let facts = preprocess_ingest_text(texts[i], source_name)
+        let j = 0
+        while j < len(facts) {
+            push(all, facts[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return preprocess_consolidate(preprocess_deduplicate(all))
+}

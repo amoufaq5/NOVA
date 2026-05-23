@@ -1,0 +1,249 @@
+// Nova Core: Goal Engine — explicit goals, drive generators, scheduler
+// Goal: [TAG, name, priority, deadline, status, progress, parent, subgoals]
+// Engine: [TAG, goals_list]
+let GOAL_TAG = 260
+let GOAL_ENGINE_TAG = 261
+let GOAL_NAME = 1
+let GOAL_PRIORITY = 2
+let GOAL_DEADLINE = 3
+let GOAL_STATUS = 4
+let GOAL_PROGRESS = 5
+let GOAL_PARENT = 6
+let GOAL_SUBGOALS = 7
+let GOAL_ACTIVE = 1
+let GOAL_SUSPENDED = 2
+let GOAL_COMPLETE = 3
+let GOAL_FAILED = 4
+let GE_GOALS = 1
+
+fn _clamp(p) { if p > 100 { return 100 }; if p < 0 { return 0 }; return p }
+
+fn goal_new(name, priority, deadline) {
+    let g = list_new()
+    push(g, GOAL_TAG); push(g, name); push(g, _clamp(priority)); push(g, deadline)
+    push(g, GOAL_ACTIVE); push(g, 0); push(g, 0); push(g, list_new())
+    return g
+}
+
+fn goal_name(g) { return g[GOAL_NAME] }
+fn goal_priority(g) { return g[GOAL_PRIORITY] }
+fn goal_deadline(g) { return g[GOAL_DEADLINE] }
+fn goal_status(g) { return g[GOAL_STATUS] }
+fn goal_progress(g) { return g[GOAL_PROGRESS] }
+fn goal_parent(g) { return g[GOAL_PARENT] }
+fn goal_subgoals(g) { return g[GOAL_SUBGOALS] }
+fn goal_set_status(g, status) { g[GOAL_STATUS] = status }
+
+fn goal_set_progress(g, pct) {
+    if pct < 0 { pct = 0 }
+    if pct > 100 { pct = 100 }
+    g[GOAL_PROGRESS] = pct
+    if pct == 100 { g[GOAL_STATUS] = GOAL_COMPLETE }
+}
+
+fn goal_add_subgoal(parent, child) {
+    child[GOAL_PARENT] = goal_name(parent)
+    push(parent[GOAL_SUBGOALS], child)
+}
+
+// --- Drive generators: create goals autonomously ---
+fn drive_curiosity(knowledge_count, novelty_score) {
+    let goals = list_new()
+    if knowledge_count < 10 { push(goals, goal_new("explore_knowledge", 60 + (10 - knowledge_count) * 3, 0)) }
+    if novelty_score > 70 { push(goals, goal_new("investigate_novelty", 40 + novelty_score / 2, 0)) }
+    return goals
+}
+
+fn drive_social(interaction_count, last_interaction_time) {
+    let goals = list_new()
+    let idle = time() - last_interaction_time
+    if interaction_count < 3 { push(goals, goal_new("seek_engagement", 50 + (3 - interaction_count) * 10, 0)) }
+    if idle > 3600 { push(goals, goal_new("reconnect_social", 40 + (idle / 3600) * 5, 0)) }
+    return goals
+}
+
+fn drive_task(pending_requests) {
+    let goals = list_new()
+    let i = 0
+    while i < len(pending_requests) {
+        push(goals, goal_new("complete_task_" + pending_requests[i], 70 + i * 3, 0))
+        i = i + 1
+    }
+    return goals
+}
+
+fn drive_homeostasis(emotion_valence, memory_load) {
+    let goals = list_new()
+    if memory_load > 80 { push(goals, goal_new("consolidate_memory", 50 + memory_load - 80, 0)) }
+    if emotion_valence < 30 { push(goals, goal_new("regulate_emotion", 45 + 30 - emotion_valence, 0)) }
+    if emotion_valence > 85 { push(goals, goal_new("stabilize_mood", 35, 0)) }
+    return goals
+}
+
+// --- Goal engine: scheduler and manager ---
+fn goal_engine_init() {
+    let e = list_new()
+    push(e, GOAL_ENGINE_TAG); push(e, list_new())
+    return e
+}
+
+fn goal_engine_add(e, g) { push(e[GE_GOALS], g) }
+
+fn goal_engine_active_count(e) {
+    let goals = e[GE_GOALS]
+    let count = 0
+    let i = 0
+    while i < len(goals) {
+        let s = goals[i][GOAL_STATUS]
+        if s == GOAL_ACTIVE { count = count + 1 }
+        if s == GOAL_SUSPENDED { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+fn goal_engine_tick(e) {
+    let goals = e[GE_GOALS]
+    let now = time()
+    let i = 0
+    while i < len(goals) {
+        let g = goals[i]
+        if g[GOAL_STATUS] == GOAL_ACTIVE {
+            let dl = g[GOAL_DEADLINE]
+            if dl > 0 {
+                if now > dl { g[GOAL_STATUS] = GOAL_FAILED }
+                let rem = dl - now
+                if rem > 0 { if rem < 600 { g[GOAL_PRIORITY] = _clamp(g[GOAL_PRIORITY] + (600 - rem) / 60) } }
+            }
+            let subs = g[GOAL_SUBGOALS]
+            if len(subs) > 0 {
+                let total = 0
+                let si = 0
+                while si < len(subs) { total = total + subs[si][GOAL_PROGRESS]; si = si + 1 }
+                g[GOAL_PROGRESS] = total / len(subs)
+                if g[GOAL_PROGRESS] >= 100 { g[GOAL_STATUS] = GOAL_COMPLETE }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn goal_engine_top(e, n) {
+    let goals = e[GE_GOALS]
+    let active = list_new()
+    let i = 0
+    while i < len(goals) {
+        let s = goals[i][GOAL_STATUS]
+        if s == GOAL_ACTIVE { push(active, goals[i]) }
+        if s == GOAL_SUSPENDED { push(active, goals[i]) }
+        i = i + 1
+    }
+    let si = 0
+    while si < len(active) {
+        let sj = si + 1
+        while sj < len(active) {
+            if active[sj][GOAL_PRIORITY] > active[si][GOAL_PRIORITY] {
+                let tmp = active[si]; active[si] = active[sj]; active[sj] = tmp
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    let result = list_new()
+    i = 0
+    while i < n { if i < len(active) { push(result, active[i]) }; i = i + 1 }
+    return result
+}
+
+fn goal_engine_complete(e, name) {
+    let goals = e[GE_GOALS]
+    let i = 0
+    while i < len(goals) {
+        if goals[i][GOAL_NAME] == name {
+            goals[i][GOAL_STATUS] = GOAL_COMPLETE; goals[i][GOAL_PROGRESS] = 100
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _goal_append(dest, src) {
+    let i = 0
+    while i < len(src) { push(dest, src[i]); i = i + 1 }
+}
+
+fn _goal_name_active(e, name) {
+    let goals = e[GE_GOALS]
+    let j = 0
+    while j < len(goals) {
+        if goals[j][GOAL_NAME] == name {
+            let s = goals[j][GOAL_STATUS]
+            if s == GOAL_ACTIVE { return 1 }
+            if s == GOAL_SUSPENDED { return 1 }
+        }
+        j = j + 1
+    }
+    return 0
+}
+
+fn goal_engine_generate_drives(e, knowledge_count, interaction_count, last_interaction, pending, valence, memory_load) {
+    let novelty = 0
+    if knowledge_count < 20 { novelty = 80 - knowledge_count * 3 }
+    let all = list_new()
+    _goal_append(all, drive_curiosity(knowledge_count, novelty))
+    _goal_append(all, drive_social(interaction_count, last_interaction))
+    _goal_append(all, drive_task(pending))
+    _goal_append(all, drive_homeostasis(valence, memory_load))
+    let i = 0
+    while i < len(all) {
+        if _goal_name_active(e, all[i][GOAL_NAME]) == 0 { goal_engine_add(e, all[i]) }
+        i = i + 1
+    }
+    return len(all)
+}
+
+// --- Goal-based reasoning integration ---
+fn goal_influences_reasoning(g) {
+    if g[GOAL_STATUS] != GOAL_ACTIVE { return 0 }
+    let boost = g[GOAL_PRIORITY] * (100 - g[GOAL_PROGRESS]) / 100
+    let dl = g[GOAL_DEADLINE]
+    if dl > 0 {
+        let rem = dl - time()
+        if rem > 0 { if rem < 1800 { boost = boost + 20 } }
+    }
+    if boost > 100 { boost = 100 }
+    return boost
+}
+
+fn goal_evaluate_action(g, action_description) {
+    let gname = str_lower(g[GOAL_NAME])
+    let action = str_lower(action_description)
+    let score = 0
+    if contains(action, gname) == 1 { score = score + 50 }
+    if contains(gname, "explore") == 1 {
+        if contains(action, "search") == 1 { score = score + 30 }
+        if contains(action, "learn") == 1 { score = score + 25 }
+        if contains(action, "discover") == 1 { score = score + 30 }
+    }
+    if contains(gname, "task") == 1 {
+        if contains(action, "complete") == 1 { score = score + 30 }
+        if contains(action, "finish") == 1 { score = score + 25 }
+        if contains(action, "execute") == 1 { score = score + 25 }
+    }
+    if contains(gname, "social") == 1 {
+        if contains(action, "respond") == 1 { score = score + 30 }
+        if contains(action, "engage") == 1 { score = score + 25 }
+    }
+    if contains(gname, "consolidate") == 1 {
+        if contains(action, "organize") == 1 { score = score + 25 }
+        if contains(action, "compress") == 1 { score = score + 25 }
+    }
+    if contains(gname, "regulate") == 1 {
+        if contains(action, "calm") == 1 { score = score + 25 }
+        if contains(action, "reflect") == 1 { score = score + 20 }
+    }
+    score = score * g[GOAL_PRIORITY] / 100
+    if score > 100 { score = 100 }
+    return score
+}

@@ -1,0 +1,75 @@
+// Test: Safety audit layer (permissions, logging, overrides)
+
+fn test_safety_audit() {
+    safety_init()
+
+    // Default permission is observe-only
+    if safety_check(PERM_FULL) == 1 {
+        println("FAIL: should not have full permission by default")
+        exit(1)
+    }
+    println("  PASS: default permission is restrictive")
+
+    // Set full permission
+    safety_set_permission(PERM_FULL)
+    if safety_check(PERM_RESPOND) != 1 {
+        println("FAIL: should have respond permission with PERM_FULL")
+        exit(1)
+    }
+    println("  PASS: permission upgrade works")
+
+    // Reversibility classification
+    let r1 = safety_classify_action("query")
+    if r1 != REVERSIBLE {
+        println("FAIL: query should be reversible")
+        exit(1)
+    }
+    let r2 = safety_classify_action("delete")
+    if r2 != IRREVERSIBLE {
+        println("FAIL: delete should be irreversible")
+        exit(1)
+    }
+    println("  PASS: reversibility classification correct")
+
+    // Decision logging
+    safety_log_decision("respond", "answered question", 85, REVERSIBLE)
+    safety_log_decision("teach", "learned new fact", 70, PARTIALLY_REVERSIBLE)
+    if safety_log_count() != 2 {
+        println("FAIL: expected 2 log entries")
+        exit(1)
+    }
+    let recent = safety_log_recent(1)
+    if len(recent) != 1 {
+        println("FAIL: expected 1 recent entry")
+        exit(1)
+    }
+    println("  PASS: decision logging works (" + int_to_str(safety_log_count()) + " entries)")
+
+    // Content filter
+    if safety_check_content("") == 1 {
+        println("FAIL: empty content should be flagged")
+        exit(1)
+    }
+    if safety_check_content("hello world") != 1 {
+        println("FAIL: normal content should pass")
+        exit(1)
+    }
+    println("  PASS: content filtering works")
+
+    // Override mechanism
+    safety_request_override("special_action", "testing")
+    safety_grant_override("special_action")
+    if safety_has_override("special_action") != 1 {
+        println("FAIL: override should be available")
+        exit(1)
+    }
+    if safety_has_override("special_action") != 0 {
+        println("FAIL: override should be consumed (one-shot)")
+        exit(1)
+    }
+    println("  PASS: override mechanism works")
+
+    println("PASS safety_audit")
+}
+
+test_safety_audit()

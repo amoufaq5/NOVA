@@ -324,6 +324,132 @@ fn reasoning_abduce(observation, depth) {
 //    Returns a single Conclusion or 0.
 // ---------------------------------------------------------------------------
 
+fn _reasoning_tokenize(text) {
+    let tokens = list_new()
+    let lower = str_lower(text)
+    let tlen = len(lower)
+    let start = 0
+    let in_word = 0
+    let i = 0
+    while i < tlen {
+        let c = char_at(lower, i)
+        let is_alpha = 0
+        if c >= 97 {
+            if c <= 122 { is_alpha = 1 }
+        }
+        if c >= 48 {
+            if c <= 57 { is_alpha = 1 }
+        }
+        if is_alpha == 1 {
+            if in_word == 0 {
+                start = i
+                in_word = 1
+            }
+        } else {
+            if in_word == 1 {
+                push(tokens, substr(lower, start, i - start))
+                in_word = 0
+            }
+        }
+        i = i + 1
+    }
+    if in_word == 1 {
+        push(tokens, substr(lower, start, tlen - start))
+    }
+    return tokens
+}
+
+fn _reasoning_is_stopword(w) {
+    if w == "the" { return 1 }
+    if w == "a" { return 1 }
+    if w == "an" { return 1 }
+    if w == "is" { return 1 }
+    if w == "are" { return 1 }
+    if w == "was" { return 1 }
+    if w == "were" { return 1 }
+    if w == "in" { return 1 }
+    if w == "on" { return 1 }
+    if w == "at" { return 1 }
+    if w == "to" { return 1 }
+    if w == "of" { return 1 }
+    if w == "and" { return 1 }
+    if w == "or" { return 1 }
+    if w == "it" { return 1 }
+    if w == "i" { return 1 }
+    if w == "do" { return 1 }
+    if w == "for" { return 1 }
+    if w == "with" { return 1 }
+    if w == "that" { return 1 }
+    if w == "this" { return 1 }
+    if w == "not" { return 1 }
+    return 0
+}
+
+fn _reasoning_content_words(text) {
+    let tokens = _reasoning_tokenize(text)
+    let result = list_new()
+    let i = 0
+    while i < len(tokens) {
+        let w = tokens[i]
+        if len(w) > 1 {
+            if _reasoning_is_stopword(w) == 0 {
+                push(result, w)
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn _reasoning_structural_sim(situation, ep_what) {
+    if situation == ep_what { return 100 }
+    let a_words = _reasoning_content_words(situation)
+    let b_words = _reasoning_content_words(ep_what)
+    let a_len = len(a_words)
+    let b_len = len(b_words)
+    if a_len == 0 { return 0 }
+    if b_len == 0 { return 0 }
+    let shared = 0
+    let i = 0
+    while i < a_len {
+        let j = 0
+        while j < b_len {
+            if a_words[i] == b_words[j] {
+                shared = shared + 1
+                j = b_len
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let union_size = a_len + b_len - shared
+    if union_size == 0 { return 0 }
+    let jaccard = shared * 100 / union_size
+    let order_bonus = 0
+    if a_len >= 2 {
+        if b_len >= 2 {
+            let bi = 0
+            while bi < a_len - 1 {
+                let w1 = a_words[bi]
+                let w2 = a_words[bi + 1]
+                let bj = 0
+                while bj < b_len - 1 {
+                    if b_words[bj] == w1 {
+                        if b_words[bj + 1] == w2 {
+                            order_bonus = order_bonus + 10
+                        }
+                    }
+                    bj = bj + 1
+                }
+                bi = bi + 1
+            }
+        }
+    }
+    let score = jaccard + order_bonus
+    if score > 100 { score = 100 }
+    return score
+}
+
 fn reasoning_analogize(situation, episodes) {
     if episodes == 0 { return 0 }
     let ep_count = len(episodes)
@@ -337,23 +463,8 @@ fn reasoning_analogize(situation, episodes) {
         let ep_m = episode_moment(ep)
         let ep_what = moment_what(ep_m)
 
-        // Score by content similarity
-        let score = 0
-        if ep_what == situation {
-            // Exact match — highest score
-            score = 100
-        } else {
-            // Try substring containment as a weaker match
-            if contains(ep_what, situation) == 1 {
-                score = 60
-            } else {
-                if contains(situation, ep_what) == 1 {
-                    score = 50
-                }
-            }
-        }
+        let score = _reasoning_structural_sim(situation, ep_what)
 
-        // Weight by salience of the original moment
         let salience = moment_salience(ep_m)
         score = score * salience / 100
 
@@ -368,7 +479,6 @@ fn reasoning_analogize(situation, episodes) {
         return 0
     }
 
-    // Extract the consequence/outcome from the best matching episode
     let best_ep = episodes[best_idx]
     let best_m = episode_moment(best_ep)
     let conseq = moment_consequence(best_m)

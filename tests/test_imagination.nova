@@ -1,0 +1,77 @@
+// Test: Imagination subsystem
+
+fn test_imagination() {
+    random_seed(42)
+    imagination_init()
+
+    // Add entities to world model
+    world_model_add_entity("ball", list_new())
+    world_model_add_entity("box", list_new())
+
+    let entities = world_model_entities()
+    if len(entities) < 2 {
+        println("FAIL: should have at least 2 entities")
+        exit(1)
+    }
+    println("  PASS: world model has " + int_to_str(len(entities)) + " entities")
+
+    // Forward simulation
+    let predictions = imagine_action("ball", "move", 3)
+    if len(predictions) < 1 {
+        println("FAIL: should produce predictions")
+        exit(1)
+    }
+    println("  PASS: forward simulation produced " + int_to_str(len(predictions)) + " steps")
+
+    // Consequence prediction
+    let consequence = imagine_consequence("break the window")
+    if len(consequence) == 0 {
+        println("FAIL: should predict a consequence")
+        exit(1)
+    }
+    println("  PASS: consequence predicted: " + consequence)
+
+    // Counterfactual
+    let cf = imagine_counterfactual("stayed home", "went outside")
+    if len(cf) < 3 {
+        println("FAIL: counterfactual should return 3 elements")
+        exit(1)
+    }
+    println("  PASS: counterfactual divergence score = " + int_to_str(cf[2]))
+
+    // Dream recombination
+    let episodes = list_new()
+    let ep1 = list_new()
+    push(ep1, "dog chased cat")
+    push(ep1, 80)
+    push(episodes, ep1)
+    let ep2 = list_new()
+    push(ep2, "rain fell hard")
+    push(ep2, 60)
+    push(episodes, ep2)
+    let dreams = imagine_dream(episodes, 50)
+    if len(dreams) < 1 {
+        println("FAIL: should produce at least one dream")
+        exit(1)
+    }
+    println("  PASS: dream recombination produced " + int_to_str(len(dreams)) + " combinations")
+
+    // Scenario planning
+    let scenarios = imagine_scenarios("approaching deadline", 3)
+    if len(scenarios) < 1 {
+        println("FAIL: should generate scenarios")
+        exit(1)
+    }
+    println("  PASS: generated " + int_to_str(len(scenarios)) + " scenarios")
+
+    let best = imagine_best_scenario(scenarios)
+    if best == 0 {
+        println("FAIL: should find best scenario")
+        exit(1)
+    }
+    println("  PASS: best scenario found")
+
+    println("PASS imagination")
+}
+
+test_imagination()

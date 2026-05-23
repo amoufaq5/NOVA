@@ -1,0 +1,76 @@
+// Test: Goal engine
+
+fn test_goal() {
+    let engine = goal_engine_init()
+
+    // Create and add goals
+    let g1 = goal_new("learn_nova", 80, 0)
+    let g2 = goal_new("help_user", 90, 0)
+    let g3 = goal_new("explore", 50, 0)
+    goal_engine_add(engine, g1)
+    goal_engine_add(engine, g2)
+    goal_engine_add(engine, g3)
+
+    let count = goal_engine_active_count(engine)
+    if count != 3 {
+        println("FAIL: expected 3 active goals, got " + int_to_str(count))
+        exit(1)
+    }
+    println("  PASS: 3 active goals")
+
+    // Top goals by priority
+    let top = goal_engine_top(engine, 2)
+    if len(top) != 2 {
+        println("FAIL: expected top 2, got " + int_to_str(len(top)))
+        exit(1)
+    }
+    if goal_name(top[0]) != "help_user" {
+        println("FAIL: highest priority should be help_user")
+        exit(1)
+    }
+    println("  PASS: top goal is help_user (priority 90)")
+
+    // Complete a goal
+    goal_engine_complete(engine, "explore")
+    let count2 = goal_engine_active_count(engine)
+    if count2 != 2 {
+        println("FAIL: expected 2 active after completing one")
+        exit(1)
+    }
+    println("  PASS: goal completion works")
+
+    // Subgoals
+    let parent = goal_new("big_task", 70, 0)
+    let sub1 = goal_new("step1", 60, 0)
+    let sub2 = goal_new("step2", 60, 0)
+    goal_add_subgoal(parent, sub1)
+    goal_add_subgoal(parent, sub2)
+    goal_set_status(sub1, GOAL_COMPLETE)
+    // Parent should still be active
+    if goal_status(parent) != GOAL_ACTIVE {
+        println("FAIL: parent should still be active")
+        exit(1)
+    }
+    println("  PASS: hierarchical goals work")
+
+    // Drive generators
+    let goals = drive_curiosity(5, 80)
+    if len(goals) < 1 {
+        println("FAIL: curiosity drive should generate goals")
+        exit(1)
+    }
+    println("  PASS: curiosity drive generates " + int_to_str(len(goals)) + " goals")
+
+    // Goal reasoning influence
+    let g = goal_new("investigate_novelty", 85, 0)
+    let boost = goal_influences_reasoning(g)
+    if boost <= 0 {
+        println("FAIL: active goal should boost reasoning")
+        exit(1)
+    }
+    println("  PASS: goal reasoning boost = " + int_to_str(boost))
+
+    println("PASS goal")
+}
+
+test_goal()

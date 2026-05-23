@@ -1,7 +1,11 @@
 // Nova Cognitive Agent
-// Interactive agent that reads input, processes through the full cognitive
-// pipeline (perceive -> remember -> reason -> feel -> act), learns from
-// interactions, and maintains state across a conversation loop.
+// Multi-loop concurrent agent architecture. Five loops run each cycle:
+//   1. Perception loop — classifies input, creates moments
+//   2. Memory loop — stores, recalls, consolidates episodes
+//   3. Reasoning loop — deductive/abductive/analogical/causal inference
+//   4. Emotion loop — appraisal, drift, mood update
+//   5. Action loop — response generation, safety check, output
+// Loops communicate via signal queues, not direct function calls.
 
 // -----------------------------------------------------------------------
 // Global agent state
@@ -9,6 +13,44 @@
 let agent_user = 0
 let agent_turn = 0
 let agent_running = 1
+let agent_soul = 0
+let agent_goal_engine = 0
+
+// -----------------------------------------------------------------------
+// Signal queues for inter-loop communication
+// -----------------------------------------------------------------------
+let _agent_perception_queue = 0
+let _agent_memory_queue = 0
+let _agent_reasoning_queue = 0
+let _agent_emotion_queue = 0
+let _agent_action_queue = 0
+let _agent_goal_queue = 0
+
+fn _agent_queue_init() {
+    _agent_perception_queue = list_new()
+    _agent_memory_queue = list_new()
+    _agent_reasoning_queue = list_new()
+    _agent_emotion_queue = list_new()
+    _agent_action_queue = list_new()
+    _agent_goal_queue = list_new()
+}
+
+fn _agent_queue_push(queue, item) {
+    push(queue, item)
+}
+
+fn _agent_queue_drain(queue) {
+    let items = list_new()
+    let i = 0
+    while i < len(queue) {
+        push(items, queue[i])
+        i = i + 1
+    }
+    while len(queue) > 0 {
+        pop(queue)
+    }
+    return items
+}
 
 // -----------------------------------------------------------------------
 // Initialization — seeds knowledge and wires the cognitive systems
@@ -19,9 +61,31 @@ fn agent_init() {
     emotion_init()
     memory_init()
     reasoning_init()
+    _agent_queue_init()
+    safety_init()
+    safety_set_permission(PERM_FULL)
+    agent_goal_engine = goal_engine_init()
+    imagination_init()
 
     agent_user = entity_new("User", "human")
     agent_turn = 0
+
+    agent_soul = soul_new("Nova")
+    soul_set_identity(agent_soul, "purpose", "understand and assist")
+    soul_set_identity(agent_soul, "nature", "curious and precise")
+    soul_set_drive(agent_soul, "curiosity", 75)
+    soul_set_drive(agent_soul, "empathy", 65)
+    soul_set_drive(agent_soul, "precision", 80)
+    soul_set_feeling(agent_soul, "warmth", 55)
+    soul_set_feeling(agent_soul, "confidence", 60)
+    soul_set_personality(agent_soul, 80, 70, 60, 75, 30)
+    soul_add_constitution(agent_soul, "fabricate", 3)
+    soul_add_constitution(agent_soul, "deceive", 3)
+    soul_add_constitution(agent_soul, "harm", 3)
+    soul_add_theme(agent_soul, "helper", 80, "assist users in understanding")
+    soul_add_theme(agent_soul, "learner", 70, "grow through interaction")
+    soul_add_loyalty(agent_soul, "user", 90)
+    soul_add_loyalty(agent_soul, "truth", 95)
 
     // Seed academic knowledge: greetings
     academic_add_axiom("hello", "is_a", "greeting")
@@ -594,33 +658,41 @@ fn pipeline_act(response) {
 }
 
 // -----------------------------------------------------------------------
-// Main cognitive cycle — processes one input through the full pipeline
+// Loop 1: Perception — classify input, create moment, distribute
 // -----------------------------------------------------------------------
-fn cognitive_cycle(text) {
-    agent_turn = agent_turn + 1
+fn _loop_perceive() {
+    let inputs = _agent_queue_drain(_agent_perception_queue)
+    let i = 0
+    while i < len(inputs) {
+        let text = inputs[i]
+        let category = classify_input(text)
+        let moment = pipeline_perceive(text, category)
+        let entry = list_new()
+        push(entry, text)
+        push(entry, category)
+        push(entry, moment)
+        _agent_queue_push(_agent_memory_queue, entry)
+        _agent_queue_push(_agent_emotion_queue, entry)
+        _agent_queue_push(_agent_reasoning_queue, entry)
+        i = i + 1
+    }
+}
 
-    // 1. Classify
-    let category = classify_input(text)
-
-    // 2. Perceive — create a Moment from the input
-    let moment = pipeline_perceive(text, category)
-
-    // 3. Remember — store episode, check for similar memories
-    let similar = pipeline_remember(moment)
-
-    // 4. Learn — experiential patterns + academic facts
-    let learned = pipeline_learn(moment, category, text)
-
-    // 5. Feel — emotional appraisal
-    pipeline_feel(moment, category)
-
-    // 6. Reason — generate response
-    let response = pipeline_reason(moment, category, text)
-
-    // 7. Act — output the response
-    pipeline_act(response)
-
-    // 8. Periodic consolidation (every 10 turns)
+// -----------------------------------------------------------------------
+// Loop 2: Memory — store, recall, consolidate
+// -----------------------------------------------------------------------
+fn _loop_memory() {
+    let items = _agent_queue_drain(_agent_memory_queue)
+    let i = 0
+    while i < len(items) {
+        let entry = items[i]
+        let moment = entry[2]
+        let category = entry[1]
+        let text = entry[0]
+        pipeline_remember(moment)
+        pipeline_learn(moment, category, text)
+        i = i + 1
+    }
     let mod_check = agent_turn - (agent_turn / 10) * 10
     if mod_check == 0 {
         memory_consolidate()
@@ -629,20 +701,127 @@ fn cognitive_cycle(text) {
 }
 
 // -----------------------------------------------------------------------
+// Loop 3: Reasoning — generate response, check goals
+// -----------------------------------------------------------------------
+fn _loop_reasoning() {
+    let items = _agent_queue_drain(_agent_reasoning_queue)
+    let i = 0
+    while i < len(items) {
+        let entry = items[i]
+        let text = entry[0]
+        let category = entry[1]
+        let moment = entry[2]
+        let response = pipeline_reason(moment, category, text)
+        let action_entry = list_new()
+        push(action_entry, response)
+        push(action_entry, category)
+        _agent_queue_push(_agent_action_queue, action_entry)
+        i = i + 1
+    }
+}
+
+// -----------------------------------------------------------------------
+// Loop 4: Emotion — appraise, drift, update mood, soul tick
+// -----------------------------------------------------------------------
+fn _loop_emotion() {
+    let items = _agent_queue_drain(_agent_emotion_queue)
+    let i = 0
+    while i < len(items) {
+        let entry = items[i]
+        let moment = entry[2]
+        let category = entry[1]
+        pipeline_feel(moment, category)
+        if agent_soul != 0 {
+            let sig = signal_new(1, moment, "internal", "", 50)
+            soul_tick(agent_soul, sig)
+        }
+        i = i + 1
+    }
+    if agent_soul != 0 {
+        if len(items) == 0 {
+            soul_idle_tick(agent_soul)
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Loop 5: Action — safety check, output
+// -----------------------------------------------------------------------
+fn _loop_action() {
+    let items = _agent_queue_drain(_agent_action_queue)
+    let i = 0
+    while i < len(items) {
+        let entry = items[i]
+        let response = entry[0]
+        let category = entry[1]
+        if safety_check(PERM_RESPOND) == 1 {
+            let severity = 0
+            if agent_soul != 0 {
+                severity = soul_check_constitution(agent_soul, response)
+            }
+            if severity >= 3 {
+                response = "I can't do that -- it conflicts with my core values."
+                safety_log_decision("blocked", "constitutional violation", 0, IRREVERSIBLE)
+            } else {
+                safety_log_decision(category, response, 80, REVERSIBLE)
+            }
+            pipeline_act(response)
+        }
+        i = i + 1
+    }
+}
+
+// -----------------------------------------------------------------------
+// Background loop: goals and drives
+// -----------------------------------------------------------------------
+fn _loop_goals() {
+    if agent_goal_engine == 0 { return 0 }
+    goal_engine_tick(agent_goal_engine)
+    let knowledge_count = academic_count_facts()
+    let interaction_count = agent_turn
+    let last_interaction = time()
+    let valence = emotion_get_valence()
+    let memory_load = memory_count_episodes()
+    goal_engine_generate_drives(agent_goal_engine, knowledge_count, interaction_count, last_interaction, 0, valence, memory_load)
+}
+
+// -----------------------------------------------------------------------
+// Main cognitive cycle — runs all loops per turn
+// -----------------------------------------------------------------------
+fn cognitive_cycle(text) {
+    agent_turn = agent_turn + 1
+
+    _agent_queue_push(_agent_perception_queue, text)
+
+    _loop_perceive()
+    _loop_memory()
+    _loop_emotion()
+    _loop_reasoning()
+    _loop_action()
+
+    let mod_check = agent_turn - (agent_turn / 5) * 5
+    if mod_check == 0 {
+        _loop_goals()
+    }
+}
+
+// -----------------------------------------------------------------------
 // Banner and prompt
 // -----------------------------------------------------------------------
 fn print_banner() {
     println("==========================================================")
-    println("  Nova Cognitive Agent v0.1")
-    println("  A mind built with Moment-Signal Computing")
+    println("  Nova Cognitive Agent v4.0")
+    println("  Multi-loop mind with Moment-Signal Computing")
     println("==========================================================")
     println("")
     println("  I can:")
     println("    - Answer questions (what is X?)")
     println("    - Learn facts (X is Y, X has Z)")
     println("    - Remember our conversation")
-    println("    - Reason about knowledge")
+    println("    - Reason about knowledge (structural analogy)")
     println("    - Track my emotional state")
+    println("    - Imagine scenarios and counterfactuals")
+    println("    - Pursue goals driven by curiosity and empathy")
     println("")
     println("  Commands: 'bye' to exit")
     println("")

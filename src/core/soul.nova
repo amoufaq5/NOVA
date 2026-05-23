@@ -561,3 +561,236 @@ fn soul_is_active(s) {
     if s == 0 { return 0 }
     return 1
 }
+
+// ================================================================
+// Personality vector: 5 dimensions (OCEAN model), each 0-100
+// Stored as a separate list on the soul at index 12
+// ================================================================
+
+let SOUL_PERSONALITY = 12
+let SOUL_CONSTITUTION = 13
+let SOUL_THEMES = 14
+let SOUL_LOYALTY = 15
+
+fn soul_ensure_extended(s) {
+    while len(s) <= SOUL_LOYALTY {
+        push(s, list_new())
+    }
+}
+
+fn soul_set_personality(s, openness, conscientiousness, extraversion, agreeableness, neuroticism) {
+    soul_ensure_extended(s)
+    let pv = list_new()
+    push(pv, openness)
+    push(pv, conscientiousness)
+    push(pv, extraversion)
+    push(pv, agreeableness)
+    push(pv, neuroticism)
+    list_set(s, SOUL_PERSONALITY, pv)
+}
+
+fn soul_get_personality(s) {
+    soul_ensure_extended(s)
+    let pv = s[SOUL_PERSONALITY]
+    if len(pv) < 5 {
+        let default_pv = list_new()
+        push(default_pv, 50)
+        push(default_pv, 50)
+        push(default_pv, 50)
+        push(default_pv, 50)
+        push(default_pv, 50)
+        return default_pv
+    }
+    return pv
+}
+
+fn soul_personality_openness(s) { return soul_get_personality(s)[0] }
+fn soul_personality_conscientiousness(s) { return soul_get_personality(s)[1] }
+fn soul_personality_extraversion(s) { return soul_get_personality(s)[2] }
+fn soul_personality_agreeableness(s) { return soul_get_personality(s)[3] }
+fn soul_personality_neuroticism(s) { return soul_get_personality(s)[4] }
+
+fn soul_personality_bias_signal(s, sig) {
+    let pv = soul_get_personality(s)
+    let m = signal_moment(sig)
+    let salience = moment_salience(m)
+    let openness = pv[0]
+    if openness > 70 {
+        salience = salience + (openness - 70) / 3
+    }
+    let neuroticism = pv[4]
+    if neuroticism > 70 {
+        let arousal = moment_arousal(m)
+        arousal = arousal + (neuroticism - 70) / 2
+    }
+    return salience
+}
+
+// ================================================================
+// Constitutional rules: hard constraints the soul must obey
+// Each rule: [rule_text, severity (1=warn, 2=block, 3=override_only)]
+// ================================================================
+
+fn soul_add_constitution(s, rule_text, severity) {
+    soul_ensure_extended(s)
+    let rule = list_new()
+    push(rule, rule_text)
+    push(rule, severity)
+    push(s[SOUL_CONSTITUTION], rule)
+}
+
+fn soul_check_constitution(s, action_text) {
+    soul_ensure_extended(s)
+    let rules = s[SOUL_CONSTITUTION]
+    let lower = str_lower(action_text)
+    let i = 0
+    while i < len(rules) {
+        let rule = rules[i]
+        let rule_lower = str_lower(rule[0])
+        if contains(lower, rule_lower) == 1 {
+            return rule[1]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn soul_constitution_count(s) {
+    soul_ensure_extended(s)
+    return len(s[SOUL_CONSTITUTION])
+}
+
+fn soul_get_constitution(s, idx) {
+    soul_ensure_extended(s)
+    return s[SOUL_CONSTITUTION][idx]
+}
+
+// ================================================================
+// Identity themes: recurring narrative patterns that define the soul
+// Each theme: [theme_name, strength (0-100), description]
+// ================================================================
+
+fn soul_add_theme(s, name, strength, description) {
+    soul_ensure_extended(s)
+    let theme = list_new()
+    push(theme, name)
+    push(theme, strength)
+    push(theme, description)
+    push(s[SOUL_THEMES], theme)
+}
+
+fn soul_theme_strength(s, name) {
+    soul_ensure_extended(s)
+    let themes = s[SOUL_THEMES]
+    let i = 0
+    while i < len(themes) {
+        if themes[i][0] == name {
+            return themes[i][1]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn soul_reinforce_theme(s, name, amount) {
+    soul_ensure_extended(s)
+    let themes = s[SOUL_THEMES]
+    let i = 0
+    while i < len(themes) {
+        if themes[i][0] == name {
+            let v = themes[i][1] + amount
+            if v > 100 { v = 100 }
+            if v < 0 { v = 0 }
+            themes[i][1] = v
+            return v
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn soul_dominant_theme(s) {
+    soul_ensure_extended(s)
+    let themes = s[SOUL_THEMES]
+    if len(themes) == 0 { return "" }
+    let best = themes[0]
+    let i = 1
+    while i < len(themes) {
+        if themes[i][1] > best[1] {
+            best = themes[i]
+        }
+        i = i + 1
+    }
+    return best[0]
+}
+
+// ================================================================
+// Loyalty hierarchy: ordered list of entities the soul is loyal to
+// Earlier entries have higher loyalty. Each: [entity_name, loyalty_level (0-100)]
+// ================================================================
+
+fn soul_add_loyalty(s, entity_name, level) {
+    soul_ensure_extended(s)
+    let entry = list_new()
+    push(entry, entity_name)
+    push(entry, level)
+    let loyalties = s[SOUL_LOYALTY]
+    let inserted = 0
+    let new_list = list_new()
+    let i = 0
+    while i < len(loyalties) {
+        if inserted == 0 {
+            if level > loyalties[i][1] {
+                push(new_list, entry)
+                inserted = 1
+            }
+        }
+        if loyalties[i][0] != entity_name {
+            push(new_list, loyalties[i])
+        }
+        i = i + 1
+    }
+    if inserted == 0 {
+        push(new_list, entry)
+    }
+    list_set(s, SOUL_LOYALTY, new_list)
+}
+
+fn soul_loyalty_level(s, entity_name) {
+    soul_ensure_extended(s)
+    let loyalties = s[SOUL_LOYALTY]
+    let i = 0
+    while i < len(loyalties) {
+        if loyalties[i][0] == entity_name {
+            return loyalties[i][1]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn soul_loyalty_rank(s, entity_name) {
+    soul_ensure_extended(s)
+    let loyalties = s[SOUL_LOYALTY]
+    let i = 0
+    while i < len(loyalties) {
+        if loyalties[i][0] == entity_name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn soul_loyalty_permits(s, entity_name, action) {
+    let rank = soul_loyalty_rank(s, entity_name)
+    if rank < 0 { return 0 }
+    let level = soul_loyalty_level(s, entity_name)
+    let severity = soul_check_constitution(s, action)
+    if severity >= 3 { return 0 }
+    if severity >= 2 {
+        if rank > 0 { return 0 }
+        if level < 90 { return 0 }
+    }
+    return 1
+}

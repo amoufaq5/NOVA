@@ -1,0 +1,342 @@
+// Nova Core: Imagination
+// Mental simulation, counterfactual reasoning, dream recombination,
+// and scenario planning for Nova's cognitive architecture.
+// Entities stored as [name, properties_list, relations_list].
+// Properties are lists of [key, value] pairs. Max ~200 entities.
+
+let IMAGINATION_TAG = 280
+let WM_ENT_NAME = 0
+let WM_ENT_PROPS = 1
+let WM_ENT_RELS = 2
+
+// -- Pair-list helpers ------------------------------------------------
+fn _img_plist_find(plist, key) {
+    let i = 0
+    while i < len(plist) {
+        if plist[i][0] == key { return i }
+        i = i + 1
+    }
+    return -1
+}
+fn _img_plist_set(plist, key, val) {
+    let idx = _img_plist_find(plist, key)
+    if idx >= 0 {
+        plist[idx][1] = val
+    } else {
+        let entry = list_new()
+        push(entry, key)
+        push(entry, val)
+        push(plist, entry)
+    }
+}
+fn _img_plist_get(plist, key) {
+    let idx = _img_plist_find(plist, key)
+    if idx >= 0 { return plist[idx][1] }
+    return ""
+}
+
+// -- World model ------------------------------------------------------
+let _wm_entities = 0
+let _wm_causal = 0
+fn _wm_add_causal(keyword, consequence, valence) {
+    let e = list_new()
+    push(e, keyword)
+    push(e, consequence)
+    push(e, valence)
+    push(_wm_causal, e)
+}
+fn world_model_init() {
+    _wm_entities = list_new()
+    _wm_causal = list_new()
+    _wm_add_causal("move", "position changed", 0)
+    _wm_add_causal("give", "possession transferred", 10)
+    _wm_add_causal("break", "object broken", -30)
+    _wm_add_causal("build", "structure created", 20)
+    _wm_add_causal("eat", "hunger reduced", 15)
+    _wm_add_causal("attack", "damage dealt", -40)
+    _wm_add_causal("heal", "health restored", 30)
+    _wm_add_causal("hide", "visibility reduced", 5)
+    _wm_add_causal("take", "item acquired", 10)
+    _wm_add_causal("drop", "item lost", -10)
+}
+fn _wm_find_entity(name) {
+    let i = 0
+    while i < len(_wm_entities) {
+        if _wm_entities[i][WM_ENT_NAME] == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+fn world_model_add_entity(name, properties) {
+    let idx = _wm_find_entity(name)
+    if idx >= 0 {
+        _wm_entities[idx][WM_ENT_PROPS] = properties
+        return idx
+    }
+    let ent = list_new()
+    push(ent, name)
+    push(ent, properties)
+    push(ent, list_new())
+    push(_wm_entities, ent)
+    return len(_wm_entities) - 1
+}
+fn world_model_set_relation(entity_a, relation, entity_b) {
+    let idx = _wm_find_entity(entity_a)
+    if idx == -1 { return 0 }
+    let rel = list_new()
+    push(rel, relation)
+    push(rel, entity_b)
+    push(_wm_entities[idx][WM_ENT_RELS], rel)
+    return 1
+}
+fn world_model_get_property(entity_name, prop_name) {
+    let idx = _wm_find_entity(entity_name)
+    if idx == -1 { return "" }
+    return _img_plist_get(_wm_entities[idx][WM_ENT_PROPS], prop_name)
+}
+fn world_model_entities() {
+    let names = list_new()
+    let i = 0
+    while i < len(_wm_entities) {
+        push(names, _wm_entities[i][WM_ENT_NAME])
+        i = i + 1
+    }
+    return names
+}
+
+// -- Deep-copy helpers ------------------------------------------------
+fn _img_copy_props(props) {
+    let cp = list_new()
+    let i = 0
+    while i < len(props) {
+        let pair = list_new()
+        push(pair, props[i][0])
+        push(pair, props[i][1])
+        push(cp, pair)
+        i = i + 1
+    }
+    return cp
+}
+fn _img_copy_entity(ent) {
+    let cp = list_new()
+    push(cp, ent[WM_ENT_NAME])
+    push(cp, _img_copy_props(ent[WM_ENT_PROPS]))
+    let rels = list_new()
+    let i = 0
+    while i < len(ent[WM_ENT_RELS]) {
+        let r = list_new()
+        push(r, ent[WM_ENT_RELS][i][0])
+        push(r, ent[WM_ENT_RELS][i][1])
+        push(rels, r)
+        i = i + 1
+    }
+    push(cp, rels)
+    return cp
+}
+
+// -- Forward simulation -----------------------------------------------
+fn _img_apply_action(ent_copy, action) {
+    let act = str_lower(action)
+    let p = ent_copy[WM_ENT_PROPS]
+    if contains(act, "move") == 1 { _img_plist_set(p, "position", "moved"); _img_plist_set(p, "state", "moving") }
+    if contains(act, "give") == 1 { _img_plist_set(p, "possession", "transferred"); _img_plist_set(p, "state", "giving") }
+    if contains(act, "break") == 1 { _img_plist_set(p, "state", "broken"); _img_plist_set(p, "integrity", "0") }
+    if contains(act, "build") == 1 { _img_plist_set(p, "state", "building"); _img_plist_set(p, "progress", "started") }
+    if contains(act, "eat") == 1 { _img_plist_set(p, "hunger", "sated"); _img_plist_set(p, "state", "eating") }
+    if contains(act, "attack") == 1 { _img_plist_set(p, "state", "attacking"); _img_plist_set(p, "threat", "high") }
+    if contains(act, "heal") == 1 { _img_plist_set(p, "state", "healing"); _img_plist_set(p, "health", "restored") }
+    if contains(act, "hide") == 1 { _img_plist_set(p, "state", "hidden"); _img_plist_set(p, "visibility", "low") }
+    if contains(act, "take") == 1 { _img_plist_set(p, "possession", "acquired"); _img_plist_set(p, "state", "taking") }
+    if contains(act, "drop") == 1 { _img_plist_set(p, "possession", "lost"); _img_plist_set(p, "state", "dropping") }
+}
+fn _img_describe_state(ent_copy) {
+    let desc = ent_copy[WM_ENT_NAME] + ": "
+    let sv = _img_plist_get(ent_copy[WM_ENT_PROPS], "state")
+    if sv != "" { desc = desc + "state=" + sv } else { desc = desc + "state=idle" }
+    let pos = _img_plist_get(ent_copy[WM_ENT_PROPS], "position")
+    if pos != "" { desc = desc + " pos=" + pos }
+    return desc
+}
+fn imagine_action(entity, action, steps) {
+    let results = list_new()
+    let idx = _wm_find_entity(entity)
+    if idx == -1 {
+        let fb = list_new()
+        push(fb, 0)
+        push(fb, entity + ": unknown entity")
+        push(results, fb)
+        return results
+    }
+    let sim = _img_copy_entity(_wm_entities[idx])
+    let step = 0
+    while step < steps {
+        _img_apply_action(sim, action)
+        let entry = list_new()
+        push(entry, step + 1)
+        push(entry, _img_describe_state(sim))
+        push(results, entry)
+        step = step + 1
+    }
+    return results
+}
+fn imagine_consequence(action_desc) {
+    let low = str_lower(action_desc)
+    let i = 0
+    while i < len(_wm_causal) {
+        if contains(low, _wm_causal[i][0]) == 1 { return _wm_causal[i][1] }
+        i = i + 1
+    }
+    return "outcome uncertain"
+}
+
+// -- Counterfactual reasoning -----------------------------------------
+fn _img_valence_sum(text) {
+    let lower = str_lower(text)
+    let total = 0
+    let i = 0
+    while i < len(_wm_causal) {
+        if contains(lower, _wm_causal[i][0]) == 1 { total = total + _wm_causal[i][2] }
+        i = i + 1
+    }
+    return total
+}
+fn imagine_counterfactual(original_situation, alternative) {
+    let orig_c = imagine_consequence(original_situation)
+    let alt_c = imagine_consequence(alternative)
+    let diff = _img_valence_sum(original_situation) - _img_valence_sum(alternative)
+    if diff < 0 { diff = 0 - diff }
+    if diff > 100 { diff = 100 }
+    let result = list_new()
+    push(result, orig_c)
+    push(result, alt_c)
+    push(result, diff)
+    return result
+}
+
+// -- Dream recombination ----------------------------------------------
+fn imagine_dream(episodes, creativity) {
+    let dreams = list_new()
+    let ep_len = len(episodes)
+    if ep_len < 2 { return dreams }
+    let num_combos = 2 + creativity * ep_len / 100
+    if num_combos > ep_len * 2 { num_combos = ep_len * 2 }
+    let rels = list_new()
+    push(rels, "transforms_into")
+    push(rels, "merges_with")
+    push(rels, "opposes")
+    push(rels, "echoes")
+    push(rels, "follows")
+    push(rels, "causes")
+    let c = 0
+    while c < num_combos {
+        let ia = random(ep_len)
+        let ib = random(ep_len)
+        if ib == ia { ib = (ia + 1 + random(ep_len - 1)) % ep_len }
+        let ri = 0
+        if creativity > 30 { ri = random(len(rels)) } else { ri = random(3) }
+        let sal = (episodes[ia][1] + episodes[ib][1]) / 2
+        if sal >= 100 - creativity {
+            let dream = list_new()
+            push(dream, episodes[ia][0])
+            push(dream, rels[ri])
+            push(dream, episodes[ib][0])
+            push(dreams, dream)
+        }
+        c = c + 1
+    }
+    return dreams
+}
+fn imagine_dream_narrative(dreams) {
+    if len(dreams) == 0 { return "...silence in the dream..." }
+    let narrative = "In the dream: "
+    let i = 0
+    while i < len(dreams) {
+        let d = dreams[i]
+        if i > 0 { narrative = narrative + " Then, " }
+        narrative = narrative + d[0] + " " + d[1] + " " + d[2] + "."
+        i = i + 1
+    }
+    return narrative
+}
+
+// -- Scenario planning ------------------------------------------------
+fn imagine_scenarios(situation, num_scenarios) {
+    let scenarios = list_new()
+    let sit_lower = str_lower(situation)
+    let matched = list_new()
+    let i = 0
+    while i < len(_wm_causal) {
+        if contains(sit_lower, _wm_causal[i][0]) == 1 { push(matched, i) }
+        i = i + 1
+    }
+    let s = 0
+    while s < num_scenarios {
+        let desc = ""
+        let likelihood = 50
+        let vsum = 0
+        if len(matched) > 0 {
+            let mi = matched[s % len(matched)]
+            desc = situation + " leads to " + _wm_causal[mi][1]
+            vsum = _wm_causal[mi][2]
+            likelihood = 40 + random(40)
+        } else {
+            desc = situation + " leads to uncertain outcome"
+            likelihood = 20 + random(30)
+        }
+        if len(_wm_causal) > 0 {
+            if s > 0 {
+                let extra = _wm_causal[random(len(_wm_causal))]
+                desc = desc + " and then " + extra[1]
+                vsum = vsum + extra[2]
+                likelihood = likelihood - 10
+            }
+        }
+        if likelihood < 5 { likelihood = 5 }
+        if likelihood > 95 { likelihood = 95 }
+        let vlabel = "neutral"
+        if vsum > 5 { vlabel = "positive" }
+        if vsum < -5 { vlabel = "negative" }
+        let sc = list_new()
+        push(sc, desc)
+        push(sc, likelihood)
+        push(sc, vlabel)
+        push(scenarios, sc)
+        s = s + 1
+    }
+    return scenarios
+}
+fn _img_scenario_score(scenario) {
+    let vm = 50
+    if scenario[2] == "positive" { vm = 80 }
+    if scenario[2] == "negative" { vm = 20 }
+    return scenario[1] * vm / 100
+}
+fn imagine_best_scenario(scenarios) {
+    if len(scenarios) == 0 { return 0 }
+    let best_idx = 0
+    let best_sc = _img_scenario_score(scenarios[0])
+    let i = 1
+    while i < len(scenarios) {
+        let sc = _img_scenario_score(scenarios[i])
+        if sc > best_sc { best_sc = sc; best_idx = i }
+        i = i + 1
+    }
+    return scenarios[best_idx]
+}
+fn imagine_worst_scenario(scenarios) {
+    if len(scenarios) == 0 { return 0 }
+    let worst_idx = 0
+    let worst_sc = _img_scenario_score(scenarios[0])
+    let i = 1
+    while i < len(scenarios) {
+        let sc = _img_scenario_score(scenarios[i])
+        if sc < worst_sc { worst_sc = sc; worst_idx = i }
+        i = i + 1
+    }
+    return scenarios[worst_idx]
+}
+
+// -- Initialization ---------------------------------------------------
+fn imagination_init() {
+    world_model_init()
+}

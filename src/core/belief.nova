@@ -1,0 +1,119 @@
+// Nova Core: Belief
+// Probabilistic belief system using Beta distributions.
+// Beliefs are (alpha, beta) pseudocount pairs stored as tagged lists.
+// All values are integers scaled by 1000 (so 1.0 = 1000, 0.5 = 500).
+
+let BELIEF_TAG = 250
+let BELIEF_ALPHA = 1
+let BELIEF_BETA = 2
+
+let belief_prior_floor = 2000
+
+fn belief_new(alpha, beta) {
+    let b = list_new()
+    push(b, BELIEF_TAG)
+    push(b, alpha)
+    push(b, beta)
+    return b
+}
+
+fn belief_mean(b) {
+    let a = b[BELIEF_ALPHA]
+    let bt = b[BELIEF_BETA]
+    let total = a + bt
+    if total == 0 { return 500 }
+    return a * 1000 / total
+}
+
+fn belief_variance(b) {
+    let a = b[BELIEF_ALPHA]
+    let bt = b[BELIEF_BETA]
+    let total = a + bt
+    if total == 0 { return 0 }
+    let num = a * bt
+    let denom = total * total
+    if denom == 0 { return 0 }
+    return num * 1000 / denom
+}
+
+fn belief_update_positive(b, weight) {
+    b[BELIEF_ALPHA] = b[BELIEF_ALPHA] + weight
+}
+
+fn belief_update_negative(b, weight) {
+    b[BELIEF_BETA] = b[BELIEF_BETA] + weight
+}
+
+fn belief_strength(b) {
+    return b[BELIEF_ALPHA] + b[BELIEF_BETA]
+}
+
+fn belief_is_uncertain(b, threshold) {
+    let v = belief_variance(b)
+    if v > threshold { return 1 }
+    return 0
+}
+
+fn belief_entropy(b) {
+    let a = b[BELIEF_ALPHA]
+    let bt = b[BELIEF_BETA]
+    let total = a + bt
+    if total == 0 { return 1000 }
+    let mean = a * 1000 / total
+    let inv_mean = 1000 - mean
+    let prod = mean * inv_mean
+    let strength = total / 1000
+    if strength < 1 { strength = 1 }
+    return prod / strength
+}
+
+fn belief_decay(b, rate) {
+    let a = b[BELIEF_ALPHA]
+    let bt = b[BELIEF_BETA]
+    let floor_each = belief_prior_floor / 2
+
+    let new_a = a - a * rate / 1000
+    let new_bt = bt - bt * rate / 1000
+
+    if new_a < floor_each { new_a = floor_each }
+    if new_bt < floor_each { new_bt = floor_each }
+
+    b[BELIEF_ALPHA] = new_a
+    b[BELIEF_BETA] = new_bt
+}
+
+fn belief_combine(a, b) {
+    let new_alpha = a[BELIEF_ALPHA] + b[BELIEF_ALPHA] - 1000
+    let new_beta = a[BELIEF_BETA] + b[BELIEF_BETA] - 1000
+    if new_alpha < 1000 { new_alpha = 1000 }
+    if new_beta < 1000 { new_beta = 1000 }
+    return belief_new(new_alpha, new_beta)
+}
+
+fn belief_conflict(a, b) {
+    let mean_a = belief_mean(a)
+    let mean_b = belief_mean(b)
+    let diff = mean_a - mean_b
+    if diff < 0 { diff = 0 - diff }
+    let strength_a = belief_strength(a)
+    let strength_b = belief_strength(b)
+    let min_str = strength_a
+    if strength_b < min_str { min_str = strength_b }
+    let certainty = min_str * 1000 / (min_str + 2000)
+    return diff * certainty / 1000
+}
+
+fn belief_to_confidence(b) {
+    let mean = belief_mean(b)
+    return mean / 10
+}
+
+fn confidence_to_belief(conf) {
+    let mean = conf * 10
+    let total = 10000
+    let alpha = mean * total / 1000
+    let beta = total - alpha
+    if alpha < 1000 { alpha = 1000 }
+    if beta < 1000 { beta = 1000 }
+    return belief_new(alpha, beta)
+}
