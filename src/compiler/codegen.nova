@@ -53,6 +53,37 @@ let cg_float_frac_digits = 0
 let cg_float_count = 0
 let cg_float_vars = 0
 let cg_float_var_count = 0
+let cg_fns_ht = 0
+let cg_globals_ht = 0
+let CG_HT_SIZE = 8
+
+fn _cg_ht_new() {
+    let ht = list_new()
+    let i = 0
+    while i < CG_HT_SIZE {
+        push(ht, list_new())
+        i = i + 1
+    }
+    return ht
+}
+
+fn _cg_ht_add(ht, name) {
+    let b = len(name) % CG_HT_SIZE
+    push(ht[b], name)
+    return 0
+}
+
+fn _cg_ht_has(ht, name) {
+    if name == 0 { return 0 }
+    let b = len(name) % CG_HT_SIZE
+    let entries = ht[b]
+    let i = 0
+    while i < len(entries) {
+        if entries[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
 
 fn cg_init() {
     cg_output = list_new()
@@ -87,6 +118,8 @@ fn cg_init() {
     cg_float_count = 0
     cg_float_vars = list_new()
     cg_float_var_count = 0
+    cg_fns_ht = _cg_ht_new()
+    cg_globals_ht = _cg_ht_new()
 }
 
 fn out(s) {
@@ -973,16 +1006,8 @@ fn is_builtin_fn(name) {
 }
 
 fn is_known_function(name) {
-    let fi = 0
-    while fi < len(cg_fns) {
-        if cg_fns[fi] == name {
-            return 1
-        }
-        fi = fi + 1
-    }
-    if is_builtin_fn(name) == 1 {
-        return 1
-    }
+    if _cg_ht_has(cg_fns_ht, name) == 1 { return 1 }
+    if is_builtin_fn(name) == 1 { return 1 }
     return 0
 }
 
@@ -3553,6 +3578,7 @@ fn gen_program(program) {
             cg_method_count = cg_method_count + 1
             let mfn_name = d[1] + "_" + d[2]
             push(cg_fns, mfn_name)
+            _cg_ht_add(cg_fns_ht, mfn_name)
         }
         i = i + 1
     }
@@ -3563,6 +3589,7 @@ fn gen_program(program) {
         let d = decls[i]
         if ast_tag(d) == AST_EXTERN_FN {
             push(cg_fns, d[1])
+            _cg_ht_add(cg_fns_ht, d[1])
             push(cg_externs, d[1])
             cg_extern_count = cg_extern_count + 1
         }
@@ -3575,6 +3602,7 @@ fn gen_program(program) {
         let d = decls[i]
         if ast_tag(d) == AST_FN_DECL {
             push(cg_fns, d[1])
+            _cg_ht_add(cg_fns_ht, d[1])
         }
         i = i + 1
     }
@@ -3583,6 +3611,7 @@ fn gen_program(program) {
     while li < len(par_lambdas) {
         let lam = par_lambdas[li]
         push(cg_fns, lam[1])
+        _cg_ht_add(cg_fns_ht, lam[1])
         li = li + 1
     }
 
@@ -5538,6 +5567,7 @@ fn wasm_gen_program(program) {
         let d = decls[i]
         if ast_tag(d) == AST_FN_DECL {
             push(cg_fns, d[1])
+            _cg_ht_add(cg_fns_ht, d[1])
             push(wasm_fn_names, d[1])
         }
         i = i + 1
