@@ -28,7 +28,10 @@ languages in systems programming and general-purpose development, respectively.
 | **Cognitive primitives** | Built-in (moments, signals, nodes, channels, minds, souls, systems, knowledge graphs, embeddings, SIMD tensors, cognitive LLM, RAG, security, beliefs, goals, safety, imagination, concepts) | Not available (requires libraries) | Not available (requires libraries) |
 | **Flow operators** | `~>`, `<~`, `=>>`, `<<~`, `~~>`, `<=>`, `\|~>` | Not available | Not available |
 | **Package manager** | Built-in (`nova pkg`) | Third-party (apt, vcpkg, conan) | pip / PyPI |
-| **Target platforms** | Linux x86-64, macOS x86-64, WebAssembly, Windows x86-64 | Every major platform and architecture | Every major platform (via interpreter) |
+| **IEEE 754 floats** | Extended utilities (classification, rounding, formatting, statistics) | Full hardware support via `<math.h>` | Built-in `float`/`complex` types |
+| **FFI** | libc-based or direct syscall ELF loading | Native (it IS the C ABI) | ctypes, cffi |
+| **Persistent memory** | Built-in file-backed allocator (mmap MAP_SHARED) | Manual mmap or libraries | mmap module, shelve, databases |
+| **Target platforms** | Linux x86-64, macOS x86-64, WebAssembly, Windows x86-64, ARM64 (codegen) | Every major platform and architecture | Every major platform (via interpreter) |
 | **First release** | 2024-2025 | 1972 | 1991 |
 | **Ecosystem maturity** | Young, growing | 50+ years, massive | 30+ years, massive |
 

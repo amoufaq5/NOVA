@@ -9,7 +9,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | | |
 |---|---|
 | **Status** | Self-hosting verified (`stage2.s == stage3.s`) |
-| **Version** | 4.1.0 |
+| **Version** | 4.2.0 |
 | **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) |
 | **Compiler** | 16,467 lines of Nova (lexer, parser, AST, IR, register allocator, x86-64 lowering, codegen) |
 | **Core Types** | 5,306 lines (moment, signal, node, channel, path, similarity, soul, system, belief, goal, safety, imagination, concept) |
@@ -17,8 +17,8 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 135 tests (129 pass, 6 skip) |
-| **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64 |
+| **Tests** | 139 tests (133 pass, 6 skip) |
+| **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64 (AArch64) codegen |
 
 ---
 
@@ -29,6 +29,8 @@ Nova is a compiled programming language designed for building AGI systems throug
 The language is **fully self-hosting**: the Nova compiler is written in Nova, bootstrapped from handwritten x86-64 assembly. The resulting native binary compiles its own source code to produce byte-identical output -- a verified fixed point.
 
 **New in v4.0:** SSE2-vectorized SIMD operations, tiled matrix multiplication for cache efficiency, OpenBLAS FFI for large matrices, a cognitive LLM pipeline with confidence annotation and episodic memory, BM25-scored n-gram embeddings for competitive RAG, and a unified embedding interface with cognitive dimensions.
+
+**New in v4.2:** IEEE 754 double-precision float utilities (classification, rounding, formatting, parsing, statistics), syscall-based FFI without libc (ELF parser, SYSV hash lookup, raw socket wrappers), ARM64/AArch64 code generation pass (register mapping, NEON SIMD, syscall translation), file-backed persistent allocator (mmap MAP_SHARED, checksummed header, survives arena resets), hash-accelerated O(1) function lookup in codegen, and tensor performance benchmarks.
 
 **New in v4.1:** Bayesian belief system (Beta distribution replacing flat 0-100 confidence), goal engine with four drive generators (curiosity, social, task, homeostasis), safety/audit layer with permission tiers and reversibility classification, imagination subsystem (world model, forward simulation, counterfactual reasoning, dream recombination), concept hierarchy with property inheritance and taxonomic similarity, schema system for entity type validation, multi-vector embeddings for rich semantic representation, OCEAN personality vectors and constitutional rules in the soul, multi-loop agent architecture replacing the sequential pipeline, and structural analogy via Jaccard similarity replacing substring matching.
 
@@ -70,7 +72,7 @@ make
 # Compile and run a program
 make run FILE=examples/hello.nova
 
-# Run all 135 tests
+# Run all 139 tests
 make test-all
 
 # Verify self-hosting (stage2.s == stage3.s)
@@ -140,15 +142,28 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - **Cognitive text embedding** -- `cognitive_embed_text` produces hash-based 64-dimensional embeddings with SIMD-accelerated normalization
 - **Interaction history** -- stores prompt/response/confidence triples with configurable max history
 
+### IEEE 754 Float Utilities
+
+- **Constants** -- `float_zero`, `float_one`, `float_inf`, `float_neg_inf`, `float_nan`, `float_epsilon`, `float_max`, `float_min_positive`
+- **Classification** -- `float_is_nan`, `float_is_inf`, `float_is_finite`, `float_is_negative`, `float_is_zero`
+- **Rounding** -- `float_floor`, `float_ceil`, `float_round`, `float_trunc`
+- **Arithmetic** -- `float_abs`, `float_neg`, `float_min_of`, `float_max_of`, `float_clamp_range`, `float_lerp`, `float_fma`, `float_reciprocal`, `float_mod`
+- **Formatting** -- `float_format(f, decimals)` produces "3.14", `float_parse(s)` parses from string
+- **Statistics** -- `float_sum_list`, `float_mean_list`, `float_min_list`, `float_max_list`, `float_variance_list`
+
 ### Foreign Function Interface
 
 - **Dynamic library loading** -- `ffi_open`, `ffi_sym`, `ffi_call` for calling C functions from Nova
+- **Syscall-based FFI** -- `ffi_syscall_init`, `ffi_load`, `ffi_lookup` for loading ELF shared libraries without libc, using direct syscalls and SYSV hash lookup
+- **Raw sockets** -- `sys_socket`, `sys_bind`, `sys_listen`, `sys_accept`, `sys_connect`, `sys_send`, `sys_recv` via direct Linux syscalls
+- **Network utilities** -- `make_sockaddr_in_raw`, `ip_to_int` for constructing socket addresses
 - **Python bridge** -- `py_init`, `py_exec`, `py_eval`, `py_import`, `py_call` for bidirectional Python interop
 - **LLM bridge** -- C bridge to llama.cpp for model loading, text generation, tokenization, and embedding extraction
 
 ### Knowledge & Persistence
 
 - **File-based key-value store** -- `db_open`, `db_put`, `db_get`, `db_prefix`, `db_close` for persistent storage across sessions
+- **Persistent allocator** -- `persistent_open`, `persistent_alloc`, `persistent_free`, `persistent_sync`, `persistent_close` for file-backed memory pools using mmap(MAP_SHARED) that survive arena resets with checksummed headers
 - **Embeddings** -- integer vectors for semantic similarity: `embed_new`, `embed_set`, `embed_cosine`, `embed_distance`
 - **Knowledge graphs** -- entity-relation graphs with nearest-neighbor lookup: `kg_new`, `kg_add_entity`, `kg_add_relation`, `kg_nearest`
 
@@ -221,7 +236,8 @@ There is no implicit entry point. Execution begins at the first top-level statem
 
 ### Compiler and Tooling
 
-- Cross-compilation: `--target=linux` (default), `--target=macos`, `--target=wasm`, `--target=windows`
+- Cross-compilation: `--target=linux` (default), `--target=macos`, `--target=wasm`, `--target=windows`, ARM64 lowering pass available
+- Hash-accelerated O(1) function lookup in codegen (8-bucket list-of-lists)
 - `--check` for syntax validation without code generation
 - `--stats` for compilation statistics
 - `--version` and `--debug` flags

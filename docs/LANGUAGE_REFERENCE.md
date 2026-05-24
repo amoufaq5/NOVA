@@ -973,7 +973,29 @@ let m = {k: v * 2 for k, v in items}
 | `conf_is_uncertain(c, threshold)` | Check if below threshold |
 | `conf_is_confident(c, threshold)` | Check if above threshold |
 
-### FFI
+### IEEE 754 Float Utilities (`import "std/float"`)
+| Function | Description |
+|----------|-------------|
+| `float_zero()`, `float_one()`, `float_half()` | Common constants |
+| `float_inf()`, `float_neg_inf()`, `float_nan()` | Special values (via bit patterns) |
+| `float_epsilon()`, `float_max()`, `float_min_positive()` | Precision limits |
+| `float_is_nan(x)`, `float_is_inf(x)`, `float_is_finite(x)` | Classification |
+| `float_is_negative(x)`, `float_is_zero(x)` | Sign/zero checks |
+| `float_floor(x)`, `float_ceil(x)`, `float_round(x)`, `float_trunc(x)` | Rounding |
+| `float_abs(x)`, `float_neg(x)` | Absolute value, negation (bit manipulation) |
+| `float_min_of(a, b)`, `float_max_of(a, b)` | Min/max |
+| `float_clamp_range(x, lo, hi)` | Clamp to range |
+| `float_lerp(a, b, t)` | Linear interpolation |
+| `float_fma(a, b, c)` | Fused multiply-add (a*b + c) |
+| `float_reciprocal(x)`, `float_mod(a, b)` | Division utilities |
+| `float_approx_eq(a, b, tolerance)` | Approximate equality |
+| `float_format(f, decimals)` | Format to string ("3.14") |
+| `float_parse(s)` | Parse from string |
+| `float_sum_list(values)`, `float_mean_list(values)` | Statistical aggregates |
+| `float_min_list(values)`, `float_max_list(values)` | List extremes |
+| `float_variance_list(values)` | Sample variance |
+
+### FFI (libc-based)
 | Function | Description |
 |----------|-------------|
 | `ffi_open(path)` | Load shared library (.so/.dylib) |
@@ -982,6 +1004,42 @@ let m = {k: v * 2 for k, v in items}
 | `ffi_call2(fn, a, b)` | Call with 2 arguments |
 | `ffi_call3(fn, a, b, c)` | Call with 3 arguments |
 | `ffi_close(lib)` | Unload shared library |
+
+### FFI Syscall-Based (`import "std/ffi_syscall"`)
+| Function | Description |
+|----------|-------------|
+| `ffi_syscall_init()` | Initialize library search paths |
+| `ffi_load(lib_name)` | Load ELF shared library (no libc) |
+| `ffi_lookup(handle, sym_name)` | Look up symbol via SYSV hash |
+| `ffi_unload(handle)` | Unload library (munmap + close) |
+| `sys_socket(domain, type, proto)` | Create socket via syscall |
+| `sys_bind(fd, addr, len)` | Bind socket |
+| `sys_listen(fd, backlog)` | Listen on socket |
+| `sys_accept(fd, addr, len)` | Accept connection |
+| `sys_connect(fd, addr, len)` | Connect to remote |
+| `sys_send(fd, buf, len, flags)` | Send data |
+| `sys_recv(fd, buf, len, flags)` | Receive data |
+| `make_sockaddr_in_raw(port, ip)` | Construct sockaddr_in structure |
+| `ip_to_int(ip_str)` | Parse IP address ("10.0.0.1") to integer |
+
+### Persistent Allocator (`import "std/persistent_alloc"`)
+| Function | Description |
+|----------|-------------|
+| `persistent_open(filepath, pool_size)` | Open/create file-backed memory pool |
+| `persistent_alloc(size)` | Allocate from persistent pool |
+| `persistent_free(ptr)` | Free persistent allocation |
+| `persistent_sync()` | Sync pool to disk (msync) |
+| `persistent_close()` | Close the pool |
+| `persistent_store64(ptr, offset, val)` | Store 64-bit value |
+| `persistent_load64(ptr, offset)` | Load 64-bit value |
+| `persistent_store8(ptr, offset, val)` | Store byte |
+| `persistent_load8(ptr, offset)` | Load byte |
+| `persistent_write_str(ptr, str)` | Write null-terminated string |
+| `persistent_read_str(ptr, max_len)` | Read null-terminated string |
+| `persistent_used()` | Query bytes used |
+| `persistent_capacity()` | Query total capacity |
+| `persistent_block_count()` | Query number of blocks |
+| `persistent_compact()` | Merge adjacent free blocks |
 
 ### Python Bridge
 | Function | Description |

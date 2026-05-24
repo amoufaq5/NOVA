@@ -1622,6 +1622,111 @@ fn main() {
 main()
 ```
 
+## 15. IEEE 754 Float Utilities (v4.2)
+
+Nova provides extended IEEE 754 double-precision operations beyond the core
+builtins, including classification, rounding, formatting, and statistics.
+
+### Scientific Computing with Floats
+
+```nova
+import "std/float"
+
+fn main() {
+    let pi = float_parse("3.14159")
+    let e = float_parse("2.71828")
+
+    // Rounding
+    println("floor(pi) = " + float_format(float_floor(pi), 1))
+    println("ceil(e) = " + float_format(float_ceil(e), 1))
+
+    // Classification
+    let inf = float_inf()
+    println("inf is infinite: " + int_to_str(float_is_inf(inf)))
+    println("nan != nan: " + int_to_str(float_is_nan(float_nan())))
+
+    // Statistics
+    let values = [to_float(10), to_float(20), to_float(30), to_float(40)]
+    println("mean = " + float_format(float_mean_list(values), 2))
+    println("variance = " + float_format(float_variance_list(values), 2))
+
+    // Formatting
+    println("pi to 4 decimals: " + float_format(pi, 4))
+}
+
+main()
+```
+
+## 16. Syscall-Based FFI and Networking (v4.2)
+
+Load shared libraries and create network connections without libc,
+using only Linux syscalls and direct ELF parsing.
+
+### Raw TCP Socket
+
+```nova
+import "std/syscall"
+import "std/alloc"
+import "std/ffi_syscall"
+
+fn main() {
+    ffi_syscall_init()
+
+    // Create a TCP socket
+    let sock = sys_socket(AF_INET, SOCK_STREAM, 0)
+    if sock >= 0 {
+        println("Socket created: fd " + int_to_str(sock))
+
+        // Build address for localhost:8080
+        let ip = ip_to_int("127.0.0.1")
+        let addr = make_sockaddr_in_raw(8080, ip)
+
+        // Attempt connect (will fail if nothing listening)
+        let rc = sys_connect(sock, addr, 16)
+        if rc < 0 {
+            println("Connect failed (expected if no server)")
+        }
+        sys_close(sock)
+    }
+}
+
+main()
+```
+
+## 17. Persistent Memory (v4.2)
+
+File-backed memory pools that survive arena resets, enabling persistent
+data structures across program runs.
+
+### Persistent Key-Value Store
+
+```nova
+import "std/syscall"
+import "std/alloc"
+import "std/persistent_alloc"
+
+fn main() {
+    let ok = persistent_open("/tmp/myapp.dat", 65536)
+    if ok == 1 {
+        // Allocate space for a record
+        let rec = persistent_alloc(256)
+        persistent_write_str(rec, "Hello from Nova!")
+
+        // Read it back
+        let msg = persistent_read_str(rec, 256)
+        println("Stored: " + msg)
+
+        // Sync to disk
+        persistent_sync()
+
+        println("Pool used: " + int_to_str(persistent_used()) + " bytes")
+        persistent_close()
+    }
+}
+
+main()
+```
+
 ---
 
 ## Summary
@@ -1645,3 +1750,7 @@ main()
 | Multi-Mind Systems | `soul` declaration, `system` declaration, bridges, `system_resolve_node` |
 | Cognitive Architecture (v4.1) | `belief_new`, `goal_engine_init`, `safety_init`, `imagination_init`, `concept_init`, `soul_set_personality`, `soul_add_constitution` |
 | Windows Deployment | `--target=windows`, `make cross-windows`, PE32+ executables |
+| IEEE 754 Floats (v4.2) | `float_abs`, `float_floor`, `float_format`, `float_parse`, `float_variance_list` |
+| Syscall FFI (v4.2) | `ffi_syscall_init`, `ffi_load`, `sys_socket`, `make_sockaddr_in_raw`, `ip_to_int` |
+| Persistent Memory (v4.2) | `persistent_open`, `persistent_alloc`, `persistent_sync`, `persistent_write_str` |
+| ARM64 Codegen (v4.2) | `la_lower_function`, `la_emit_float_add`, `la_emit_neon_add_f64` |
