@@ -56,6 +56,8 @@ fn init_import_tracker() {
     _dep_add("blas", "ffi,mem,simd,tensor")
     _dep_add("embedding", "mem,simd,tensor")
     _dep_add("cognitive_llm", "ffi,mem,simd,tensor,confidence")
+    _dep_add("persistent_alloc", "syscall,alloc")
+    _dep_add("ffi_syscall", "syscall,alloc")
 }
 
 fn _dep_add(pkg, deps) {

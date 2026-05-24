@@ -1,0 +1,310 @@
+// Nova Runtime: Persistent Allocator
+// File-backed memory pool using mmap(MAP_SHARED) that survives arena resets.
+// Data persists to a file on disk; re-opening the file restores state.
+//
+// Layout: [header (64 bytes)] [data blocks...]
+// Header: magic(8) | version(8) | pool_size(8) | used(8) | free_list_off(8) | block_count(8) | checksum(8) | reserved(8)
+// Block:  size(8) | next_free_off(8) | data...
+//
+// Uses int_add/int_sub for all pointer arithmetic.
+
+let PA_MAGIC = 1315468878  // "NOVA" as int
+let PA_VERSION = 1
+let PA_HDR_SIZE = 64
+let PA_BLOCK_HDR = 16
+let PA_MIN_BLOCK = 32
+
+// Pool state
+let _pa_base = 0
+let _pa_size = 0
+let _pa_fd = -1
+let _pa_ready = 0
+
+// Header field offsets (bytes from base)
+let PA_OFF_MAGIC = 0
+let PA_OFF_VERSION = 8
+let PA_OFF_POOL_SIZE = 16
+let PA_OFF_USED = 24
+let PA_OFF_FREE_LIST = 32
+let PA_OFF_BLOCK_COUNT = 40
+let PA_OFF_CHECKSUM = 48
+
+fn _pa_read64(offset) {
+    return load64(int_add(_pa_base, offset))
+}
+
+fn _pa_write64(offset, val) {
+    store64(int_add(_pa_base, offset), val)
+}
+
+fn _pa_compute_checksum() {
+    let sum = 0
+    sum = sum + _pa_read64(PA_OFF_MAGIC)
+    sum = sum + _pa_read64(PA_OFF_VERSION)
+    sum = sum + _pa_read64(PA_OFF_POOL_SIZE)
+    sum = sum + _pa_read64(PA_OFF_USED)
+    sum = sum + _pa_read64(PA_OFF_FREE_LIST)
+    sum = sum + _pa_read64(PA_OFF_BLOCK_COUNT)
+    return sum
+}
+
+fn _pa_update_checksum() {
+    _pa_write64(PA_OFF_CHECKSUM, _pa_compute_checksum())
+}
+
+fn _pa_verify_checksum() {
+    let stored = _pa_read64(PA_OFF_CHECKSUM)
+    let computed = _pa_compute_checksum()
+    if stored == computed { return 1 }
+    return 0
+}
+
+fn _pa_ftruncate(fd, length) {
+    let result = 0
+    asm {
+        "mov rax, 77"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "syscall"
+        "mov [rbp - 24], rax"
+    }
+    return result
+}
+
+// Open or create a persistent memory pool backed by a file.
+// Returns 1 on success, 0 on failure.
+fn persistent_open(filepath, pool_size) {
+    if _pa_ready == 1 { return 0 }
+    let aligned_size = (pool_size + 4095) & (~4095)  // page-align
+
+    // Try to open existing file (O_RDWR)
+    let fd = sys_open(filepath, 2, 0)
+    let is_new = 0
+    if fd < 0 {
+        // Create new file (O_RDWR | O_CREAT)
+        fd = sys_open(filepath, 2 | 64, 438)  // 0666
+        if fd < 0 { return 0 }
+        is_new = 1
+    }
+
+    // Set file size via ftruncate
+    _pa_ftruncate(fd, aligned_size)
+
+    // mmap the file: PROT_READ|PROT_WRITE, MAP_SHARED
+    let base = sys_mmap(0, aligned_size, 3, 1, fd, 0)  // MAP_SHARED=1
+    if base < 0 {
+        sys_close(fd)
+        return 0
+    }
+
+    _pa_base = base
+    _pa_size = aligned_size
+    _pa_fd = fd
+    _pa_ready = 1
+
+    if is_new == 1 {
+        _pa_write64(PA_OFF_MAGIC, PA_MAGIC)
+        _pa_write64(PA_OFF_VERSION, PA_VERSION)
+        _pa_write64(PA_OFF_POOL_SIZE, aligned_size)
+        _pa_write64(PA_OFF_USED, PA_HDR_SIZE)
+        _pa_write64(PA_OFF_FREE_LIST, 0)
+        _pa_write64(PA_OFF_BLOCK_COUNT, 0)
+        _pa_update_checksum()
+    } else {
+        let magic = _pa_read64(PA_OFF_MAGIC)
+        if magic != PA_MAGIC {
+            persistent_close()
+            return 0
+        }
+        if _pa_verify_checksum() == 0 {
+            persistent_close()
+            return 0
+        }
+    }
+
+    return 1
+}
+
+// Allocate persistent memory from the pool.
+// Returns a raw pointer (>= PTR_THRESHOLD), or 0 on failure.
+fn persistent_alloc(size) {
+    if _pa_ready == 0 { return 0 }
+    let aligned = (size + 7) & (~7)
+    if aligned < PA_MIN_BLOCK { aligned = PA_MIN_BLOCK }
+    let total = int_add(aligned, PA_BLOCK_HDR)
+
+    // Skip free list for now — just bump allocate
+    let used = _pa_read64(PA_OFF_USED)
+    if int_add(used, total) > _pa_size { return 0 }
+
+    let block_ptr = int_add(_pa_base, used)
+    store64(block_ptr, total)
+    store64(int_add(block_ptr, 8), 0)
+
+    _pa_write64(PA_OFF_USED, int_add(used, total))
+    let count = _pa_read64(PA_OFF_BLOCK_COUNT)
+    _pa_write64(PA_OFF_BLOCK_COUNT, int_add(count, 1))
+    _pa_update_checksum()
+
+    return int_add(block_ptr, PA_BLOCK_HDR)
+}
+
+// Free a persistent allocation (adds to free list).
+fn persistent_free(ptr) {
+    if _pa_ready == 0 { return 0 }
+    if ptr == 0 { return 0 }
+
+    let block_ptr = int_sub(ptr, PA_BLOCK_HDR)
+    let offset = int_sub(block_ptr, _pa_base)
+
+    // Prepend to free list
+    let old_head = _pa_read64(PA_OFF_FREE_LIST)
+    store64(int_add(block_ptr, 8), old_head)
+    _pa_write64(PA_OFF_FREE_LIST, offset)
+    _pa_update_checksum()
+    return 1
+}
+
+// Sync the memory pool to disk (msync).
+fn persistent_sync() {
+    if _pa_ready == 0 { return 0 }
+    // msync syscall: 26 on Linux
+    // MS_SYNC = 4
+    let result = 0
+    asm {
+        "mov rax, 26"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, 4"
+        "syscall"
+        "mov [rbp - 24], rax"
+    }
+    // Use _pa_base as rdi, _pa_size as rsi (need to load from globals)
+    // Simpler approach: direct syscall with our values
+    return _pa_msync()
+}
+
+fn _pa_msync() {
+    let base = _pa_base
+    let size = _pa_size
+    let result = 0
+    asm {
+        "mov rax, 26"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, 4"
+        "syscall"
+        "mov [rbp - 24], rax"
+    }
+    return result
+}
+
+// Close the persistent memory pool.
+fn persistent_close() {
+    if _pa_ready == 0 { return 0 }
+    _pa_msync()
+    sys_munmap(_pa_base, _pa_size)
+    sys_close(_pa_fd)
+    _pa_base = 0
+    _pa_size = 0
+    _pa_fd = -1
+    _pa_ready = 0
+    return 1
+}
+
+// Query how much of the pool is used (bytes).
+fn persistent_used() {
+    if _pa_ready == 0 { return 0 }
+    return _pa_read64(PA_OFF_USED)
+}
+
+// Query total pool capacity (bytes).
+fn persistent_capacity() {
+    if _pa_ready == 0 { return 0 }
+    return _pa_read64(PA_OFF_POOL_SIZE)
+}
+
+// Query number of allocated blocks.
+fn persistent_block_count() {
+    if _pa_ready == 0 { return 0 }
+    return _pa_read64(PA_OFF_BLOCK_COUNT)
+}
+
+// Check if the pool is open and valid.
+fn persistent_is_open() {
+    return _pa_ready
+}
+
+// Store a 64-bit value at offset within a persistent allocation.
+fn persistent_store64(ptr, offset, val) {
+    store64(int_add(ptr, offset), val)
+}
+
+// Load a 64-bit value from offset within a persistent allocation.
+fn persistent_load64(ptr, offset) {
+    return load64(int_add(ptr, offset))
+}
+
+// Store a byte at offset within a persistent allocation.
+fn persistent_store8(ptr, offset, val) {
+    store8(int_add(ptr, offset), val)
+}
+
+// Load a byte from offset within a persistent allocation.
+fn persistent_load8(ptr, offset) {
+    return load8(int_add(ptr, offset))
+}
+
+// Write a string into persistent memory at ptr.
+// Returns number of bytes written.
+fn persistent_write_str(ptr, str_val) {
+    let slen = len(str_val)
+    let i = 0
+    while i < slen {
+        let ch = substr(str_val, i, 1)
+        let code = char_code(ch)
+        store8(int_add(ptr, i), code)
+        i = i + 1
+    }
+    store8(int_add(ptr, slen), 0)  // null-terminate
+    return slen + 1
+}
+
+// Read a null-terminated string from persistent memory.
+fn persistent_read_str(ptr, max_len) {
+    let result = ""
+    let i = 0
+    while i < max_len {
+        let c = load8(int_add(ptr, i))
+        if c == 0 { return result }
+        result = result + chr(c)
+        i = i + 1
+    }
+    return result
+}
+
+// Compact free list: merge adjacent free blocks.
+fn persistent_compact() {
+    if _pa_ready == 0 { return 0 }
+    let merged = 0
+    let curr_off = _pa_read64(PA_OFF_FREE_LIST)
+    while curr_off != 0 {
+        let curr_ptr = int_add(_pa_base, curr_off)
+        let curr_size = load64(curr_ptr)
+        let next_off = load64(int_add(curr_ptr, 8))
+        // Check if next block is physically adjacent
+        if next_off == curr_off + curr_size {
+            let next_ptr = int_add(_pa_base, next_off)
+            let next_size = load64(next_ptr)
+            let after_off = load64(int_add(next_ptr, 8))
+            // Merge: extend current block, skip next
+            store64(curr_ptr, curr_size + next_size)
+            store64(int_add(curr_ptr, 8), after_off)
+            merged = merged + 1
+        } else {
+            curr_off = next_off
+        }
+    }
+    if merged > 0 { _pa_update_checksum() }
+    return merged
+}

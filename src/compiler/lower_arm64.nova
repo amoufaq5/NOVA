@@ -1,0 +1,772 @@
+// Nova Compiler: ARM64 (AArch64) Lowering Pass
+// Takes IR instructions and emits GAS assembly for ARM64.
+// Uses register allocation results to map vregs to physical regs.
+//
+// ARM64 calling convention (AAPCS64):
+//   Arguments: x0-x7 (integer), d0-d7 (float)
+//   Return: x0 (integer), d0 (float)
+//   Callee-saved: x19-x28, x29(fp), x30(lr), d8-d15
+//   Scratch: x9-x15, x16-x17 (IP0/IP1)
+//   Frame pointer: x29, Link register: x30
+//   Stack: 16-byte aligned
+
+let la_output = 0
+let la_target = 0
+let la_source_file = ""
+
+fn la_init(target_val) {
+    la_output = list_new()
+    la_target = target_val
+}
+
+fn la_out(s) {
+    push(la_output, s)
+}
+
+fn la_label(name) {
+    push(la_output, name + ":")
+}
+
+// Map virtual registers to ARM64 physical registers or stack spills.
+// ARM64 uses x-prefixed 64-bit registers.
+fn la_reg_or_spill(vreg) {
+    let phys = ra_lookup(vreg)
+    if ra_is_spill(phys) == 1 {
+        let off_str = substr(phys, 6, len(phys) - 6)
+        let off = str_to_int(off_str)
+        return "[x29, #-" + int_to_str(off) + "]"
+    }
+    return _la_map_reg(phys)
+}
+
+fn _la_map_reg(x86_reg) {
+    // Map x86-64 register names to ARM64 equivalents
+    if x86_reg == "rax" { return "x0" }
+    if x86_reg == "rdi" { return "x0" }
+    if x86_reg == "rsi" { return "x1" }
+    if x86_reg == "rdx" { return "x2" }
+    if x86_reg == "rcx" { return "x3" }
+    if x86_reg == "r8" { return "x4" }
+    if x86_reg == "r9" { return "x5" }
+    if x86_reg == "r10" { return "x9" }
+    if x86_reg == "r11" { return "x10" }
+    if x86_reg == "rbx" { return "x19" }
+    if x86_reg == "r12" { return "x20" }
+    if x86_reg == "r13" { return "x21" }
+    if x86_reg == "r14" { return "x22" }
+    if x86_reg == "r15" { return "x23" }
+    return x86_reg
+}
+
+fn la_ensure_reg(vreg, scratch) {
+    let phys = ra_lookup(vreg)
+    if ra_is_spill(phys) == 1 {
+        let off_str = substr(phys, 6, len(phys) - 6)
+        let off = str_to_int(off_str)
+        let s = _la_map_reg(scratch)
+        la_out("    ldr " + s + ", [x29, #-" + int_to_str(off) + "]")
+        return s
+    }
+    return _la_map_reg(phys)
+}
+
+fn la_store_to(vreg, src_reg) {
+    let phys = ra_lookup(vreg)
+    if ra_is_spill(phys) == 1 {
+        let off_str = substr(phys, 6, len(phys) - 6)
+        let off = str_to_int(off_str)
+        la_out("    str " + src_reg + ", [x29, #-" + int_to_str(off) + "]")
+        return 0
+    }
+    let dest = _la_map_reg(phys)
+    if dest == src_reg { return 0 }
+    la_out("    mov " + dest + ", " + src_reg)
+    return 0
+}
+
+fn la_syscall_num(linux_num) {
+    // ARM64 Linux syscall numbers differ from x86-64
+    if linux_num == 0 { return 63 }    // read
+    if linux_num == 1 { return 64 }    // write
+    if linux_num == 2 { return 56 }    // openat (ARM64 has no open, uses openat)
+    if linux_num == 3 { return 57 }    // close
+    if linux_num == 5 { return 80 }    // fstat → newfstatat
+    if linux_num == 8 { return 62 }    // lseek
+    if linux_num == 9 { return 222 }   // mmap
+    if linux_num == 11 { return 215 }  // munmap
+    if linux_num == 12 { return 214 }  // brk
+    if linux_num == 26 { return 227 }  // msync
+    if linux_num == 60 { return 93 }   // exit
+    if linux_num == 79 { return 17 }   // getcwd
+    if linux_num == 83 { return 34 }   // mkdirat (ARM64 uses mkdirat)
+    if linux_num == 87 { return 35 }   // unlinkat
+    return linux_num
+}
+
+// --- Lower a single IR instruction to ARM64 ---
+fn la_lower_inst(inst) {
+    let opc = inst[0]
+
+    if opc == IR_NOP { return 0 }
+
+    if opc == IR_LOC {
+        if len(la_source_file) > 0 {
+            la_out("    .loc 1 " + int_to_str(inst[1]) + " 0")
+        }
+        return 0
+    }
+
+    if opc == IR_LABEL {
+        la_label(inst[1])
+        return 0
+    }
+
+    if opc == IR_CONST {
+        let dest = inst[1]
+        let val = inst[2]
+        if val == 0 {
+            la_out("    mov x0, #0")
+            la_store_to(dest, "x0")
+        } else {
+            if val >= 0 {
+                if val < 65536 {
+                    la_out("    mov x0, #" + int_to_str(val))
+                } else {
+                    _la_load_large_const("x0", val)
+                }
+            } else {
+                _la_load_large_const("x0", val)
+            }
+            la_store_to(dest, "x0")
+        }
+        return 0
+    }
+
+    if opc == IR_LOAD_STR {
+        let dest = inst[1]
+        let idx = inst[2]
+        la_out("    adrp x0, _str_" + int_to_str(idx))
+        la_out("    add x0, x0, :lo12:_str_" + int_to_str(idx))
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_LOAD_GLOBAL {
+        let dest = inst[1]
+        let name = inst[2]
+        la_out("    adrp x0, _g_" + name)
+        la_out("    ldr x0, [x0, :lo12:_g_" + name + "]")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_STORE_GLOBAL {
+        let name = inst[1]
+        let src = la_ensure_reg(inst[2], "rax")
+        la_out("    adrp x9, _g_" + name)
+        la_out("    str " + src + ", [x9, :lo12:_g_" + name + "]")
+        return 0
+    }
+
+    if opc == IR_MOVE {
+        let dest = inst[1]
+        let src = inst[2]
+        let src_r = la_ensure_reg(src, "rax")
+        la_store_to(dest, src_r)
+        return 0
+    }
+
+    if opc == IR_SMART_ADD {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rdi")
+        la_out("    mov x0, " + left)
+        let right = la_ensure_reg(inst[3], "rsi")
+        la_out("    mov x1, " + right)
+        la_out("    bl _nova_add")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_ADD {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    add x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_SUB {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    sub x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_MUL {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    mul x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_SMART_MUL {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rdi")
+        la_out("    mov x0, " + left)
+        let right = la_ensure_reg(inst[3], "rsi")
+        la_out("    mov x1, " + right)
+        la_out("    bl _nova_mul")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_DIV {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    cbz " + right + ", _div_zero_handler")
+        la_out("    sdiv x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_MOD {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    cbz " + right + ", _div_zero_handler")
+        la_out("    sdiv x9, " + left + ", " + right)
+        la_out("    msub x0, x9, " + right + ", " + left)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_POW {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rdi")
+        la_out("    mov x0, " + left)
+        let right = la_ensure_reg(inst[3], "rsi")
+        la_out("    mov x1, " + right)
+        la_out("    bl _nova_pow")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_NEG {
+        let dest = inst[1]
+        let src = la_ensure_reg(inst[2], "rax")
+        la_out("    neg x0, " + src)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_NOT {
+        let dest = inst[1]
+        let src = la_ensure_reg(inst[2], "rax")
+        la_out("    cmp " + src + ", #0")
+        la_out("    cset x0, eq")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_EQ {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rdi")
+        la_out("    mov x0, " + left)
+        let right = la_ensure_reg(inst[3], "rsi")
+        la_out("    mov x1, " + right)
+        la_out("    bl _nova_eq")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_NEQ {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rdi")
+        la_out("    mov x0, " + left)
+        let right = la_ensure_reg(inst[3], "rsi")
+        la_out("    mov x1, " + right)
+        la_out("    bl _nova_neq")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_LT {
+        la_lower_cmp_arm(inst, "lt")
+        return 0
+    }
+
+    if opc == IR_GT {
+        la_lower_cmp_arm(inst, "gt")
+        return 0
+    }
+
+    if opc == IR_LTE {
+        la_lower_cmp_arm(inst, "le")
+        return 0
+    }
+
+    if opc == IR_GTE {
+        la_lower_cmp_arm(inst, "ge")
+        return 0
+    }
+
+    if opc == IR_AND {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    and x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_OR {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    orr x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_XOR {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    eor x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_SHL {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    lsl x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_SHR {
+        let dest = inst[1]
+        let left = la_ensure_reg(inst[2], "rax")
+        let right = la_ensure_reg(inst[3], "rcx")
+        la_out("    asr x0, " + left + ", " + right)
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_CALL {
+        let dest = inst[1]
+        let fn_name = inst[2]
+        let arg_regs = inst[3]
+        la_lower_call_arm(dest, fn_name, arg_regs)
+        return 0
+    }
+
+    if opc == IR_CALL_INDIRECT {
+        let dest = inst[1]
+        let fn_reg = la_ensure_reg(inst[2], "r11")
+        let arg_regs = inst[3]
+        la_lower_call_indirect_arm(dest, fn_reg, arg_regs)
+        return 0
+    }
+
+    if opc == IR_RET {
+        let src = inst[1]
+        if src == "" {
+            la_out("    mov x0, #0")
+        } else {
+            let src_r = la_ensure_reg(src, "rax")
+            if src_r != "x0" {
+                la_out("    mov x0, " + src_r)
+            }
+        }
+        la_out("    ldp x29, x30, [sp], #16")
+        la_out("    ret")
+        return 0
+    }
+
+    if opc == IR_JUMP {
+        la_out("    b " + inst[1])
+        return 0
+    }
+
+    if opc == IR_BRANCH {
+        let cond = la_ensure_reg(inst[1], "rax")
+        la_out("    cbnz " + cond + ", " + inst[2])
+        la_out("    b " + inst[3])
+        return 0
+    }
+
+    if opc == IR_LOAD_FN_ADDR {
+        let dest = inst[1]
+        la_out("    adrp x0, " + inst[2])
+        la_out("    add x0, x0, :lo12:" + inst[2])
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_LOAD_CAPTURE {
+        let dest = inst[1]
+        let cap_name = inst[2]
+        let fn_name = inst[3]
+        la_out("    adrp x0, _cap_" + fn_name + "_" + cap_name)
+        la_out("    ldr x0, [x0, :lo12:_cap_" + fn_name + "_" + cap_name + "]")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_STORE_CAPTURE {
+        let cap_name = inst[1]
+        let fn_name = inst[2]
+        let src = la_ensure_reg(inst[3], "rax")
+        la_out("    adrp x9, _cap_" + fn_name + "_" + cap_name)
+        la_out("    str " + src + ", [x9, :lo12:_cap_" + fn_name + "_" + cap_name + "]")
+        return 0
+    }
+
+    if opc == IR_LOAD_FIELD {
+        let dest = inst[1]
+        let base = la_ensure_reg(inst[2], "rax")
+        let idx = inst[3]
+        la_out("    ldr x9, [" + base + ", #24]")
+        la_out("    ldr x0, [x9, #" + int_to_str(idx * 8) + "]")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_STORE_FIELD {
+        let base = la_ensure_reg(inst[1], "rax")
+        let idx = inst[2]
+        let src = la_ensure_reg(inst[3], "rdx")
+        la_out("    ldr x9, [" + base + ", #24]")
+        la_out("    str " + src + ", [x9, #" + int_to_str(idx * 8) + "]")
+        return 0
+    }
+
+    if opc == IR_INDEX_LOAD {
+        let dest = inst[1]
+        let base = la_ensure_reg(inst[2], "rdi")
+        let idx_r = la_ensure_reg(inst[3], "rsi")
+        la_out("    mov x0, " + base)
+        la_out("    mov x1, " + idx_r)
+        la_out("    bl _nova_index")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_INDEX_STORE {
+        let base = la_ensure_reg(inst[1], "rax")
+        let idx_r = la_ensure_reg(inst[2], "rsi")
+        let val = la_ensure_reg(inst[3], "rdx")
+        la_out("    ldr x9, [" + base + ", #24]")
+        la_out("    str " + val + ", [x9, " + idx_r + ", lsl #3]")
+        return 0
+    }
+
+    if opc == IR_LIST_NEW {
+        let dest = inst[1]
+        la_out("    bl _nova_list_new")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_LIST_PUSH {
+        let list_r = la_ensure_reg(inst[1], "rdi")
+        let val_r = la_ensure_reg(inst[2], "rsi")
+        la_out("    mov x0, " + list_r)
+        la_out("    mov x1, " + val_r)
+        la_out("    bl _nova_push")
+        return 0
+    }
+
+    if opc == IR_MAP_NEW {
+        let dest = inst[1]
+        la_out("    bl _nova_map_new")
+        la_store_to(dest, "x0")
+        return 0
+    }
+
+    if opc == IR_MAP_SET {
+        let map_r = la_ensure_reg(inst[1], "rdi")
+        let key_r = la_ensure_reg(inst[2], "rsi")
+        let val_r = la_ensure_reg(inst[3], "rdx")
+        la_out("    mov x0, " + map_r)
+        la_out("    mov x1, " + key_r)
+        la_out("    mov x2, " + val_r)
+        la_out("    bl _nova_map_set")
+        return 0
+    }
+
+    if opc == IR_SYSCALL {
+        let dest = inst[1]
+        let num = inst[2]
+        let args = inst[3]
+        // ARM64 syscalls: x8 = syscall number, x0-x5 = args, svc #0
+        let arg_regs_sc = list_new()
+        push(arg_regs_sc, "x0")
+        push(arg_regs_sc, "x1")
+        push(arg_regs_sc, "x2")
+        push(arg_regs_sc, "x3")
+        push(arg_regs_sc, "x4")
+        push(arg_regs_sc, "x5")
+        let ai = 0
+        while ai < len(args) {
+            let src = la_ensure_reg(args[ai], "rax")
+            if src != arg_regs_sc[ai] {
+                la_out("    mov " + arg_regs_sc[ai] + ", " + src)
+            }
+            ai = ai + 1
+        }
+        let sc_num = la_syscall_num(num)
+        la_out("    mov x8, #" + int_to_str(sc_num))
+        la_out("    svc #0")
+        if dest != "" {
+            la_store_to(dest, "x0")
+        }
+        return 0
+    }
+
+    la_out("    // unknown IR opcode " + int_to_str(opc))
+}
+
+fn la_lower_cmp_arm(inst, cond) {
+    let dest = inst[1]
+    let left = la_ensure_reg(inst[2], "rax")
+    let right = la_ensure_reg(inst[3], "rcx")
+    la_out("    cmp " + left + ", " + right)
+    la_out("    cset x0, " + cond)
+    la_store_to(dest, "x0")
+}
+
+fn la_lower_call_arm(dest, fn_name, arg_regs) {
+    let arg_phys = list_new()
+    push(arg_phys, "x0")
+    push(arg_phys, "x1")
+    push(arg_phys, "x2")
+    push(arg_phys, "x3")
+    push(arg_phys, "x4")
+    push(arg_phys, "x5")
+    push(arg_phys, "x6")
+    push(arg_phys, "x7")
+    let argc = len(arg_regs)
+    let ai = 0
+    while ai < argc {
+        let src = la_ensure_reg(arg_regs[ai], "rax")
+        if src != arg_phys[ai] {
+            la_out("    mov " + arg_phys[ai] + ", " + src)
+        }
+        ai = ai + 1
+    }
+    la_out("    bl " + fn_name)
+    if dest != "" {
+        la_store_to(dest, "x0")
+    }
+}
+
+fn la_lower_call_indirect_arm(dest, fn_reg, arg_regs) {
+    let arg_phys = list_new()
+    push(arg_phys, "x0")
+    push(arg_phys, "x1")
+    push(arg_phys, "x2")
+    push(arg_phys, "x3")
+    push(arg_phys, "x4")
+    push(arg_phys, "x5")
+    push(arg_phys, "x6")
+    push(arg_phys, "x7")
+    let argc = len(arg_regs)
+    let ai = 0
+    while ai < argc {
+        let src = la_ensure_reg(arg_regs[ai], "rax")
+        if src != arg_phys[ai] {
+            la_out("    mov " + arg_phys[ai] + ", " + src)
+        }
+        ai = ai + 1
+    }
+    if fn_reg != "x10" {
+        la_out("    mov x10, " + fn_reg)
+    }
+    la_out("    blr x10")
+    if dest != "" {
+        la_store_to(dest, "x0")
+    }
+}
+
+// Load large constants that don't fit in a single MOV immediate.
+fn _la_load_large_const(reg, val) {
+    // ARM64: movz + movk sequence for 64-bit constants
+    // For negative values, use movn
+    if val < 0 {
+        let inv = 0 - val - 1
+        la_out("    movn " + reg + ", #" + int_to_str(inv & 65535))
+        if inv > 65535 {
+            la_out("    movk " + reg + ", #" + int_to_str((inv / 65536) & 65535) + ", lsl #16")
+        }
+        return 0
+    }
+    la_out("    movz " + reg + ", #" + int_to_str(val & 65535))
+    let shifted = val / 65536
+    if shifted > 0 {
+        la_out("    movk " + reg + ", #" + int_to_str(shifted & 65535) + ", lsl #16")
+        shifted = shifted / 65536
+        if shifted > 0 {
+            la_out("    movk " + reg + ", #" + int_to_str(shifted & 65535) + ", lsl #32")
+            shifted = shifted / 65536
+            if shifted > 0 {
+                la_out("    movk " + reg + ", #" + int_to_str(shifted & 65535) + ", lsl #48")
+            }
+        }
+    }
+    return 0
+}
+
+// --- Lower an entire function's IR to ARM64 assembly ---
+fn la_lower_function(fn_name, fn_ir_ops, ranges) {
+    ra_allocate(ranges)
+
+    let callee_saved = ra_used_callee_saved()
+    let spills = ra_spill_slots()
+
+    la_out("")
+    la_out(".globl " + fn_name)
+    la_out(".p2align 2")
+    la_label(fn_name)
+
+    // Save frame pointer and link register
+    la_out("    stp x29, x30, [sp, #-16]!")
+    la_out("    mov x29, sp")
+
+    // Save callee-saved registers in pairs
+    let ci = 0
+    while ci < len(callee_saved) {
+        let mapped = _la_map_reg(callee_saved[ci])
+        la_out("    str " + mapped + ", [sp, #-8]!")
+        ci = ci + 1
+    }
+
+    // Allocate spill slots (16-byte aligned)
+    if spills > 0 {
+        let spill_bytes = spills * 8
+        let rem = spill_bytes % 16
+        if rem > 0 { spill_bytes = spill_bytes + (16 - rem) }
+        la_out("    sub sp, sp, #" + int_to_str(spill_bytes))
+    }
+
+    // Lower each instruction
+    let i = 0
+    while i < len(fn_ir_ops) {
+        la_lower_inst(fn_ir_ops[i])
+        i = i + 1
+    }
+
+    // Default return value
+    la_out("    mov x0, #0")
+
+    // Deallocate spill slots
+    if spills > 0 {
+        let spill_bytes = spills * 8
+        let rem = spill_bytes % 16
+        if rem > 0 { spill_bytes = spill_bytes + (16 - rem) }
+        la_out("    add sp, sp, #" + int_to_str(spill_bytes))
+    }
+
+    // Restore callee-saved registers (reverse order)
+    ci = len(callee_saved) - 1
+    while ci >= 0 {
+        let mapped = _la_map_reg(callee_saved[ci])
+        la_out("    ldr " + mapped + ", [sp], #8")
+        ci = ci - 1
+    }
+
+    // Restore frame pointer and return
+    la_out("    ldp x29, x30, [sp], #16")
+    la_out("    ret")
+}
+
+// --- ARM64 float operations using NEON/FP registers ---
+fn la_emit_float_add() {
+    la_out("    fmov d0, x0")
+    la_out("    fmov d1, x1")
+    la_out("    fadd d0, d0, d1")
+    la_out("    fmov x0, d0")
+}
+
+fn la_emit_float_sub() {
+    la_out("    fmov d0, x0")
+    la_out("    fmov d1, x1")
+    la_out("    fsub d0, d0, d1")
+    la_out("    fmov x0, d0")
+}
+
+fn la_emit_float_mul() {
+    la_out("    fmov d0, x0")
+    la_out("    fmov d1, x1")
+    la_out("    fmul d0, d0, d1")
+    la_out("    fmov x0, d0")
+}
+
+fn la_emit_float_div() {
+    la_out("    fmov d0, x0")
+    la_out("    fmov d1, x1")
+    la_out("    fdiv d0, d0, d1")
+    la_out("    fmov x0, d0")
+}
+
+fn la_emit_float_cmp() {
+    la_out("    fmov d0, x0")
+    la_out("    fmov d1, x1")
+    la_out("    fcmp d0, d1")
+    la_out("    cset x0, gt")
+    la_out("    csinv x0, x0, xzr, ge")  // -1 if lt, 0 if eq, 1 if gt
+}
+
+fn la_emit_float_sqrt() {
+    la_out("    fmov d0, x0")
+    la_out("    fsqrt d0, d0")
+    la_out("    fmov x0, d0")
+}
+
+fn la_emit_to_float() {
+    la_out("    scvtf d0, x0")
+    la_out("    fmov x0, d0")
+}
+
+fn la_emit_from_float() {
+    la_out("    fmov d0, x0")
+    la_out("    fcvtzs x0, d0")
+}
+
+// --- NEON SIMD operations (128-bit, processes 2 doubles) ---
+fn la_emit_neon_add_f64() {
+    la_out("    ld1 {v0.2d}, [x0]")
+    la_out("    ld1 {v1.2d}, [x1]")
+    la_out("    fadd v0.2d, v0.2d, v1.2d")
+    la_out("    st1 {v0.2d}, [x0]")
+}
+
+fn la_emit_neon_mul_f64() {
+    la_out("    ld1 {v0.2d}, [x0]")
+    la_out("    ld1 {v1.2d}, [x1]")
+    la_out("    fmul v0.2d, v0.2d, v1.2d")
+    la_out("    st1 {v0.2d}, [x0]")
+}
+
+fn la_emit_neon_fma_f64() {
+    // d = a * b + c (fused multiply-accumulate)
+    la_out("    ld1 {v0.2d}, [x0]")  // a
+    la_out("    ld1 {v1.2d}, [x1]")  // b
+    la_out("    ld1 {v2.2d}, [x2]")  // c (accumulator)
+    la_out("    fmla v2.2d, v0.2d, v1.2d")
+    la_out("    st1 {v2.2d}, [x2]")
+}
+
+// --- Get final assembly output ---
+fn la_get_output() {
+    return la_output
+}

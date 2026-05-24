@@ -1,0 +1,420 @@
+// Nova Runtime: Float Utilities
+// Extended IEEE 754 double-precision operations beyond the core builtins.
+// Core builtins: float_add, float_sub, float_mul, float_div, float_cmp,
+//                to_float, from_float, float_to_str, fsqrt
+// This module adds: comparisons, rounding, classification, conversion,
+// vector ops, and numeric formatting.
+
+// --- Constants ---
+fn float_zero() { return to_float(0) }
+fn float_one() { return to_float(1) }
+fn float_neg_one() { return to_float(0 - 1) }
+fn float_half() { return float_div(to_float(1), to_float(2)) }
+fn float_two() { return to_float(2) }
+fn float_ten() { return to_float(10) }
+fn float_inf() {
+    // +Infinity: exponent all 1s, mantissa 0
+    // Bit pattern: 0x7FF0000000000000 = 9218868437227405312
+    let result = 0
+    asm {
+        "mov rax, 0x7FF0000000000000"
+        "mov [rbp - 8], rax"
+    }
+    return result
+}
+fn float_neg_inf() {
+    let result = 0
+    asm {
+        "mov rax, 0xFFF0000000000000"
+        "mov [rbp - 8], rax"
+    }
+    return result
+}
+fn float_nan() {
+    // Quiet NaN
+    let result = 0
+    asm {
+        "mov rax, 0x7FF8000000000000"
+        "mov [rbp - 8], rax"
+    }
+    return result
+}
+fn float_epsilon() {
+    // Machine epsilon for double: 2^-52 ≈ 2.22e-16
+    let result = 0
+    asm {
+        "mov rax, 0x3CB0000000000000"
+        "mov [rbp - 8], rax"
+    }
+    return result
+}
+fn float_max() {
+    let result = 0
+    asm {
+        "mov rax, 0x7FEFFFFFFFFFFFFF"
+        "mov [rbp - 8], rax"
+    }
+    return result
+}
+fn float_min_positive() {
+    let result = 0
+    asm {
+        "mov rax, 0x0010000000000000"
+        "mov [rbp - 8], rax"
+    }
+    return result
+}
+
+// --- Classification ---
+fn float_is_nan(x) {
+    let cmp = float_cmp(x, x)
+    // NaN != NaN returns non-zero from ucomisd parity flag
+    if cmp == 0 - 2 { return 1 }
+    // Alternate check: bit pattern
+    let bits = x
+    let exp_mask = 0
+    asm {
+        "mov rax, [rbp - 8]"
+        "mov rcx, rax"
+        "shr rcx, 52"
+        "and rcx, 0x7FF"
+        "mov [rbp - 16], rcx"
+    }
+    if exp_mask == 2047 {
+        // Check mantissa is non-zero
+        let mantissa = 0
+        asm {
+            "mov rax, [rbp - 8]"
+            "mov rcx, 0x000FFFFFFFFFFFFF"
+            "and rax, rcx"
+            "mov [rbp - 24], rax"
+        }
+        if mantissa != 0 { return 1 }
+    }
+    return 0
+}
+
+fn float_is_inf(x) {
+    let exp_mask = 0
+    let mantissa = 0
+    asm {
+        "mov rax, [rbp - 8]"
+        "mov rcx, rax"
+        "shr rcx, 52"
+        "and rcx, 0x7FF"
+        "mov [rbp - 16], rcx"
+        "mov rcx, rax"
+        "mov rdx, 0x000FFFFFFFFFFFFF"
+        "and rcx, rdx"
+        "mov [rbp - 24], rcx"
+    }
+    if exp_mask == 2047 {
+        if mantissa == 0 { return 1 }
+    }
+    return 0
+}
+
+fn float_is_finite(x) {
+    if float_is_nan(x) == 1 { return 0 }
+    if float_is_inf(x) == 1 { return 0 }
+    return 1
+}
+
+fn float_is_negative(x) {
+    let sign = 0
+    asm {
+        "mov rax, [rbp - 8]"
+        "shr rax, 63"
+        "mov [rbp - 16], rax"
+    }
+    return sign
+}
+
+fn float_is_zero(x) {
+    // +0 and -0 both compare equal
+    let cmp = float_cmp(x, to_float(0))
+    if cmp == 0 { return 1 }
+    return 0
+}
+
+// --- Rounding ---
+fn float_round(x) {
+    let half = float_half()
+    let cmp = float_cmp(x, float_zero())
+    if cmp >= 0 {
+        return to_float(from_float(float_add(x, half)))
+    } else {
+        return to_float(from_float(float_sub(x, half)))
+    }
+}
+
+fn float_trunc(x) {
+    return to_float(from_float(x))
+}
+
+fn float_floor(x) {
+    let i = from_float(x)
+    let fi = to_float(i)
+    let cmp = float_cmp(x, fi)
+    if cmp < 0 { return to_float(i - 1) }
+    return fi
+}
+
+fn float_ceil(x) {
+    let i = from_float(x)
+    let fi = to_float(i)
+    let cmp = float_cmp(x, fi)
+    if cmp > 0 { return to_float(i + 1) }
+    return fi
+}
+
+// --- Arithmetic extensions ---
+fn float_abs(x) {
+    // Clear sign bit
+    let result = 0
+    asm {
+        "mov rax, [rbp - 8]"
+        "mov rcx, 0x7FFFFFFFFFFFFFFF"
+        "and rax, rcx"
+        "mov [rbp - 16], rax"
+    }
+    return result
+}
+
+fn float_neg(x) {
+    // Flip sign bit
+    let result = 0
+    asm {
+        "mov rax, [rbp - 8]"
+        "mov rcx, 0x8000000000000000"
+        "xor rax, rcx"
+        "mov [rbp - 16], rax"
+    }
+    return result
+}
+
+fn float_min_of(a, b) {
+    let cmp = float_cmp(a, b)
+    if cmp <= 0 { return a }
+    return b
+}
+
+fn float_max_of(a, b) {
+    let cmp = float_cmp(a, b)
+    if cmp >= 0 { return a }
+    return b
+}
+
+fn float_clamp_range(x, lo, hi) {
+    let cmp_lo = float_cmp(x, lo)
+    if cmp_lo < 0 { return lo }
+    let cmp_hi = float_cmp(x, hi)
+    if cmp_hi > 0 { return hi }
+    return x
+}
+
+fn float_lerp(a, b, t) {
+    // a + (b - a) * t
+    return float_add(a, float_mul(float_sub(b, a), t))
+}
+
+fn float_fma(a, b, c) {
+    // Fused multiply-add: a*b + c
+    // Uses SSE2; no FMA instruction without AVX2
+    return float_add(float_mul(a, b), c)
+}
+
+fn float_reciprocal(x) {
+    return float_div(float_one(), x)
+}
+
+fn float_mod(a, b) {
+    let q = from_float(float_div(a, b))
+    return float_sub(a, float_mul(to_float(q), b))
+}
+
+// --- Comparison utilities ---
+fn float_approx_eq(a, b, tolerance) {
+    let diff = float_abs(float_sub(a, b))
+    let cmp = float_cmp(diff, tolerance)
+    if cmp <= 0 { return 1 }
+    return 0
+}
+
+fn float_sign(x) {
+    let cmp = float_cmp(x, float_zero())
+    if cmp > 0 { return float_one() }
+    if cmp < 0 { return float_neg_one() }
+    return float_zero()
+}
+
+// --- Conversion ---
+fn float_from_fixed(fixed_val, scale) {
+    return float_div(to_float(fixed_val), to_float(scale))
+}
+
+fn float_to_fixed(f, scale) {
+    return from_float(float_mul(f, to_float(scale)))
+}
+
+fn float_from_ratio(num, denom) {
+    if denom == 0 { return float_inf() }
+    return float_div(to_float(num), to_float(denom))
+}
+
+// Convert float to string with specified decimal places.
+fn float_format(f, decimals) {
+    let is_neg = float_is_negative(f)
+    let abs_f = float_abs(f)
+
+    let int_part = from_float(abs_f)
+    let frac = float_sub(abs_f, to_float(int_part))
+
+    // Multiply fractional part by 10^decimals
+    let mul = 1
+    let d = 0
+    while d < decimals {
+        mul = mul * 10
+        d = d + 1
+    }
+    // Round fractional
+    let frac_int = from_float(float_add(float_mul(frac, to_float(mul)), float_half()))
+    if frac_int >= mul {
+        int_part = int_part + 1
+        frac_int = 0
+    }
+
+    let result = ""
+    if is_neg == 1 { result = "-" }
+    result = result + int_to_str(int_part)
+
+    if decimals > 0 {
+        result = result + "."
+        // Pad with leading zeros
+        let frac_str = int_to_str(frac_int)
+        let pad = decimals - len(frac_str)
+        while pad > 0 {
+            result = result + "0"
+            pad = pad - 1
+        }
+        result = result + frac_str
+    }
+
+    return result
+}
+
+// Parse a float from a string ("3.14", "-2.5", "42")
+fn float_parse(s) {
+    let slen = len(s)
+    if slen == 0 { return float_zero() }
+
+    let neg = 0
+    let start = 0
+    if substr(s, 0, 1) == "-" {
+        neg = 1
+        start = 1
+    }
+
+    let int_part = 0
+    let i = start
+    while i < slen {
+        let c = substr(s, i, 1)
+        if c == "." { i = i + 1; let dummy = 0; i = i - 1; i = i + 1; break }
+        let digit = char_code(c) - 48
+        if digit >= 0 {
+            if digit <= 9 {
+                int_part = int_part * 10 + digit
+            }
+        }
+        i = i + 1
+    }
+
+    let frac = float_zero()
+    let divisor = float_one()
+    // i now points past the dot (if any)
+    while i < slen {
+        let c = substr(s, i, 1)
+        let digit = char_code(c) - 48
+        if digit >= 0 {
+            if digit <= 9 {
+                frac = float_add(float_mul(frac, float_ten()), to_float(digit))
+                divisor = float_mul(divisor, float_ten())
+            }
+        }
+        i = i + 1
+    }
+
+    let result = float_add(to_float(int_part), float_div(frac, divisor))
+    if neg == 1 { result = float_neg(result) }
+    return result
+}
+
+// --- Bit manipulation ---
+fn float_bits(x) {
+    return x  // floats are stored as bit patterns in integers
+}
+
+fn float_from_bits(bits) {
+    return bits
+}
+
+fn float_copy_sign(magnitude, sign_source) {
+    let mag_bits = float_abs(magnitude)
+    if float_is_negative(sign_source) == 1 {
+        return float_neg(mag_bits)
+    }
+    return mag_bits
+}
+
+// --- Statistical helpers ---
+fn float_sum_list(values) {
+    let total = float_zero()
+    let i = 0
+    while i < len(values) {
+        total = float_add(total, values[i])
+        i = i + 1
+    }
+    return total
+}
+
+fn float_mean_list(values) {
+    let n = len(values)
+    if n == 0 { return float_zero() }
+    return float_div(float_sum_list(values), to_float(n))
+}
+
+fn float_min_list(values) {
+    if len(values) == 0 { return float_inf() }
+    let m = values[0]
+    let i = 1
+    while i < len(values) {
+        if float_cmp(values[i], m) < 0 { m = values[i] }
+        i = i + 1
+    }
+    return m
+}
+
+fn float_max_list(values) {
+    if len(values) == 0 { return float_neg_inf() }
+    let m = values[0]
+    let i = 1
+    while i < len(values) {
+        if float_cmp(values[i], m) > 0 { m = values[i] }
+        i = i + 1
+    }
+    return m
+}
+
+fn float_variance_list(values) {
+    let n = len(values)
+    if n < 2 { return float_zero() }
+    let mean = float_mean_list(values)
+    let sum_sq = float_zero()
+    let i = 0
+    while i < n {
+        let diff = float_sub(values[i], mean)
+        sum_sq = float_add(sum_sq, float_mul(diff, diff))
+        i = i + 1
+    }
+    return float_div(sum_sq, to_float(n - 1))
+}

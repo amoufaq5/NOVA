@@ -55,6 +55,9 @@ fn pkg_init_std() {
     push(STD_PACKAGES, "blas")
     push(STD_PACKAGES, "embedding")
     push(STD_PACKAGES, "cognitive_llm")
+    push(STD_PACKAGES, "persistent_alloc")
+    push(STD_PACKAGES, "float")
+    push(STD_PACKAGES, "ffi_syscall")
 }
 
 fn is_std_package(name) {

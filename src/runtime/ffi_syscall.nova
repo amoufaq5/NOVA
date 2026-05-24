@@ -1,0 +1,632 @@
+// Nova Runtime: Syscall-Based FFI (No libc Required)
+// Loads ELF shared libraries and resolves symbols using raw Linux syscalls.
+// This replaces the libc-dependent dlopen/dlsym with direct ELF parsing.
+//
+// ELF structures parsed:
+//   - ELF header (identifies file format, entry point, section headers)
+//   - Program headers (for mmap segments)
+//   - Dynamic section (DT_STRTAB, DT_SYMTAB, DT_HASH)
+//   - Symbol table + string table (for symbol resolution)
+//
+// Uses int_add for all pointer arithmetic.
+
+// ELF constants
+// ELF magic: check bytes individually instead of a large constant
+let ET_DYN = 3                   // Shared object
+let PT_LOAD = 1                  // Loadable segment
+let PT_DYNAMIC = 2               // Dynamic linking info
+let DT_NULL = 0
+let DT_STRTAB = 5               // String table address
+let DT_SYMTAB = 6               // Symbol table address
+let DT_STRSZ = 10               // String table size
+let DT_HASH = 4                 // Symbol hash table
+// DT_GNU_HASH = 0x6FFFFEF5 — too large for Nova's PTR_THRESHOLD, skip GNU hash
+
+let SYM_ENTRY_SIZE = 24          // sizeof(Elf64_Sym)
+
+// Library handle: [base_addr, strtab_ptr, symtab_ptr, hash_ptr, hash_type, str_size, fd]
+let _FFI_BASE = 0
+let _FFI_STRTAB = 1
+let _FFI_SYMTAB = 2
+let _FFI_HASH = 3
+let _FFI_HASH_TYPE = 4
+let _FFI_STRSZ = 5
+let _FFI_FD = 6
+let _FFI_SIZE = 7
+
+// Search paths for shared libraries
+let _ffi_search_paths = 0
+let _ffi_initialized = 0
+
+fn ffi_syscall_init() {
+    if _ffi_initialized == 1 { return 0 }
+    _ffi_search_paths = list_new()
+    push(_ffi_search_paths, "/usr/lib/x86_64-linux-gnu/")
+    push(_ffi_search_paths, "/usr/lib64/")
+    push(_ffi_search_paths, "/usr/lib/")
+    push(_ffi_search_paths, "/lib/x86_64-linux-gnu/")
+    push(_ffi_search_paths, "/lib64/")
+    push(_ffi_search_paths, "/lib/")
+    push(_ffi_search_paths, "./")
+    _ffi_initialized = 1
+    return 1
+}
+
+// Read bytes from a file descriptor into a buffer.
+fn _ffi_read_at(fd, offset, buf, count) {
+    sys_lseek(fd, offset, 0)  // SEEK_SET
+    return sys_read(fd, buf, count)
+}
+
+// Read a 16-bit little-endian value from memory.
+fn _ffi_read16(ptr) {
+    let b0 = load8(ptr)
+    let b1 = load8(int_add(ptr, 1))
+    return b0 + b1 * 256
+}
+
+// Read a 32-bit little-endian value from memory.
+fn _ffi_read32(ptr) {
+    let b0 = load8(ptr)
+    let b1 = load8(int_add(ptr, 1))
+    let b2 = load8(int_add(ptr, 2))
+    let b3 = load8(int_add(ptr, 3))
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+// Read a 64-bit value from memory.
+fn _ffi_read64(ptr) {
+    return load64(ptr)
+}
+
+// Read a null-terminated string from a pointer.
+fn _ffi_read_cstr(ptr, max_len) {
+    let result = ""
+    let i = 0
+    while i < max_len {
+        let c = load8(int_add(ptr, i))
+        if c == 0 { return result }
+        result = result + chr(c)
+        i = i + 1
+    }
+    return result
+}
+
+// Simple hash function for symbol lookup.
+// Uses int_mul to handle intermediates above PTR_THRESHOLD.
+fn _elf_hash(name) {
+    let h = 7
+    let i = 0
+    let slen = len(name)
+    while i < slen {
+        let ch = substr(name, i, 1)
+        let c = char_code(ch)
+        h = int_mod(int_add(int_mul(h, 31), c), 999983)
+        i = i + 1
+    }
+    return h
+}
+
+// Try to find a library file, searching standard paths.
+fn _ffi_find_lib(name) {
+    // If name contains '/', try as absolute/relative path
+    let i = 0
+    while i < len(name) {
+        if substr(name, i, 1) == "/" {
+            let fd = sys_open(name, 0, 0)  // O_RDONLY
+            if fd >= 0 { return fd }
+            return -1
+        }
+        i = i + 1
+    }
+
+    // Search standard paths
+    ffi_syscall_init()
+    i = 0
+    while i < len(_ffi_search_paths) {
+        let path = _ffi_search_paths[i] + name
+        let buf = alloc(len(path) + 1)
+        let j = 0
+        while j < len(path) {
+            store8(int_add(buf, j), char_code(substr(path, j, 1)))
+            j = j + 1
+        }
+        store8(int_add(buf, j), 0)
+        let fd = sys_open(buf, 0, 0)
+        if fd >= 0 { return fd }
+        i = i + 1
+    }
+    return -1
+}
+
+// Open and parse an ELF shared library.
+// Returns a handle list, or 0 on failure.
+fn ffi_load(lib_name) {
+    let fd = _ffi_find_lib(lib_name)
+    if fd < 0 { return 0 }
+
+    // Read ELF header (64 bytes)
+    let ehdr = alloc(64)
+    let n = sys_read(fd, ehdr, 64)
+    if n < 64 {
+        sys_close(fd)
+        return 0
+    }
+
+    // Verify ELF magic: 0x7F 'E' 'L' 'F'
+    if load8(ehdr) != 127 {
+        sys_close(fd)
+        return 0
+    }
+    if load8(int_add(ehdr, 1)) != 69 {
+        sys_close(fd)
+        return 0
+    }
+    if load8(int_add(ehdr, 2)) != 76 {
+        sys_close(fd)
+        return 0
+    }
+    if load8(int_add(ehdr, 3)) != 70 {
+        sys_close(fd)
+        return 0
+    }
+
+    // Verify 64-bit (class=2) and little-endian (data=1)
+    if load8(int_add(ehdr, 4)) != 2 {
+        sys_close(fd)
+        return 0
+    }
+    if load8(int_add(ehdr, 5)) != 1 {
+        sys_close(fd)
+        return 0
+    }
+
+    // Read program header info
+    let phoff = _ffi_read64(int_add(ehdr, 32))   // e_phoff
+    let phentsize = _ffi_read16(int_add(ehdr, 54)) // e_phentsize
+    let phnum = _ffi_read16(int_add(ehdr, 56))     // e_phnum
+
+    // Read all program headers
+    let ph_size = phentsize * phnum
+    let phdrs = alloc(ph_size)
+    _ffi_read_at(fd, phoff, phdrs, ph_size)
+
+    // First pass: find total memory range needed
+    let min_vaddr = 0 - 1  // large sentinel
+    let max_vaddr = 0
+    let pi = 0
+    while pi < phnum {
+        let ph = int_add(phdrs, pi * phentsize)
+        let p_type = _ffi_read32(ph)
+        if p_type == PT_LOAD {
+            let vaddr = _ffi_read64(int_add(ph, 16))    // p_vaddr
+            let memsz = _ffi_read64(int_add(ph, 40))    // p_memsz
+            if vaddr < min_vaddr { min_vaddr = vaddr }
+            let end = int_add(vaddr, memsz)
+            if end > max_vaddr { max_vaddr = end }
+        }
+        pi = pi + 1
+    }
+
+    if min_vaddr == 0 - 1 {
+        sys_close(fd)
+        return 0
+    }
+
+    // Allocate address space for the library
+    let total_size = int_sub(max_vaddr, min_vaddr)
+    let page_size = 4096
+    total_size = ((total_size + page_size - 1) / page_size) * page_size
+
+    // mmap anonymous space first
+    let base = sys_mmap(0, total_size, 7, 34, -1, 0)  // PROT_RWX, MAP_PRIVATE|MAP_ANONYMOUS
+    if base < 0 {
+        sys_close(fd)
+        return 0
+    }
+
+    // Load each PT_LOAD segment
+    pi = 0
+    while pi < phnum {
+        let ph = int_add(phdrs, pi * phentsize)
+        let p_type = _ffi_read32(ph)
+        if p_type == PT_LOAD {
+            let p_offset = _ffi_read64(int_add(ph, 8))   // p_offset
+            let p_vaddr = _ffi_read64(int_add(ph, 16))    // p_vaddr
+            let p_filesz = _ffi_read64(int_add(ph, 32))   // p_filesz
+
+            let dest = int_add(base, int_sub(p_vaddr, min_vaddr))
+            _ffi_read_at(fd, p_offset, dest, p_filesz)
+        }
+        pi = pi + 1
+    }
+
+    // Find PT_DYNAMIC segment
+    let dyn_off = 0
+    let dyn_size = 0
+    pi = 0
+    while pi < phnum {
+        let ph = int_add(phdrs, pi * phentsize)
+        let p_type = _ffi_read32(ph)
+        if p_type == PT_DYNAMIC {
+            dyn_off = _ffi_read64(int_add(ph, 16))  // p_vaddr
+            dyn_size = _ffi_read64(int_add(ph, 32))  // p_filesz
+        }
+        pi = pi + 1
+    }
+
+    // Parse dynamic section to find strtab, symtab, hash
+    let strtab = 0
+    let symtab = 0
+    let hashtab = 0
+    let hash_type = 0
+    let strsz = 0
+
+    if dyn_off > 0 {
+        let dyn_ptr = int_add(base, int_sub(dyn_off, min_vaddr))
+        let di = 0
+        let done = 0
+        while done == 0 {
+            let d_tag = _ffi_read64(int_add(dyn_ptr, di * 16))
+            let d_val = _ffi_read64(int_add(dyn_ptr, di * 16 + 8))
+            if d_tag == DT_NULL { done = 1 }
+            if d_tag == DT_STRTAB {
+                strtab = int_add(base, int_sub(d_val, min_vaddr))
+            }
+            if d_tag == DT_SYMTAB {
+                symtab = int_add(base, int_sub(d_val, min_vaddr))
+            }
+            if d_tag == DT_HASH {
+                hashtab = int_add(base, int_sub(d_val, min_vaddr))
+                hash_type = 1
+            }
+            // GNU hash not supported (tag value exceeds PTR_THRESHOLD)
+            if d_tag == DT_STRSZ { strsz = d_val }
+            di = di + 1
+            if di > 1000 { done = 1 }
+        }
+    }
+
+    // Build handle
+    let handle = list_new()
+    push(handle, base)         // _FFI_BASE
+    push(handle, strtab)       // _FFI_STRTAB
+    push(handle, symtab)       // _FFI_SYMTAB
+    push(handle, hashtab)      // _FFI_HASH
+    push(handle, hash_type)    // _FFI_HASH_TYPE
+    push(handle, strsz)        // _FFI_STRSZ
+    push(handle, fd)           // _FFI_FD
+    push(handle, total_size)   // _FFI_SIZE
+
+    return handle
+}
+
+// Look up a symbol by name in a loaded library.
+// Returns the symbol's absolute address, or 0 if not found.
+fn ffi_lookup(handle, sym_name) {
+    if handle == 0 { return 0 }
+    let symtab = handle[_FFI_SYMTAB]
+    let strtab = handle[_FFI_STRTAB]
+    if symtab == 0 { return 0 }
+    if strtab == 0 { return 0 }
+
+    let hashtab = handle[_FFI_HASH]
+
+    // Use SYSV hash table for lookup if available
+    if handle[_FFI_HASH_TYPE] == 1 {
+        if hashtab != 0 {
+            let nbucket = _ffi_read32(hashtab)
+            let nchain = _ffi_read32(int_add(hashtab, 4))
+            let bucket_base = int_add(hashtab, 8)
+            let chain_base = int_add(bucket_base, nbucket * 4)
+
+            let hash_val = _elf_hash(sym_name)
+            let bucket_idx = hash_val % nbucket
+            let sym_idx = _ffi_read32(int_add(bucket_base, bucket_idx * 4))
+
+            while sym_idx != 0 {
+                // Read symbol entry
+                let sym_ent = int_add(symtab, sym_idx * SYM_ENTRY_SIZE)
+                let st_name = _ffi_read32(sym_ent)  // offset into strtab
+                let name = _ffi_read_cstr(int_add(strtab, st_name), 256)
+                if name == sym_name {
+                    let st_value = _ffi_read64(int_add(sym_ent, 8))
+                    if st_value != 0 {
+                        return int_add(handle[_FFI_BASE], st_value)
+                    }
+                }
+                // Follow chain
+                sym_idx = _ffi_read32(int_add(chain_base, sym_idx * 4))
+            }
+            return 0
+        }
+    }
+
+    // Linear scan fallback (when no hash table)
+    let si = 0
+    let max_syms = 10000
+    while si < max_syms {
+        let sym_ent = int_add(symtab, si * SYM_ENTRY_SIZE)
+        let st_name = _ffi_read32(sym_ent)
+        if st_name == 0 {
+            if si > 0 { return 0 }
+        }
+        let name = _ffi_read_cstr(int_add(strtab, st_name), 256)
+        if name == sym_name {
+            let st_value = _ffi_read64(int_add(sym_ent, 8))
+            if st_value != 0 {
+                return int_add(handle[_FFI_BASE], st_value)
+            }
+        }
+        si = si + 1
+    }
+    return 0
+}
+
+// Unload a library.
+fn ffi_unload(handle) {
+    if handle == 0 { return 0 }
+    sys_munmap(handle[_FFI_BASE], handle[_FFI_SIZE])
+    sys_close(handle[_FFI_FD])
+    return 1
+}
+
+// Call a function pointer with 0-6 arguments (uses inline asm).
+fn ffi_syscall_call0(fn_ptr) {
+    let result = 0
+    asm {
+        "mov rax, [rbp - 8]"
+        "call rax"
+        "mov [rbp - 16], rax"
+    }
+    return result
+}
+
+fn ffi_syscall_call1(fn_ptr, a1) {
+    let result = 0
+    asm {
+        "mov rdi, [rbp - 16]"
+        "mov rax, [rbp - 8]"
+        "call rax"
+        "mov [rbp - 24], rax"
+    }
+    return result
+}
+
+fn ffi_syscall_call2(fn_ptr, a1, a2) {
+    let result = 0
+    asm {
+        "mov rdi, [rbp - 16]"
+        "mov rsi, [rbp - 24]"
+        "mov rax, [rbp - 8]"
+        "call rax"
+        "mov [rbp - 32], rax"
+    }
+    return result
+}
+
+fn ffi_syscall_call3(fn_ptr, a1, a2, a3) {
+    let result = 0
+    asm {
+        "mov rdi, [rbp - 16]"
+        "mov rsi, [rbp - 24]"
+        "mov rdx, [rbp - 32]"
+        "mov rax, [rbp - 8]"
+        "call rax"
+        "mov [rbp - 40], rax"
+    }
+    return result
+}
+
+fn ffi_syscall_call4(fn_ptr, a1, a2, a3, a4) {
+    let result = 0
+    asm {
+        "mov rdi, [rbp - 16]"
+        "mov rsi, [rbp - 24]"
+        "mov rdx, [rbp - 32]"
+        "mov rcx, [rbp - 40]"
+        "mov rax, [rbp - 8]"
+        "call rax"
+        "mov [rbp - 48], rax"
+    }
+    return result
+}
+
+fn ffi_syscall_call5(fn_ptr, a1, a2, a3, a4, a5) {
+    let result = 0
+    asm {
+        "mov rdi, [rbp - 16]"
+        "mov rsi, [rbp - 24]"
+        "mov rdx, [rbp - 32]"
+        "mov rcx, [rbp - 40]"
+        "mov r8, [rbp - 48]"
+        "mov rax, [rbp - 8]"
+        "call rax"
+        "mov [rbp - 56], rax"
+    }
+    return result
+}
+
+fn ffi_syscall_call6(fn_ptr, a1, a2, a3, a4, a5, a6) {
+    let result = 0
+    asm {
+        "mov rdi, [rbp - 16]"
+        "mov rsi, [rbp - 24]"
+        "mov rdx, [rbp - 32]"
+        "mov rcx, [rbp - 40]"
+        "mov r8, [rbp - 48]"
+        "mov r9, [rbp - 56]"
+        "mov rax, [rbp - 8]"
+        "call rax"
+        "mov [rbp - 64], rax"
+    }
+    return result
+}
+
+// Direct socket syscall wrappers (no libc needed).
+fn sys_socket(domain, sock_type, protocol) {
+    let result = 0
+    asm {
+        "mov rax, 41"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "syscall"
+        "mov [rbp - 32], rax"
+    }
+    return result
+}
+
+fn sys_bind(sockfd, addr, addrlen) {
+    let result = 0
+    asm {
+        "mov rax, 49"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "syscall"
+        "mov [rbp - 32], rax"
+    }
+    return result
+}
+
+fn sys_listen(sockfd, backlog) {
+    let result = 0
+    asm {
+        "mov rax, 50"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "syscall"
+        "mov [rbp - 24], rax"
+    }
+    return result
+}
+
+fn sys_accept(sockfd, addr, addrlen) {
+    let result = 0
+    asm {
+        "mov rax, 43"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "syscall"
+        "mov [rbp - 32], rax"
+    }
+    return result
+}
+
+fn sys_connect(sockfd, addr, addrlen) {
+    let result = 0
+    asm {
+        "mov rax, 42"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "syscall"
+        "mov [rbp - 32], rax"
+    }
+    return result
+}
+
+fn sys_send(sockfd, buf, blen, flags) {
+    let result = 0
+    asm {
+        "mov rax, 44"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov r10, [rbp - 32]"
+        "syscall"
+        "mov [rbp - 40], rax"
+    }
+    return result
+}
+
+fn sys_recv(sockfd, buf, blen, flags) {
+    let result = 0
+    asm {
+        "mov rax, 45"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov r10, [rbp - 32]"
+        "syscall"
+        "mov [rbp - 40], rax"
+    }
+    return result
+}
+
+fn sys_setsockopt(sockfd, level, optname, optval, optlen) {
+    let result = 0
+    asm {
+        "mov rax, 54"
+        "mov rdi, [rbp - 8]"
+        "mov rsi, [rbp - 16]"
+        "mov rdx, [rbp - 24]"
+        "mov r10, [rbp - 32]"
+        "mov r8, [rbp - 40]"
+        "syscall"
+        "mov [rbp - 48], rax"
+    }
+    return result
+}
+
+// Socket constants
+let AF_INET = 2
+let AF_INET6 = 10
+let AF_UNIX = 1
+let SOCK_STREAM = 1
+let SOCK_DGRAM = 2
+let SOL_SOCKET = 1
+let SO_REUSEADDR = 2
+
+// Build a sockaddr_in structure for IPv4.
+// Returns pointer to the struct (16 bytes).
+fn make_sockaddr_in_raw(port, ip_addr) {
+    let addr = alloc(16)
+    // sin_family (AF_INET = 2), 2 bytes little-endian
+    store8(addr, 2)
+    store8(int_add(addr, 1), 0)
+    // sin_port, 2 bytes big-endian
+    store8(int_add(addr, 2), port / 256)
+    store8(int_add(addr, 3), port % 256)
+    // sin_addr, 4 bytes — use int_div/int_mod for large ip_addr
+    let b0 = int_div(ip_addr, int_mul(256, int_mul(256, 256)))
+    let rem1 = int_sub(ip_addr, int_mul(b0, int_mul(256, int_mul(256, 256))))
+    let b1 = int_div(rem1, int_mul(256, 256))
+    let rem2 = int_sub(rem1, int_mul(b1, int_mul(256, 256)))
+    let b2 = int_div(rem2, 256)
+    let b3 = int_sub(rem2, int_mul(b2, 256))
+    store8(int_add(addr, 4), b0)
+    store8(int_add(addr, 5), b1)
+    store8(int_add(addr, 6), b2)
+    store8(int_add(addr, 7), b3)
+    // padding (8 bytes zeros)
+    store64(int_add(addr, 8), 0)
+    return addr
+}
+
+// Convert dotted-quad IP string to integer.
+// Uses int_mul/int_add for values that may exceed PTR_THRESHOLD.
+fn ip_to_int(ip_str) {
+    let parts = list_new()
+    let current = 0
+    let i = 0
+    while i < len(ip_str) {
+        let c = substr(ip_str, i, 1)
+        if c == "." {
+            push(parts, current)
+            current = 0
+        } else {
+            current = current * 10 + (char_code(c) - 48)
+        }
+        i = i + 1
+    }
+    push(parts, current)
+    if len(parts) != 4 { return 0 }
+    // Use int_mul/int_add since result may exceed PTR_THRESHOLD
+    let octet0 = int_mul(parts[0], int_mul(256, int_mul(256, 256)))
+    let octet1 = int_mul(parts[1], int_mul(256, 256))
+    let octet2 = int_mul(parts[2], 256)
+    return int_add(int_add(octet0, octet1), int_add(octet2, parts[3]))
+}

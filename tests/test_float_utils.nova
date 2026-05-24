@@ -1,0 +1,130 @@
+// Test: Float Utilities
+import "std/float"
+
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Float Utilities Tests ===")
+
+    // Test 1: Constants
+    let zero = float_zero()
+    let one = float_one()
+    assert_test(float_cmp(zero, to_float(0)) == 0, "float_zero()")
+    assert_test(float_cmp(one, to_float(1)) == 0, "float_one()")
+
+    // Test 2: Absolute value
+    let neg5 = float_neg(to_float(5))
+    let abs5 = float_abs(neg5)
+    assert_test(float_cmp(abs5, to_float(5)) == 0, "float_abs(-5) == 5")
+
+    // Test 3: Negation
+    let neg3 = float_neg(to_float(3))
+    assert_test(float_cmp(neg3, to_float(0)) < 0, "float_neg(3) < 0")
+
+    // Test 4: Min/Max
+    let a = to_float(3)
+    let b = to_float(7)
+    assert_test(float_cmp(float_min_of(a, b), a) == 0, "float_min(3,7) == 3")
+    assert_test(float_cmp(float_max_of(a, b), b) == 0, "float_max(3,7) == 7")
+
+    // Test 5: Clamp
+    let clamped = float_clamp_range(to_float(15), to_float(0), to_float(10))
+    assert_test(float_cmp(clamped, to_float(10)) == 0, "float_clamp_range(15, 0, 10) == 10")
+    let clamped2 = float_clamp_range(float_neg(to_float(5)), to_float(0), to_float(10))
+    assert_test(float_cmp(clamped2, to_float(0)) == 0, "float_clamp_range(-5, 0, 10) == 0")
+
+    // Test 6: Lerp
+    let lerped = float_lerp(to_float(0), to_float(10), float_half())
+    assert_test(float_cmp(lerped, to_float(5)) == 0, "float_lerp(0, 10, 0.5) == 5")
+
+    // Test 7: Floor / Ceil / Round
+    let val = float_div(to_float(7), to_float(2))  // 3.5
+    let fl = float_floor(val)
+    let cl = float_ceil(val)
+    let rn = float_round(val)
+    assert_test(from_float(fl) == 3, "float_floor(3.5) == 3")
+    assert_test(from_float(cl) == 4, "float_ceil(3.5) == 4")
+    assert_test(from_float(rn) == 4, "float_round(3.5) == 4")
+
+    // Test 8: Truncation
+    let tr = float_trunc(val)
+    assert_test(from_float(tr) == 3, "float_trunc(3.5) == 3")
+
+    // Test 9: Classification
+    let inf = float_inf()
+    assert_test(float_is_inf(inf) == 1, "float_inf() is infinite")
+    assert_test(float_is_finite(to_float(42)) == 1, "42 is finite")
+    assert_test(float_is_zero(to_float(0)) == 1, "0 is zero")
+    assert_test(float_is_negative(float_neg(to_float(1))) == 1, "-1 is negative")
+    assert_test(float_is_negative(to_float(1)) == 0, "1 is not negative")
+
+    // Test 10: Approximate equality
+    let almost = float_add(to_float(1), float_div(to_float(1), to_float(1000)))
+    let tol = float_div(to_float(1), to_float(100))
+    assert_test(float_approx_eq(almost, to_float(1), tol) == 1, "1.001 ~ 1.0 (tol=0.01)")
+
+    // Test 11: Fixed-point conversion
+    let fixed = float_to_fixed(float_div(to_float(3), to_float(2)), 1000)  // 1.5 * 1000 = 1500
+    assert_test(fixed == 1500, "float_to_fixed(1.5, 1000) == 1500")
+    let back = float_from_fixed(1500, 1000)
+    assert_test(from_float(float_mul(back, to_float(2))) == 3, "float_from_fixed(1500, 1000) == 1.5")
+
+    // Test 12: Format
+    let pi_approx = float_div(to_float(355), to_float(113))
+    let formatted = float_format(pi_approx, 2)
+    assert_test(formatted == "3.14", "float_format(355/113, 2) == '3.14'")
+
+    // Test 13: Format negative
+    let neg_val = float_neg(float_div(to_float(7), to_float(2)))
+    let neg_fmt = float_format(neg_val, 1)
+    assert_test(neg_fmt == "-3.5", "float_format(-3.5, 1) == '-3.5'")
+
+    // Test 14: FMA
+    let fma_result = float_fma(to_float(3), to_float(4), to_float(5))  // 3*4 + 5 = 17
+    assert_test(from_float(fma_result) == 17, "float_fma(3, 4, 5) == 17")
+
+    // Test 15: Reciprocal
+    let recip = float_reciprocal(to_float(4))
+    let check = float_mul(recip, to_float(4))
+    assert_test(from_float(check) == 1, "1/4 * 4 == 1")
+
+    // Test 16: Mod
+    let mod_result = float_mod(to_float(7), to_float(3))
+    assert_test(from_float(mod_result) == 1, "float_mod(7, 3) == 1")
+
+    // Test 17: Sign
+    assert_test(float_cmp(float_sign(to_float(5)), float_one()) == 0, "float_sign(5) == 1")
+    assert_test(float_cmp(float_sign(float_neg(to_float(3))), float_neg_one()) == 0, "float_sign(-3) == -1")
+
+    // Test 18: Statistical helpers
+    let vals = list_new()
+    push(vals, to_float(2))
+    push(vals, to_float(4))
+    push(vals, to_float(6))
+    push(vals, to_float(8))
+    let fsum = float_sum_list(vals)
+    assert_test(from_float(fsum) == 20, "float_sum_list([2,4,6,8]) == 20")
+    let fmean = float_mean_list(vals)
+    assert_test(from_float(fmean) == 5, "float_mean_list([2,4,6,8]) == 5")
+    let fmin = float_min_list(vals)
+    assert_test(from_float(fmin) == 2, "float_min_list([2,4,6,8]) == 2")
+    let fmax = float_max_list(vals)
+    assert_test(from_float(fmax) == 8, "float_max_list([2,4,6,8]) == 8")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

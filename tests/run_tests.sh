@@ -155,6 +155,26 @@ for test_file in tests/test_*.nova; do
             grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
             INPUT="/tmp/nova_combined_test.nova"
             ;;
+        test_float_utils)
+            cat src/runtime/float.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+        test_persistent_alloc)
+            cat src/runtime/syscall.nova src/runtime/alloc.nova \
+                src/runtime/persistent_alloc.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
+        test_ffi_syscall)
+            cat src/runtime/syscall.nova src/runtime/alloc.nova \
+                src/runtime/ffi_syscall.nova \
+                > /tmp/nova_combined_test.nova
+            grep -v '^import ' "$test_file" >> /tmp/nova_combined_test.nova
+            INPUT="/tmp/nova_combined_test.nova"
+            ;;
     esac
 
     # Compile (with timeout to prevent hangs)

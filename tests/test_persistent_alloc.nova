@@ -1,0 +1,97 @@
+// Test: Persistent Allocator
+import "std/syscall"
+import "std/alloc"
+import "std/persistent_alloc"
+
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Persistent Allocator Tests ===")
+
+    let test_file = "/tmp/nova_pa_test.dat"
+    let pool_size = 65536
+
+    // Clean up from any previous failed run
+    sys_unlink(test_file)
+
+    // Test 1: Open a new pool
+    let ok = persistent_open(test_file, pool_size)
+    assert_test(ok == 1, "open new pool")
+    assert_test(persistent_is_open() == 1, "pool is open")
+
+    // Test 3: Capacity
+    let cap = persistent_capacity()
+    assert_test(cap >= pool_size, "capacity >= requested")
+
+    // Test 4: Used starts at header
+    let used = persistent_used()
+    assert_test(used == 64, "initial used == 64")
+
+    // Test 5: Allocate and store/load 64-bit
+    let p1 = persistent_alloc(128)
+    assert_test(p1 != 0, "alloc 128 bytes")
+    persistent_store64(p1, 0, 42)
+    assert_test(persistent_load64(p1, 0) == 42, "store64/load64")
+
+    // Test 7: Store/load byte
+    persistent_store8(p1, 8, 99)
+    assert_test(persistent_load8(p1, 8) == 99, "store8/load8")
+
+    // Test 8: Second allocation
+    let p2 = persistent_alloc(64)
+    assert_test(p2 != 0, "second alloc 64 bytes")
+
+    // Test 9: Block count
+    let bc = persistent_block_count()
+    assert_test(bc == 2, "block count == 2")
+
+    // Test 10: Used increased
+    let used2 = persistent_used()
+    assert_test(used2 > 64, "used increased after allocs")
+
+    // Test 11: Multiple small allocations
+    let alloc_ok = 1
+    let i = 0
+    while i < 5 {
+        let p = persistent_alloc(32)
+        if p == 0 { alloc_ok = 0 }
+        if p != 0 {
+            persistent_store64(p, 0, int_add(i, 100))
+        }
+        i = i + 1
+    }
+    assert_test(alloc_ok == 1, "5 more allocations succeed")
+
+    // Test 12: Close
+    persistent_close()
+    assert_test(persistent_is_open() == 0, "pool closed")
+
+    // Test 13: Reopen
+    let ok2 = persistent_open(test_file, pool_size)
+    assert_test(ok2 == 1, "reopen existing pool")
+    assert_test(persistent_block_count() > 0, "block count persisted")
+
+    // Test 15: Capacity still correct
+    assert_test(persistent_capacity() >= pool_size, "capacity after reopen")
+
+    // Cleanup
+    persistent_close()
+    sys_unlink(test_file)
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()
