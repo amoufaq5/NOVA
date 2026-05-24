@@ -23,6 +23,20 @@ let SIG_REQUEST = 5
 let SIG_RESPONSE = 6
 let SIG_CORRECTION = 7
 let SIG_REFLECTION = 8
+let SIG_PREDICTIVE = 9
+let SIG_ERROR = 10
+let SIG_CAUSAL = 11
+let SIG_IMPLICATIVE = 12
+let SIG_ANALOGICAL = 13
+let SIG_EVIDENTIAL = 14
+let SIG_ATTENTIVE = 15
+let SIG_BINDING = 16
+let SIG_VALENCE = 17
+let SIG_AROUSAL = 18
+let SIG_CURIOSITY = 19
+let SIG_GOAL_DRIVE = 20
+let SIG_REWARD = 21
+let SIG_RECALL = 22
 
 // ---------------------------------------------------------------------------
 // Constructors
@@ -63,6 +77,62 @@ fn signal_reflection(moment, origin, dest) {
 
 fn signal_correction(moment, origin, dest) {
     return signal_new(SIG_CORRECTION, moment, origin, dest, 80)
+}
+
+fn signal_predictive(moment, origin, dest) {
+    return signal_new(SIG_PREDICTIVE, moment, origin, dest, 55)
+}
+
+fn signal_error(moment, origin, dest) {
+    return signal_new(SIG_ERROR, moment, origin, dest, 85)
+}
+
+fn signal_causal(moment, origin, dest) {
+    return signal_new(SIG_CAUSAL, moment, origin, dest, 65)
+}
+
+fn signal_implicative(moment, origin, dest) {
+    return signal_new(SIG_IMPLICATIVE, moment, origin, dest, 60)
+}
+
+fn signal_analogical(moment, origin, dest) {
+    return signal_new(SIG_ANALOGICAL, moment, origin, dest, 55)
+}
+
+fn signal_evidential(moment, origin, dest) {
+    return signal_new(SIG_EVIDENTIAL, moment, origin, dest, 70)
+}
+
+fn signal_attentive(moment, origin, dest) {
+    return signal_new(SIG_ATTENTIVE, moment, origin, dest, 95)
+}
+
+fn signal_binding(moment, origin, dest) {
+    return signal_new(SIG_BINDING, moment, origin, dest, 50)
+}
+
+fn signal_valence(moment, origin, dest) {
+    return signal_new(SIG_VALENCE, moment, origin, dest, 45)
+}
+
+fn signal_arousal(moment, origin, dest) {
+    return signal_new(SIG_AROUSAL, moment, origin, dest, 45)
+}
+
+fn signal_curiosity(moment, origin, dest) {
+    return signal_new(SIG_CURIOSITY, moment, origin, dest, 55)
+}
+
+fn signal_goal_drive(moment, origin, dest) {
+    return signal_new(SIG_GOAL_DRIVE, moment, origin, dest, 75)
+}
+
+fn signal_reward(moment, origin, dest) {
+    return signal_new(SIG_REWARD, moment, origin, dest, 80)
+}
+
+fn signal_recall(moment, origin, dest) {
+    return signal_new(SIG_RECALL, moment, origin, dest, 65)
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +293,20 @@ fn signal_type_name(s) {
     if t == SIG_RESPONSE { return "response" }
     if t == SIG_CORRECTION { return "correction" }
     if t == SIG_REFLECTION { return "reflection" }
+    if t == SIG_PREDICTIVE { return "predictive" }
+    if t == SIG_ERROR { return "error" }
+    if t == SIG_CAUSAL { return "causal" }
+    if t == SIG_IMPLICATIVE { return "implicative" }
+    if t == SIG_ANALOGICAL { return "analogical" }
+    if t == SIG_EVIDENTIAL { return "evidential" }
+    if t == SIG_ATTENTIVE { return "attentive" }
+    if t == SIG_BINDING { return "binding" }
+    if t == SIG_VALENCE { return "valence" }
+    if t == SIG_AROUSAL { return "arousal" }
+    if t == SIG_CURIOSITY { return "curiosity" }
+    if t == SIG_GOAL_DRIVE { return "goal_drive" }
+    if t == SIG_REWARD { return "reward" }
+    if t == SIG_RECALL { return "recall" }
     return "unknown"
 }
 

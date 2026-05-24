@@ -389,3 +389,175 @@ fn kg_describe(kg) {
     print_int(kg_relation_count(kg))
     println(")")
 }
+
+// KG Registry - manages multiple knowledge graphs by domain
+let _kg_registry_domains = 0
+let _kg_registry_kgs = 0
+let _kg_registry_count = 0
+
+fn kg_registry_init() {
+    _kg_registry_domains = list_new()
+    _kg_registry_kgs = list_new()
+    _kg_registry_count = 0
+}
+
+fn _kg_registry_find(domain_name) {
+    let i = 0
+    while i < _kg_registry_count {
+        if _kg_registry_domains[i] == domain_name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn kg_spawn(domain_name) {
+    let existing = _kg_registry_find(domain_name)
+    if existing != -1 { return _kg_registry_kgs[existing] }
+    let kg = kg_new()
+    push(_kg_registry_domains, domain_name)
+    push(_kg_registry_kgs, kg)
+    _kg_registry_count = _kg_registry_count + 1
+    return kg
+}
+
+fn kg_get_domain(domain_name) {
+    let idx = _kg_registry_find(domain_name)
+    if idx == -1 { return 0 }
+    return _kg_registry_kgs[idx]
+}
+
+fn kg_list_domains() {
+    let result = list_new()
+    let i = 0
+    while i < _kg_registry_count {
+        push(result, _kg_registry_domains[i])
+        i = i + 1
+    }
+    return result
+}
+
+fn kg_domain_count() {
+    return _kg_registry_count
+}
+
+fn kg_remove_domain(domain_name) {
+    let idx = _kg_registry_find(domain_name)
+    if idx == -1 { return 0 }
+    list_remove(_kg_registry_domains, idx)
+    list_remove(_kg_registry_kgs, idx)
+    _kg_registry_count = _kg_registry_count - 1
+    return 1
+}
+
+fn kg_cross_ref(source_kg, source_entity, target_domain, target_entity) {
+    let obj = target_domain + ":" + target_entity
+    kg_add_relation(source_kg, source_entity, "xref", obj, 1)
+}
+
+fn kg_resolve_ref(ref_string) {
+    let slen = len(ref_string)
+    let colon_pos = -1
+    let i = 0
+    while i < slen {
+        if substr(ref_string, i, 1) == ":" {
+            colon_pos = i
+            i = slen
+        }
+        i = i + 1
+    }
+    let result = list_new()
+    if colon_pos == -1 {
+        push(result, ref_string)
+        push(result, "")
+        return result
+    }
+    push(result, substr(ref_string, 0, colon_pos))
+    push(result, substr(ref_string, colon_pos + 1, slen - colon_pos - 1))
+    return result
+}
+
+fn kg_cross_query(source_domain, entity_name, rel_type) {
+    let result = list_new()
+    let source_kg = kg_get_domain(source_domain)
+    if source_kg == 0 { return result }
+    let rels = source_kg[KG_RELATIONS]
+    let i = 0
+    while i < len(rels) {
+        let r = rels[i]
+        if r[KG_REL_SUBJ] == entity_name {
+            if r[KG_REL_TYPE] == rel_type {
+                let triple = list_new()
+                push(triple, source_domain)
+                push(triple, r[KG_REL_OBJ])
+                push(triple, r[KG_REL_WEIGHT])
+                push(result, triple)
+            }
+            if r[KG_REL_TYPE] == "xref" {
+                let ref_parts = kg_resolve_ref(r[KG_REL_OBJ])
+                let target_domain = ref_parts[0]
+                let target_entity = ref_parts[1]
+                let target_kg = kg_get_domain(target_domain)
+                if target_kg != 0 {
+                    let target_rels = target_kg[KG_RELATIONS]
+                    let j = 0
+                    while j < len(target_rels) {
+                        let tr = target_rels[j]
+                        if tr[KG_REL_SUBJ] == target_entity {
+                            if tr[KG_REL_TYPE] == rel_type {
+                                let triple = list_new()
+                                push(triple, target_domain)
+                                push(triple, tr[KG_REL_OBJ])
+                                push(triple, tr[KG_REL_WEIGHT])
+                                push(result, triple)
+                            }
+                        }
+                        j = j + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn kg_merge_domains(domain_a, domain_b, target_domain) {
+    let kg_a = kg_get_domain(domain_a)
+    let kg_b = kg_get_domain(domain_b)
+    let merged = kg_spawn(target_domain)
+
+    let i = 0
+    if kg_a != 0 {
+        let ents_a = kg_a[KG_ENTITIES]
+        i = 0
+        while i < len(ents_a) {
+            kg_add_entity(merged, ents_a[i][KG_ENT_NAME], ents_a[i][KG_ENT_EMBED])
+            i = i + 1
+        }
+        let rels_a = kg_a[KG_RELATIONS]
+        i = 0
+        while i < len(rels_a) {
+            let r = rels_a[i]
+            kg_add_relation(merged, r[KG_REL_SUBJ], r[KG_REL_TYPE], r[KG_REL_OBJ], r[KG_REL_WEIGHT])
+            i = i + 1
+        }
+    }
+
+    if kg_b != 0 {
+        let ents_b = kg_b[KG_ENTITIES]
+        i = 0
+        while i < len(ents_b) {
+            kg_add_entity(merged, ents_b[i][KG_ENT_NAME], ents_b[i][KG_ENT_EMBED])
+            i = i + 1
+        }
+        let rels_b = kg_b[KG_RELATIONS]
+        i = 0
+        while i < len(rels_b) {
+            let r = rels_b[i]
+            kg_add_relation(merged, r[KG_REL_SUBJ], r[KG_REL_TYPE], r[KG_REL_OBJ], r[KG_REL_WEIGHT])
+            i = i + 1
+        }
+    }
+
+    return merged
+}

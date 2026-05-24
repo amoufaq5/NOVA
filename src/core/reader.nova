@@ -1,0 +1,431 @@
+// Nova Core: Reader
+// Five-stage hybrid cognitive processing pipeline.
+// Stages: Lexical Anchor -> Context Bias -> Spreading Activation
+//         -> Coherence Check -> Fetch/Route/Learn
+//
+// Depends on: knowledge.nova (KG), signal.nova, node.nova
+
+let READER_TAG = 310
+let RDR_NAME = 1
+let RDR_KG = 2
+let RDR_CONTEXT = 3
+let RDR_CONTEXT_SIZE = 4
+let RDR_ACTIVATIONS = 5
+let RDR_ACT_NAMES = 6
+let RDR_ACT_LEVELS = 7
+let RDR_COHERENCE_THRESHOLD = 8
+let RDR_LEARN_RATE = 9
+let RDR_PROCESSED = 10
+
+// =========================================================
+// Constructor & Accessors
+// =========================================================
+
+fn reader_new(name, kg, context_size, coherence_threshold, learn_rate) {
+    let r = list_new()
+    push(r, READER_TAG)
+    push(r, name)
+    push(r, kg)
+    push(r, list_new())
+    push(r, context_size)
+    push(r, list_new())
+    push(r, list_new())
+    push(r, list_new())
+    push(r, coherence_threshold)
+    push(r, learn_rate)
+    push(r, 0)
+    return r
+}
+
+fn reader_name(r) {
+    return r[RDR_NAME]
+}
+
+// =========================================================
+// Internal: split text into words by spaces
+// =========================================================
+
+fn _reader_split_words(text) {
+    let words = list_new()
+    let tlen = len(text)
+    let start = 0
+    let in_word = 0
+    let i = 0
+    while i < tlen {
+        let ch = substr(text, i, 1)
+        if ch == " " {
+            if in_word == 1 {
+                push(words, substr(text, start, i - start))
+                in_word = 0
+            }
+        } else {
+            if in_word == 0 {
+                start = i
+                in_word = 1
+            }
+        }
+        i = i + 1
+    }
+    if in_word == 1 {
+        push(words, substr(text, start, tlen - start))
+    }
+    return words
+}
+
+// =========================================================
+// Stage 1: Lexical Anchor
+// =========================================================
+
+fn reader_lexical_anchor(r, text) {
+    let kg = r[RDR_KG]
+    let words = _reader_split_words(text)
+    let matched = list_new()
+    let i = 0
+    while i < len(words) {
+        let word = words[i]
+        let ent = kg_get_entity(kg, word)
+        if ent != 0 {
+            // Avoid duplicates
+            let already = 0
+            let j = 0
+            while j < len(matched) {
+                if matched[j] == word { already = 1 }
+                j = j + 1
+            }
+            if already == 0 {
+                push(matched, word)
+            }
+        }
+        i = i + 1
+    }
+    return matched
+}
+
+// =========================================================
+// Stage 2: Context Bias
+// =========================================================
+
+fn reader_context_bias(r, candidates) {
+    let context = r[RDR_CONTEXT]
+    let result = list_new()
+    let i = 0
+    while i < len(candidates) {
+        let name = candidates[i]
+        let bias = 0
+        let j = 0
+        while j < len(context) {
+            if context[j] == name { bias = 200 }
+            j = j + 1
+        }
+        let pair = list_new()
+        push(pair, name)
+        push(pair, bias)
+        push(result, pair)
+        i = i + 1
+    }
+    return result
+}
+
+fn reader_update_context(r, entity_name) {
+    let context = r[RDR_CONTEXT]
+    push(context, entity_name)
+    let max_size = r[RDR_CONTEXT_SIZE]
+    while len(context) > max_size {
+        // Remove oldest (front) by shifting
+        let k = 1
+        while k < len(context) {
+            context[k - 1] = context[k]
+            k = k + 1
+        }
+        pop(context)
+    }
+}
+
+// =========================================================
+// Stage 3: Spreading Activation
+// =========================================================
+
+fn reader_spread_activation(r, seed_entities, depth) {
+    let kg = r[RDR_KG]
+    let act_names = list_new()
+    let act_levels = list_new()
+
+    // Seed entities start at full activation (1000)
+    let i = 0
+    while i < len(seed_entities) {
+        push(act_names, seed_entities[i])
+        push(act_levels, 1000)
+        i = i + 1
+    }
+
+    let energy = 1000
+    let d = 0
+    while d < depth {
+        energy = energy / 2
+        if energy < 1 { d = depth }
+        if energy >= 1 {
+            let frontier_size = len(act_names)
+            let fi = 0
+            while fi < frontier_size {
+                let current = act_names[fi]
+                let rels = kg_get_relations(kg, current)
+                let ri = 0
+                while ri < len(rels) {
+                    let neighbor = rels[ri][KG_REL_OBJ]
+                    // Check if already activated
+                    let found = -1
+                    let ai = 0
+                    while ai < len(act_names) {
+                        if act_names[ai] == neighbor { found = ai }
+                        ai = ai + 1
+                    }
+                    if found == -1 {
+                        push(act_names, neighbor)
+                        push(act_levels, energy)
+                    } else {
+                        // Boost existing activation, cap at 1000
+                        let new_level = act_levels[found] + energy
+                        if new_level > 1000 { new_level = 1000 }
+                        act_levels[found] = new_level
+                    }
+                    ri = ri + 1
+                }
+                // Also follow reverse relations
+                let rev_rels = kg_get_reverse(kg, current)
+                let rri = 0
+                while rri < len(rev_rels) {
+                    let rev_neighbor = rev_rels[rri][KG_REL_SUBJ]
+                    let found2 = -1
+                    let ai2 = 0
+                    while ai2 < len(act_names) {
+                        if act_names[ai2] == rev_neighbor { found2 = ai2 }
+                        ai2 = ai2 + 1
+                    }
+                    if found2 == -1 {
+                        push(act_names, rev_neighbor)
+                        push(act_levels, energy)
+                    } else {
+                        let new_level2 = act_levels[found2] + energy
+                        if new_level2 > 1000 { new_level2 = 1000 }
+                        act_levels[found2] = new_level2
+                    }
+                    rri = rri + 1
+                }
+                fi = fi + 1
+            }
+            d = d + 1
+        }
+    }
+
+    // Store activations in reader state
+    r[RDR_ACT_NAMES] = act_names
+    r[RDR_ACT_LEVELS] = act_levels
+
+    let result = list_new()
+    let k = 0
+    while k < len(act_names) {
+        let pair = list_new()
+        push(pair, act_names[k])
+        push(pair, act_levels[k])
+        push(result, pair)
+        k = k + 1
+    }
+    return result
+}
+
+fn reader_get_activation(r, entity_name) {
+    let names = r[RDR_ACT_NAMES]
+    let levels = r[RDR_ACT_LEVELS]
+    let i = 0
+    while i < len(names) {
+        if names[i] == entity_name { return levels[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+fn reader_clear_activations(r) {
+    r[RDR_ACT_NAMES] = list_new()
+    r[RDR_ACT_LEVELS] = list_new()
+}
+
+// =========================================================
+// Stage 4: Coherence Check
+// =========================================================
+
+fn reader_coherence_check(r, activated_entities) {
+    let kg = r[RDR_KG]
+    let n = len(activated_entities)
+    if n < 2 { return 1000 }
+    let pairs = n * (n - 1) / 2
+    let relations_found = 0
+    let i = 0
+    while i < n {
+        let j = i + 1
+        while j < n {
+            let a = activated_entities[i]
+            let b = activated_entities[j]
+            // Check both directions for any relation type
+            let rels_ab = kg_get_relations(kg, a)
+            let found_link = 0
+            let ri = 0
+            while ri < len(rels_ab) {
+                if rels_ab[ri][KG_REL_OBJ] == b { found_link = 1 }
+                ri = ri + 1
+            }
+            if found_link == 0 {
+                let rels_ba = kg_get_relations(kg, b)
+                let rj = 0
+                while rj < len(rels_ba) {
+                    if rels_ba[rj][KG_REL_OBJ] == a { found_link = 1 }
+                    rj = rj + 1
+                }
+            }
+            if found_link == 1 {
+                relations_found = relations_found + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // Scale to 0-1000
+    let score = relations_found * 1000 / pairs
+    return score
+}
+
+fn reader_is_coherent(r, score) {
+    if score >= r[RDR_COHERENCE_THRESHOLD] { return 1 }
+    return 0
+}
+
+// =========================================================
+// Stage 5: Fetch / Route / Learn
+// =========================================================
+
+fn reader_fetch(r, entity_names) {
+    let kg = r[RDR_KG]
+    let result = list_new()
+    let i = 0
+    while i < len(entity_names) {
+        let name = entity_names[i]
+        let rels = kg_get_relations(kg, name)
+        let pair = list_new()
+        push(pair, name)
+        push(pair, rels)
+        push(result, pair)
+        i = i + 1
+    }
+    return result
+}
+
+fn reader_learn(r, entity_a, entity_b, relation_type) {
+    let kg = r[RDR_KG]
+    let already = kg_has_relation(kg, entity_a, relation_type, entity_b)
+    if already == 1 { return 0 }
+    let weight = r[RDR_LEARN_RATE]
+    kg_add_relation(kg, entity_a, relation_type, entity_b, weight)
+    return 1
+}
+
+fn reader_route_signal(r, signal, target_entities) {
+    let result = list_new()
+    let i = 0
+    while i < len(target_entities) {
+        let target = target_entities[i]
+        let redirected = signal_redirect(signal, target)
+        push(result, redirected)
+        i = i + 1
+    }
+    return result
+}
+
+// =========================================================
+// Full Pipeline
+// =========================================================
+
+fn reader_process(r, signal, text) {
+    // Stage 1: Lexical Anchor
+    let candidates = reader_lexical_anchor(r, text)
+
+    // Stage 2: Context Bias
+    let biased = reader_context_bias(r, candidates)
+    // Sort by bias score descending to find top candidates
+    let si = 0
+    while si < len(biased) {
+        let sj = si + 1
+        while sj < len(biased) {
+            if biased[sj][1] > biased[si][1] {
+                let tmp = biased[si]
+                biased[si] = biased[sj]
+                biased[sj] = tmp
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    // Extract top candidate names for activation seeding
+    let top_names = list_new()
+    let ti = 0
+    while ti < len(biased) {
+        push(top_names, biased[ti][0])
+        ti = ti + 1
+    }
+
+    // Stage 3: Spreading Activation
+    let activations = reader_spread_activation(r, top_names, 2)
+
+    // Stage 4: Coherence Check
+    let entity_names = list_new()
+    let ei = 0
+    while ei < len(activations) {
+        push(entity_names, activations[ei][0])
+        ei = ei + 1
+    }
+    let coherence = reader_coherence_check(r, entity_names)
+
+    // Stage 5: Fetch/Route/Learn (only if coherent)
+    if reader_is_coherent(r, coherence) == 1 {
+        reader_fetch(r, entity_names)
+        // Update context with all anchored candidates
+        let ci = 0
+        while ci < len(candidates) {
+            reader_update_context(r, candidates[ci])
+            ci = ci + 1
+        }
+        // Learn co-occurrence relations between candidates
+        let li = 0
+        while li < len(candidates) {
+            let lj = li + 1
+            while lj < len(candidates) {
+                reader_learn(r, candidates[li], candidates[lj], "co_occurs")
+                lj = lj + 1
+            }
+            li = li + 1
+        }
+    }
+
+    r[RDR_PROCESSED] = r[RDR_PROCESSED] + 1
+    return activations
+}
+
+// =========================================================
+// Describe
+// =========================================================
+
+fn reader_describe(r) {
+    print("Reader(")
+    print(r[RDR_NAME])
+    print(", context=")
+    print_int(len(r[RDR_CONTEXT]))
+    print("/")
+    print_int(r[RDR_CONTEXT_SIZE])
+    print(", activations=")
+    print_int(len(r[RDR_ACT_NAMES]))
+    print(", coherence_threshold=")
+    print_int(r[RDR_COHERENCE_THRESHOLD])
+    print(", learn_rate=")
+    print_int(r[RDR_LEARN_RATE])
+    print(", processed=")
+    print_int(r[RDR_PROCESSED])
+    println(")")
+}

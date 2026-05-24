@@ -1,0 +1,259 @@
+let SYNAPSE_TAG = 280
+let SYN_SOURCE = 1
+let SYN_TARGET = 2
+let SYN_WEIGHT = 3
+let SYN_SIGNAL_TYPES = 4
+let SYN_FIRE_COUNT = 5
+let SYN_LAST_FIRE = 6
+let SYN_CREATED = 7
+let SYN_ACTIVE = 8
+
+let SYNAPSE_BANK_TAG = 285
+let SBANK_SYNAPSES = 1
+let SBANK_TICK = 2
+let SBANK_DECAY_RATE = 3
+let SBANK_PRUNE_THRESHOLD = 4
+let SBANK_GROWTH_RATE = 5
+
+fn synapse_new(source, target, weight) {
+    if weight < 0 { weight = 0 }
+    if weight > 1000 { weight = 1000 }
+    let s = list_new()
+    push(s, SYNAPSE_TAG)
+    push(s, source)
+    push(s, target)
+    push(s, weight)
+    push(s, list_new())
+    push(s, 0)
+    push(s, 0)
+    push(s, 0)
+    push(s, 1)
+    return s
+}
+
+fn synapse_source(syn) { return syn[SYN_SOURCE] }
+fn synapse_target(syn) { return syn[SYN_TARGET] }
+fn synapse_weight(syn) { return syn[SYN_WEIGHT] }
+
+fn synapse_add_signal_type(syn, sig_type) {
+    push(syn[SYN_SIGNAL_TYPES], sig_type)
+}
+
+fn synapse_allows(syn, sig_type) {
+    let types = syn[SYN_SIGNAL_TYPES]
+    if len(types) == 0 { return 1 }
+    let i = 0
+    while i < len(types) {
+        if types[i] == sig_type { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn synapse_fire(syn, tick) {
+    syn[SYN_FIRE_COUNT] = syn[SYN_FIRE_COUNT] + 1
+    syn[SYN_LAST_FIRE] = tick
+    return syn[SYN_WEIGHT]
+}
+
+fn synapse_is_active(syn) { return syn[SYN_ACTIVE] }
+
+fn synapse_prune(syn) {
+    syn[SYN_ACTIVE] = 0
+}
+
+fn synapse_bank_new(decay_rate, prune_threshold, growth_rate) {
+    let b = list_new()
+    push(b, SYNAPSE_BANK_TAG)
+    push(b, list_new())
+    push(b, 0)
+    push(b, decay_rate)
+    push(b, prune_threshold)
+    push(b, growth_rate)
+    return b
+}
+
+fn synapse_bank_add(bank, syn) {
+    push(bank[SBANK_SYNAPSES], syn)
+}
+
+fn synapse_bank_connect(bank, source, target, weight) {
+    let syn = synapse_new(source, target, weight)
+    syn[SYN_CREATED] = bank[SBANK_TICK]
+    synapse_bank_add(bank, syn)
+    return syn
+}
+
+fn synapse_bank_find(bank, source, target) {
+    let syns = bank[SBANK_SYNAPSES]
+    let i = 0
+    while i < len(syns) {
+        let s = syns[i]
+        if synapse_is_active(s) == 1 {
+            if synapse_source(s) == source {
+                if synapse_target(s) == target {
+                    return s
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn synapse_bank_outgoing(bank, node_name) {
+    let syns = bank[SBANK_SYNAPSES]
+    let result = list_new()
+    let i = 0
+    while i < len(syns) {
+        let s = syns[i]
+        if synapse_is_active(s) == 1 {
+            if synapse_source(s) == node_name {
+                push(result, s)
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn synapse_bank_incoming(bank, node_name) {
+    let syns = bank[SBANK_SYNAPSES]
+    let result = list_new()
+    let i = 0
+    while i < len(syns) {
+        let s = syns[i]
+        if synapse_is_active(s) == 1 {
+            if synapse_target(s) == node_name {
+                push(result, s)
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn synapse_bank_tick(bank) {
+    bank[SBANK_TICK] = bank[SBANK_TICK] + 1
+    let decay = bank[SBANK_DECAY_RATE]
+    let threshold = bank[SBANK_PRUNE_THRESHOLD]
+    let syns = bank[SBANK_SYNAPSES]
+    let i = 0
+    while i < len(syns) {
+        let s = syns[i]
+        if synapse_is_active(s) == 1 {
+            let w = s[SYN_WEIGHT]
+            w = w - decay
+            if w < 0 { w = 0 }
+            s[SYN_WEIGHT] = w
+            if w < threshold {
+                synapse_prune(s)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn synapse_bank_strengthen(bank, source, target, amount) {
+    let syn = synapse_bank_find(bank, source, target)
+    if syn == 0 { return 0 }
+    let w = syn[SYN_WEIGHT] + amount
+    if w > 1000 { w = 1000 }
+    syn[SYN_WEIGHT] = w
+    return w
+}
+
+fn synapse_bank_weaken(bank, source, target, amount) {
+    let syn = synapse_bank_find(bank, source, target)
+    if syn == 0 { return 0 }
+    let w = syn[SYN_WEIGHT] - amount
+    if w < 0 { w = 0 }
+    syn[SYN_WEIGHT] = w
+    return w
+}
+
+fn synapse_bank_route(bank, source_name, signal) {
+    let outgoing = synapse_bank_outgoing(bank, source_name)
+    let results = list_new()
+    let sig_t = signal_type(signal)
+    let orig_priority = signal_priority(signal)
+    let i = 0
+    while i < len(outgoing) {
+        let syn = outgoing[i]
+        if synapse_allows(syn, sig_t) == 1 {
+            let w = synapse_fire(syn, bank[SBANK_TICK])
+            let modified_priority = orig_priority * w / 1000
+            let routed_signal = signal_elevate(signal, modified_priority)
+            let pair = list_new()
+            push(pair, synapse_target(syn))
+            push(pair, routed_signal)
+            push(results, pair)
+        }
+        i = i + 1
+    }
+    return results
+}
+
+fn synapse_bank_active_count(bank) {
+    let syns = bank[SBANK_SYNAPSES]
+    let count = 0
+    let i = 0
+    while i < len(syns) {
+        if synapse_is_active(syns[i]) == 1 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+fn synapse_bank_hebbian_update(bank, source, target, correlation) {
+    if correlation > 0 {
+        let amount = correlation * bank[SBANK_GROWTH_RATE] / 1000
+        if amount < 1 { amount = 1 }
+        synapse_bank_strengthen(bank, source, target, amount)
+    }
+    if correlation < 0 {
+        let neg = 0 - correlation
+        let amount = neg * bank[SBANK_DECAY_RATE] / 1000
+        if amount < 1 { amount = 1 }
+        synapse_bank_weaken(bank, source, target, amount)
+    }
+}
+
+fn synapse_bank_describe(bank) {
+    let total = len(bank[SBANK_SYNAPSES])
+    let active = synapse_bank_active_count(bank)
+    print("SynapseBank(total=")
+    print_int(total)
+    print(", active=")
+    print_int(active)
+    print(", tick=")
+    print_int(bank[SBANK_TICK])
+    print(", decay=")
+    print_int(bank[SBANK_DECAY_RATE])
+    print(", prune_at=")
+    print_int(bank[SBANK_PRUNE_THRESHOLD])
+    print(", growth=")
+    print_int(bank[SBANK_GROWTH_RATE])
+    println(")")
+    let syns = bank[SBANK_SYNAPSES]
+    let i = 0
+    while i < len(syns) {
+        let s = syns[i]
+        let status = "active"
+        if synapse_is_active(s) == 0 { status = "pruned" }
+        print("  ")
+        print(synapse_source(s))
+        print(" -> ")
+        print(synapse_target(s))
+        print(" w=")
+        print_int(synapse_weight(s))
+        print(" fires=")
+        print_int(s[SYN_FIRE_COUNT])
+        print(" [")
+        print(status)
+        println("]")
+        i = i + 1
+    }
+}

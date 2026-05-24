@@ -58,6 +58,14 @@ fn init_import_tracker() {
     _dep_add("cognitive_llm", "ffi,mem,simd,tensor,confidence")
     _dep_add("persistent_alloc", "syscall,alloc")
     _dep_add("ffi_syscall", "syscall,alloc")
+    _dep_add("lower_arm64", "")
+    _dep_add("synapse", "signal")
+    _dep_add("gates", "signal")
+    _dep_add("parts", "signal")
+    _dep_add("reader", "signal,knowledge")
+    _dep_add("effects", "")
+    _dep_add("http", "mem")
+    _dep_add("signal_flow", "signal,synapse")
 }
 
 fn _dep_add(pkg, deps) {
@@ -270,6 +278,48 @@ fn _find_std_file(pkg_name) {
         }
         return ""
     }
+    let core_path = "src/core/" + pkg_name + ".nova"
+    let core_content = read_file(core_path)
+    if core_content == 0 {
+    } else {
+        if already_imported(core_path) == 0 {
+            push(imported_files, core_path)
+            return core_content
+        }
+        return ""
+    }
+    let agent_path = "src/agent/" + pkg_name + ".nova"
+    let agent_content = read_file(agent_path)
+    if agent_content == 0 {
+    } else {
+        if already_imported(agent_path) == 0 {
+            push(imported_files, agent_path)
+            return agent_content
+        }
+        return ""
+    }
+    if len(nova_root_dir) > 0 {
+        let core_path2 = nova_root_dir + "/src/core/" + pkg_name + ".nova"
+        let core_c2 = read_file(core_path2)
+        if core_c2 == 0 {
+        } else {
+            if already_imported(core_path2) == 0 {
+                push(imported_files, core_path2)
+                return core_c2
+            }
+            return ""
+        }
+        let agent_path2 = nova_root_dir + "/src/agent/" + pkg_name + ".nova"
+        let agent_c2 = read_file(agent_path2)
+        if agent_c2 == 0 {
+        } else {
+            if already_imported(agent_path2) == 0 {
+                push(imported_files, agent_path2)
+                return agent_c2
+            }
+            return ""
+        }
+    }
     return ""
 }
 
@@ -459,9 +509,14 @@ fn main() {
                                 cg_target = 3
                                 println("Target: Windows (x86-64)")
                             } else {
-                                println(concat("Unknown target: ", tname))
-                                println("Supported targets: linux, macos, wasm, windows")
-                                exit(1)
+                                if tname == "arm64" {
+                                    cg_target = 4
+                                    println("Target: ARM64 (AArch64)")
+                                } else {
+                                    println(concat("Unknown target: ", tname))
+                                    println("Supported targets: linux, macos, wasm, windows, arm64")
+                                    exit(1)
+                                }
                             }
                         }
                     }
@@ -510,7 +565,7 @@ fn main() {
         println("")
         println("Options:")
         println("  -o <file>              Output assembly file (default: output.s)")
-        println("  --target=<t>           Target: linux, macos, wasm")
+        println("  --target=<t>           Target: linux, macos, wasm, windows, arm64")
         println("  --check                Syntax check only (no codegen)")
         println("  --stats                Show compilation statistics")
         println("  --debug / --no-debug   Enable/disable debug info")

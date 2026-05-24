@@ -3120,6 +3120,21 @@ fn gen_program(program) {
     if cg_target == 2 {
         return wasm_gen_program(program)
     }
+    // ARM64 target: initialize lowering pass and delegate to la_* functions
+    if cg_target == 4 {
+        la_init(4)
+        la_source_file = cg_source_file
+        // TODO: walk AST, generate IR, then call la_lower_function() per function
+        // For now, emit a minimal stub that exits cleanly
+        la_out(".text")
+        la_out(".globl _start")
+        la_out("_start:")
+        la_out("    mov x0, #0")
+        la_out("    mov x8, #93")
+        la_out("    svc #0")
+        let arm64_lines = la_get_output()
+        return join(arm64_lines, chr(10))
+    }
     let decls = program[1]
 
     // Expand mind declarations into regular statements

@@ -1,0 +1,322 @@
+let FLOW_TAG = 350
+let FLOW_RULES = 1
+let FLOW_STRICT = 2
+let FLOW_VIOLATIONS = 3
+let FLOW_CHECK_COUNT = 4
+
+let FLOW_RULE_TAG = 355
+let FR_SOURCE = 1
+let FR_TARGET = 2
+let FR_ALLOWED_TYPES = 3
+let FR_DENIED_TYPES = 4
+let FR_MIN_PRIORITY = 5
+let FR_MAX_PRIORITY = 6
+let FR_ACTIVE = 7
+
+fn flow_new(strict) {
+    let f = list_new()
+    push(f, FLOW_TAG)
+    push(f, list_new())
+    push(f, strict)
+    push(f, list_new())
+    push(f, 0)
+    return f
+}
+
+fn flow_add_rule(flow, source, target) {
+    let r = list_new()
+    push(r, FLOW_RULE_TAG)
+    push(r, source)
+    push(r, target)
+    push(r, list_new())
+    push(r, list_new())
+    push(r, 0)
+    push(r, 1000)
+    push(r, 1)
+    push(flow[FLOW_RULES], r)
+    return r
+}
+
+fn flow_rule_allow(rule, sig_type) {
+    push(rule[FR_ALLOWED_TYPES], sig_type)
+}
+
+fn flow_rule_deny(rule, sig_type) {
+    push(rule[FR_DENIED_TYPES], sig_type)
+}
+
+fn flow_rule_priority_range(rule, min_p, max_p) {
+    rule[FR_MIN_PRIORITY] = min_p
+    rule[FR_MAX_PRIORITY] = max_p
+}
+
+fn _flow_find_rule(flow, source, target) {
+    let rules = flow[FLOW_RULES]
+    let i = 0
+    while i < len(rules) {
+        let r = rules[i]
+        if r[FR_ACTIVE] == 1 {
+            if r[FR_SOURCE] == source {
+                if r[FR_TARGET] == target {
+                    return r
+                }
+            }
+            if r[FR_SOURCE] == "*" {
+                if r[FR_TARGET] == target {
+                    return r
+                }
+            }
+            if r[FR_TARGET] == "*" {
+                if r[FR_SOURCE] == source {
+                    return r
+                }
+            }
+            if r[FR_SOURCE] == "*" {
+                if r[FR_TARGET] == "*" {
+                    return r
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _flow_type_in_list(types, sig_type) {
+    let i = 0
+    while i < len(types) {
+        if types[i] == sig_type { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn flow_check(flow, source, target, sig_type, priority) {
+    flow[FLOW_CHECK_COUNT] = flow[FLOW_CHECK_COUNT] + 1
+    let rule = _flow_find_rule(flow, source, target)
+    if rule == 0 {
+        if flow[FLOW_STRICT] == 1 {
+            let v = list_new()
+            push(v, "no_rule")
+            push(v, source)
+            push(v, target)
+            push(v, sig_type)
+            push(flow[FLOW_VIOLATIONS], v)
+            return 0
+        }
+        return 1
+    }
+    let denied = rule[FR_DENIED_TYPES]
+    if len(denied) > 0 {
+        if _flow_type_in_list(denied, sig_type) == 1 {
+            let v = list_new()
+            push(v, "denied_type")
+            push(v, source)
+            push(v, target)
+            push(v, sig_type)
+            push(flow[FLOW_VIOLATIONS], v)
+            return 0
+        }
+    }
+    let allowed = rule[FR_ALLOWED_TYPES]
+    if len(allowed) > 0 {
+        if _flow_type_in_list(allowed, sig_type) == 0 {
+            let v = list_new()
+            push(v, "disallowed_type")
+            push(v, source)
+            push(v, target)
+            push(v, sig_type)
+            push(flow[FLOW_VIOLATIONS], v)
+            return 0
+        }
+    }
+    if priority < rule[FR_MIN_PRIORITY] {
+        let v = list_new()
+        push(v, "priority_low")
+        push(v, source)
+        push(v, target)
+        push(v, sig_type)
+        push(flow[FLOW_VIOLATIONS], v)
+        return 0
+    }
+    if priority > rule[FR_MAX_PRIORITY] {
+        let v = list_new()
+        push(v, "priority_high")
+        push(v, source)
+        push(v, target)
+        push(v, sig_type)
+        push(flow[FLOW_VIOLATIONS], v)
+        return 0
+    }
+    return 1
+}
+
+fn flow_enforce(flow, source, target, signal) {
+    let sig_t = signal[1]
+    let sig_p = signal[5]
+    let ok = flow_check(flow, source, target, sig_t, sig_p)
+    if ok == 0 {
+        print("FLOW VIOLATION: ")
+        print(source)
+        print(" -> ")
+        print(target)
+        print(" type=")
+        print_int(sig_t)
+        print(" priority=")
+        print_int(sig_p)
+        println("")
+    }
+    return ok
+}
+
+fn flow_violations(flow) {
+    return flow[FLOW_VIOLATIONS]
+}
+
+fn flow_violation_count(flow) {
+    return len(flow[FLOW_VIOLATIONS])
+}
+
+fn flow_check_count(flow) {
+    return flow[FLOW_CHECK_COUNT]
+}
+
+fn flow_clear_violations(flow) {
+    flow[FLOW_VIOLATIONS] = list_new()
+}
+
+fn flow_is_clean(flow) {
+    if len(flow[FLOW_VIOLATIONS]) == 0 { return 1 }
+    return 0
+}
+
+fn flow_apply_to_bank(flow, bank) {
+    let syns = bank[1]
+    let violations = list_new()
+    let i = 0
+    while i < len(syns) {
+        let syn = syns[i]
+        if syn[8] == 1 {
+            let source = syn[1]
+            let target = syn[2]
+            let allowed_types = syn[4]
+            if len(allowed_types) > 0 {
+                let j = 0
+                while j < len(allowed_types) {
+                    let ok = flow_check(flow, source, target, allowed_types[j], 50)
+                    if ok == 0 {
+                        let v = list_new()
+                        push(v, source)
+                        push(v, target)
+                        push(v, allowed_types[j])
+                        push(violations, v)
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return violations
+}
+
+fn flow_bank_route_checked(flow, bank, source_name, signal) {
+    let outgoing = list_new()
+    let syns = bank[1]
+    let i = 0
+    while i < len(syns) {
+        let s = syns[i]
+        if s[8] == 1 {
+            if s[1] == source_name {
+                push(outgoing, s)
+            }
+        }
+        i = i + 1
+    }
+    let results = list_new()
+    let sig_t = signal[1]
+    let sig_p = signal[5]
+    let j = 0
+    while j < len(outgoing) {
+        let syn = outgoing[j]
+        let target = syn[2]
+        let ok = flow_check(flow, source_name, target, sig_t, sig_p)
+        if ok == 1 {
+            let types = syn[4]
+            let type_ok = 1
+            if len(types) > 0 {
+                type_ok = _flow_type_in_list(types, sig_t)
+            }
+            if type_ok == 1 {
+                syn[5] = syn[5] + 1
+                syn[6] = bank[2]
+                let w = syn[3]
+                let modified_priority = sig_p * w / 1000
+                let routed = list_new()
+                push(routed, signal[0])
+                push(routed, signal[1])
+                push(routed, signal[2])
+                push(routed, signal[3])
+                push(routed, target)
+                push(routed, modified_priority)
+                push(routed, signal[6])
+                push(routed, signal[7])
+                let pair = list_new()
+                push(pair, target)
+                push(pair, routed)
+                push(results, pair)
+            }
+        }
+        j = j + 1
+    }
+    return results
+}
+
+fn flow_remove_rule(flow, source, target) {
+    let rules = flow[FLOW_RULES]
+    let i = 0
+    while i < len(rules) {
+        let r = rules[i]
+        if r[FR_SOURCE] == source {
+            if r[FR_TARGET] == target {
+                r[FR_ACTIVE] = 0
+                return 1
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn flow_describe(flow) {
+    let rules = flow[FLOW_RULES]
+    print("FlowSpec(rules=")
+    print_int(len(rules))
+    print(", strict=")
+    print_int(flow[FLOW_STRICT])
+    print(", checks=")
+    print_int(flow[FLOW_CHECK_COUNT])
+    print(", violations=")
+    print_int(len(flow[FLOW_VIOLATIONS]))
+    println(")")
+    let i = 0
+    while i < len(rules) {
+        let r = rules[i]
+        if r[FR_ACTIVE] == 1 {
+            print("  ")
+            print(r[FR_SOURCE])
+            print(" -> ")
+            print(r[FR_TARGET])
+            print(" allow=")
+            print_int(len(r[FR_ALLOWED_TYPES]))
+            print(" deny=")
+            print_int(len(r[FR_DENIED_TYPES]))
+            print(" priority=[")
+            print_int(r[FR_MIN_PRIORITY])
+            print(",")
+            print_int(r[FR_MAX_PRIORITY])
+            println("]")
+        }
+        i = i + 1
+    }
+}

@@ -1,0 +1,255 @@
+let EFFECT_TAG = 320
+let EFF_NAME = 1
+let EFF_VALUE = 2
+let EFF_HANDLED = 3
+
+let HANDLER_TAG = 325
+let HDLR_EFFECT_NAME = 1
+let HDLR_CALLBACK = 2
+let HDLR_ACTIVE = 3
+
+let CHOICE_TAG = 330
+let CHOICE_ID = 1
+let CHOICE_ALTERNATIVES = 2
+let CHOICE_CURRENT = 3
+let CHOICE_RESULT = 4
+let CHOICE_FAILED = 5
+
+let _eff_handlers_names = 0
+let _eff_handlers_fns = 0
+let _eff_handler_count = 0
+let _eff_choice_stack = 0
+let _eff_choice_count = 0
+let _eff_next_id = 0
+
+// ================================================================
+// Initialization
+// ================================================================
+
+fn effects_init() {
+    _eff_handlers_names = list_new()
+    _eff_handlers_fns = list_new()
+    _eff_handler_count = 0
+    _eff_choice_stack = list_new()
+    _eff_choice_count = 0
+    _eff_next_id = 1
+}
+
+// ================================================================
+// Handler Management
+// ================================================================
+
+fn _eff_find_handler(effect_name) {
+    let i = 0
+    while i < _eff_handler_count {
+        if list_get(_eff_handlers_names, i) == effect_name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn effect_handle(effect_name, callback_fn) {
+    let idx = _eff_find_handler(effect_name)
+    if idx >= 0 {
+        list_set(_eff_handlers_fns, idx, callback_fn)
+        return 1
+    }
+    list_push(_eff_handlers_names, effect_name)
+    list_push(_eff_handlers_fns, callback_fn)
+    _eff_handler_count = _eff_handler_count + 1
+    return 1
+}
+
+fn effect_unhandle(effect_name) {
+    let idx = _eff_find_handler(effect_name)
+    if idx < 0 { return 0 }
+    list_remove(_eff_handlers_names, idx)
+    list_remove(_eff_handlers_fns, idx)
+    _eff_handler_count = _eff_handler_count - 1
+    return 1
+}
+
+fn effect_has_handler(effect_name) {
+    if _eff_find_handler(effect_name) >= 0 { return 1 }
+    return 0
+}
+
+// ================================================================
+// Performing Effects
+// ================================================================
+
+fn effect_new(name, value) {
+    let eff = list_new()
+    push(eff, EFFECT_TAG)
+    push(eff, name)
+    push(eff, value)
+    push(eff, 0)
+    return eff
+}
+
+fn effect_perform(effect_name, value) {
+    let idx = _eff_find_handler(effect_name)
+    if idx < 0 { return 0 }
+    let handler_fn = list_get(_eff_handlers_fns, idx)
+    return handler_fn(value)
+}
+
+// ================================================================
+// Choice Points
+// ================================================================
+
+fn choice_new(alternatives) {
+    let cp = list_new()
+    push(cp, CHOICE_TAG)
+    let id = _eff_next_id
+    _eff_next_id = _eff_next_id + 1
+    push(cp, id)
+    push(cp, alternatives)
+    push(cp, 0)
+    push(cp, 0)
+    push(cp, 0)
+    return cp
+}
+
+fn choice_current_value(cp) {
+    let alts = cp[CHOICE_ALTERNATIVES]
+    let idx = cp[CHOICE_CURRENT]
+    if idx >= len(alts) { return 0 }
+    return alts[idx]
+}
+
+fn choice_next(cp) {
+    let alts = cp[CHOICE_ALTERNATIVES]
+    let next_idx = cp[CHOICE_CURRENT] + 1
+    if next_idx >= len(alts) { return 0 }
+    cp[CHOICE_CURRENT] = next_idx
+    cp[CHOICE_RESULT] = 0
+    cp[CHOICE_FAILED] = 0
+    return 1
+}
+
+fn choice_fail(cp) {
+    cp[CHOICE_FAILED] = 1
+    return choice_next(cp)
+}
+
+fn choice_succeed(cp, result) {
+    cp[CHOICE_RESULT] = result
+    cp[CHOICE_FAILED] = 0
+}
+
+fn choice_is_exhausted(cp) {
+    let alts = cp[CHOICE_ALTERNATIVES]
+    if cp[CHOICE_CURRENT] >= len(alts) { return 1 }
+    return 0
+}
+
+fn choice_result(cp) {
+    if cp[CHOICE_FAILED] == 1 { return 0 }
+    return cp[CHOICE_RESULT]
+}
+
+// ================================================================
+// Choice Stack (nested backtracking)
+// ================================================================
+
+fn choice_push(alternatives) {
+    let cp = choice_new(alternatives)
+    list_push(_eff_choice_stack, cp)
+    _eff_choice_count = _eff_choice_count + 1
+    return choice_current_value(cp)
+}
+
+fn choice_backtrack() {
+    if _eff_choice_count == 0 { return 0 }
+    let cp = list_get(_eff_choice_stack, _eff_choice_count - 1)
+    let advanced = choice_next(cp)
+    if advanced == 1 {
+        return choice_current_value(cp)
+    }
+    list_pop(_eff_choice_stack)
+    _eff_choice_count = _eff_choice_count - 1
+    if _eff_choice_count == 0 { return 0 }
+    return choice_backtrack()
+}
+
+fn choice_commit() {
+    if _eff_choice_count == 0 { return 0 }
+    list_pop(_eff_choice_stack)
+    _eff_choice_count = _eff_choice_count - 1
+    return 1
+}
+
+fn choice_depth() {
+    return _eff_choice_count
+}
+
+// ================================================================
+// Search Combinators
+// ================================================================
+
+fn search_first(alternatives, test_fn) {
+    let i = 0
+    while i < len(alternatives) {
+        let val = alternatives[i]
+        if test_fn(val) != 0 {
+            return val
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn search_all(alternatives, test_fn) {
+    let results = list_new()
+    let i = 0
+    while i < len(alternatives) {
+        let val = alternatives[i]
+        if test_fn(val) != 0 {
+            push(results, val)
+        }
+        i = i + 1
+    }
+    return results
+}
+
+fn search_best(alternatives, score_fn) {
+    let best_val = 0
+    let best_score = -1
+    let i = 0
+    while i < len(alternatives) {
+        let val = alternatives[i]
+        let score = score_fn(val)
+        if score > best_score {
+            best_score = score
+            best_val = val
+        }
+        i = i + 1
+    }
+    return best_val
+}
+
+// ================================================================
+// Built-in Effects
+// ================================================================
+
+fn _eff_always_true(val) {
+    return 1
+}
+
+fn effect_amb(alternatives) {
+    if effect_has_handler("amb") == 1 {
+        return effect_perform("amb", alternatives)
+    }
+    return search_first(alternatives, _eff_always_true)
+}
+
+fn effect_fail() {
+    return effect_perform("fail", 0)
+}
+
+fn effect_retry(value) {
+    return effect_perform("retry", value)
+}

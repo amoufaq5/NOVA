@@ -1,0 +1,356 @@
+// Nova Core: Gate
+// Gates sit between signals and nodes, learning routing rules based on
+// signal content. They support broadcast (one signal to many destinations)
+// and conditional routing. Gates replace/extend channel routing with
+// learned behavior.
+//
+// Gate Layout: [TAG, name, rules, default_dest, fire_count, learn_rate, active]
+// Rule Layout: [TAG, condition, value, destinations, weight, fire_count]
+// GateNet Layout: [TAG, gates]
+
+let GATE_TAG = 290
+let GATE_NAME = 1
+let GATE_RULES = 2
+let GATE_DEFAULT_DEST = 3
+let GATE_FIRE_COUNT = 4
+let GATE_LEARN_RATE = 5
+let GATE_ACTIVE = 6
+
+let GATE_RULE_TAG = 295
+let GRULE_CONDITION = 1
+let GRULE_VALUE = 2
+let GRULE_DESTINATIONS = 3
+let GRULE_WEIGHT = 4
+let GRULE_FIRE_COUNT = 5
+
+let GATE_NET_TAG = 298
+let GNET_GATES = 1
+
+// =========================================================
+// Gate constructors and accessors
+// =========================================================
+
+fn gate_new(name, learn_rate) {
+    let g = list_new()
+    push(g, GATE_TAG)
+    push(g, name)
+    push(g, list_new())
+    push(g, 0)
+    push(g, 0)
+    push(g, learn_rate)
+    push(g, 1)
+    return g
+}
+
+fn gate_name(g) { return g[GATE_NAME] }
+
+fn gate_set_default(g, dest) {
+    g[GATE_DEFAULT_DEST] = dest
+}
+
+// =========================================================
+// Rule management
+// =========================================================
+
+fn _rule_new(condition, value, destinations) {
+    let r = list_new()
+    push(r, GATE_RULE_TAG)
+    push(r, condition)
+    push(r, value)
+    push(r, destinations)
+    push(r, 500)
+    push(r, 0)
+    return r
+}
+
+fn gate_add_rule(g, condition, value, destinations) {
+    let r = _rule_new(condition, value, destinations)
+    push(g[GATE_RULES], r)
+    return r
+}
+
+fn gate_add_rule_single(g, condition, value, dest) {
+    let dests = list_new()
+    push(dests, dest)
+    return gate_add_rule(g, condition, value, dests)
+}
+
+fn gate_find_rule(g, condition, value) {
+    let rules = g[GATE_RULES]
+    let i = 0
+    while i < len(rules) {
+        let r = rules[i]
+        if r[GRULE_CONDITION] == condition {
+            if r[GRULE_VALUE] == value {
+                return r
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn gate_rule_count(g) {
+    return len(g[GATE_RULES])
+}
+
+// =========================================================
+// Rule evaluation
+// =========================================================
+
+fn _rule_matches(r, signal) {
+    let cond = r[GRULE_CONDITION]
+    let val = r[GRULE_VALUE]
+    if cond == "type" {
+        if signal[SIG_TYPE] == val { return 1 }
+        return 0
+    }
+    if cond == "priority_above" {
+        if signal[SIG_PRIORITY] > val { return 1 }
+        return 0
+    }
+    if cond == "priority_below" {
+        if signal[SIG_PRIORITY] < val { return 1 }
+        return 0
+    }
+    if cond == "origin" {
+        if signal[SIG_ORIGIN] == val { return 1 }
+        return 0
+    }
+    if cond == "any" {
+        return 1
+    }
+    return 0
+}
+
+fn gate_evaluate(g, signal) {
+    let rules = g[GATE_RULES]
+    let matches = list_new()
+    let i = 0
+    while i < len(rules) {
+        let r = rules[i]
+        if _rule_matches(r, signal) == 1 {
+            let pair = list_new()
+            push(pair, r)
+            push(pair, r[GRULE_DESTINATIONS])
+            push(matches, pair)
+        }
+        i = i + 1
+    }
+
+    // Sort by weight descending via insertion sort
+    let m = 0
+    while m < len(matches) {
+        let item = matches[m]
+        let w = item[0][GRULE_WEIGHT]
+        // Find where this item belongs among already-sorted portion
+        let j = m
+        while j > 0 {
+            let prev_w = matches[j - 1][0][GRULE_WEIGHT]
+            if w > prev_w {
+                // Swap: item with higher weight moves earlier
+                let tmp = matches[j - 1]
+                matches[j - 1] = matches[j]
+                matches[j] = tmp
+                j = j - 1
+            } else {
+                j = 0
+            }
+        }
+        m = m + 1
+    }
+
+    return matches
+}
+
+// =========================================================
+// Routing
+// =========================================================
+
+fn gate_route(g, signal) {
+    let result = list_new()
+
+    if g[GATE_ACTIVE] == 0 {
+        return result
+    }
+
+    let matches = gate_evaluate(g, signal)
+
+    if len(matches) == 0 {
+        // No rules matched — use default destination
+        let def = g[GATE_DEFAULT_DEST]
+        if def != 0 {
+            let pair = list_new()
+            push(pair, def)
+            push(pair, signal)
+            push(result, pair)
+        }
+        g[GATE_FIRE_COUNT] = g[GATE_FIRE_COUNT] + 1
+        return result
+    }
+
+    let i = 0
+    while i < len(matches) {
+        let match = matches[i]
+        let rule = match[0]
+        let dests = match[1]
+        rule[GRULE_FIRE_COUNT] = rule[GRULE_FIRE_COUNT] + 1
+        let d = 0
+        while d < len(dests) {
+            let pair = list_new()
+            push(pair, dests[d])
+            push(pair, signal)
+            push(result, pair)
+            d = d + 1
+        }
+        i = i + 1
+    }
+
+    g[GATE_FIRE_COUNT] = g[GATE_FIRE_COUNT] + 1
+    return result
+}
+
+fn gate_route_broadcast(g, signal, destinations) {
+    let result = list_new()
+    let i = 0
+    while i < len(destinations) {
+        let pair = list_new()
+        push(pair, destinations[i])
+        push(pair, signal)
+        push(result, pair)
+        i = i + 1
+    }
+    return result
+}
+
+// =========================================================
+// Learning
+// =========================================================
+
+fn gate_learn(g, signal, correct_dest) {
+    let lr = g[GATE_LEARN_RATE]
+    let sig_type = signal[SIG_TYPE]
+    let rules = g[GATE_RULES]
+
+    // Strengthen rules that route to correct_dest, weaken others
+    let found_correct = 0
+    let i = 0
+    while i < len(rules) {
+        let r = rules[i]
+        if _rule_matches(r, signal) == 1 {
+            let dests = r[GRULE_DESTINATIONS]
+            let has_correct = 0
+            let d = 0
+            while d < len(dests) {
+                if dests[d] == correct_dest {
+                    has_correct = 1
+                }
+                d = d + 1
+            }
+            if has_correct == 1 {
+                // Strengthen: increase weight by learn_rate fraction
+                let boost = lr / 10
+                let new_w = r[GRULE_WEIGHT] + boost
+                if new_w > 1000 { new_w = 1000 }
+                r[GRULE_WEIGHT] = new_w
+                found_correct = 1
+            } else {
+                // Weaken: decrease weight by learn_rate fraction
+                let drop = lr / 20
+                let new_w = r[GRULE_WEIGHT] - drop
+                if new_w < 0 { new_w = 0 }
+                r[GRULE_WEIGHT] = new_w
+            }
+        }
+        i = i + 1
+    }
+
+    // If no existing rule routes this signal type to correct_dest, create one
+    if found_correct == 0 {
+        let new_dests = list_new()
+        push(new_dests, correct_dest)
+        let new_rule = _rule_new("type", sig_type, new_dests)
+        new_rule[GRULE_WEIGHT] = 500 + lr / 10
+        push(rules, new_rule)
+    }
+}
+
+// =========================================================
+// Enable / disable
+// =========================================================
+
+fn gate_disable(g) { g[GATE_ACTIVE] = 0 }
+fn gate_enable(g) { g[GATE_ACTIVE] = 1 }
+fn gate_is_active(g) { return g[GATE_ACTIVE] }
+
+// =========================================================
+// Describe
+// =========================================================
+
+fn gate_describe(g) {
+    let name = gate_name(g)
+    let rc = gate_rule_count(g)
+    let fc = g[GATE_FIRE_COUNT]
+    let lr = g[GATE_LEARN_RATE]
+    let active = "active"
+    if g[GATE_ACTIVE] == 0 { active = "disabled" }
+    let def = g[GATE_DEFAULT_DEST]
+    let def_str = "none"
+    if def != 0 { def_str = def }
+    let desc = "Gate<" + name + " rules=" + int_to_str(rc) + " fired=" + int_to_str(fc) + " lr=" + int_to_str(lr) + " default=" + def_str + " " + active + ">"
+    return desc
+}
+
+// =========================================================
+// Gate Network
+// =========================================================
+
+fn gate_net_new() {
+    let net = list_new()
+    push(net, GATE_NET_TAG)
+    push(net, list_new())
+    return net
+}
+
+fn gate_net_add(net, gate) {
+    push(net[GNET_GATES], gate)
+}
+
+fn gate_net_find(net, name) {
+    let gates = net[GNET_GATES]
+    let i = 0
+    while i < len(gates) {
+        if gate_name(gates[i]) == name {
+            return gates[i]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn gate_net_route(net, gate_name, signal) {
+    let g = gate_net_find(net, gate_name)
+    if g == 0 {
+        return list_new()
+    }
+    return gate_route(g, signal)
+}
+
+fn gate_net_route_all(net, signal) {
+    let result = list_new()
+    let gates = net[GNET_GATES]
+    let i = 0
+    while i < len(gates) {
+        let g = gates[i]
+        if g[GATE_ACTIVE] == 1 {
+            let routed = gate_route(g, signal)
+            let j = 0
+            while j < len(routed) {
+                push(result, routed[j])
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return result
+}

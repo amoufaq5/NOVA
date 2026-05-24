@@ -1,0 +1,262 @@
+// Nova Core: Parts
+// Parts group nodes into functional regions (perception, KG-domain,
+// soul, episodic, reasoning, imagination, action, meta). This is a
+// higher-level organizational structure above individual nodes.
+//
+// Layout: [TAG, name, nodes, first_nodes, signals_in, signals_out, active]
+// Registry layout: [TAG, parts, node_to_part, node_names]
+
+let PART_TAG = 300
+let PART_NAME = 1
+let PART_NODES = 2
+let PART_FIRST_NODES = 3
+let PART_SIGNALS_IN = 4
+let PART_SIGNALS_OUT = 5
+let PART_ACTIVE = 6
+
+let PART_REGISTRY_TAG = 305
+let PREG_PARTS = 1
+let PREG_NODE_TO_PART = 2
+let PREG_NODE_NAMES = 3
+
+// Standard part names
+let PART_PERCEPTION = "perception"
+let PART_KG_DOMAIN = "kg_domain"
+let PART_SOUL = "soul"
+let PART_EPISODIC = "episodic"
+let PART_REASONING = "reasoning"
+let PART_IMAGINATION = "imagination"
+let PART_ACTION = "action"
+let PART_META = "meta"
+
+// ================================================================
+// Part constructor and accessors
+// ================================================================
+
+fn part_new(name) {
+    let p = list_new()
+    push(p, PART_TAG)
+    push(p, name)
+    push(p, list_new())
+    push(p, list_new())
+    push(p, 0)
+    push(p, 0)
+    push(p, 1)
+    return p
+}
+
+fn part_name(p) { return p[PART_NAME] }
+
+// ================================================================
+// Node membership
+// ================================================================
+
+fn part_add_node(p, node_name) {
+    let nodes = p[PART_NODES]
+    let i = 0
+    while i < len(nodes) {
+        if nodes[i] == node_name { return 0 }
+        i = i + 1
+    }
+    push(nodes, node_name)
+}
+
+fn part_remove_node(p, node_name) {
+    let nodes = p[PART_NODES]
+    let i = 0
+    while i < len(nodes) {
+        if nodes[i] == node_name {
+            list_remove(nodes, i)
+            // also remove from first-nodes if present
+            let fn_list = p[PART_FIRST_NODES]
+            let fi = 0
+            while fi < len(fn_list) {
+                if fn_list[fi] == node_name {
+                    list_remove(fn_list, fi)
+                    fi = len(fn_list)
+                }
+                fi = fi + 1
+            }
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn part_has_node(p, node_name) {
+    let nodes = p[PART_NODES]
+    let i = 0
+    while i < len(nodes) {
+        if nodes[i] == node_name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn part_nodes(p) { return p[PART_NODES] }
+
+fn part_node_count(p) { return len(p[PART_NODES]) }
+
+// ================================================================
+// First-nodes (sensory input receivers) — implements N5
+// ================================================================
+
+fn part_set_first_node(p, node_name) {
+    // ensure node belongs to this part
+    if part_has_node(p, node_name) == 0 {
+        part_add_node(p, node_name)
+    }
+    let fn_list = p[PART_FIRST_NODES]
+    let i = 0
+    while i < len(fn_list) {
+        if fn_list[i] == node_name { return 0 }
+        i = i + 1
+    }
+    push(fn_list, node_name)
+}
+
+fn part_is_first_node(p, node_name) {
+    let fn_list = p[PART_FIRST_NODES]
+    let i = 0
+    while i < len(fn_list) {
+        if fn_list[i] == node_name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn part_first_nodes(p) { return p[PART_FIRST_NODES] }
+
+fn part_first_node_count(p) { return len(p[PART_FIRST_NODES]) }
+
+// ================================================================
+// Activation and signal tracking
+// ================================================================
+
+fn part_activate(p) { p[PART_ACTIVE] = 1 }
+
+fn part_deactivate(p) { p[PART_ACTIVE] = 0 }
+
+fn part_is_active(p) { return p[PART_ACTIVE] }
+
+fn part_record_signal_in(p) {
+    p[PART_SIGNALS_IN] = p[PART_SIGNALS_IN] + 1
+}
+
+fn part_record_signal_out(p) {
+    p[PART_SIGNALS_OUT] = p[PART_SIGNALS_OUT] + 1
+}
+
+fn part_describe(p) {
+    let status = "dormant"
+    if p[PART_ACTIVE] == 1 { status = "active" }
+    let desc = "Part<" + part_name(p) + " nodes=" + int_to_str(part_node_count(p)) + " first=" + int_to_str(part_first_node_count(p)) + " in=" + int_to_str(p[PART_SIGNALS_IN]) + " out=" + int_to_str(p[PART_SIGNALS_OUT]) + " " + status + ">"
+    return desc
+}
+
+// ================================================================
+// Part Registry
+// ================================================================
+
+fn part_registry_new() {
+    let reg = list_new()
+    push(reg, PART_REGISTRY_TAG)
+    push(reg, list_new())
+    push(reg, list_new())
+    push(reg, list_new())
+    return reg
+}
+
+fn part_registry_add(reg, part) {
+    push(reg[PREG_PARTS], part)
+}
+
+fn part_registry_find(reg, name) {
+    let parts = reg[PREG_PARTS]
+    let i = 0
+    while i < len(parts) {
+        if part_name(parts[i]) == name { return parts[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+fn part_registry_assign(reg, node_name, pname) {
+    let part = part_registry_find(reg, pname)
+    if part == 0 { return 0 }
+    part_add_node(part, node_name)
+    // update parallel mapping lists
+    let names = reg[PREG_NODE_NAMES]
+    let mapping = reg[PREG_NODE_TO_PART]
+    let i = 0
+    while i < len(names) {
+        if names[i] == node_name {
+            // node already mapped, update its part
+            list_set(mapping, i, pname)
+            return 1
+        }
+        i = i + 1
+    }
+    push(names, node_name)
+    push(mapping, pname)
+    return 1
+}
+
+fn part_registry_lookup(reg, node_name) {
+    let names = reg[PREG_NODE_NAMES]
+    let mapping = reg[PREG_NODE_TO_PART]
+    let i = 0
+    while i < len(names) {
+        if names[i] == node_name { return mapping[i] }
+        i = i + 1
+    }
+    return ""
+}
+
+fn part_registry_list(reg) {
+    let parts = reg[PREG_PARTS]
+    let result = list_new()
+    let i = 0
+    while i < len(parts) {
+        push(result, part_name(parts[i]))
+        i = i + 1
+    }
+    return result
+}
+
+fn part_registry_count(reg) {
+    return len(reg[PREG_PARTS])
+}
+
+fn part_registry_nodes_in(reg, pname) {
+    let part = part_registry_find(reg, pname)
+    if part == 0 { return list_new() }
+    return part_nodes(part)
+}
+
+fn part_registry_describe(reg) {
+    let parts = reg[PREG_PARTS]
+    let desc = "PartRegistry<parts=" + int_to_str(len(parts)) + " mappings=" + int_to_str(len(reg[PREG_NODE_NAMES])) + ">"
+    println(desc)
+    let i = 0
+    while i < len(parts) {
+        println("  " + part_describe(parts[i]))
+        i = i + 1
+    }
+}
+
+// ================================================================
+// Convenience: pre-create all 8 standard parts
+// ================================================================
+
+fn part_registry_init_standard(reg) {
+    part_registry_add(reg, part_new(PART_PERCEPTION))
+    part_registry_add(reg, part_new(PART_KG_DOMAIN))
+    part_registry_add(reg, part_new(PART_SOUL))
+    part_registry_add(reg, part_new(PART_EPISODIC))
+    part_registry_add(reg, part_new(PART_REASONING))
+    part_registry_add(reg, part_new(PART_IMAGINATION))
+    part_registry_add(reg, part_new(PART_ACTION))
+    part_registry_add(reg, part_new(PART_META))
+}

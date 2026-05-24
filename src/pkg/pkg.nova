@@ -58,6 +58,16 @@ fn pkg_init_std() {
     push(STD_PACKAGES, "persistent_alloc")
     push(STD_PACKAGES, "float")
     push(STD_PACKAGES, "ffi_syscall")
+    push(STD_PACKAGES, "lower_arm64")
+    push(STD_PACKAGES, "synapse")
+    push(STD_PACKAGES, "gates")
+    push(STD_PACKAGES, "parts")
+    push(STD_PACKAGES, "reader")
+    push(STD_PACKAGES, "effects")
+    push(STD_PACKAGES, "http")
+    push(STD_PACKAGES, "signal")
+    push(STD_PACKAGES, "knowledge")
+    push(STD_PACKAGES, "signal_flow")
 }
 
 fn is_std_package(name) {
