@@ -1,0 +1,138 @@
+// Test: Tensor Performance Benchmarks
+import "std/mem"
+import "std/simd"
+import "std/tensor"
+
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Tensor Performance Tests ===")
+
+    // Test 1: Small matmul correctness (2x3 * 3x2)
+    let a = tensor_new(2, 3)
+    tensor_set(a, 0, 0, to_float(1))
+    tensor_set(a, 0, 1, to_float(2))
+    tensor_set(a, 0, 2, to_float(3))
+    tensor_set(a, 1, 0, to_float(4))
+    tensor_set(a, 1, 1, to_float(5))
+    tensor_set(a, 1, 2, to_float(6))
+
+    let b = tensor_new(3, 2)
+    tensor_set(b, 0, 0, to_float(7))
+    tensor_set(b, 0, 1, to_float(8))
+    tensor_set(b, 1, 0, to_float(9))
+    tensor_set(b, 1, 1, to_float(10))
+    tensor_set(b, 2, 0, to_float(11))
+    tensor_set(b, 2, 1, to_float(12))
+
+    let c = tensor_matmul(a, b)
+    let c00 = from_float(tensor_get(c, 0, 0))
+    let c01 = from_float(tensor_get(c, 0, 1))
+    let c10 = from_float(tensor_get(c, 1, 0))
+    let c11 = from_float(tensor_get(c, 1, 1))
+    assert_test(c00 == 58, "matmul (0,0) = 58")
+    assert_test(c01 == 64, "matmul (0,1) = 64")
+    assert_test(c10 == 139, "matmul (1,0) = 139")
+    assert_test(c11 == 154, "matmul (1,1) = 154")
+
+    // Test 2: Identity matmul (4x4)
+    let eye = tensor_new(4, 4)
+    let ei = 0
+    while ei < 4 {
+        tensor_set(eye, ei, ei, to_float(1))
+        ei = ei + 1
+    }
+    let m = tensor_new(4, 4)
+    let mi = 0
+    while mi < 4 {
+        let mj = 0
+        while mj < 4 {
+            tensor_set(m, mi, mj, to_float(mi * 4 + mj + 1))
+            mj = mj + 1
+        }
+        mi = mi + 1
+    }
+    let mid = tensor_matmul(m, eye)
+    assert_test(from_float(tensor_get(mid, 0, 0)) == 1, "identity matmul (0,0) = 1")
+    assert_test(from_float(tensor_get(mid, 3, 3)) == 16, "identity matmul (3,3) = 16")
+
+    // Test 3: SIMD dot product via tensor (1xN * Nx1)
+    let va = tensor_new(1, 8)
+    let vb = tensor_new(8, 1)
+    let vi = 0
+    while vi < 8 {
+        tensor_set(va, 0, vi, to_float(vi + 1))
+        tensor_set(vb, vi, 0, to_float(1))
+        vi = vi + 1
+    }
+    let vr = tensor_matmul(va, vb)
+    assert_test(from_float(tensor_get(vr, 0, 0)) == 36, "dot product sum(1..8) = 36")
+
+    // Test 4: Tensor transpose correctness
+    let t = tensor_new(2, 3)
+    tensor_set(t, 0, 0, to_float(1))
+    tensor_set(t, 0, 1, to_float(2))
+    tensor_set(t, 0, 2, to_float(3))
+    tensor_set(t, 1, 0, to_float(4))
+    tensor_set(t, 1, 1, to_float(5))
+    tensor_set(t, 1, 2, to_float(6))
+    let tt = tensor_transpose(t)
+    assert_test(tt[1] == 3, "transpose rows = 3")
+    assert_test(tt[2] == 2, "transpose cols = 2")
+    assert_test(from_float(tensor_get(tt, 0, 0)) == 1, "transpose (0,0) = 1")
+    assert_test(from_float(tensor_get(tt, 2, 1)) == 6, "transpose (2,1) = 6")
+
+    // Test 5: Tensor addition
+    let ta = tensor_new(2, 2)
+    let tb = tensor_new(2, 2)
+    tensor_set(ta, 0, 0, to_float(1))
+    tensor_set(ta, 0, 1, to_float(2))
+    tensor_set(ta, 1, 0, to_float(3))
+    tensor_set(ta, 1, 1, to_float(4))
+    tensor_set(tb, 0, 0, to_float(10))
+    tensor_set(tb, 0, 1, to_float(20))
+    tensor_set(tb, 1, 0, to_float(30))
+    tensor_set(tb, 1, 1, to_float(40))
+    let tc = tensor_add(ta, tb)
+    assert_test(from_float(tensor_get(tc, 0, 0)) == 11, "tensor_add (0,0) = 11")
+    assert_test(from_float(tensor_get(tc, 1, 1)) == 44, "tensor_add (1,1) = 44")
+
+    // Test 6: Tensor scalar multiply
+    let ts = tensor_new(2, 2)
+    tensor_set(ts, 0, 0, to_float(5))
+    tensor_set(ts, 1, 1, to_float(10))
+    let tsc = tensor_scale(ts, to_float(3))
+    assert_test(from_float(tensor_get(tsc, 0, 0)) == 15, "tensor_scale (0,0) = 15")
+    assert_test(from_float(tensor_get(tsc, 1, 1)) == 30, "tensor_scale (1,1) = 30")
+
+    // Test 7: Large matmul consistency (8x8 diagonal)
+    let d8a = tensor_new(8, 8)
+    let d8b = tensor_new(8, 8)
+    let d8i = 0
+    while d8i < 8 {
+        tensor_set(d8a, d8i, d8i, to_float(d8i + 1))
+        tensor_set(d8b, d8i, d8i, to_float(2))
+        d8i = d8i + 1
+    }
+    let d8c = tensor_matmul(d8a, d8b)
+    assert_test(from_float(tensor_get(d8c, 0, 0)) == 2, "8x8 diag matmul (0,0) = 2")
+    assert_test(from_float(tensor_get(d8c, 7, 7)) == 16, "8x8 diag matmul (7,7) = 16")
+    assert_test(from_float(tensor_get(d8c, 3, 4)) == 0, "8x8 diag matmul off-diag = 0")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

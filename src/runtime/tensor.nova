@@ -227,6 +227,12 @@ fn _tensor_matmul_tiled(a, b, tile) {
     return result
 }
 
+let _tensor_blas_threshold = 0
+
+fn tensor_enable_blas(threshold) {
+    _tensor_blas_threshold = threshold
+}
+
 fn tensor_matmul(a, b) {
     let ar = a[1]
     let ac = a[2]
