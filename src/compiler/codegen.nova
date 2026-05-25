@@ -1678,6 +1678,14 @@ fn gen_expr(nd) {
             }
             if resolved_method == "" {
             } else {
+                let mtotal = argc + 1
+                let m_extra = 0
+                let m_pad = 0
+                if mtotal > 6 {
+                    m_extra = mtotal - 6
+                    if m_extra % 2 == 1 { m_pad = 8 }
+                }
+                if m_pad > 0 { out("    sub rsp, 8") }
                 let mai = argc - 1
                 while mai >= 0 {
                     gen_expr(args[mai])
@@ -1686,7 +1694,6 @@ fn gen_expr(nd) {
                 }
                 gen_expr(mbase)
                 out("    push rax")
-                let mtotal = argc + 1
                 if mtotal > 0 { out("    pop rdi") }
                 if mtotal > 1 { out("    pop rsi") }
                 if mtotal > 2 { out("    pop rdx") }
@@ -1694,11 +1701,21 @@ fn gen_expr(nd) {
                 if mtotal > 4 { out("    pop r8") }
                 if mtotal > 5 { out("    pop r9") }
                 out("    call " + resolved_method)
+                if mtotal > 6 {
+                    out("    add rsp, " + int_to_str(m_extra * 8 + m_pad))
+                }
                 return 0
             }
         }
         if is_direct == 1 {
             // Direct call to a known function
+            let extra_args = 0
+            let align_pad = 0
+            if argc > 6 {
+                extra_args = argc - 6
+                if extra_args % 2 == 1 { align_pad = 8 }
+            }
+            if align_pad > 0 { out("    sub rsp, 8") }
             let i = argc - 1
             while i >= 0 {
                 gen_expr(args[i])
@@ -1718,8 +1735,18 @@ fn gen_expr(nd) {
                 }
             }
             out("    call " + call_target)
+            if argc > 6 {
+                out("    add rsp, " + int_to_str(extra_args * 8 + align_pad))
+            }
         } else {
             // Indirect call through a function pointer variable
+            let ind_extra = 0
+            let ind_pad = 0
+            if argc > 6 {
+                ind_extra = argc - 6
+                if ind_extra % 2 == 1 { ind_pad = 8 }
+            }
+            if ind_pad > 0 { out("    sub rsp, 8") }
             // Evaluate args first, push onto stack
             let i = argc - 1
             while i >= 0 {
@@ -1753,6 +1780,9 @@ fn gen_expr(nd) {
                 if argc > 0 { out("    pop rdi") }
             }
             out("    call r11")
+            if argc > 6 {
+                out("    add rsp, " + int_to_str(ind_extra * 8 + ind_pad))
+            }
         }
         return 0
     }
@@ -3126,6 +3156,16 @@ fn gen_function(nd) {
     if cg_param_count > 3 { out("    mov [rbp - 32], rcx") }
     if cg_param_count > 4 { out("    mov [rbp - 40], r8") }
     if cg_param_count > 5 { out("    mov [rbp - 48], r9") }
+    if cg_param_count > 6 {
+        let sp_i = 6
+        while sp_i < cg_param_count {
+            let stk_off = (sp_i - 6) * 8 + 16
+            let lcl_off = (sp_i + 1) * 8
+            out("    mov rax, [rbp + " + int_to_str(stk_off) + "]")
+            out("    mov [rbp - " + int_to_str(lcl_off) + "], rax")
+            sp_i = sp_i + 1
+        }
+    }
 
     let tco_lbl = new_label()
     cg_current_fn = name

@@ -68,11 +68,16 @@ All fully implemented with:
 
 ## Known Issues and Workarounds
 
-### Compiler 7th-parameter bug
-Functions with 7+ parameters produce incorrect values for the 7th argument
-(first stack-passed argument returns 0). Workaround: keep functions to 6
-parameters max; push additional values after creation. Applied in
-`causal_library.nova` (`causal_pattern_new` and `_causal_add_seed`).
+### Compiler 7th-parameter bug — FIXED
+Previously, functions with 7+ parameters produced incorrect values for the
+7th+ arguments (stack-passed args were never copied into local slots, and
+the caller didn't clean up extra stack args after the call). Fixed in
+codegen.nova: function prologues now copy `[rbp + 16 + n*8]` into local
+slots for parameters 7+, callers emit `add rsp` to clean up, and alignment
+padding ensures 16-byte stack alignment before `call`. Test:
+`tests/test_7th_param.nova` verifies 7, 8, and 9 parameter functions.
+Note: `causal_library.nova` still uses the old 6-param workaround but new
+code can freely use 7+ parameters.
 
 ### is_global hash table incompatibility
 The hash table optimization for `is_global` causes segfaults when compiling

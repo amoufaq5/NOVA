@@ -1,0 +1,60 @@
+fn add7(a, b, c, d, e, f, g) {
+    return a + b + c + d + e + f + g
+}
+
+fn check8(a, b, c, d, e, f, g, h) {
+    return a * 1000 + b * 100 + c * 10 + d + e + f + g + h
+}
+
+fn verify_order(a, b, c, d, e, f, g) {
+    if a != 10 { println("FAIL: a != 10, got " + int_to_str(a)); exit(1) }
+    if b != 20 { println("FAIL: b != 20, got " + int_to_str(b)); exit(1) }
+    if c != 30 { println("FAIL: c != 30, got " + int_to_str(c)); exit(1) }
+    if d != 40 { println("FAIL: d != 40, got " + int_to_str(d)); exit(1) }
+    if e != 50 { println("FAIL: e != 50, got " + int_to_str(e)); exit(1) }
+    if f != 60 { println("FAIL: f != 60, got " + int_to_str(f)); exit(1) }
+    if g != 70 { println("FAIL: g != 70, got " + int_to_str(g)); exit(1) }
+    println("  PASS: 7 params in correct order")
+}
+
+fn verify_nine(a, b, c, d, e, f, g, h, i) {
+    if a != 1 { println("FAIL: a"); exit(1) }
+    if b != 2 { println("FAIL: b"); exit(1) }
+    if c != 3 { println("FAIL: c"); exit(1) }
+    if d != 4 { println("FAIL: d"); exit(1) }
+    if e != 5 { println("FAIL: e"); exit(1) }
+    if f != 6 { println("FAIL: f"); exit(1) }
+    if g != 7 { println("FAIL: g=" + int_to_str(g)); exit(1) }
+    if h != 8 { println("FAIL: h=" + int_to_str(h)); exit(1) }
+    if i != 9 { println("FAIL: i=" + int_to_str(i)); exit(1) }
+    println("  PASS: 9 params in correct order")
+}
+
+fn main() {
+    println("=== 7th Parameter Bug Fix Tests ===")
+
+    let r1 = add7(1, 2, 3, 4, 5, 6, 7)
+    if r1 == 28 {
+        println("  PASS: add7(1..7) = 28")
+    } else {
+        println("  FAIL: add7(1..7) = " + int_to_str(r1) + ", expected 28")
+        exit(1)
+    }
+
+    verify_order(10, 20, 30, 40, 50, 60, 70)
+
+    let r2 = check8(1, 2, 3, 4, 5, 6, 7, 8)
+    if r2 == 1260 {
+        println("  PASS: check8 = 1260")
+    } else {
+        println("  FAIL: check8 = " + int_to_str(r2) + ", expected 1260")
+        exit(1)
+    }
+
+    verify_nine(1, 2, 3, 4, 5, 6, 7, 8, 9)
+
+    println("")
+    println("All 7th-parameter tests passed!")
+}
+
+main()
