@@ -33,6 +33,7 @@ let imported_files = 0
 let _dep_map_keys = 0
 let _dep_map_vals = 0
 let _dep_map_count = 0
+let _dep_ht = 0
 let _import_depth = 0
 
 fn init_import_tracker() {
@@ -41,6 +42,7 @@ fn init_import_tracker() {
     _dep_map_keys = list_new()
     _dep_map_vals = list_new()
     _dep_map_count = 0
+    _dep_ht = _cg_ht_new()
     _dep_add("tensor", "mem,simd")
     _dep_add("gpu", "ffi")
     _dep_add("llm", "ffi")
@@ -90,14 +92,12 @@ fn _dep_add(pkg, deps) {
     push(_dep_map_keys, pkg)
     push(_dep_map_vals, deps)
     _dep_map_count = _dep_map_count + 1
+    _cg_ht_set(_dep_ht, pkg, deps)
 }
 
 fn _dep_get(pkg) {
-    let i = 0
-    while i < _dep_map_count {
-        if _dep_map_keys[i] == pkg { return _dep_map_vals[i] }
-        i = i + 1
-    }
+    let v = _cg_ht_get(_dep_ht, pkg)
+    if v != 0 { return v }
     return ""
 }
 

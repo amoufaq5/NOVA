@@ -54,7 +54,7 @@ let cg_float_count = 0
 let cg_float_vars = 0
 let cg_float_var_count = 0
 let cg_fns_ht = 0
-let cg_globals_ht = 0
+let cg_fn_modules = 0
 let CG_HT_SIZE = 8
 
 fn _cg_ht_new() {
@@ -67,20 +67,52 @@ fn _cg_ht_new() {
     return ht
 }
 
+fn _cg_ht_hash(name) {
+    return len(name) % CG_HT_SIZE
+}
+
 fn _cg_ht_add(ht, name) {
-    let b = len(name) % CG_HT_SIZE
+    let b = _cg_ht_hash(name)
     push(ht[b], name)
     return 0
 }
 
 fn _cg_ht_has(ht, name) {
     if name == 0 { return 0 }
-    let b = len(name) % CG_HT_SIZE
+    let b = _cg_ht_hash(name)
     let entries = ht[b]
     let i = 0
     while i < len(entries) {
         if entries[i] == name { return 1 }
         i = i + 1
+    }
+    return 0
+}
+
+fn _cg_ht_set(ht, key, val) {
+    let b = _cg_ht_hash(key)
+    let entries = ht[b]
+    let i = 0
+    while i < len(entries) {
+        if entries[i] == key {
+            entries[i + 1] = val
+            return 0
+        }
+        i = i + 2
+    }
+    push(entries, key)
+    push(entries, val)
+    return 0
+}
+
+fn _cg_ht_get(ht, key) {
+    if key == 0 { return 0 }
+    let b = _cg_ht_hash(key)
+    let entries = ht[b]
+    let i = 0
+    while i < len(entries) {
+        if entries[i] == key { return entries[i + 1] }
+        i = i + 2
     }
     return 0
 }
@@ -119,7 +151,7 @@ fn cg_init() {
     cg_float_vars = list_new()
     cg_float_var_count = 0
     cg_fns_ht = _cg_ht_new()
-    cg_globals_ht = _cg_ht_new()
+    cg_fn_modules = _cg_ht_new()
 }
 
 fn out(s) {
@@ -1009,6 +1041,12 @@ fn is_known_function(name) {
     if _cg_ht_has(cg_fns_ht, name) == 1 { return 1 }
     if is_builtin_fn(name) == 1 { return 1 }
     return 0
+}
+
+fn fn_module(name) {
+    let m = _cg_ht_get(cg_fn_modules, name)
+    if m == 0 { return "" }
+    return m
 }
 
 fn mark_float_var(name) {
@@ -3594,6 +3632,7 @@ fn gen_program(program) {
             let mfn_name = d[1] + "_" + d[2]
             push(cg_fns, mfn_name)
             _cg_ht_add(cg_fns_ht, mfn_name)
+            _cg_ht_set(cg_fn_modules, mfn_name, cg_source_file)
         }
         i = i + 1
     }
@@ -3605,6 +3644,7 @@ fn gen_program(program) {
         if ast_tag(d) == AST_EXTERN_FN {
             push(cg_fns, d[1])
             _cg_ht_add(cg_fns_ht, d[1])
+            _cg_ht_set(cg_fn_modules, d[1], cg_source_file)
             push(cg_externs, d[1])
             cg_extern_count = cg_extern_count + 1
         }
@@ -3618,6 +3658,7 @@ fn gen_program(program) {
         if ast_tag(d) == AST_FN_DECL {
             push(cg_fns, d[1])
             _cg_ht_add(cg_fns_ht, d[1])
+            _cg_ht_set(cg_fn_modules, d[1], cg_source_file)
         }
         i = i + 1
     }
@@ -3627,6 +3668,7 @@ fn gen_program(program) {
         let lam = par_lambdas[li]
         push(cg_fns, lam[1])
         _cg_ht_add(cg_fns_ht, lam[1])
+        _cg_ht_set(cg_fn_modules, lam[1], cg_source_file)
         li = li + 1
     }
 
@@ -5583,6 +5625,7 @@ fn wasm_gen_program(program) {
         if ast_tag(d) == AST_FN_DECL {
             push(cg_fns, d[1])
             _cg_ht_add(cg_fns_ht, d[1])
+            _cg_ht_set(cg_fn_modules, d[1], cg_source_file)
             push(wasm_fn_names, d[1])
         }
         i = i + 1

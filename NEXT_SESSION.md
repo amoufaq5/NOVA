@@ -1,14 +1,47 @@
-# NEXT_SESSION.md — Nova N12–N29 Implementation Status
+# NEXT_SESSION.md — Nova Implementation Status
 
 ## Completed
 
-All 18 modules (N12–N29) are fully implemented with:
+### N12–N29 Modules (18 modules)
+All fully implemented with:
 - Implementation files under `src/cognitive/`, `src/runtime/`, `src/tooling/`
 - Unit tests in `tests/` (all passing: 151/157, 0 failures, 6 skipped)
 - Example programs in `examples/` (18 new `*_demo.nova` files)
 - Documentation in `docs/STDLIB.md`
 - Self-hosting verified (`stage2.s == stage3.s`)
-- Committed and pushed to `claude/nova-language-design-dZn3q`
+
+### Phase 1: Tensor Performance
+- SSE2 vectorized `simd_dot_f64` (4-element unrolled mulpd/addpd)
+- SSE2 vectorized `simd_scale_f64` and `simd_sum_f64`
+- Tiled matmul for matrices >= 64 columns (32x32 tile blocking)
+- OpenBLAS FFI wrapper (`src/runtime/blas.nova`)
+- Size-based dispatch in `tensor_matmul` (simple → tiled → BLAS)
+- Tests: `test_tensor_perf` passes
+
+### Phase 2: Cognitive LLM Pipeline
+- `src/agent/cognitive_llm.nova` — LLM generation + reasoning + confidence
+- Integrates with reasoning engine, episodic memory, emotion analysis
+- Tests: `test_cognitive_llm` passes
+
+### Phase 3: Competitive Embeddings
+- `src/runtime/embedding.nova` — unified multi-backend embedding interface
+- TF-IDF + character n-grams + BM25 scoring
+- Neural embedding via Python bridge (optional)
+- Cognitive embedding with emotional/episodic/inferential dimensions
+- Tests: `test_embedding` passes
+
+### Phase 4: Import Scaling
+- **4a**: O(1) function name lookup via hash table (`cg_fns_ht`)
+  - Hash table with 8 buckets, `len(name) % 8` hash function
+  - `is_known_function` uses hash table instead of O(n) scan
+  - Note: `is_global` stays linear scan due to destructuring edge case
+- **4b**: O(1) dependency and package lookups
+  - `_dep_get` uses key-value hash table (`_dep_ht`)
+  - `is_std_package` uses membership hash table (`_std_pkg_ht`)
+- **4c**: Module provenance tracking
+  - `cg_fn_modules` hash table maps function names to source files
+  - `fn_module(name)` returns the source file that defined a function
+  - Tracked for all function declarations, extern functions, methods, lambdas
 
 ## Module Summary
 
@@ -41,6 +74,13 @@ Functions with 7+ parameters produce incorrect values for the 7th argument
 parameters max; push additional values after creation. Applied in
 `causal_library.nova` (`causal_pattern_new` and `_causal_add_seed`).
 
+### is_global hash table incompatibility
+The hash table optimization for `is_global` causes segfaults when compiling
+destructuring patterns (`let [a, b] = ...`). Root cause: values passed to
+`is_global` during `collect_locals` may not always be valid string pointers.
+The hash table works for `is_known_function` because function names are
+always string literals from the AST. `is_global` remains O(n) linear scan.
+
 ### Forbidden patterns
 - `char_at(s, i)` — broken, use `substr(s, i, 1)`
 - `map_new()` — 16-slot limit causes infinite loops; use parallel lists
@@ -53,18 +93,21 @@ Values exceeding PTR_THRESHOLD (0x100000 = 1048576) are treated as heap
 pointers. Use `int_add/int_mul/int_sub/int_div/int_mod` builtins for
 arithmetic on potentially large values.
 
-## Files Modified in Compiler
+## Files Modified in Compiler (Phase 4)
 
-- `src/compiler/compiler.nova` — extended `_find_std_file` to search
-  `src/core/`, `src/agent/`, `src/cognitive/`, `src/tooling/` directories;
-  added dependency entries for all 18 modules in `init_import_tracker()`
-- `src/pkg/pkg.nova` — added all 18 packages to STD_PACKAGES list
-- `tests/run_tests.sh` — added 18 case blocks for source concatenation
+- `src/compiler/codegen.nova` — added hash table functions (`_cg_ht_new`,
+  `_cg_ht_hash`, `_cg_ht_add`, `_cg_ht_has`, `_cg_ht_set`, `_cg_ht_get`),
+  function name hash table (`cg_fns_ht`), module tracking (`cg_fn_modules`),
+  `fn_module()` query function
+- `src/compiler/compiler.nova` — O(1) dependency lookup via `_dep_ht` hash
+  table, updated `_dep_add` and `_dep_get`
+- `src/pkg/pkg.nova` — O(1) package lookup via `_std_pkg_ht` hash table,
+  `_pkg_reg()` helper, updated `is_std_package`
 
 ## What's Left (for future sessions)
 
-1. The plan file references Phase 1–4 improvements (tensor perf, cognitive
-   LLM, embeddings, import scaling) — those are separate from N12–N29
-2. Consider fixing the 7th-parameter compiler bug in codegen.nova
+1. Fix the 7th-parameter compiler bug in codegen.nova
+2. Investigate `is_global` hash table incompatibility (may be fixable by
+   adding type guards for string pointers in `_cg_ht_hash`)
 3. Example programs are standalone demos — they don't compile/run without
    library source concatenation (by design, matching existing examples)
