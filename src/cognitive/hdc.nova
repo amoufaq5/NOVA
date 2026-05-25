@@ -1,0 +1,146 @@
+// N13 Hyperdimensional Computing: Vector Symbolic Architecture (VSA).
+// Implements bipolar hypervectors (+1.0/-1.0) stored as raw memory blocks
+// of IEEE 754 doubles. Supports bind, bundle, permute, and cosine
+// similarity for holographic distributed representations.
+
+let HDC_TAG = 410
+let HV_TAG = 411
+
+fn hdc_new(dimensions) {
+    let ctx = list_new()
+    push(ctx, HDC_TAG)
+    push(ctx, dimensions)
+    push(ctx, 42)
+    return ctx
+}
+
+fn hdc_dimensions(hdc) {
+    return hdc[1]
+}
+
+fn hdc_random_vector(hdc) {
+    let dimensions = hdc[1]
+    let seed = hdc[2]
+    let data_ptr = alloc(dimensions * 8)
+    let pos_one = to_float(1)
+    let neg_one = float_sub(to_float(0), to_float(1))
+    let lcg_mul = 1103515245
+    let lcg_inc = 12345
+    let lcg_mod = 2147483648
+    let i = 0
+    while i < dimensions {
+        seed = int_mod(int_add(int_mul(seed, lcg_mul), lcg_inc), lcg_mod)
+        let bit = int_mod(int_div(seed, 65536), 2)
+        let offset = i * 8
+        if bit == 0 {
+            mem_write_f64(int_add(data_ptr, offset), neg_one)
+        } else {
+            mem_write_f64(int_add(data_ptr, offset), pos_one)
+        }
+        i = i + 1
+    }
+    hdc[2] = seed
+    let hv = list_new()
+    push(hv, HV_TAG)
+    push(hv, dimensions)
+    push(hv, data_ptr)
+    return hv
+}
+
+fn hdc_bind(a, b) {
+    let dimensions = a[1]
+    let a_ptr = a[2]
+    let b_ptr = b[2]
+    let data_ptr = alloc(dimensions * 8)
+    let i = 0
+    while i < dimensions {
+        let offset = i * 8
+        let a_val = mem_read_f64(int_add(a_ptr, offset))
+        let b_val = mem_read_f64(int_add(b_ptr, offset))
+        mem_write_f64(int_add(data_ptr, offset), float_mul(a_val, b_val))
+        i = i + 1
+    }
+    let hv = list_new()
+    push(hv, HV_TAG)
+    push(hv, dimensions)
+    push(hv, data_ptr)
+    return hv
+}
+
+fn hdc_unbind(bound, key) {
+    return hdc_bind(bound, key)
+}
+
+fn hdc_bundle(vectors_list) {
+    let count = len(vectors_list)
+    let first = vectors_list[0]
+    let dimensions = first[1]
+    let data_ptr = alloc(dimensions * 8)
+    let zero = to_float(0)
+    let i = 0
+    while i < dimensions {
+        mem_write_f64(int_add(data_ptr, i * 8), zero)
+        i = i + 1
+    }
+    let v = 0
+    while v < count {
+        let vec = vectors_list[v]
+        let vec_ptr = vec[2]
+        i = 0
+        while i < dimensions {
+            let offset = i * 8
+            let cur = mem_read_f64(int_add(data_ptr, offset))
+            let val = mem_read_f64(int_add(vec_ptr, offset))
+            mem_write_f64(int_add(data_ptr, offset), float_add(cur, val))
+            i = i + 1
+        }
+        v = v + 1
+    }
+    let pos_one = to_float(1)
+    let neg_one = float_sub(to_float(0), to_float(1))
+    i = 0
+    while i < dimensions {
+        let offset = i * 8
+        let val = mem_read_f64(int_add(data_ptr, offset))
+        if float_cmp(val, zero) >= 0 {
+            mem_write_f64(int_add(data_ptr, offset), pos_one)
+        } else {
+            mem_write_f64(int_add(data_ptr, offset), neg_one)
+        }
+        i = i + 1
+    }
+    let hv = list_new()
+    push(hv, HV_TAG)
+    push(hv, dimensions)
+    push(hv, data_ptr)
+    return hv
+}
+
+fn hdc_similarity(a, b) {
+    let dimensions = a[1]
+    let a_ptr = a[2]
+    let b_ptr = b[2]
+    let dot = simd_dot_f64(a_ptr, b_ptr, dimensions)
+    let dims_f = to_float(dimensions)
+    let ratio = float_div(dot, dims_f)
+    let scaled = float_mul(ratio, to_float(1000))
+    return from_float(scaled)
+}
+
+fn hdc_permute(v, shift) {
+    let dimensions = v[1]
+    let src_ptr = v[2]
+    let data_ptr = alloc(dimensions * 8)
+    let i = 0
+    while i < dimensions {
+        let src_idx = int_mod(int_add(int_mod(int_sub(i, shift), dimensions), dimensions), dimensions)
+        let src_val = mem_read_f64(int_add(src_ptr, src_idx * 8))
+        mem_write_f64(int_add(data_ptr, i * 8), src_val)
+        i = i + 1
+    }
+    let hv = list_new()
+    push(hv, HV_TAG)
+    push(hv, dimensions)
+    push(hv, data_ptr)
+    return hv
+}

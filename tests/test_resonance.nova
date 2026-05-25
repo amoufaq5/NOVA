@@ -1,0 +1,77 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Resonance Kernel Tests ===")
+
+    let k = resonance_new(3, 4)
+    assert_test(k[0] == 470, "tag is RESONANCE_TAG")
+
+    let pref = list_new()
+    push(pref, 1000)
+    push(pref, 0)
+    push(pref, 0)
+    push(pref, 0)
+    resonance_set_preference(k, 0, pref)
+
+    let pattern = list_new()
+    push(pattern, 1000)
+    push(pattern, 0)
+    push(pattern, 0)
+    push(pattern, 0)
+    let sim = resonance_similarity(k, 0, pattern)
+    assert_test(sim >= 900, "identical pattern similarity >= 900")
+
+    let ortho = list_new()
+    push(ortho, 0)
+    push(ortho, 1000)
+    push(ortho, 0)
+    push(ortho, 0)
+    let sim2 = resonance_similarity(k, 0, ortho)
+    assert_test(sim2 == 0, "orthogonal pattern similarity = 0")
+
+    let sig = list_new()
+    let sig_entry = list_new()
+    push(sig_entry, 0)
+    push(sig_entry, 500)
+    push(sig_entry, pattern)
+    push(sig, sig_entry)
+    let act = resonance_compute(k, sig)
+    assert_test(act >= 0, "activation is non-negative")
+
+    resonance_set_activation(k, 1)
+    let act2 = resonance_compute(k, sig)
+    assert_test(act2 >= 0, "relu activation is non-negative")
+
+    let observed = list_new()
+    push(observed, 800)
+    push(observed, 200)
+    push(observed, 0)
+    push(observed, 0)
+    resonance_update_preference(k, 0, observed, 500)
+    let updated_sim = resonance_similarity(k, 0, observed)
+    assert_test(updated_sim > 0, "preference moves toward observed pattern")
+
+    let hist = resonance_history(k)
+    assert_test(len(hist) == 2, "history has 2 entries after 2 computes")
+
+    resonance_reset(k)
+    let reset_sim = resonance_similarity(k, 0, pattern)
+    assert_test(reset_sim == 0, "after reset, similarity = 0")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

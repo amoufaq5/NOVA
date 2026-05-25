@@ -1,0 +1,238 @@
+// N12 Associative Memory: Hopfield-network content-addressable memory.
+// Stores binary patterns as bipolar vectors and recalls via iterative
+// sign-based update on an NxN Hebbian weight matrix until convergence.
+
+let ASSOC_TAG = 400
+let ASSOC_CAPACITY = 1
+let ASSOC_DIMENSIONS = 2
+let ASSOC_STORED_COUNT = 3
+let ASSOC_WEIGHT_TENSOR = 4
+let ASSOC_PATTERNS_LIST = 5
+
+let ASSOC_MAX_ITER = 100
+
+fn associative_new(capacity, dimensions) {
+    let mem = list_new()
+    push(mem, ASSOC_TAG)
+    push(mem, capacity)
+    push(mem, dimensions)
+    push(mem, 0)
+    push(mem, tensor_new(dimensions, dimensions))
+    push(mem, list_new())
+    return mem
+}
+
+fn _associative_to_bipolar(pattern, dimensions) {
+    let bipolar = list_new()
+    let i = 0
+    while i < dimensions {
+        let v = pattern[i]
+        if v == 1 {
+            push(bipolar, 1)
+        } else {
+            push(bipolar, -1)
+        }
+        i = i + 1
+    }
+    return bipolar
+}
+
+fn _associative_to_binary(bipolar, dimensions) {
+    let binary = list_new()
+    let i = 0
+    while i < dimensions {
+        if bipolar[i] >= 0 {
+            push(binary, 1)
+        } else {
+            push(binary, 0)
+        }
+        i = i + 1
+    }
+    return binary
+}
+
+fn associative_store(mem, pattern) {
+    let dimensions = mem[ASSOC_DIMENSIONS]
+    let stored = mem[ASSOC_STORED_COUNT]
+    let capacity = mem[ASSOC_CAPACITY]
+    if stored >= capacity {
+        return -1
+    }
+    let bipolar = _associative_to_bipolar(pattern, dimensions)
+    let w = mem[ASSOC_WEIGHT_TENSOR]
+    let i = 0
+    while i < dimensions {
+        let si = bipolar[i]
+        let si_f = to_float(si)
+        let j = 0
+        while j < dimensions {
+            if i != j {
+                let sj = bipolar[j]
+                let sj_f = to_float(sj)
+                let old_val = tensor_get(w, i, j)
+                let delta = float_mul(si_f, sj_f)
+                tensor_set(w, i, j, float_add(old_val, delta))
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let patterns = mem[ASSOC_PATTERNS_LIST]
+    push(patterns, bipolar)
+    let pattern_id = stored
+    mem[ASSOC_STORED_COUNT] = stored + 1
+    return pattern_id
+}
+
+fn associative_recall(mem, partial_pattern) {
+    let dimensions = mem[ASSOC_DIMENSIONS]
+    let w = mem[ASSOC_WEIGHT_TENSOR]
+    let state = list_new()
+    let i = 0
+    while i < dimensions {
+        let v = partial_pattern[i]
+        if v == 1 {
+            push(state, 1)
+        } else {
+            if v == 0 {
+                push(state, -1)
+            } else {
+                push(state, 1)
+            }
+        }
+        i = i + 1
+    }
+    let iter = 0
+    let converged = 0
+    while iter < ASSOC_MAX_ITER {
+        if converged == 1 {
+            iter = ASSOC_MAX_ITER
+        } else {
+            let changed = 0
+            i = 0
+            while i < dimensions {
+                let sum = to_float(0)
+                let j = 0
+                while j < dimensions {
+                    let wij = tensor_get(w, i, j)
+                    let sj_f = to_float(state[j])
+                    sum = float_add(sum, float_mul(wij, sj_f))
+                    j = j + 1
+                }
+                let new_val = 1
+                if float_cmp(sum, to_float(0)) < 0 {
+                    new_val = -1
+                }
+                if new_val != state[i] {
+                    changed = 1
+                    state[i] = new_val
+                }
+                i = i + 1
+            }
+            if changed == 0 {
+                converged = 1
+            }
+            iter = iter + 1
+        }
+    }
+    let output = _associative_to_binary(state, dimensions)
+    let input_bipolar = list_new()
+    i = 0
+    while i < dimensions {
+        let v = partial_pattern[i]
+        if v == 1 {
+            push(input_bipolar, 1)
+        } else {
+            if v == 0 {
+                push(input_bipolar, -1)
+            } else {
+                push(input_bipolar, 0)
+            }
+        }
+        i = i + 1
+    }
+    let match_count = 0
+    let total_known = 0
+    i = 0
+    while i < dimensions {
+        if input_bipolar[i] != 0 {
+            total_known = total_known + 1
+            if input_bipolar[i] == state[i] {
+                match_count = match_count + 1
+            }
+        }
+        i = i + 1
+    }
+    let confidence = 0
+    if total_known > 0 {
+        confidence = (match_count * 1000) / total_known
+    } else {
+        confidence = 500
+    }
+    let result = list_new()
+    push(result, output)
+    push(result, confidence)
+    return result
+}
+
+fn associative_capacity_used(mem) {
+    return mem[ASSOC_STORED_COUNT]
+}
+
+fn associative_clear(mem) {
+    let dimensions = mem[ASSOC_DIMENSIONS]
+    mem[ASSOC_WEIGHT_TENSOR] = tensor_new(dimensions, dimensions)
+    mem[ASSOC_PATTERNS_LIST] = list_new()
+    mem[ASSOC_STORED_COUNT] = 0
+}
+
+fn associative_energy(mem, pattern) {
+    let dimensions = mem[ASSOC_DIMENSIONS]
+    let w = mem[ASSOC_WEIGHT_TENSOR]
+    let bipolar = _associative_to_bipolar(pattern, dimensions)
+    let sum = to_float(0)
+    let i = 0
+    while i < dimensions {
+        let si_f = to_float(bipolar[i])
+        let j = 0
+        while j < dimensions {
+            let sj_f = to_float(bipolar[j])
+            let wij = tensor_get(w, i, j)
+            sum = float_add(sum, float_mul(wij, float_mul(si_f, sj_f)))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let neg_half = float_sub(to_float(0), float_div(to_float(1), to_float(2)))
+    return float_mul(neg_half, sum)
+}
+
+fn associative_nearest(mem, pattern) {
+    let dimensions = mem[ASSOC_DIMENSIONS]
+    let patterns = mem[ASSOC_PATTERNS_LIST]
+    let stored = mem[ASSOC_STORED_COUNT]
+    if stored == 0 {
+        return -1
+    }
+    let query_bipolar = _associative_to_bipolar(pattern, dimensions)
+    let best_idx = 0
+    let best_overlap = -1
+    let p = 0
+    while p < stored {
+        let stored_pat = patterns[p]
+        let overlap = 0
+        let i = 0
+        while i < dimensions {
+            if query_bipolar[i] == stored_pat[i] {
+                overlap = overlap + 1
+            }
+            i = i + 1
+        }
+        if overlap > best_overlap {
+            best_overlap = overlap
+            best_idx = p
+        }
+        p = p + 1
+    }
+    return best_idx
+}

@@ -1,0 +1,310 @@
+// N20 Atom Birth/Death Mechanism: meta-learning fabric for monitoring
+// co-activation patterns and managing atom lifecycle through birth
+// promotion and death release based on recurrence and activity decay.
+
+let BIRTH_MON_TAG = 480
+let BIRTH_THRESHOLD = 1
+let BIRTH_PATTERN_HASHES = 2
+let BIRTH_PATTERN_COUNTS = 3
+let BIRTH_PATTERN_DATA = 4
+let BIRTH_PATTERN_TIMESTAMPS = 5
+let BIRTH_NEXT_ATOM_ID = 6
+
+let DEATH_MON_TAG = 485
+let DEATH_DECAY_RATE = 1
+let DEATH_THRESHOLD = 2
+let DEATH_SUSTAINED_TICKS = 3
+let DEATH_ATOM_IDS = 4
+let DEATH_ATOM_ACTIVITIES = 5
+let DEATH_ATOM_INACTIVE_TICKS = 6
+
+fn _birth_insertion_sort(lst) {
+    let n = len(lst)
+    let i = 1
+    while i < n {
+        let key = lst[i]
+        let j = i - 1
+        let done = 0
+        while done == 0 {
+            if j < 0 {
+                done = 1
+            } else {
+                if lst[j] > key {
+                    lst[j + 1] = lst[j]
+                    j = j - 1
+                } else {
+                    done = 1
+                }
+            }
+        }
+        lst[j + 1] = key
+        i = i + 1
+    }
+}
+
+fn _birth_copy_and_sort(pattern) {
+    let sorted = list_new()
+    let i = 0
+    while i < len(pattern) {
+        push(sorted, pattern[i])
+        i = i + 1
+    }
+    _birth_insertion_sort(sorted)
+    return sorted
+}
+
+fn _birth_compute_hash(sorted_pattern) {
+    let hash = 0
+    let i = 0
+    while i < len(sorted_pattern) {
+        let id = sorted_pattern[i]
+        let pos = i + 1
+        hash = int_add(hash, int_mul(id, pos))
+        i = i + 1
+    }
+    return hash
+}
+
+fn _birth_find_hash(monitor, hash) {
+    let hashes = monitor[BIRTH_PATTERN_HASHES]
+    let i = 0
+    while i < len(hashes) {
+        if hashes[i] == hash {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn birth_monitor_new(threshold) {
+    let monitor = list_new()
+    push(monitor, BIRTH_MON_TAG)
+    push(monitor, threshold)
+    push(monitor, list_new())
+    push(monitor, list_new())
+    push(monitor, list_new())
+    push(monitor, list_new())
+    push(monitor, 1)
+    return monitor
+}
+
+fn birth_observe(monitor, co_activation_pattern, timestamp) {
+    let sorted = _birth_copy_and_sort(co_activation_pattern)
+    let hash = _birth_compute_hash(sorted)
+    let idx = _birth_find_hash(monitor, hash)
+    if idx >= 0 {
+        let counts = monitor[BIRTH_PATTERN_COUNTS]
+        counts[idx] = counts[idx] + 1
+        let timestamps = monitor[BIRTH_PATTERN_TIMESTAMPS]
+        timestamps[idx] = timestamp
+    } else {
+        let hashes = monitor[BIRTH_PATTERN_HASHES]
+        push(hashes, hash)
+        let counts = monitor[BIRTH_PATTERN_COUNTS]
+        push(counts, 1)
+        let data = monitor[BIRTH_PATTERN_DATA]
+        push(data, sorted)
+        let timestamps = monitor[BIRTH_PATTERN_TIMESTAMPS]
+        push(timestamps, timestamp)
+    }
+}
+
+fn birth_pending_births(monitor) {
+    let threshold = monitor[BIRTH_THRESHOLD]
+    let hashes = monitor[BIRTH_PATTERN_HASHES]
+    let counts = monitor[BIRTH_PATTERN_COUNTS]
+    let data = monitor[BIRTH_PATTERN_DATA]
+    let result = list_new()
+    let i = 0
+    while i < len(hashes) {
+        if counts[i] >= threshold {
+            let entry = list_new()
+            push(entry, hashes[i])
+            push(entry, data[i])
+            push(entry, counts[i])
+            push(result, entry)
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn birth_promote(monitor, pattern_hash) {
+    let idx = _birth_find_hash(monitor, pattern_hash)
+    if idx < 0 {
+        return -1
+    }
+    let hashes = monitor[BIRTH_PATTERN_HASHES]
+    let counts = monitor[BIRTH_PATTERN_COUNTS]
+    let data = monitor[BIRTH_PATTERN_DATA]
+    let timestamps = monitor[BIRTH_PATTERN_TIMESTAMPS]
+    let last = len(hashes) - 1
+    hashes[idx] = hashes[last]
+    counts[idx] = counts[last]
+    data[idx] = data[last]
+    timestamps[idx] = timestamps[last]
+    pop(hashes)
+    pop(counts)
+    pop(data)
+    pop(timestamps)
+    let atom_id = monitor[BIRTH_NEXT_ATOM_ID]
+    monitor[BIRTH_NEXT_ATOM_ID] = atom_id + 1
+    return atom_id
+}
+
+fn birth_pattern_count(monitor) {
+    return len(monitor[BIRTH_PATTERN_HASHES])
+}
+
+fn birth_clear(monitor) {
+    monitor[BIRTH_PATTERN_HASHES] = list_new()
+    monitor[BIRTH_PATTERN_COUNTS] = list_new()
+    monitor[BIRTH_PATTERN_DATA] = list_new()
+    monitor[BIRTH_PATTERN_TIMESTAMPS] = list_new()
+}
+
+fn death_monitor_new(decay_rate, death_threshold, sustained_ticks) {
+    let monitor = list_new()
+    push(monitor, DEATH_MON_TAG)
+    push(monitor, decay_rate)
+    push(monitor, death_threshold)
+    push(monitor, sustained_ticks)
+    push(monitor, list_new())
+    push(monitor, list_new())
+    push(monitor, list_new())
+    return monitor
+}
+
+fn _death_find_atom(monitor, atom_id) {
+    let ids = monitor[DEATH_ATOM_IDS]
+    let i = 0
+    while i < len(ids) {
+        if ids[i] == atom_id {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn death_register_atom(monitor, atom_id) {
+    let ids = monitor[DEATH_ATOM_IDS]
+    push(ids, atom_id)
+    let activities = monitor[DEATH_ATOM_ACTIVITIES]
+    push(activities, 1000)
+    let inactive = monitor[DEATH_ATOM_INACTIVE_TICKS]
+    push(inactive, 0)
+}
+
+fn death_observe(monitor, atom_id, activity_level) {
+    let idx = _death_find_atom(monitor, atom_id)
+    if idx < 0 {
+        return
+    }
+    let activities = monitor[DEATH_ATOM_ACTIVITIES]
+    let inactive = monitor[DEATH_ATOM_INACTIVE_TICKS]
+    let decay_rate = monitor[DEATH_DECAY_RATE]
+    let threshold = monitor[DEATH_THRESHOLD]
+    let old_activity = activities[idx]
+    let decayed_part = int_div(int_mul(old_activity, decay_rate), 1000)
+    let fresh_part = int_div(int_mul(activity_level, int_sub(1000, decay_rate)), 1000)
+    let new_activity = int_add(decayed_part, fresh_part)
+    activities[idx] = new_activity
+    if new_activity < threshold {
+        inactive[idx] = inactive[idx] + 1
+    } else {
+        inactive[idx] = 0
+    }
+}
+
+fn death_tick(monitor) {
+    let decay_rate = monitor[DEATH_DECAY_RATE]
+    let threshold = monitor[DEATH_THRESHOLD]
+    let activities = monitor[DEATH_ATOM_ACTIVITIES]
+    let inactive = monitor[DEATH_ATOM_INACTIVE_TICKS]
+    let i = 0
+    while i < len(activities) {
+        let old_activity = activities[i]
+        let new_activity = int_div(int_mul(old_activity, decay_rate), 1000)
+        activities[i] = new_activity
+        if new_activity < threshold {
+            inactive[i] = inactive[i] + 1
+        } else {
+            inactive[i] = 0
+        }
+        i = i + 1
+    }
+}
+
+fn death_pending_deaths(monitor) {
+    let sustained = monitor[DEATH_SUSTAINED_TICKS]
+    let ids = monitor[DEATH_ATOM_IDS]
+    let inactive = monitor[DEATH_ATOM_INACTIVE_TICKS]
+    let result = list_new()
+    let i = 0
+    while i < len(ids) {
+        if inactive[i] >= sustained {
+            push(result, ids[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn death_release(monitor, atom_id) {
+    let idx = _death_find_atom(monitor, atom_id)
+    if idx < 0 {
+        return
+    }
+    let ids = monitor[DEATH_ATOM_IDS]
+    let activities = monitor[DEATH_ATOM_ACTIVITIES]
+    let inactive = monitor[DEATH_ATOM_INACTIVE_TICKS]
+    let last = len(ids) - 1
+    ids[idx] = ids[last]
+    activities[idx] = activities[last]
+    inactive[idx] = inactive[last]
+    pop(ids)
+    pop(activities)
+    pop(inactive)
+}
+
+fn death_atom_activity(monitor, atom_id) {
+    let idx = _death_find_atom(monitor, atom_id)
+    if idx < 0 {
+        return -1
+    }
+    let activities = monitor[DEATH_ATOM_ACTIVITIES]
+    return activities[idx]
+}
+
+fn death_atom_count(monitor) {
+    return len(monitor[DEATH_ATOM_IDS])
+}
+
+fn death_describe(monitor) {
+    let decay_rate = monitor[DEATH_DECAY_RATE]
+    let threshold = monitor[DEATH_THRESHOLD]
+    let sustained = monitor[DEATH_SUSTAINED_TICKS]
+    let ids = monitor[DEATH_ATOM_IDS]
+    let activities = monitor[DEATH_ATOM_ACTIVITIES]
+    let inactive = monitor[DEATH_ATOM_INACTIVE_TICKS]
+    print("Death Monitor (decay=")
+    print_int(decay_rate)
+    print(" threshold=")
+    print_int(threshold)
+    print(" sustained=")
+    print_int(sustained)
+    println(")")
+    let i = 0
+    while i < len(ids) {
+        print("  atom ")
+        print_int(ids[i])
+        print(": activity=")
+        print_int(activities[i])
+        print(" inactive_ticks=")
+        print_int(inactive[i])
+        println("")
+        i = i + 1
+    }
+}

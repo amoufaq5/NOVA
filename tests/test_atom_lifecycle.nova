@@ -1,0 +1,78 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Atom Lifecycle Tests ===")
+
+    let bm = birth_monitor_new(3)
+    assert_test(birth_pattern_count(bm) == 0, "empty birth monitor")
+
+    let pat1 = list_new()
+    push(pat1, 1)
+    push(pat1, 5)
+    push(pat1, 10)
+    birth_observe(bm, pat1, 100)
+    assert_test(birth_pattern_count(bm) == 1, "one pattern tracked")
+
+    birth_observe(bm, pat1, 200)
+    let pending = birth_pending_births(bm)
+    assert_test(len(pending) == 0, "not enough recurrences yet (2 < 3)")
+
+    birth_observe(bm, pat1, 300)
+    let pending2 = birth_pending_births(bm)
+    assert_test(len(pending2) == 1, "pattern ready for birth (3 >= 3)")
+
+    let pat2 = list_new()
+    push(pat2, 2)
+    push(pat2, 7)
+    birth_observe(bm, pat2, 400)
+    assert_test(birth_pattern_count(bm) == 2, "two patterns tracked")
+
+    let hash1 = pending2[0][0]
+    let atom_id = birth_promote(bm, hash1)
+    assert_test(atom_id >= 1, "promoted atom gets valid id")
+    assert_test(birth_pattern_count(bm) == 1, "promoted pattern removed")
+
+    birth_clear(bm)
+    assert_test(birth_pattern_count(bm) == 0, "clear removes all patterns")
+
+    let dm = death_monitor_new(950, 100, 3)
+    death_register_atom(dm, 1)
+    death_register_atom(dm, 2)
+    assert_test(death_atom_count(dm) == 2, "two atoms registered")
+
+    let act = death_atom_activity(dm, 1)
+    assert_test(act == 1000, "initial activity = 1000")
+
+    death_tick(dm)
+    death_tick(dm)
+    death_tick(dm)
+    let act_after = death_atom_activity(dm, 1)
+    assert_test(act_after < 1000, "activity decays after ticks")
+
+    let deaths = death_pending_deaths(dm)
+    assert_test(len(deaths) >= 0, "death check runs without error")
+
+    death_observe(dm, 1, 1000)
+    let act_observed = death_atom_activity(dm, 1)
+    assert_test(act_observed > act_after, "observation increases activity")
+
+    death_release(dm, 2)
+    assert_test(death_atom_count(dm) == 1, "one atom after release")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

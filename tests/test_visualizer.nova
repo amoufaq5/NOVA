@@ -1,0 +1,58 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Visualizer Tests ===")
+
+    let v = viz_new()
+    assert_test(viz_node_count(v) == 0, "new viz has 0 nodes")
+    assert_test(viz_event_count(v) == 0, "new viz has 0 events")
+
+    viz_register_node(v, "node_a", "Perception", 100, 100)
+    viz_register_node(v, "node_b", "Reasoning", 200, 100)
+    viz_register_node(v, "node_c", "Action", 300, 100)
+    assert_test(viz_node_count(v) == 3, "3 nodes registered")
+
+    viz_register_synapse(v, "node_a", "node_b")
+    viz_register_synapse(v, "node_b", "node_c")
+    assert_test(viz_synapse_count(v) == 2, "2 synapses registered")
+
+    viz_log_signal(v, 1, "node_a", "node_b", 500)
+    viz_log_signal(v, 2, "node_b", "node_c", 300)
+    viz_log_signal(v, 1, "node_a", "node_b", 700)
+    assert_test(viz_event_count(v) == 3, "3 events logged")
+
+    viz_log_activation(v, "node_b", 800)
+    assert_test(viz_event_count(v) == 4, "4 events after activation log")
+
+    let events_b = viz_events_for_node(v, "node_b")
+    assert_test(len(events_b) == 4, "node_b involved in 4 events")
+
+    let flow_ab = viz_flow_between(v, "node_a", "node_b")
+    assert_test(flow_ab == 2, "2 signals from a to b")
+
+    let hot = viz_hottest_nodes(v, 2)
+    assert_test(len(hot) >= 1, "hottest nodes returns results")
+
+    viz_clear_events(v)
+    assert_test(viz_event_count(v) == 0, "events cleared")
+    assert_test(viz_node_count(v) == 3, "nodes preserved after clear")
+
+    viz_stop(v)
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

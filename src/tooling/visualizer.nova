@@ -1,0 +1,342 @@
+// N21 Signal-Flow Visualizer
+// Logs signal flow through nodes for debugging emergent behavior.
+// Tracks node registrations, synapse registrations, and signal events.
+// Exports to a self-contained HTML file with inline SVG visualization.
+
+let VIZ_TAG = 500
+let VIZ_NODE_IDS = 1
+let VIZ_NODE_LABELS = 2
+let VIZ_NODE_X = 3
+let VIZ_NODE_Y = 4
+let VIZ_SYNAPSE_FROM = 5
+let VIZ_SYNAPSE_TO = 6
+let VIZ_EVENT_TYPES = 7
+let VIZ_EVENT_FROM = 8
+let VIZ_EVENT_TO = 9
+let VIZ_EVENT_MAGNITUDES = 10
+let VIZ_EVENT_TIMESTAMPS = 11
+let VIZ_EVENT_COUNT = 12
+let VIZ_ACTIVE = 13
+
+fn viz_new() {
+    let v = list_new()
+    push(v, VIZ_TAG)
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, list_new())
+    push(v, 0)
+    push(v, 1)
+    return v
+}
+
+fn viz_register_node(viz, node_id, label, x, y) {
+    if viz[VIZ_ACTIVE] == 0 { return }
+    push(viz[VIZ_NODE_IDS], node_id)
+    push(viz[VIZ_NODE_LABELS], label)
+    push(viz[VIZ_NODE_X], x)
+    push(viz[VIZ_NODE_Y], y)
+}
+
+fn viz_register_synapse(viz, from_node, to_node) {
+    if viz[VIZ_ACTIVE] == 0 { return }
+    push(viz[VIZ_SYNAPSE_FROM], from_node)
+    push(viz[VIZ_SYNAPSE_TO], to_node)
+}
+
+fn viz_log_signal(viz, signal_type, from_node, to_node, magnitude) {
+    if viz[VIZ_ACTIVE] == 0 { return }
+    let tick = viz[VIZ_EVENT_COUNT]
+    push(viz[VIZ_EVENT_TYPES], signal_type)
+    push(viz[VIZ_EVENT_FROM], from_node)
+    push(viz[VIZ_EVENT_TO], to_node)
+    push(viz[VIZ_EVENT_MAGNITUDES], magnitude)
+    push(viz[VIZ_EVENT_TIMESTAMPS], tick)
+    viz[VIZ_EVENT_COUNT] = tick + 1
+}
+
+fn viz_log_activation(viz, node_id, level) {
+    if viz[VIZ_ACTIVE] == 0 { return }
+    let tick = viz[VIZ_EVENT_COUNT]
+    push(viz[VIZ_EVENT_TYPES], 0)
+    push(viz[VIZ_EVENT_FROM], node_id)
+    push(viz[VIZ_EVENT_TO], node_id)
+    push(viz[VIZ_EVENT_MAGNITUDES], level)
+    push(viz[VIZ_EVENT_TIMESTAMPS], tick)
+    viz[VIZ_EVENT_COUNT] = tick + 1
+}
+
+fn viz_event_count(viz) {
+    return viz[VIZ_EVENT_COUNT]
+}
+
+fn viz_node_count(viz) {
+    return len(viz[VIZ_NODE_IDS])
+}
+
+fn viz_synapse_count(viz) {
+    return len(viz[VIZ_SYNAPSE_FROM])
+}
+
+fn viz_events_for_node(viz, node_id) {
+    let result = list_new()
+    let from_list = viz[VIZ_EVENT_FROM]
+    let to_list = viz[VIZ_EVENT_TO]
+    let count = viz[VIZ_EVENT_COUNT]
+    let i = 0
+    while i < count {
+        if from_list[i] == node_id {
+            push(result, i)
+        } else {
+            if to_list[i] == node_id {
+                push(result, i)
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn viz_hottest_nodes(viz, top_n) {
+    let node_ids = viz[VIZ_NODE_IDS]
+    let n_nodes = len(node_ids)
+    let counts = list_new()
+    let i = 0
+    while i < n_nodes {
+        push(counts, 0)
+        i = i + 1
+    }
+    let from_list = viz[VIZ_EVENT_FROM]
+    let to_list = viz[VIZ_EVENT_TO]
+    let e_count = viz[VIZ_EVENT_COUNT]
+    let ei = 0
+    while ei < e_count {
+        let ni = 0
+        while ni < n_nodes {
+            if from_list[ei] == node_ids[ni] {
+                counts[ni] = counts[ni] + 1
+            }
+            if to_list[ei] == node_ids[ni] {
+                if from_list[ei] != to_list[ei] {
+                    counts[ni] = counts[ni] + 1
+                }
+            }
+            ni = ni + 1
+        }
+        ei = ei + 1
+    }
+    let sorted_ids = list_new()
+    let sorted_counts = list_new()
+    let si = 0
+    while si < n_nodes {
+        push(sorted_ids, node_ids[si])
+        push(sorted_counts, counts[si])
+        si = si + 1
+    }
+    let a = 0
+    while a < n_nodes {
+        let b = a + 1
+        while b < n_nodes {
+            if sorted_counts[b] > sorted_counts[a] {
+                let tmp_id = sorted_ids[a]
+                let tmp_c = sorted_counts[a]
+                list_set(sorted_ids, a, sorted_ids[b])
+                list_set(sorted_counts, a, sorted_counts[b])
+                list_set(sorted_ids, b, tmp_id)
+                list_set(sorted_counts, b, tmp_c)
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    let result = list_new()
+    let ri = 0
+    while ri < top_n {
+        if ri >= n_nodes { ri = top_n }
+        if ri < top_n {
+            let pair = list_new()
+            push(pair, sorted_ids[ri])
+            push(pair, sorted_counts[ri])
+            push(result, pair)
+            ri = ri + 1
+        }
+    }
+    return result
+}
+
+fn viz_flow_between(viz, from_node, to_node) {
+    let from_list = viz[VIZ_EVENT_FROM]
+    let to_list = viz[VIZ_EVENT_TO]
+    let count = viz[VIZ_EVENT_COUNT]
+    let total = 0
+    let i = 0
+    while i < count {
+        if from_list[i] == from_node {
+            if to_list[i] == to_node {
+                total = total + 1
+            }
+        }
+        i = i + 1
+    }
+    return total
+}
+
+fn _viz_find_node_x(viz, node_id) {
+    let ids = viz[VIZ_NODE_IDS]
+    let xs = viz[VIZ_NODE_X]
+    let i = 0
+    while i < len(ids) {
+        if ids[i] == node_id { return xs[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _viz_find_node_y(viz, node_id) {
+    let ids = viz[VIZ_NODE_IDS]
+    let ys = viz[VIZ_NODE_Y]
+    let i = 0
+    while i < len(ids) {
+        if ids[i] == node_id { return ys[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+fn viz_export_html(viz, filename) {
+    let h = "<html><head><title>NOVA Signal-Flow Visualizer</title>"
+    h = h + "<style>"
+    h = h + "body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;margin:20px;}"
+    h = h + "h1{color:#0f3460;}"
+    h = h + "svg{border:1px solid #333;background:#16213e;}"
+    h = h + "table{border-collapse:collapse;margin-top:16px;}"
+    h = h + "th,td{border:1px solid #444;padding:4px 8px;text-align:left;}"
+    h = h + "th{background:#0f3460;}"
+    h = h + "</style></head><body>"
+    h = h + "<h1>Signal-Flow Visualizer</h1>"
+    let max_x = 800
+    let max_y = 600
+    let node_ids = viz[VIZ_NODE_IDS]
+    let node_labels = viz[VIZ_NODE_LABELS]
+    let node_x = viz[VIZ_NODE_X]
+    let node_y = viz[VIZ_NODE_Y]
+    let syn_from = viz[VIZ_SYNAPSE_FROM]
+    let syn_to = viz[VIZ_SYNAPSE_TO]
+    let n_nodes = len(node_ids)
+    let n_synapses = len(syn_from)
+    let ni = 0
+    while ni < n_nodes {
+        if node_x[ni] > max_x { max_x = node_x[ni] + 100 }
+        if node_y[ni] > max_y { max_y = node_y[ni] + 100 }
+        ni = ni + 1
+    }
+    h = h + "<svg width='" + int_to_str(max_x) + "' height='" + int_to_str(max_y) + "'>"
+    h = h + "<defs><marker id='ah' markerWidth='10' markerHeight='7' refX='10' refY='3.5' orient='auto'>"
+    h = h + "<polygon points='0 0,10 3.5,0 7' fill='#e94560'/></marker></defs>"
+    let si = 0
+    while si < n_synapses {
+        let sx = _viz_find_node_x(viz, syn_from[si])
+        let sy = _viz_find_node_y(viz, syn_from[si])
+        let tx = _viz_find_node_x(viz, syn_to[si])
+        let ty = _viz_find_node_y(viz, syn_to[si])
+        h = h + "<line x1='" + int_to_str(sx) + "' y1='" + int_to_str(sy)
+        h = h + "' x2='" + int_to_str(tx) + "' y2='" + int_to_str(ty)
+        h = h + "' stroke='#e94560' stroke-width='2' marker-end='url(#ah)'/>"
+        si = si + 1
+    }
+    let ci = 0
+    while ci < n_nodes {
+        let cx = node_x[ci]
+        let cy = node_y[ci]
+        h = h + "<circle cx='" + int_to_str(cx) + "' cy='" + int_to_str(cy)
+        h = h + "' r='20' fill='#533483' stroke='#e94560' stroke-width='2'/>"
+        h = h + "<text x='" + int_to_str(cx) + "' y='" + int_to_str(cy - 25)
+        h = h + "' text-anchor='middle' fill='#e0e0e0' font-size='12'>"
+        h = h + node_labels[ci] + "</text>"
+        ci = ci + 1
+    }
+    h = h + "</svg>"
+    h = h + "<h2>Nodes: " + int_to_str(n_nodes) + "</h2>"
+    h = h + "<h2>Synapses: " + int_to_str(n_synapses) + "</h2>"
+    h = h + "<h2>Events: " + int_to_str(viz[VIZ_EVENT_COUNT]) + "</h2>"
+    let e_count = viz[VIZ_EVENT_COUNT]
+    if e_count > 0 {
+        h = h + "<table><tr><th>Tick</th><th>Type</th><th>From</th><th>To</th><th>Magnitude</th></tr>"
+        let event_types = viz[VIZ_EVENT_TYPES]
+        let event_from = viz[VIZ_EVENT_FROM]
+        let event_to = viz[VIZ_EVENT_TO]
+        let event_mag = viz[VIZ_EVENT_MAGNITUDES]
+        let event_ts = viz[VIZ_EVENT_TIMESTAMPS]
+        let ei = 0
+        while ei < e_count {
+            h = h + "<tr><td>" + int_to_str(event_ts[ei]) + "</td>"
+            h = h + "<td>" + int_to_str(event_types[ei]) + "</td>"
+            h = h + "<td>" + event_from[ei] + "</td>"
+            h = h + "<td>" + event_to[ei] + "</td>"
+            h = h + "<td>" + int_to_str(event_mag[ei]) + "</td></tr>"
+            ei = ei + 1
+        }
+        h = h + "</table>"
+    }
+    h = h + "</body></html>"
+    write_file(filename, h)
+}
+
+fn viz_stop(viz) {
+    viz[VIZ_ACTIVE] = 0
+}
+
+fn viz_clear_events(viz) {
+    viz[VIZ_EVENT_TYPES] = list_new()
+    viz[VIZ_EVENT_FROM] = list_new()
+    viz[VIZ_EVENT_TO] = list_new()
+    viz[VIZ_EVENT_MAGNITUDES] = list_new()
+    viz[VIZ_EVENT_TIMESTAMPS] = list_new()
+    viz[VIZ_EVENT_COUNT] = 0
+}
+
+fn viz_describe(viz) {
+    print("Visualizer(nodes=")
+    print_int(len(viz[VIZ_NODE_IDS]))
+    print(", synapses=")
+    print_int(len(viz[VIZ_SYNAPSE_FROM]))
+    print(", events=")
+    print_int(viz[VIZ_EVENT_COUNT])
+    print(", active=")
+    print_int(viz[VIZ_ACTIVE])
+    println(")")
+    let node_ids = viz[VIZ_NODE_IDS]
+    let node_labels = viz[VIZ_NODE_LABELS]
+    let node_x = viz[VIZ_NODE_X]
+    let node_y = viz[VIZ_NODE_Y]
+    let i = 0
+    while i < len(node_ids) {
+        print("  node ")
+        print(node_ids[i])
+        print(" [")
+        print(node_labels[i])
+        print("] at (")
+        print_int(node_x[i])
+        print(",")
+        print_int(node_y[i])
+        println(")")
+        i = i + 1
+    }
+    let syn_from = viz[VIZ_SYNAPSE_FROM]
+    let syn_to = viz[VIZ_SYNAPSE_TO]
+    let si = 0
+    while si < len(syn_from) {
+        print("  synapse ")
+        print(syn_from[si])
+        print(" -> ")
+        println(syn_to[si])
+        si = si + 1
+    }
+}

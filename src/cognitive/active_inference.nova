@@ -1,0 +1,357 @@
+// N15 Active Inference: free-energy minimization for perception and action selection.
+// Uses Beta-distribution priors (alpha/beta parameters) over discrete states.
+// All probabilities use fixed-point scale-1000 (500 = 0.5, 1000 = 1.0).
+
+let AI_MODEL_TAG = 430
+let AI_NUM_STATES = 1
+let AI_PRIOR_ALPHAS = 2
+let AI_PRIOR_BETAS = 3
+let AI_LIKELIHOOD = 4
+let AI_OBSERVATIONS = 5
+let AI_ACTION_COUNT = 6
+
+fn ai_new(num_states, num_obs, num_actions) {
+    let model = list_new()
+    push(model, AI_MODEL_TAG)
+    push(model, num_states)
+    let alphas = list_new()
+    let betas = list_new()
+    let s = 0
+    while s < num_states {
+        push(alphas, 1000)
+        push(betas, 1000)
+        s = s + 1
+    }
+    push(model, alphas)
+    push(model, betas)
+    let likelihood = list_new()
+    s = 0
+    while s < num_states {
+        let row = list_new()
+        let o = 0
+        let uniform_p = 1000 / num_obs
+        while o < num_obs {
+            push(row, uniform_p)
+            o = o + 1
+        }
+        push(likelihood, row)
+        s = s + 1
+    }
+    push(model, likelihood)
+    push(model, list_new())
+    push(model, num_actions)
+    return model
+}
+
+fn ai_set_prior(model, state, alpha, beta) {
+    let alphas = model[AI_PRIOR_ALPHAS]
+    let betas = model[AI_PRIOR_BETAS]
+    alphas[state] = alpha
+    betas[state] = beta
+}
+
+fn ai_set_likelihood(model, state, obs, probability) {
+    let likelihood = model[AI_LIKELIHOOD]
+    let row = likelihood[state]
+    row[obs] = probability
+}
+
+fn ai_observe(model, observation) {
+    let observations = model[AI_OBSERVATIONS]
+    push(observations, observation)
+    let num_states = model[AI_NUM_STATES]
+    let alphas = model[AI_PRIOR_ALPHAS]
+    let betas = model[AI_PRIOR_BETAS]
+    let likelihood = model[AI_LIKELIHOOD]
+    let s = 0
+    while s < num_states {
+        let row = likelihood[s]
+        let lik = row[observation]
+        if lik > 500 {
+            let inc = lik / 10
+            alphas[s] = alphas[s] + inc
+        } else {
+            let inc = (1000 - lik) / 10
+            betas[s] = betas[s] + inc
+        }
+        s = s + 1
+    }
+    return model
+}
+
+fn _ai_posterior_mean(alphas, betas, state) {
+    let a = alphas[state]
+    let b = betas[state]
+    let total = a + b
+    if total == 0 {
+        return 500
+    }
+    return a * 1000 / total
+}
+
+fn ai_predict(model, num_samples) {
+    let num_states = model[AI_NUM_STATES]
+    let alphas = model[AI_PRIOR_ALPHAS]
+    let betas = model[AI_PRIOR_BETAS]
+    let indices = list_new()
+    let means = list_new()
+    let s = 0
+    while s < num_states {
+        push(indices, s)
+        push(means, _ai_posterior_mean(alphas, betas, s))
+        s = s + 1
+    }
+    let i = 0
+    while i < num_states - 1 {
+        let j = i + 1
+        while j < num_states {
+            if means[j] > means[i] {
+                let tmp_m = means[i]
+                means[i] = means[j]
+                means[j] = tmp_m
+                let tmp_idx = indices[i]
+                indices[i] = indices[j]
+                indices[j] = tmp_idx
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let count = num_samples
+    if count > num_states {
+        count = num_states
+    }
+    let result = list_new()
+    i = 0
+    while i < count {
+        let pair = list_new()
+        push(pair, indices[i])
+        push(pair, means[i])
+        push(result, pair)
+        i = i + 1
+    }
+    return result
+}
+
+fn _ai_approx_log(x) {
+    if x <= 0 {
+        return 0 - 3000
+    }
+    let diff = x - 1000
+    return diff
+}
+
+fn ai_free_energy(model, observation) {
+    let num_states = model[AI_NUM_STATES]
+    let alphas = model[AI_PRIOR_ALPHAS]
+    let betas = model[AI_PRIOR_BETAS]
+    let likelihood = model[AI_LIKELIHOOD]
+    let posterior_means = list_new()
+    let posterior_sum = 0
+    let s = 0
+    while s < num_states {
+        let pm = _ai_posterior_mean(alphas, betas, s)
+        push(posterior_means, pm)
+        posterior_sum = posterior_sum + pm
+        s = s + 1
+    }
+    if posterior_sum == 0 {
+        posterior_sum = 1
+    }
+    let prior_sum = 0
+    s = 0
+    while s < num_states {
+        prior_sum = prior_sum + 1000
+        s = s + 1
+    }
+    let uniform_prior = 1000 / num_states
+    let fe = 0
+    s = 0
+    while s < num_states {
+        let post_s = posterior_means[s] * 1000 / posterior_sum
+        if post_s > 0 {
+            let row = likelihood[s]
+            let lik_s = row[observation]
+            let log_post = _ai_approx_log(post_s)
+            let log_prior = _ai_approx_log(uniform_prior)
+            let log_lik = _ai_approx_log(lik_s)
+            let kl_term = post_s * (log_post - log_prior) / 1000
+            let energy_term = post_s * (0 - log_lik) / 1000
+            fe = fe + kl_term + energy_term
+        }
+        s = s + 1
+    }
+    return fe
+}
+
+fn ai_select_action(model, candidate_actions) {
+    let num_candidates = len(candidate_actions)
+    if num_candidates == 0 {
+        return 0
+    }
+    let num_states = model[AI_NUM_STATES]
+    let alphas = model[AI_PRIOR_ALPHAS]
+    let betas = model[AI_PRIOR_BETAS]
+    let likelihood = model[AI_LIKELIHOOD]
+    let num_obs = 0
+    if num_states > 0 {
+        let first_row = likelihood[0]
+        num_obs = len(first_row)
+    }
+    let best_action = candidate_actions[0]
+    let best_fe = 999999
+    let ci = 0
+    while ci < num_candidates {
+        let action = candidate_actions[ci]
+        let total_fe = 0
+        let obs = 0
+        while obs < num_obs {
+            let obs_prob = 0
+            let s = 0
+            while s < num_states {
+                let pm = _ai_posterior_mean(alphas, betas, s)
+                let row = likelihood[s]
+                let lik = row[obs]
+                obs_prob = obs_prob + pm * lik / 1000
+                s = s + 1
+            }
+            if obs_prob > 0 {
+                let save_alphas = list_new()
+                let save_betas = list_new()
+                s = 0
+                while s < num_states {
+                    push(save_alphas, alphas[s])
+                    push(save_betas, betas[s])
+                    s = s + 1
+                }
+                let temp_alphas = list_new()
+                let temp_betas = list_new()
+                s = 0
+                while s < num_states {
+                    let ta = alphas[s]
+                    let tb = betas[s]
+                    let row_s = likelihood[s]
+                    let lik_s = row_s[obs]
+                    if lik_s > 500 {
+                        ta = ta + lik_s / 10
+                    } else {
+                        tb = tb + (1000 - lik_s) / 10
+                    }
+                    push(temp_alphas, ta)
+                    push(temp_betas, tb)
+                    s = s + 1
+                }
+                let post_sum = 0
+                s = 0
+                while s < num_states {
+                    let pm_t = temp_alphas[s] * 1000 / (temp_alphas[s] + temp_betas[s])
+                    post_sum = post_sum + pm_t
+                    s = s + 1
+                }
+                if post_sum == 0 {
+                    post_sum = 1
+                }
+                let fe_obs = 0
+                s = 0
+                while s < num_states {
+                    let pm_t = temp_alphas[s] * 1000 / (temp_alphas[s] + temp_betas[s])
+                    let post_norm = pm_t * 1000 / post_sum
+                    if post_norm > 0 {
+                        let uniform_prior = 1000 / num_states
+                        let log_post = _ai_approx_log(post_norm)
+                        let log_prior = _ai_approx_log(uniform_prior)
+                        let row_s2 = likelihood[s]
+                        let lik_s2 = row_s2[obs]
+                        let log_lik = _ai_approx_log(lik_s2)
+                        let kl = post_norm * (log_post - log_prior) / 1000
+                        let energy = post_norm * (0 - log_lik) / 1000
+                        fe_obs = fe_obs + kl + energy
+                    }
+                    s = s + 1
+                }
+                total_fe = total_fe + obs_prob * fe_obs / 1000
+            }
+            obs = obs + 1
+        }
+        if total_fe < best_fe {
+            best_fe = total_fe
+            best_action = action
+        }
+        ci = ci + 1
+    }
+    return best_action
+}
+
+fn ai_posterior(model, state) {
+    let alphas = model[AI_PRIOR_ALPHAS]
+    let betas = model[AI_PRIOR_BETAS]
+    let result = list_new()
+    push(result, alphas[state])
+    push(result, betas[state])
+    return result
+}
+
+fn ai_reset(model) {
+    let num_states = model[AI_NUM_STATES]
+    let alphas = model[AI_PRIOR_ALPHAS]
+    let betas = model[AI_PRIOR_BETAS]
+    let s = 0
+    while s < num_states {
+        alphas[s] = 1000
+        betas[s] = 1000
+        s = s + 1
+    }
+    model[AI_OBSERVATIONS] = list_new()
+}
+
+fn ai_state_count(model) {
+    return model[AI_NUM_STATES]
+}
+
+fn ai_describe(model) {
+    let num_states = model[AI_NUM_STATES]
+    let alphas = model[AI_PRIOR_ALPHAS]
+    let betas = model[AI_PRIOR_BETAS]
+    let observations = model[AI_OBSERVATIONS]
+    let num_actions = model[AI_ACTION_COUNT]
+    print("Active Inference Model (")
+    print_int(num_states)
+    print(" states, ")
+    print_int(num_actions)
+    println(" actions)")
+    let s = 0
+    while s < num_states {
+        print("  state ")
+        print_int(s)
+        print(": alpha=")
+        print_int(alphas[s])
+        print(" beta=")
+        print_int(betas[s])
+        print(" mean=")
+        print_int(_ai_posterior_mean(alphas, betas, s))
+        println("")
+        s = s + 1
+    }
+    print("  observations: ")
+    print_int(len(observations))
+    println("")
+    let likelihood = model[AI_LIKELIHOOD]
+    s = 0
+    while s < num_states {
+        let row = likelihood[s]
+        let num_obs = len(row)
+        print("  likelihood[")
+        print_int(s)
+        print("]: ")
+        let o = 0
+        while o < num_obs {
+            print_int(row[o])
+            if o < num_obs - 1 {
+                print(" ")
+            }
+            o = o + 1
+        }
+        println("")
+        s = s + 1
+    }
+}

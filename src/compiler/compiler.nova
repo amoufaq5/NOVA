@@ -66,6 +66,24 @@ fn init_import_tracker() {
     _dep_add("effects", "")
     _dep_add("http", "mem")
     _dep_add("signal_flow", "signal,synapse")
+    _dep_add("associative", "mem,simd,tensor")
+    _dep_add("hdc", "mem,simd")
+    _dep_add("sdr", "")
+    _dep_add("active_inference", "")
+    _dep_add("timeseries", "")
+    _dep_add("audio", "mem")
+    _dep_add("node_pool", "mem")
+    _dep_add("resonance", "")
+    _dep_add("atom_lifecycle", "")
+    _dep_add("visualizer", "")
+    _dep_add("time_machine", "")
+    _dep_add("kg_visualizer", "knowledge")
+    _dep_add("profiler", "")
+    _dep_add("causal_library", "")
+    _dep_add("predictive_coding", "")
+    _dep_add("skill", "")
+    _dep_add("self_model", "")
+    _dep_add("federation", "")
 }
 
 fn _dep_add(pkg, deps) {
@@ -298,6 +316,26 @@ fn _find_std_file(pkg_name) {
         }
         return ""
     }
+    let cog_path = "src/cognitive/" + pkg_name + ".nova"
+    let cog_content = read_file(cog_path)
+    if cog_content == 0 {
+    } else {
+        if already_imported(cog_path) == 0 {
+            push(imported_files, cog_path)
+            return cog_content
+        }
+        return ""
+    }
+    let tool_path = "src/tooling/" + pkg_name + ".nova"
+    let tool_content = read_file(tool_path)
+    if tool_content == 0 {
+    } else {
+        if already_imported(tool_path) == 0 {
+            push(imported_files, tool_path)
+            return tool_content
+        }
+        return ""
+    }
     if len(nova_root_dir) > 0 {
         let core_path2 = nova_root_dir + "/src/core/" + pkg_name + ".nova"
         let core_c2 = read_file(core_path2)
@@ -316,6 +354,26 @@ fn _find_std_file(pkg_name) {
             if already_imported(agent_path2) == 0 {
                 push(imported_files, agent_path2)
                 return agent_c2
+            }
+            return ""
+        }
+        let cog_path2 = nova_root_dir + "/src/cognitive/" + pkg_name + ".nova"
+        let cog_c2 = read_file(cog_path2)
+        if cog_c2 == 0 {
+        } else {
+            if already_imported(cog_path2) == 0 {
+                push(imported_files, cog_path2)
+                return cog_c2
+            }
+            return ""
+        }
+        let tool_path2 = nova_root_dir + "/src/tooling/" + pkg_name + ".nova"
+        let tool_c2 = read_file(tool_path2)
+        if tool_c2 == 0 {
+        } else {
+            if already_imported(tool_path2) == 0 {
+                push(imported_files, tool_path2)
+                return tool_c2
             }
             return ""
         }

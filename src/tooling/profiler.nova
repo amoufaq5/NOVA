@@ -1,0 +1,280 @@
+// N24 Profiler: Per-loop, per-signal-type, per-node-type performance profiling.
+// Tick-based profiling with manual start/end section calls.
+// Layout: [PROF_TAG, section_names, section_starts, section_totals, section_counts, section_stack, counter_categories, counter_types, counter_values, current_tick, active]
+
+let PROF_TAG = 530
+let PROF_IDX_TAG = 0
+let PROF_IDX_SECTION_NAMES = 1
+let PROF_IDX_SECTION_STARTS = 2
+let PROF_IDX_SECTION_TOTALS = 3
+let PROF_IDX_SECTION_COUNTS = 4
+let PROF_IDX_SECTION_STACK = 5
+let PROF_IDX_COUNTER_CATEGORIES = 6
+let PROF_IDX_COUNTER_TYPES = 7
+let PROF_IDX_COUNTER_VALUES = 8
+let PROF_IDX_CURRENT_TICK = 9
+let PROF_IDX_ACTIVE = 10
+
+fn prof_new() {
+    let prof = list_new()
+    push(prof, PROF_TAG)
+    push(prof, list_new())
+    push(prof, list_new())
+    push(prof, list_new())
+    push(prof, list_new())
+    push(prof, list_new())
+    push(prof, list_new())
+    push(prof, list_new())
+    push(prof, list_new())
+    push(prof, 0)
+    push(prof, 1)
+    return prof
+}
+
+fn prof_tick(prof) {
+    let tick = prof[PROF_IDX_CURRENT_TICK] + 1
+    prof[PROF_IDX_CURRENT_TICK] = tick
+    return tick
+}
+
+fn prof_set_tick(prof, tick) {
+    prof[PROF_IDX_CURRENT_TICK] = tick
+}
+
+fn _prof_find_section(prof, label) {
+    let names = prof[PROF_IDX_SECTION_NAMES]
+    let count = len(names)
+    let i = 0
+    while i < count {
+        if names[i] == label {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _prof_create_section(prof, label) {
+    let names = prof[PROF_IDX_SECTION_NAMES]
+    let starts = prof[PROF_IDX_SECTION_STARTS]
+    let totals = prof[PROF_IDX_SECTION_TOTALS]
+    let counts = prof[PROF_IDX_SECTION_COUNTS]
+    push(names, label)
+    push(starts, 0)
+    push(totals, 0)
+    push(counts, 0)
+    return len(names) - 1
+}
+
+fn prof_start_section(prof, label) {
+    if prof[PROF_IDX_ACTIVE] == 0 { return -1 }
+    let idx = _prof_find_section(prof, label)
+    if idx == -1 {
+        idx = _prof_create_section(prof, label)
+    }
+    let starts = prof[PROF_IDX_SECTION_STARTS]
+    starts[idx] = prof[PROF_IDX_CURRENT_TICK]
+    let stack = prof[PROF_IDX_SECTION_STACK]
+    push(stack, idx)
+    return idx
+}
+
+fn prof_end_section(prof, label) {
+    if prof[PROF_IDX_ACTIVE] == 0 { return 0 }
+    let idx = _prof_find_section(prof, label)
+    if idx == -1 { return 0 }
+    let starts = prof[PROF_IDX_SECTION_STARTS]
+    let totals = prof[PROF_IDX_SECTION_TOTALS]
+    let counts = prof[PROF_IDX_SECTION_COUNTS]
+    let elapsed = prof[PROF_IDX_CURRENT_TICK] - starts[idx]
+    totals[idx] = totals[idx] + elapsed
+    counts[idx] = counts[idx] + 1
+    let stack = prof[PROF_IDX_SECTION_STACK]
+    let stack_len = len(stack)
+    if stack_len > 0 {
+        list_remove(stack, stack_len - 1)
+    }
+    return elapsed
+}
+
+fn prof_section_total(prof, label) {
+    let idx = _prof_find_section(prof, label)
+    if idx == -1 { return 0 }
+    return prof[PROF_IDX_SECTION_TOTALS][idx]
+}
+
+fn prof_section_count(prof, label) {
+    let idx = _prof_find_section(prof, label)
+    if idx == -1 { return 0 }
+    return prof[PROF_IDX_SECTION_COUNTS][idx]
+}
+
+fn prof_section_average(prof, label) {
+    let idx = _prof_find_section(prof, label)
+    if idx == -1 { return 0 }
+    let total = prof[PROF_IDX_SECTION_TOTALS][idx]
+    let count = prof[PROF_IDX_SECTION_COUNTS][idx]
+    if count == 0 { return 0 }
+    return int_div(total, count)
+}
+
+fn _prof_find_counter(prof, category, evt_type) {
+    let categories = prof[PROF_IDX_COUNTER_CATEGORIES]
+    let types = prof[PROF_IDX_COUNTER_TYPES]
+    let count = len(categories)
+    let i = 0
+    while i < count {
+        if categories[i] == category {
+            if types[i] == evt_type {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _prof_create_counter(prof, category, evt_type) {
+    let categories = prof[PROF_IDX_COUNTER_CATEGORIES]
+    let types = prof[PROF_IDX_COUNTER_TYPES]
+    let values = prof[PROF_IDX_COUNTER_VALUES]
+    push(categories, category)
+    push(types, evt_type)
+    push(values, 0)
+    return len(categories) - 1
+}
+
+fn prof_count_event(prof, category, evt_type) {
+    if prof[PROF_IDX_ACTIVE] == 0 { return }
+    let idx = _prof_find_counter(prof, category, evt_type)
+    if idx == -1 {
+        idx = _prof_create_counter(prof, category, evt_type)
+    }
+    let values = prof[PROF_IDX_COUNTER_VALUES]
+    values[idx] = values[idx] + 1
+}
+
+fn prof_count_event_n(prof, category, evt_type, n) {
+    if prof[PROF_IDX_ACTIVE] == 0 { return }
+    let idx = _prof_find_counter(prof, category, evt_type)
+    if idx == -1 {
+        idx = _prof_create_counter(prof, category, evt_type)
+    }
+    let values = prof[PROF_IDX_COUNTER_VALUES]
+    values[idx] = values[idx] + n
+}
+
+fn prof_get_count(prof, category, evt_type) {
+    let idx = _prof_find_counter(prof, category, evt_type)
+    if idx == -1 { return 0 }
+    return prof[PROF_IDX_COUNTER_VALUES][idx]
+}
+
+fn prof_report(prof) {
+    let r = "=== Profiler Report ===" + "\n"
+    r = r + "Sections:" + "\n"
+    let names = prof[PROF_IDX_SECTION_NAMES]
+    let totals = prof[PROF_IDX_SECTION_TOTALS]
+    let counts = prof[PROF_IDX_SECTION_COUNTS]
+    let n_sections = len(names)
+    let i = 0
+    while i < n_sections {
+        let avg = 0
+        if counts[i] > 0 {
+            avg = int_div(totals[i], counts[i])
+        }
+        r = r + "  " + names[i] + ": total=" + int_to_str(totals[i])
+        r = r + " calls=" + int_to_str(counts[i])
+        r = r + " avg=" + int_to_str(avg) + "\n"
+        i = i + 1
+    }
+    r = r + "Counters:" + "\n"
+    let categories = prof[PROF_IDX_COUNTER_CATEGORIES]
+    let types = prof[PROF_IDX_COUNTER_TYPES]
+    let values = prof[PROF_IDX_COUNTER_VALUES]
+    let n_counters = len(categories)
+    let j = 0
+    while j < n_counters {
+        r = r + "  " + categories[j] + "/" + types[j] + ": " + int_to_str(values[j]) + "\n"
+        j = j + 1
+    }
+    return r
+}
+
+fn prof_export_flamegraph(prof, filename) {
+    let content = ""
+    let names = prof[PROF_IDX_SECTION_NAMES]
+    let totals = prof[PROF_IDX_SECTION_TOTALS]
+    let n_sections = len(names)
+    let i = 0
+    while i < n_sections {
+        if totals[i] > 0 {
+            content = content + names[i] + " " + int_to_str(totals[i]) + "\n"
+        }
+        i = i + 1
+    }
+    write_file(filename, content)
+}
+
+fn prof_reset(prof) {
+    prof[PROF_IDX_SECTION_NAMES] = list_new()
+    prof[PROF_IDX_SECTION_STARTS] = list_new()
+    prof[PROF_IDX_SECTION_TOTALS] = list_new()
+    prof[PROF_IDX_SECTION_COUNTS] = list_new()
+    prof[PROF_IDX_SECTION_STACK] = list_new()
+    prof[PROF_IDX_COUNTER_CATEGORIES] = list_new()
+    prof[PROF_IDX_COUNTER_TYPES] = list_new()
+    prof[PROF_IDX_COUNTER_VALUES] = list_new()
+    prof[PROF_IDX_CURRENT_TICK] = 0
+}
+
+fn prof_stop(prof) {
+    prof[PROF_IDX_ACTIVE] = 0
+}
+
+fn prof_start(prof) {
+    prof[PROF_IDX_ACTIVE] = 1
+}
+
+fn prof_describe(prof) {
+    let names = prof[PROF_IDX_SECTION_NAMES]
+    let categories = prof[PROF_IDX_COUNTER_CATEGORIES]
+    let stack = prof[PROF_IDX_SECTION_STACK]
+    print("Profiler(sections=")
+    print_int(len(names))
+    print(", counters=")
+    print_int(len(categories))
+    print(", tick=")
+    print_int(prof[PROF_IDX_CURRENT_TICK])
+    print(", active=")
+    print_int(prof[PROF_IDX_ACTIVE])
+    print(", stack_depth=")
+    print_int(len(stack))
+    println(")")
+    let i = 0
+    while i < len(names) {
+        let totals = prof[PROF_IDX_SECTION_TOTALS]
+        let counts = prof[PROF_IDX_SECTION_COUNTS]
+        print("  section ")
+        print(names[i])
+        print(": total=")
+        print_int(totals[i])
+        print(" calls=")
+        print_int(counts[i])
+        println("")
+        i = i + 1
+    }
+    let j = 0
+    let types = prof[PROF_IDX_COUNTER_TYPES]
+    let values = prof[PROF_IDX_COUNTER_VALUES]
+    while j < len(categories) {
+        print("  counter ")
+        print(categories[j])
+        print("/")
+        print(types[j])
+        print(": ")
+        print_int(values[j])
+        println("")
+        j = j + 1
+    }
+}

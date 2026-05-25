@@ -1,0 +1,64 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Time Series Tests ===")
+
+    let ts = ts_new(100)
+    assert_test(ts_count(ts) == 0, "new timeseries is empty")
+
+    ts_append(ts, 10, 100)
+    ts_append(ts, 20, 200)
+    ts_append(ts, 30, 300)
+    ts_append(ts, 40, 400)
+    ts_append(ts, 50, 500)
+    assert_test(ts_count(ts) == 5, "5 entries after 5 appends")
+
+    let entry = ts_get(ts, 2)
+    assert_test(entry[0] == 30, "entry 2 timestamp = 30")
+    assert_test(entry[1] == 300, "entry 2 value = 300")
+
+    let w = ts_window(ts, 20, 40)
+    assert_test(len(w) == 3, "window [20,40] has 3 entries")
+
+    let s = ts_sum(ts, 10, 50)
+    assert_test(s == 1500, "sum of 100+200+300+400+500 = 1500")
+
+    let avg = ts_mean(ts, 10, 50)
+    assert_test(avg == 300, "mean = 1500/5 = 300")
+
+    let mx = ts_max(ts, 10, 50)
+    assert_test(mx == 500, "max = 500")
+
+    let mn = ts_min(ts, 10, 50)
+    assert_test(mn == 100, "min = 100")
+
+    let cnt = ts_count_window(ts, 20, 40)
+    assert_test(cnt == 3, "count in [20,40] = 3")
+
+    let ts2 = ts_new(10)
+    ts_append(ts2, 10, 50)
+    ts_append(ts2, 20, 150)
+    ts_append(ts2, 30, 250)
+    let joined = ts_join(ts, ts2, 5)
+    assert_test(len(joined) > 0, "temporal join produces results")
+
+    let decayed = ts_decay_exponential(ts, 20, 60)
+    assert_test(ts_count(decayed) == 5, "decayed TS has same count")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

@@ -1,0 +1,65 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Federation Tests ===")
+
+    let peers = list_new()
+    push(peers, "hospital_b")
+    push(peers, "hospital_c")
+    let node_a = fed_node_new("hospital_a", peers)
+    assert_test(fed_inbox_count(node_a) == 0, "empty inbox")
+    assert_test(fed_outbox_count(node_a) == 0, "empty outbox")
+
+    let insight = fed_extract_insight(node_a, "medical", "drug_x causes nausea at 15 percent", 800)
+    assert_test(insight[0] == 585, "insight has correct tag")
+    assert_test(insight[3] == "medical", "insight category = medical")
+
+    fed_publish_insight(node_a, insight)
+    assert_test(fed_outbox_count(node_a) == 1, "1 insight published")
+
+    let peers_b = list_new()
+    push(peers_b, "hospital_a")
+    let node_b = fed_node_new("hospital_b", peers_b)
+    fed_receive_insight(node_b, insight)
+    assert_test(fed_inbox_count(node_b) == 1, "node_b received insight")
+
+    let trust = fed_validate_insight(node_b, insight)
+    assert_test(trust > 0, "trust score is positive")
+    assert_test(trust <= 1000, "trust score <= 1000")
+
+    fed_set_trust(node_b, "hospital_a", 900)
+    let new_trust = fed_get_trust(node_b, "hospital_a")
+    assert_test(new_trust == 900, "trust updated to 900")
+
+    let trust2 = fed_validate_insight(node_b, insight)
+    assert_test(trust2 > trust, "higher trust gives higher validation")
+
+    fed_subscribe(node_a, "medical")
+    fed_subscribe(node_a, "behavioral")
+
+    fed_clear_inbox(node_b)
+    assert_test(fed_inbox_count(node_b) == 0, "inbox cleared")
+
+    let insight2 = fed_extract_insight(node_a, "behavioral", "positive reinforcement improves compliance", 600)
+    fed_publish_insight(node_a, insight2)
+    assert_test(fed_outbox_count(node_a) == 2, "2 insights published")
+
+    fed_close(node_a)
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

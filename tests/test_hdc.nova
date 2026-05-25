@@ -1,0 +1,57 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== HDC Tests ===")
+
+    let h = hdc_new(64)
+    assert_test(hdc_dimensions(h) == 64, "dimensions = 64")
+
+    let va = hdc_random_vector(h)
+    let vb = hdc_random_vector(h)
+    assert_test(va[1] == 64, "vector a has 64 dimensions")
+    assert_test(vb[1] == 64, "vector b has 64 dimensions")
+
+    let self_sim = hdc_similarity(va, va)
+    assert_test(self_sim == 1000, "self-similarity = 1000")
+
+    let bound = hdc_bind(va, vb)
+    assert_test(bound[1] == 64, "bound vector has 64 dims")
+
+    let unbound = hdc_unbind(bound, vb)
+    let roundtrip_sim = hdc_similarity(unbound, va)
+    assert_test(roundtrip_sim == 1000, "bind-unbind roundtrip preserves vector")
+
+    let vecs = list_new()
+    push(vecs, va)
+    push(vecs, vb)
+    let bundled = hdc_bundle(vecs)
+    let sim_a = hdc_similarity(bundled, va)
+    let sim_b = hdc_similarity(bundled, vb)
+    assert_test(sim_a > 0, "bundle preserves similarity to a")
+    assert_test(sim_b > 0, "bundle preserves similarity to b")
+
+    let perm = hdc_permute(va, 1)
+    let perm_sim = hdc_similarity(perm, va)
+    assert_test(perm_sim < 1000, "permutation changes vector")
+
+    let perm_back = hdc_permute(perm, 63)
+    let perm_roundtrip = hdc_similarity(perm_back, va)
+    assert_test(perm_roundtrip == 1000, "permute(64-1) reverses permute(1)")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

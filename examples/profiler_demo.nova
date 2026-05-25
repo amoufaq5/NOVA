@@ -1,0 +1,80 @@
+// Nova Profiler Demo (N24)
+// Demonstrates performance profiling with sections, event counting, and reporting.
+
+fn main() {
+    println("=== Nova Profiler Demo ===")
+    println("")
+
+    let p = prof_new()
+    println("--- Section Profiling ---")
+
+    prof_start_section(p, "parsing")
+    let i = 0
+    while i < 1000 {
+        i = i + 1
+    }
+    prof_end_section(p, "parsing")
+
+    prof_start_section(p, "analysis")
+    let j = 0
+    while j < 500 {
+        j = j + 1
+    }
+    prof_end_section(p, "analysis")
+
+    prof_start_section(p, "parsing")
+    let k = 0
+    while k < 800 {
+        k = k + 1
+    }
+    prof_end_section(p, "parsing")
+
+    print("Parsing total:   ")
+    print_int(prof_section_total(p, "parsing"))
+    println(" ticks")
+    print("Parsing count:   ")
+    print_int(prof_section_count(p, "parsing"))
+    println(" invocations")
+    print("Parsing average: ")
+    print_int(prof_section_average(p, "parsing"))
+    println(" ticks/call")
+    print("Analysis total:  ")
+    print_int(prof_section_total(p, "analysis"))
+    println(" ticks")
+    println("")
+
+    println("--- Event Counting ---")
+    prof_count_event(p, "memory", "alloc")
+    prof_count_event(p, "memory", "alloc")
+    prof_count_event(p, "memory", "free")
+    prof_count_event(p, "io", "read")
+
+    print("memory/alloc: ")
+    print_int(prof_get_count(p, "memory", "alloc"))
+    println("")
+    print("memory/free:  ")
+    print_int(prof_get_count(p, "memory", "free"))
+    println("")
+    print("io/read:      ")
+    print_int(prof_get_count(p, "io", "read"))
+    println("")
+    println("")
+
+    println("--- Tick Counter ---")
+    prof_tick(p)
+    prof_tick(p)
+    prof_tick(p)
+    println("")
+
+    println("--- Full Report ---")
+    prof_report(p)
+    println("")
+
+    println("--- Description ---")
+    println(prof_describe(p))
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

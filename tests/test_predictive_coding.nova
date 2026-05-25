@@ -1,0 +1,71 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Predictive Coding Tests ===")
+
+    let layer = pc_layer_new(3, 2)
+    assert_test(pc_layer_input_dim(layer) == 3, "input dim = 3")
+    assert_test(pc_layer_output_dim(layer) == 2, "output dim = 2")
+
+    let input = list_new()
+    push(input, 500)
+    push(input, 300)
+    push(input, 100)
+    let pred = pc_predict(layer, input)
+    assert_test(len(pred) == 2, "prediction has 2 outputs")
+
+    let actual = list_new()
+    push(actual, 1000)
+    push(actual, 0)
+    let err = pc_compute_error(layer, pred, actual)
+    assert_test(len(err) == 2, "error has 2 elements")
+    assert_test(err[0] == actual[0] - pred[0], "error[0] = actual - predicted")
+
+    pc_update_weights(layer, err, input, 100)
+    let pred2 = pc_predict(layer, input)
+    let err2 = pc_compute_error(layer, pred2, actual)
+    let err_mag1 = err[0] * err[0] + err[1] * err[1]
+    let err_mag2 = err2[0] * err2[0] + err2[1] * err2[1]
+    assert_test(err_mag2 <= err_mag1, "error decreases after learning")
+
+    let dims = list_new()
+    push(dims, 3)
+    push(dims, 3)
+    push(dims, 3)
+    let stack = pc_stack_new(dims)
+    assert_test(pc_stack_layer_count(stack) == 2, "stack has 2 layers")
+
+    let obs = list_new()
+    push(obs, 100)
+    push(obs, 200)
+    push(obs, 300)
+    let preds = pc_stack_run(stack, obs)
+    assert_test(len(preds) == 2, "stack run returns 2 layer predictions")
+
+    let total_err = pc_stack_learn(stack, obs, 50)
+    assert_test(total_err >= 0, "learning returns non-negative error")
+
+    let top = list_new()
+    push(top, 500)
+    push(top, 500)
+    push(top, 500)
+    let imagined = pc_stack_imagine(stack, top)
+    assert_test(len(imagined) == 3, "imagination generates 3-dim observation")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

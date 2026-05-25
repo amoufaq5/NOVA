@@ -1,0 +1,88 @@
+// Resonance Kernel Demo (N19)
+// Demonstrates similarity-based signal response using learned preference vectors.
+// Uses fixed-point scale-1000 arithmetic throughout.
+
+fn main() {
+    println("=== Resonance Kernel Demo ===")
+    println("")
+
+    // Create kernel: 2 signal types, 3-dimensional patterns
+    let k = resonance_new(2, 3)
+    resonance_describe(k)
+    println("")
+
+    // Set preference vectors for each signal type
+    let pref0 = [800, 200, 500]
+    let pref1 = [100, 900, 300]
+    resonance_set_preference(k, 0, pref0)
+    resonance_set_preference(k, 1, pref1)
+    println("Preferences set for 2 signal types")
+
+    // Use ReLU activation (1)
+    resonance_set_activation(k, 1)
+    println("Activation: ReLU")
+    println("")
+
+    // Measure similarity to various patterns
+    println("--- Similarity Tests ---")
+    let test1 = [800, 200, 500]
+    let sim1 = resonance_similarity(k, 0, test1)
+    print("Type 0 vs exact match: ")
+    print_int(sim1)
+    println("")
+
+    let test2 = [100, 900, 300]
+    let sim2 = resonance_similarity(k, 0, test2)
+    print("Type 0 vs opposite: ")
+    print_int(sim2)
+    println("")
+
+    let sim3 = resonance_similarity(k, 1, test2)
+    print("Type 1 vs exact match: ")
+    print_int(sim3)
+    println("")
+    println("")
+
+    // Compute activation from incoming signals
+    println("--- Compute Activation ---")
+    let signals = list_new()
+    let sig0 = [0, 700, test1]
+    let sig1 = [1, 500, test2]
+    push(signals, sig0)
+    push(signals, sig1)
+
+    let activation = resonance_compute(k, signals)
+    print("Activation from 2 signals: ")
+    print_int(activation)
+    println("")
+
+    // Online learning: update preference toward observed pattern
+    println("")
+    println("--- Online Learning ---")
+    let observed = [600, 400, 600]
+    resonance_update_preference(k, 0, observed, 200)
+    print("After learning (rate=200), type 0 similarity to observed: ")
+    let sim_after = resonance_similarity(k, 0, observed)
+    print_int(sim_after)
+    println("")
+
+    // Second round of learning
+    resonance_update_preference(k, 0, observed, 200)
+    let sim_after2 = resonance_similarity(k, 0, observed)
+    print("After 2nd update: ")
+    print_int(sim_after2)
+    println("")
+
+    // Check history
+    let hist = resonance_history(k)
+    print("Activation history length: ")
+    print_int(len(hist))
+    println("")
+    println("")
+
+    resonance_describe(k)
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

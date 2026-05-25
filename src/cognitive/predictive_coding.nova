@@ -1,0 +1,339 @@
+// N26 Predictive-Coding Kernel: top-down prediction and bottom-up error
+// propagation. Uses scale-1000 fixed-point integer arithmetic throughout.
+
+let PC_LAYER_TAG = 550
+let PC_STACK_TAG = 555
+
+let PC_LAYER_INPUT_DIM = 1
+let PC_LAYER_OUTPUT_DIM = 2
+let PC_LAYER_WEIGHTS = 3
+let PC_LAYER_BIASES = 4
+let PC_LAYER_PREDICTION = 5
+let PC_LAYER_ERROR = 6
+
+let PC_STACK_LAYERS = 1
+let PC_STACK_LAYER_COUNT = 2
+
+fn pc_layer_new(input_dim, output_dim) {
+    let layer = list_new()
+    push(layer, PC_LAYER_TAG)
+    push(layer, input_dim)
+    push(layer, output_dim)
+    let weights = list_new()
+    let total = int_mul(input_dim, output_dim)
+    let idx = 0
+    while idx < total {
+        let w = int_sub(100, int_mod(int_mul(idx, 37), 200))
+        push(weights, w)
+        idx = idx + 1
+    }
+    push(layer, weights)
+    let biases = list_new()
+    let j = 0
+    while j < output_dim {
+        push(biases, 0)
+        j = j + 1
+    }
+    push(layer, biases)
+    let prediction = list_new()
+    j = 0
+    while j < output_dim {
+        push(prediction, 0)
+        j = j + 1
+    }
+    push(layer, prediction)
+    let error = list_new()
+    let i = 0
+    while i < input_dim {
+        push(error, 0)
+        i = i + 1
+    }
+    push(layer, error)
+    return layer
+}
+
+fn pc_predict(layer, top_down_input) {
+    let input_dim = layer[PC_LAYER_INPUT_DIM]
+    let output_dim = layer[PC_LAYER_OUTPUT_DIM]
+    let weights = layer[PC_LAYER_WEIGHTS]
+    let biases = layer[PC_LAYER_BIASES]
+    let prediction = layer[PC_LAYER_PREDICTION]
+    let j = 0
+    while j < output_dim {
+        let sum = biases[j]
+        let i = 0
+        while i < input_dim {
+            let w_idx = int_add(int_mul(i, output_dim), j)
+            let prod = int_mul(weights[w_idx], top_down_input[i])
+            sum = int_add(sum, int_div(prod, 1000))
+            i = i + 1
+        }
+        prediction[j] = sum
+        j = j + 1
+    }
+    return prediction
+}
+
+fn pc_compute_error(layer, prediction, actual) {
+    let count = len(actual)
+    let error = list_new()
+    let i = 0
+    while i < count {
+        push(error, int_sub(actual[i], prediction[i]))
+        i = i + 1
+    }
+    return error
+}
+
+fn pc_update_weights(layer, error, input, learning_rate) {
+    let input_dim = layer[PC_LAYER_INPUT_DIM]
+    let output_dim = layer[PC_LAYER_OUTPUT_DIM]
+    let weights = layer[PC_LAYER_WEIGHTS]
+    let biases = layer[PC_LAYER_BIASES]
+    let error_len = len(error)
+    let j = 0
+    while j < error_len {
+        let bias_delta = int_div(int_mul(learning_rate, error[j]), 1000)
+        biases[j] = int_add(biases[j], bias_delta)
+        j = j + 1
+    }
+    let i = 0
+    while i < input_dim {
+        j = 0
+        while j < output_dim {
+            if j < error_len {
+                let w_idx = int_add(int_mul(i, output_dim), j)
+                let delta = int_div(int_div(int_mul(int_mul(learning_rate, error[j]), input[i]), 1000), 1000)
+                let new_w = int_add(weights[w_idx], delta)
+                if new_w > 5000 {
+                    new_w = 5000
+                }
+                if new_w < -5000 {
+                    new_w = -5000
+                }
+                weights[w_idx] = new_w
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn pc_layer_input_dim(layer) {
+    return layer[PC_LAYER_INPUT_DIM]
+}
+
+fn pc_layer_output_dim(layer) {
+    return layer[PC_LAYER_OUTPUT_DIM]
+}
+
+fn pc_stack_new(layer_dims) {
+    let stack = list_new()
+    push(stack, PC_STACK_TAG)
+    let layers = list_new()
+    let num_layers = len(layer_dims) - 1
+    let i = 0
+    while i < num_layers {
+        let in_dim = layer_dims[i]
+        let out_dim = layer_dims[i + 1]
+        let l = pc_layer_new(in_dim, out_dim)
+        push(layers, l)
+        i = i + 1
+    }
+    push(stack, layers)
+    push(stack, num_layers)
+    return stack
+}
+
+fn pc_stack_run(stack, observation) {
+    let layers = stack[PC_STACK_LAYERS]
+    let num_layers = stack[PC_STACK_LAYER_COUNT]
+    let predictions = list_new()
+    let current_input = observation
+    let li = 0
+    while li < num_layers {
+        let layer = layers[li]
+        let pred = pc_predict(layer, current_input)
+        let output_dim = layer[PC_LAYER_OUTPUT_DIM]
+        let actual = list_new()
+        if li < num_layers - 1 {
+            let next_layer = layers[li + 1]
+            let next_pred = next_layer[PC_LAYER_PREDICTION]
+            let k = 0
+            while k < output_dim {
+                push(actual, next_pred[k])
+                k = k + 1
+            }
+        } else {
+            let k = 0
+            while k < output_dim {
+                push(actual, 0)
+                k = k + 1
+            }
+        }
+        let err = pc_compute_error(layer, pred, actual)
+        layer[PC_LAYER_ERROR] = err
+        push(predictions, pred)
+        current_input = pred
+        li = li + 1
+    }
+    return predictions
+}
+
+fn pc_stack_learn(stack, observation, learning_rate) {
+    let layers = stack[PC_STACK_LAYERS]
+    let num_layers = stack[PC_STACK_LAYER_COUNT]
+    let inputs = list_new()
+    let current_input = observation
+    let li = 0
+    while li < num_layers {
+        push(inputs, current_input)
+        let layer = layers[li]
+        let pred = pc_predict(layer, current_input)
+        current_input = pred
+        li = li + 1
+    }
+    let total_error = 0
+    li = num_layers - 1
+    let done = 0
+    while done == 0 {
+        let layer = layers[li]
+        let output_dim = layer[PC_LAYER_OUTPUT_DIM]
+        let pred = layer[PC_LAYER_PREDICTION]
+        let actual = list_new()
+        if li < num_layers - 1 {
+            let next_layer = layers[li + 1]
+            let next_input = inputs[li + 1]
+            let k = 0
+            while k < output_dim {
+                push(actual, next_input[k])
+                k = k + 1
+            }
+        } else {
+            let k = 0
+            while k < output_dim {
+                push(actual, 0)
+                k = k + 1
+            }
+        }
+        let err = pc_compute_error(layer, pred, actual)
+        layer[PC_LAYER_ERROR] = err
+        let input_for_layer = inputs[li]
+        pc_update_weights(layer, err, input_for_layer, learning_rate)
+        let ei = 0
+        while ei < len(err) {
+            let abs_err = err[ei]
+            if abs_err < 0 {
+                abs_err = int_sub(0, abs_err)
+            }
+            total_error = int_add(total_error, abs_err)
+            ei = ei + 1
+        }
+        if li == 0 {
+            done = 1
+        } else {
+            li = li - 1
+        }
+    }
+    return total_error
+}
+
+fn pc_stack_imagine(stack, top_priors) {
+    let layers = stack[PC_STACK_LAYERS]
+    let num_layers = stack[PC_STACK_LAYER_COUNT]
+    let current = top_priors
+    let li = num_layers - 1
+    let done = 0
+    while done == 0 {
+        let layer = layers[li]
+        let input_dim = layer[PC_LAYER_INPUT_DIM]
+        let output_dim = layer[PC_LAYER_OUTPUT_DIM]
+        let weights = layer[PC_LAYER_WEIGHTS]
+        let biases = layer[PC_LAYER_BIASES]
+        let generated = list_new()
+        let i = 0
+        while i < input_dim {
+            let sum = 0
+            let j = 0
+            while j < output_dim {
+                let w_idx = int_add(int_mul(i, output_dim), j)
+                let prod = int_mul(weights[w_idx], current[j])
+                sum = int_add(sum, int_div(prod, 1000))
+                j = j + 1
+            }
+            push(generated, sum)
+            i = i + 1
+        }
+        current = generated
+        if li == 0 {
+            done = 1
+        } else {
+            li = li - 1
+        }
+    }
+    return current
+}
+
+fn pc_stack_layer_count(stack) {
+    return stack[PC_STACK_LAYER_COUNT]
+}
+
+fn pc_stack_get_layer(stack, index) {
+    let layers = stack[PC_STACK_LAYERS]
+    return layers[index]
+}
+
+fn pc_describe(layer) {
+    let input_dim = layer[PC_LAYER_INPUT_DIM]
+    let output_dim = layer[PC_LAYER_OUTPUT_DIM]
+    let weights = layer[PC_LAYER_WEIGHTS]
+    let biases = layer[PC_LAYER_BIASES]
+    let prediction = layer[PC_LAYER_PREDICTION]
+    let error = layer[PC_LAYER_ERROR]
+    print("PCLayer (")
+    print_int(input_dim)
+    print(" -> ")
+    print_int(output_dim)
+    println(")")
+    print("  weights: [")
+    let total = int_mul(input_dim, output_dim)
+    let wi = 0
+    while wi < total {
+        if wi > 0 {
+            print(",")
+        }
+        print_int(weights[wi])
+        wi = wi + 1
+    }
+    println("]")
+    print("  biases: [")
+    let bi = 0
+    while bi < output_dim {
+        if bi > 0 {
+            print(",")
+        }
+        print_int(biases[bi])
+        bi = bi + 1
+    }
+    println("]")
+    print("  prediction: [")
+    let pi = 0
+    while pi < output_dim {
+        if pi > 0 {
+            print(",")
+        }
+        print_int(prediction[pi])
+        pi = pi + 1
+    }
+    println("]")
+    print("  error: [")
+    let ei = 0
+    while ei < input_dim {
+        if ei > 0 {
+            print(",")
+        }
+        print_int(error[ei])
+        ei = ei + 1
+    }
+    println("]")
+}

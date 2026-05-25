@@ -1,0 +1,82 @@
+// Nova Self-Model Introspection Demo (N28)
+// Demonstrates state tracking, goal management, and emotional trend analysis.
+
+fn main() {
+    println("=== Nova Self-Model Demo ===")
+    println("")
+
+    let sm = sm_new("aurora", 10)
+
+    println("--- Initial State ---")
+    println(sm_describe(sm))
+    println("")
+
+    println("--- Updating Internal State ---")
+    sm_update_state(sm, "curious", "learning", 60)
+    print("Emotion:    ")
+    println(sm_current_emotion(sm))
+    print("Focus:      ")
+    println(sm_current_focus(sm))
+    print("Confidence: ")
+    print_int(sm_current_confidence(sm))
+    println("")
+    println("")
+
+    sm_update_state(sm, "excited", "discovery", 75)
+    sm_update_state(sm, "calm", "reflection", 80)
+    sm_update_state(sm, "focused", "problem_solving", 90)
+
+    println("--- Goal Management ---")
+    sm_add_goal(sm, "understand user intent")
+    sm_add_goal(sm, "improve response quality")
+    sm_add_goal(sm, "learn new domain")
+    println("Added 3 goals")
+
+    sm_remove_goal(sm, "learn new domain")
+    println("Removed 'learn new domain'")
+    println("")
+
+    println("--- Natural Language Summary ---")
+    println(sm_describe_natural_language(sm))
+    println("")
+
+    println("--- State History (last 3) ---")
+    let hist = sm_history(sm, 3)
+    let i = 0
+    while i < len(hist) {
+        print("  ")
+        println(hist[i])
+        i = i + 1
+    }
+    println("")
+
+    println("--- Trend Analysis ---")
+    print("Emotion trend:    ")
+    let et = sm_emotion_trend(sm, 4)
+    let j = 0
+    while j < len(et) {
+        if j > 0 { print(" -> ") }
+        print(et[j])
+        j = j + 1
+    }
+    println("")
+
+    print("Confidence trend: ")
+    let ct = sm_confidence_trend(sm, 4)
+    let k = 0
+    while k < len(ct) {
+        if k > 0 { print(" -> ") }
+        print_int(ct[k])
+        k = k + 1
+    }
+    println("")
+    println("")
+
+    println("--- Full Description ---")
+    println(sm_describe(sm))
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

@@ -1,0 +1,82 @@
+// Nova Active Inference Demo
+// Demonstrates free energy minimization for perception and action selection.
+
+fn main() {
+    println("=== Nova Active Inference Demo ===")
+    println("")
+
+    // Create a model with 3 hidden states: sunny(0), cloudy(1), rainy(2)
+    let model = ai_new(3)
+
+    // Set priors: we believe sunny is most likely
+    ai_set_prior(model, 0, 8, 2)
+    ai_set_prior(model, 1, 4, 6)
+    ai_set_prior(model, 2, 2, 8)
+    println("Prior beliefs set: sunny=high, cloudy=mid, rainy=low")
+
+    // Set likelihoods: what we expect to observe in each state
+    // Observations: 0=bright, 1=dim, 2=wet
+    ai_set_likelihood(model, 0, 0, 90)
+    ai_set_likelihood(model, 0, 1, 10)
+    ai_set_likelihood(model, 1, 0, 30)
+    ai_set_likelihood(model, 1, 1, 60)
+    ai_set_likelihood(model, 2, 1, 40)
+    ai_set_likelihood(model, 2, 2, 80)
+    println("Likelihood model configured")
+    println("")
+
+    // Observe "bright" -- should confirm sunny belief
+    println("--- Observation: bright light (obs=0) ---")
+    ai_observe(model, 0)
+    let pred1 = ai_predict(model)
+    print("Predicted state: ")
+    print_int(pred1)
+    println(" (0=sunny)")
+    let fe1 = ai_free_energy(model)
+    print("Free energy: ")
+    print_int(fe1)
+    println(" (low = good fit)")
+    println("")
+
+    // Observe "dim" -- surprise, update beliefs
+    println("--- Observation: dim light (obs=1) ---")
+    ai_observe(model, 1)
+    let pred2 = ai_predict(model)
+    print("Predicted state: ")
+    print_int(pred2)
+    println(" (1=cloudy)")
+    let fe2 = ai_free_energy(model)
+    print("Free energy: ")
+    print_int(fe2)
+    println(" (higher = surprise)")
+    println("")
+
+    // Observe "wet" -- strong evidence for rain
+    println("--- Observation: wet (obs=2) ---")
+    ai_observe(model, 2)
+    let pred3 = ai_predict(model)
+    print("Predicted state: ")
+    print_int(pred3)
+    println(" (2=rainy)")
+    let fe3 = ai_free_energy(model)
+    print("Free energy: ")
+    print_int(fe3)
+    println("")
+    println("")
+
+    // Action selection: pick best action to minimize expected free energy
+    // 3 actions: 0=stay, 1=get_umbrella, 2=go_inside
+    println("--- Action Selection ---")
+    let action = ai_select_action(model, 3)
+    print("Selected action: ")
+    print_int(action)
+    println("")
+    println("")
+
+    ai_describe(model)
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

@@ -1,0 +1,59 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Active Inference Tests ===")
+
+    let model = ai_new(3, 2, 2)
+    assert_test(ai_state_count(model) == 3, "model has 3 states")
+
+    let post = ai_posterior(model, 0)
+    assert_test(post[0] == 1000, "initial alpha = 1000")
+    assert_test(post[1] == 1000, "initial beta = 1000")
+
+    ai_set_likelihood(model, 0, 0, 800)
+    ai_set_likelihood(model, 0, 1, 200)
+    ai_set_likelihood(model, 1, 0, 300)
+    ai_set_likelihood(model, 1, 1, 700)
+    ai_set_likelihood(model, 2, 0, 500)
+    ai_set_likelihood(model, 2, 1, 500)
+
+    ai_observe(model, 0)
+    let post_after = ai_posterior(model, 0)
+    assert_test(post_after[0] > 1000, "alpha increased for state 0 after obs 0")
+
+    let preds = ai_predict(model, 2)
+    assert_test(len(preds) == 2, "predict returns 2 results")
+    assert_test(preds[0][0] >= 0, "prediction has valid state index")
+    assert_test(preds[0][1] > 0, "prediction has positive posterior mean")
+
+    let fe = ai_free_energy(model, 0)
+    assert_test(fe > -10000, "free energy is computed")
+
+    let actions = list_new()
+    push(actions, 0)
+    push(actions, 1)
+    let best = ai_select_action(model, actions)
+    assert_test(best >= 0, "action selection returns valid action")
+    assert_test(best <= 1, "action is within range")
+
+    ai_reset(model)
+    let post_reset = ai_posterior(model, 0)
+    assert_test(post_reset[0] == 1000, "reset restores alpha = 1000")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

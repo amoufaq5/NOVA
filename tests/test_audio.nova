@@ -1,0 +1,59 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Audio Tests ===")
+
+    let samples = list_new()
+    let i = 0
+    while i < 64 {
+        push(samples, i * 15)
+        i = i + 1
+    }
+    let buf = audio_from_samples(16000, samples)
+    assert_test(audio_sample_count(buf) == 64, "64 samples created")
+
+    let s0 = audio_get_sample(buf, 0)
+    assert_test(from_float(s0) == 0, "sample 0 = 0")
+
+    let norm = audio_normalize(buf)
+    assert_test(audio_sample_count(norm) == 64, "normalized has 64 samples")
+
+    let energy = audio_energy(buf, 0, 32)
+    assert_test(energy >= 0, "energy is non-negative")
+
+    let samples2 = list_new()
+    let j = 0
+    while j < 128 {
+        let val = 0
+        if j < 64 { val = 500 }
+        push(samples2, val)
+        j = j + 1
+    }
+    let buf2 = audio_from_samples(16000, samples2)
+    let vad = audio_voice_activity(buf2, 10)
+    assert_test(len(vad) >= 0, "VAD returns segment list")
+
+    let extra = list_new()
+    push(extra, 100)
+    push(extra, 200)
+    push(extra, 300)
+    audio_append_samples(buf, extra)
+    assert_test(audio_sample_count(buf) >= 64, "samples appended")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

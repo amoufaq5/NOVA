@@ -1,0 +1,521 @@
+// N23 KG Visualizer: Browse and visualize knowledge graphs.
+// Provides subgraph extraction, entity search, HTML/SVG and DOT export.
+
+let KGVIZ_TAG = 520
+let KGVIZ_KG = 1
+let KGVIZ_DEPTH = 2
+let KGVIZ_FILTERS = 3
+let KGVIZ_EXPORTS = 4
+
+fn kgviz_new(kg) {
+    let viz = list_new()
+    push(viz, KGVIZ_TAG)
+    push(viz, kg)
+    push(viz, 2)
+    push(viz, list_new())
+    push(viz, 0)
+    return viz
+}
+
+fn kgviz_set_depth(viz, depth) {
+    viz[KGVIZ_DEPTH] = depth
+}
+
+fn kgviz_add_filter(viz, relation_type) {
+    push(viz[KGVIZ_FILTERS], relation_type)
+}
+
+fn kgviz_clear_filters(viz) {
+    viz[KGVIZ_FILTERS] = list_new()
+}
+
+fn _kgviz_passes_filter(viz, rel_type) {
+    let filters = viz[KGVIZ_FILTERS]
+    if len(filters) == 0 {
+        return 1
+    }
+    let i = 0
+    while i < len(filters) {
+        if filters[i] == rel_type {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _kgviz_entity_in_list(lst, name) {
+    let i = 0
+    while i < len(lst) {
+        if lst[i] == name {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn kgviz_render_subgraph(viz, root_entity, depth) {
+    let kg = viz[KGVIZ_KG]
+    let all_rels = kg[KG_RELATIONS]
+    let visited = list_new()
+    let queue = list_new()
+    let queue_depths = list_new()
+    let result_entities = list_new()
+    let result_relations = list_new()
+
+    push(queue, root_entity)
+    push(queue_depths, 0)
+    push(visited, root_entity)
+    push(result_entities, root_entity)
+
+    let qi = 0
+    while qi < len(queue) {
+        let current = queue[qi]
+        let current_depth = queue_depths[qi]
+        if current_depth < depth {
+            let ri = 0
+            while ri < len(all_rels) {
+                let r = all_rels[ri]
+                let r_subj = r[KG_REL_SUBJ]
+                let r_type = r[KG_REL_TYPE]
+                let r_obj = r[KG_REL_OBJ]
+                let r_weight = r[KG_REL_WEIGHT]
+                if r_subj == current {
+                    if _kgviz_passes_filter(viz, r_type) == 1 {
+                        let rel_copy = list_new()
+                        push(rel_copy, r_subj)
+                        push(rel_copy, r_type)
+                        push(rel_copy, r_obj)
+                        push(rel_copy, r_weight)
+                        push(result_relations, rel_copy)
+                        if _kgviz_entity_in_list(visited, r_obj) == 0 {
+                            push(visited, r_obj)
+                            push(queue, r_obj)
+                            push(queue_depths, current_depth + 1)
+                            push(result_entities, r_obj)
+                        }
+                    }
+                }
+                if r_obj == current {
+                    if _kgviz_passes_filter(viz, r_type) == 1 {
+                        let rel_copy = list_new()
+                        push(rel_copy, r_subj)
+                        push(rel_copy, r_type)
+                        push(rel_copy, r_obj)
+                        push(rel_copy, r_weight)
+                        push(result_relations, rel_copy)
+                        if _kgviz_entity_in_list(visited, r_subj) == 0 {
+                            push(visited, r_subj)
+                            push(queue, r_subj)
+                            push(queue_depths, current_depth + 1)
+                            push(result_entities, r_subj)
+                        }
+                    }
+                }
+                ri = ri + 1
+            }
+        }
+        qi = qi + 1
+    }
+
+    let subgraph = list_new()
+    push(subgraph, result_entities)
+    push(subgraph, result_relations)
+    return subgraph
+}
+
+fn kgviz_search(viz, query) {
+    let kg = viz[KGVIZ_KG]
+    let ents = kg[KG_ENTITIES]
+    let results = list_new()
+    let query_len = len(query)
+    if query_len == 0 {
+        return results
+    }
+    let ei = 0
+    while ei < len(ents) {
+        let name = ents[ei][KG_ENT_NAME]
+        let name_len = len(name)
+        if name_len >= query_len {
+            let limit = name_len - query_len
+            let pos = 0
+            let found = 0
+            while pos <= limit {
+                if substr(name, pos, query_len) == query {
+                    found = 1
+                    pos = limit + 1
+                }
+                pos = pos + 1
+            }
+            if found == 1 {
+                push(results, name)
+            }
+        }
+        ei = ei + 1
+    }
+    return results
+}
+
+fn kgviz_entity_info(viz, entity_name) {
+    let kg = viz[KGVIZ_KG]
+    let all_rels = kg[KG_RELATIONS]
+    let outgoing = list_new()
+    let incoming = list_new()
+    let i = 0
+    while i < len(all_rels) {
+        let r = all_rels[i]
+        if r[KG_REL_SUBJ] == entity_name {
+            let quad = list_new()
+            push(quad, r[KG_REL_SUBJ])
+            push(quad, r[KG_REL_TYPE])
+            push(quad, r[KG_REL_OBJ])
+            push(quad, r[KG_REL_WEIGHT])
+            push(outgoing, quad)
+        }
+        if r[KG_REL_OBJ] == entity_name {
+            let quad = list_new()
+            push(quad, r[KG_REL_SUBJ])
+            push(quad, r[KG_REL_TYPE])
+            push(quad, r[KG_REL_OBJ])
+            push(quad, r[KG_REL_WEIGHT])
+            push(incoming, quad)
+        }
+        i = i + 1
+    }
+    let info = list_new()
+    push(info, entity_name)
+    push(info, outgoing)
+    push(info, incoming)
+    return info
+}
+
+fn kgviz_stats(viz) {
+    let kg = viz[KGVIZ_KG]
+    let ents = kg[KG_ENTITIES]
+    let all_rels = kg[KG_RELATIONS]
+    let entity_count = kg_entity_count(kg)
+    let relation_count = len(all_rels)
+
+    let max_rels = 0
+    let ei = 0
+    while ei < len(ents) {
+        let ename = ents[ei][KG_ENT_NAME]
+        let count = 0
+        let ri = 0
+        while ri < len(all_rels) {
+            let r = all_rels[ri]
+            if r[KG_REL_SUBJ] == ename {
+                count = count + 1
+            }
+            if r[KG_REL_OBJ] == ename {
+                count = count + 1
+            }
+            ri = ri + 1
+        }
+        if count > max_rels {
+            max_rels = count
+        }
+        ei = ei + 1
+    }
+
+    let stats = list_new()
+    push(stats, entity_count)
+    push(stats, relation_count)
+    push(stats, max_rels)
+    return stats
+}
+
+fn _kgviz_compute_depth(entity, root, visited_names, visited_depths) {
+    let i = 0
+    while i < len(visited_names) {
+        if visited_names[i] == entity {
+            return visited_depths[i]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _kgviz_int_to_str(n) {
+    return int_to_str(n)
+}
+
+fn _kgviz_build_svg_circle(cx, cy, radius, fill, label) {
+    let s = "<circle cx=\"" + _kgviz_int_to_str(cx) + "\" cy=\"" + _kgviz_int_to_str(cy)
+    s = s + "\" r=\"" + _kgviz_int_to_str(radius) + "\" fill=\"" + fill
+    s = s + "\" stroke=\"#333\" stroke-width=\"2\"/>"
+    s = s + "<text x=\"" + _kgviz_int_to_str(cx) + "\" y=\""
+    s = s + _kgviz_int_to_str(cy + radius + 15)
+    s = s + "\" text-anchor=\"middle\" font-size=\"12\">" + label + "</text>"
+    return s
+}
+
+fn _kgviz_build_svg_line(x1, y1, x2, y2, label) {
+    let s = "<line x1=\"" + _kgviz_int_to_str(x1) + "\" y1=\"" + _kgviz_int_to_str(y1)
+    s = s + "\" x2=\"" + _kgviz_int_to_str(x2) + "\" y2=\"" + _kgviz_int_to_str(y2)
+    s = s + "\" stroke=\"#666\" stroke-width=\"1\" marker-end=\"url(#arrow)\"/>"
+    let mx = int_div(int_add(x1, x2), 2)
+    let my = int_div(int_add(y1, y2), 2)
+    s = s + "<text x=\"" + _kgviz_int_to_str(mx) + "\" y=\""
+    s = s + _kgviz_int_to_str(my - 5)
+    s = s + "\" text-anchor=\"middle\" font-size=\"10\" fill=\"#999\">" + label + "</text>"
+    return s
+}
+
+fn _kgviz_cos_approx(angle_deg) {
+    let a = int_mod(angle_deg, 360)
+    if a < 0 {
+        a = a + 360
+    }
+    if a == 0 { return 100 }
+    if a == 90 { return 0 }
+    if a == 180 { return -100 }
+    if a == 270 { return 0 }
+    if a > 0 {
+        if a < 90 {
+            let t = int_mul(a, 100)
+            t = int_div(t, 90)
+            return int_sub(100, int_div(int_mul(t, t), 100))
+        }
+    }
+    if a > 90 {
+        if a < 180 {
+            let t = int_sub(a, 90)
+            t = int_mul(t, 100)
+            t = int_div(t, 90)
+            return 0 - int_sub(100, int_div(int_mul(t, t), 100))
+        }
+    }
+    if a > 180 {
+        if a < 270 {
+            let t = int_sub(a, 180)
+            t = int_mul(t, 100)
+            t = int_div(t, 90)
+            return 0 - int_add(0, int_sub(100, int_div(int_mul(t, t), 100)))
+        }
+    }
+    let t = int_sub(a, 270)
+    t = int_mul(t, 100)
+    t = int_div(t, 90)
+    return int_sub(100, int_div(int_mul(t, t), 100))
+}
+
+fn _kgviz_sin_approx(angle_deg) {
+    return _kgviz_cos_approx(angle_deg - 90)
+}
+
+fn _kgviz_entity_index(entities, name) {
+    let i = 0
+    while i < len(entities) {
+        if entities[i] == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn kgviz_export_html(viz, root_entity, depth, filename) {
+    let subgraph = kgviz_render_subgraph(viz, root_entity, depth)
+    let entities = subgraph[0]
+    let relations = subgraph[1]
+    let entity_count = len(entities)
+
+    let bfs_names = list_new()
+    let bfs_depths = list_new()
+    let bfs_queue = list_new()
+    let bfs_queue_d = list_new()
+
+    push(bfs_queue, root_entity)
+    push(bfs_queue_d, 0)
+    push(bfs_names, root_entity)
+    push(bfs_depths, 0)
+
+    let bqi = 0
+    while bqi < len(bfs_queue) {
+        let cur = bfs_queue[bqi]
+        let cur_d = bfs_queue_d[bqi]
+        let ri = 0
+        while ri < len(relations) {
+            let r = relations[ri]
+            if r[KG_REL_SUBJ] == cur {
+                let nbr = r[KG_REL_OBJ]
+                if _kgviz_entity_in_list(bfs_names, nbr) == 0 {
+                    push(bfs_names, nbr)
+                    push(bfs_depths, cur_d + 1)
+                    push(bfs_queue, nbr)
+                    push(bfs_queue_d, cur_d + 1)
+                }
+            }
+            if r[KG_REL_OBJ] == cur {
+                let nbr = r[KG_REL_SUBJ]
+                if _kgviz_entity_in_list(bfs_names, nbr) == 0 {
+                    push(bfs_names, nbr)
+                    push(bfs_depths, cur_d + 1)
+                    push(bfs_queue, nbr)
+                    push(bfs_queue_d, cur_d + 1)
+                }
+            }
+            ri = ri + 1
+        }
+        bqi = bqi + 1
+    }
+
+    let cx = 400
+    let cy = 300
+    let ring_spacing = 120
+
+    let node_xs = list_new()
+    let node_ys = list_new()
+    let ni = 0
+    while ni < entity_count {
+        push(node_xs, cx)
+        push(node_ys, cy)
+        ni = ni + 1
+    }
+
+    let max_d = 0
+    let di = 0
+    while di < len(bfs_depths) {
+        if bfs_depths[di] > max_d {
+            max_d = bfs_depths[di]
+        }
+        di = di + 1
+    }
+
+    let ring = 0
+    while ring <= max_d {
+        let ring_entities = list_new()
+        let rei = 0
+        while rei < len(bfs_names) {
+            if bfs_depths[rei] == ring {
+                push(ring_entities, bfs_names[rei])
+            }
+            rei = rei + 1
+        }
+        let ring_count = len(ring_entities)
+        if ring == 0 {
+            let idx = _kgviz_entity_index(entities, root_entity)
+            if idx >= 0 {
+                node_xs[idx] = cx
+                node_ys[idx] = cy
+            }
+        } else {
+            let radius = int_mul(ring, ring_spacing)
+            let angle_step = 0
+            if ring_count > 0 {
+                angle_step = int_div(360, ring_count)
+            }
+            let rci = 0
+            while rci < ring_count {
+                let angle = int_mul(rci, angle_step)
+                let cos_val = _kgviz_cos_approx(angle)
+                let sin_val = _kgviz_sin_approx(angle)
+                let px = int_add(cx, int_div(int_mul(radius, cos_val), 100))
+                let py = int_add(cy, int_div(int_mul(radius, sin_val), 100))
+                let idx = _kgviz_entity_index(entities, ring_entities[rci])
+                if idx >= 0 {
+                    node_xs[idx] = px
+                    node_ys[idx] = py
+                }
+                rci = rci + 1
+            }
+        }
+        ring = ring + 1
+    }
+
+    let colors = list_new()
+    push(colors, "#4A90D9")
+    push(colors, "#E74C3C")
+    push(colors, "#2ECC71")
+    push(colors, "#F39C12")
+    push(colors, "#9B59B6")
+    push(colors, "#1ABC9C")
+    push(colors, "#E67E22")
+    push(colors, "#3498DB")
+
+    let html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+    html = html + "<title>KG Visualization: " + root_entity + "</title>"
+    html = html + "<style>body{margin:0;background:#1a1a2e;font-family:sans-serif;}"
+    html = html + "svg{display:block;margin:auto;}</style></head><body>"
+    html = html + "<svg width=\"800\" height=\"600\" xmlns=\"http://www.w3.org/2000/svg\">"
+    html = html + "<defs><marker id=\"arrow\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"5\""
+    html = html + " markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\">"
+    html = html + "<path d=\"M 0 0 L 10 5 L 0 10 z\" fill=\"#666\"/></marker></defs>"
+
+    let eli = 0
+    while eli < len(relations) {
+        let r = relations[eli]
+        let si = _kgviz_entity_index(entities, r[KG_REL_SUBJ])
+        let oi = _kgviz_entity_index(entities, r[KG_REL_OBJ])
+        if si >= 0 {
+            if oi >= 0 {
+                html = html + _kgviz_build_svg_line(node_xs[si], node_ys[si], node_xs[oi], node_ys[oi], r[KG_REL_TYPE])
+            }
+        }
+        eli = eli + 1
+    }
+
+    let eni = 0
+    while eni < entity_count {
+        let color_idx = int_mod(eni, len(colors))
+        let fill = colors[color_idx]
+        html = html + _kgviz_build_svg_circle(node_xs[eni], node_ys[eni], 20, fill, entities[eni])
+        eni = eni + 1
+    }
+
+    html = html + "</svg></body></html>"
+
+    write_file(filename, html)
+    viz[KGVIZ_EXPORTS] = viz[KGVIZ_EXPORTS] + 1
+}
+
+fn kgviz_export_dot(viz, root_entity, depth, filename) {
+    let subgraph = kgviz_render_subgraph(viz, root_entity, depth)
+    let entities = subgraph[0]
+    let relations = subgraph[1]
+
+    let dot = "digraph KG {\n"
+    dot = dot + "  rankdir=LR;\n"
+    dot = dot + "  node [shape=ellipse, style=filled, fillcolor=\"#4A90D9\", fontcolor=white];\n"
+    dot = dot + "  edge [color=\"#666666\"];\n"
+
+    let ei = 0
+    while ei < len(entities) {
+        dot = dot + "  \"" + entities[ei] + "\";\n"
+        ei = ei + 1
+    }
+
+    let ri = 0
+    while ri < len(relations) {
+        let r = relations[ri]
+        dot = dot + "  \"" + r[KG_REL_SUBJ] + "\" -> \"" + r[KG_REL_OBJ]
+        dot = dot + "\" [label=\"" + r[KG_REL_TYPE]
+        dot = dot + " (" + int_to_str(r[KG_REL_WEIGHT]) + ")\"];\n"
+        ri = ri + 1
+    }
+
+    dot = dot + "}\n"
+
+    write_file(filename, dot)
+    viz[KGVIZ_EXPORTS] = viz[KGVIZ_EXPORTS] + 1
+}
+
+fn kgviz_describe(viz) {
+    let kg = viz[KGVIZ_KG]
+    let stats = kgviz_stats(viz)
+    print("KGVisualizer(entities=")
+    print_int(stats[0])
+    print(", relations=")
+    print_int(stats[1])
+    print(", max_per_entity=")
+    print_int(stats[2])
+    print(", depth=")
+    print_int(viz[KGVIZ_DEPTH])
+    print(", filters=")
+    print_int(len(viz[KGVIZ_FILTERS]))
+    print(", exports=")
+    print_int(viz[KGVIZ_EXPORTS])
+    println(")")
+}

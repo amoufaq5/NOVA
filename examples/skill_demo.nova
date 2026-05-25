@@ -1,0 +1,75 @@
+// Nova Skill / Procedural Rule Demo (N27)
+// Demonstrates skill creation, trigger matching, preconditions, and outcome tracking.
+
+fn main() {
+    println("=== Nova Skill Demo ===")
+    println("")
+
+    let s = skill_new("greet_user", "Respond to greetings warmly")
+    skill_add_trigger(s, "hello")
+    skill_add_trigger(s, "hi")
+    skill_add_trigger(s, "hey")
+    skill_add_action(s, "emit_greeting_response")
+    skill_add_action(s, "boost_warmth")
+    skill_add_precondition(s, "user_present")
+
+    println("--- Skill Info ---")
+    print("Name: ")
+    println(skill_name(s))
+    print("Triggers: ")
+    let trigs = skill_triggers(s)
+    let i = 0
+    while i < len(trigs) {
+        if i > 0 { print(", ") }
+        print(trigs[i])
+        i = i + 1
+    }
+    println("")
+    println("")
+
+    println("--- Trigger Matching ---")
+    let inputs = ["hello there", "goodbye now", "hey friend"]
+    let t = 0
+    while t < len(inputs) {
+        let matched = skill_matches_trigger(s, inputs[t])
+        print("'" + inputs[t] + "' matches: ")
+        print_int(matched)
+        println("")
+        t = t + 1
+    }
+    println("")
+
+    println("--- Precondition Check ---")
+    let ctx1 = "user_present"
+    print("Context '" + ctx1 + "': ")
+    print_int(skill_check_preconditions(s, ctx1))
+    println("")
+    let ctx2 = "no_user"
+    print("Context '" + ctx2 + "': ")
+    print_int(skill_check_preconditions(s, ctx2))
+    println("")
+    println("")
+
+    println("--- Outcome Tracking ---")
+    skill_record_outcome(s, 1)
+    skill_record_outcome(s, 1)
+    skill_record_outcome(s, 0)
+    skill_record_outcome(s, 1)
+    skill_record_outcome(s, 1)
+
+    print("Attempts:     ")
+    print_int(skill_attempt_count(s))
+    println("")
+    print("Success rate: ")
+    print_int(skill_success_rate(s))
+    println("%")
+    println("")
+
+    println("--- Full Description ---")
+    println(skill_describe(s))
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

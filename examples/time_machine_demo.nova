@@ -1,0 +1,106 @@
+// Time-Travel Debugger Demo (N22)
+// Records tick snapshots, rewinds, replays with modifications,
+// and compares divergent trajectories.
+
+fn main() {
+    println("=== Time-Travel Debugger Demo ===")
+    println("")
+
+    let tm = tm_new(20)
+    tm_describe(tm)
+    println("")
+
+    // Record 5 ticks with node activation snapshots
+    println("--- Recording Ticks ---")
+    let t = 0
+    while t < 5 {
+        let snap = list_new()
+        let p1 = list_new()
+        push(p1, "Think")
+        push(p1, 100 + t * 50)
+        push(snap, p1)
+        let p2 = list_new()
+        push(p2, "Feel")
+        push(p2, 200 + t * 30)
+        push(snap, p2)
+        let p3 = list_new()
+        push(p3, "Act")
+        push(p3, 50 + t * 80)
+        push(snap, p3)
+        tm_record_tick(tm, t, snap)
+        t = t + 1
+    }
+    print("Recorded ticks: ")
+    print_int(tm_tick_count(tm))
+    println("")
+
+    let range = tm_get_tick_range(tm)
+    print("Tick range: ")
+    print_int(range[0])
+    print(" .. ")
+    print_int(range[1])
+    println("")
+    println("")
+
+    // Rewind to tick 2 and inspect
+    println("--- Rewind to Tick 2 ---")
+    let snap2 = tm_rewind_to(tm, 2)
+    let si = 0
+    while si < len(snap2) {
+        let pair = snap2[si]
+        print("  " + pair[0] + " = ")
+        print_int(pair[1])
+        println("")
+        si = si + 1
+    }
+    println("")
+
+    // Replay from tick 1 (original trajectory)
+    println("--- Replay (original) ---")
+    let mods_empty = list_new()
+    let traj_a = tm_replay_from(tm, 1, mods_empty)
+    print("Trajectory A length: ")
+    print_int(len(traj_a))
+    println("")
+    let id_a = tm_save_trajectory(tm, traj_a)
+    print("Saved as trajectory ")
+    print_int(id_a)
+    println("")
+
+    // Replay from tick 1 with a modification at tick 2
+    println("")
+    println("--- Replay (modified at tick 2) ---")
+    let mods = list_new()
+    let mod1 = list_new()
+    push(mod1, 2)
+    push(mod1, "Think")
+    push(mod1, 999)
+    push(mods, mod1)
+    let traj_b = tm_replay_from(tm, 1, mods)
+    let id_b = tm_save_trajectory(tm, traj_b)
+    print("Saved as trajectory ")
+    print_int(id_b)
+    println("")
+
+    // Compare the two trajectories
+    println("")
+    println("--- Trajectory Comparison ---")
+    let cmp = tm_compare_trajectories(tm, traj_a, traj_b)
+    let ci = 0
+    while ci < len(cmp) {
+        let entry = cmp[ci]
+        print("  step ")
+        print_int(entry[0])
+        print(": divergence=")
+        print_int(entry[1])
+        println("")
+        ci = ci + 1
+    }
+    println("")
+
+    tm_describe(tm)
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

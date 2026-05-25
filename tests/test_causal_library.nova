@@ -1,0 +1,45 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Causal Library Tests ===")
+
+    let lib = causal_lib_new()
+    assert_test(causal_lib_count(lib) == 0, "empty library")
+
+    causal_lib_load(lib)
+    let count = causal_lib_count(lib)
+    assert_test(count >= 1000, "library has 1000+ patterns after load")
+
+    let cats = causal_lib_categories(lib)
+    assert_test(len(cats) == 6, "6 categories")
+
+    let pat = causal_lib_get(lib, 1)
+    assert_test(pat != 0, "pattern 1 found")
+    assert_test(pat[0] == 545, "pattern has correct tag")
+
+    let phys = causal_lib_search_category(lib, "physical")
+    assert_test(len(phys) > 0, "physical category has patterns")
+
+    let results = causal_lib_search(lib, "force")
+    assert_test(len(results) > 0, "search for force finds patterns")
+
+    let applied = causal_lib_apply(lib, 1, "ball", "object dropped from height")
+    assert_test(len(applied) == 3, "apply returns [effect, strength, applicable]")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

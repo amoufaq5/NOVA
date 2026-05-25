@@ -1,0 +1,692 @@
+// N25 Standard Library of Causal Patterns: extends imagination with 1000+
+// common causal patterns across physical, biological, social, computational,
+// causal, and domain categories. Seed patterns are expanded via modifier
+// variations to exceed 1000 total patterns.
+
+let CAUSAL_LIB_TAG = 540
+let CAUSAL_PAT_TAG = 545
+
+fn _causal_contains(haystack, needle) {
+    let hay_len = len(haystack)
+    let needle_len = len(needle)
+    if needle_len > hay_len {
+        return 0
+    }
+    if needle_len == 0 {
+        return 1
+    }
+    let limit = hay_len - needle_len
+    let pos = 0
+    while pos <= limit {
+        let chunk = substr(haystack, pos, needle_len)
+        if chunk == needle {
+            return 1
+        }
+        pos = pos + 1
+    }
+    return 0
+}
+
+fn causal_pattern_new(id, category, precondition, action, effect, strength) {
+    let pat = list_new()
+    push(pat, CAUSAL_PAT_TAG)
+    push(pat, id)
+    push(pat, category)
+    push(pat, precondition)
+    push(pat, action)
+    push(pat, effect)
+    push(pat, strength)
+    return pat
+}
+
+fn causal_lib_new() {
+    let lib = list_new()
+    push(lib, CAUSAL_LIB_TAG)
+    push(lib, list_new())
+    push(lib, 0)
+    let cats = list_new()
+    push(cats, "physical")
+    push(cats, "biological")
+    push(cats, "social")
+    push(cats, "computational")
+    push(cats, "causal")
+    push(cats, "domain")
+    push(lib, cats)
+    push(lib, 0)
+    return lib
+}
+
+fn _causal_add_seed(lib, category, precondition, action, effect, strength) {
+    let patterns = lib[1]
+    let count = lib[2]
+    let pat = causal_pattern_new(count, category, precondition, action, effect, strength)
+    push(patterns, pat)
+    lib[2] = count + 1
+    return pat
+}
+
+fn _causal_load_physical(lib) {
+    let kw = list_new()
+    push(kw, "drop")
+    push(kw, "gravity")
+    push(kw, "fall")
+    let p = _causal_add_seed(lib, "physical", "object dropped", "falls", "hits ground", 950)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "heat")
+    push(kw, "temperature")
+    push(kw, "expansion")
+    p = _causal_add_seed(lib, "physical", "heat applied", "temperature rises", "expansion", 900)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "force")
+    push(kw, "acceleration")
+    push(kw, "motion")
+    p = _causal_add_seed(lib, "physical", "force applied", "acceleration", "motion", 950)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "friction")
+    push(kw, "resistance")
+    push(kw, "slowdown")
+    p = _causal_add_seed(lib, "physical", "friction present", "kinetic resistance", "deceleration", 880)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "pressure")
+    push(kw, "compression")
+    push(kw, "volume")
+    p = _causal_add_seed(lib, "physical", "pressure increased", "compression", "volume decreases", 870)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "light")
+    push(kw, "reflection")
+    push(kw, "surface")
+    p = _causal_add_seed(lib, "physical", "light strikes surface", "reflection", "image formed", 920)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "current")
+    push(kw, "circuit")
+    push(kw, "electricity")
+    p = _causal_add_seed(lib, "physical", "circuit closed", "current flows", "energy delivered", 940)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "wave")
+    push(kw, "medium")
+    push(kw, "propagation")
+    p = _causal_add_seed(lib, "physical", "disturbance in medium", "wave propagation", "energy transfer", 890)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "collision")
+    push(kw, "momentum")
+    push(kw, "transfer")
+    p = _causal_add_seed(lib, "physical", "objects collide", "momentum exchange", "velocity change", 930)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "cooling")
+    push(kw, "solidification")
+    push(kw, "phase")
+    p = _causal_add_seed(lib, "physical", "temperature drops below freezing", "solidification", "phase change to solid", 910)
+    push(p, kw)
+}
+
+fn _causal_load_biological(lib) {
+    let kw = list_new()
+    push(kw, "pathogen")
+    push(kw, "immune")
+    push(kw, "antibody")
+    let p = _causal_add_seed(lib, "biological", "pathogen exposure", "immune response", "antibody production", 850)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "nutrient")
+    push(kw, "digestion")
+    push(kw, "energy")
+    p = _causal_add_seed(lib, "biological", "nutrient consumed", "digestion", "energy released", 900)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "stimulus")
+    push(kw, "nerve")
+    push(kw, "reflex")
+    p = _causal_add_seed(lib, "biological", "stimulus detected", "nerve signal", "reflex action", 880)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "cell")
+    push(kw, "division")
+    push(kw, "growth")
+    p = _causal_add_seed(lib, "biological", "growth signal received", "cell division", "tissue growth", 860)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "oxygen")
+    push(kw, "respiration")
+    push(kw, "atp")
+    p = _causal_add_seed(lib, "biological", "oxygen available", "cellular respiration", "atp produced", 920)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "mutation")
+    push(kw, "selection")
+    push(kw, "adaptation")
+    p = _causal_add_seed(lib, "biological", "mutation occurs", "natural selection", "adaptation", 700)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "hormone")
+    push(kw, "receptor")
+    push(kw, "regulation")
+    p = _causal_add_seed(lib, "biological", "hormone released", "receptor binding", "metabolic regulation", 840)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "dehydration")
+    push(kw, "thirst")
+    push(kw, "drinking")
+    p = _causal_add_seed(lib, "biological", "dehydration detected", "thirst response", "water seeking behavior", 890)
+    push(p, kw)
+}
+
+fn _causal_load_social(lib) {
+    let kw = list_new()
+    push(kw, "trust")
+    push(kw, "relationship")
+    push(kw, "cooperation")
+    let p = _causal_add_seed(lib, "social", "trust broken", "relationship damage", "reduced cooperation", 800)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "praise")
+    push(kw, "reinforcement")
+    push(kw, "behavior")
+    p = _causal_add_seed(lib, "social", "praise given", "positive reinforcement", "repeated behavior", 820)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "conflict")
+    push(kw, "negotiation")
+    push(kw, "resolution")
+    p = _causal_add_seed(lib, "social", "conflict arises", "negotiation", "compromise reached", 700)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "leadership")
+    push(kw, "direction")
+    push(kw, "coordination")
+    p = _causal_add_seed(lib, "social", "leader emerges", "group direction", "coordinated action", 750)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "norm")
+    push(kw, "violation")
+    push(kw, "sanction")
+    p = _causal_add_seed(lib, "social", "norm violated", "social sanction", "behavior correction", 770)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "reciprocity")
+    push(kw, "exchange")
+    push(kw, "bond")
+    p = _causal_add_seed(lib, "social", "favor granted", "reciprocity expectation", "social bond strengthened", 780)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "isolation")
+    push(kw, "loneliness")
+    push(kw, "wellbeing")
+    p = _causal_add_seed(lib, "social", "social isolation", "loneliness increases", "wellbeing declines", 810)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "communication")
+    push(kw, "understanding")
+    push(kw, "alignment")
+    p = _causal_add_seed(lib, "social", "clear communication", "shared understanding", "goal alignment", 830)
+    push(p, kw)
+}
+
+fn _causal_load_computational(lib) {
+    let kw = list_new()
+    push(kw, "input")
+    push(kw, "validation")
+    push(kw, "output")
+    let p = _causal_add_seed(lib, "computational", "input validated", "processing", "valid output", 900)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "buffer")
+    push(kw, "overflow")
+    push(kw, "crash")
+    p = _causal_add_seed(lib, "computational", "buffer overflow", "memory corruption", "crash", 850)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "cache")
+    push(kw, "hit")
+    push(kw, "speed")
+    p = _causal_add_seed(lib, "computational", "data cached", "cache hit", "faster retrieval", 880)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "deadlock")
+    push(kw, "resource")
+    push(kw, "hang")
+    p = _causal_add_seed(lib, "computational", "circular dependency", "deadlock", "system hang", 830)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "load")
+    push(kw, "scaling")
+    push(kw, "throughput")
+    p = _causal_add_seed(lib, "computational", "load increases", "auto scaling", "throughput maintained", 790)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "timeout")
+    push(kw, "retry")
+    push(kw, "recovery")
+    p = _causal_add_seed(lib, "computational", "request timeout", "retry logic", "eventual success", 760)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "encryption")
+    push(kw, "security")
+    push(kw, "protection")
+    p = _causal_add_seed(lib, "computational", "data encrypted", "secure transmission", "confidentiality maintained", 910)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "index")
+    push(kw, "query")
+    push(kw, "performance")
+    p = _causal_add_seed(lib, "computational", "index created", "query optimization", "performance improved", 870)
+    push(p, kw)
+}
+
+fn _causal_load_causal(lib) {
+    let kw = list_new()
+    push(kw, "joint")
+    push(kw, "combined")
+    push(kw, "conjunction")
+    let p = _causal_add_seed(lib, "causal", "condition A and condition B", "joint effect", "outcome C", 800)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "removal")
+    push(kw, "diminish")
+    push(kw, "baseline")
+    p = _causal_add_seed(lib, "causal", "cause removed", "effect diminishes", "baseline return", 850)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "chain")
+    push(kw, "propagation")
+    push(kw, "cascade")
+    p = _causal_add_seed(lib, "causal", "initial cause triggers", "chain reaction", "cascading effects", 780)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "feedback")
+    push(kw, "amplification")
+    push(kw, "loop")
+    p = _causal_add_seed(lib, "causal", "positive feedback loop", "effect amplifies cause", "exponential growth", 750)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "inhibition")
+    push(kw, "dampening")
+    push(kw, "stability")
+    p = _causal_add_seed(lib, "causal", "negative feedback loop", "effect dampens cause", "equilibrium reached", 820)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "threshold")
+    push(kw, "tipping")
+    push(kw, "transition")
+    p = _causal_add_seed(lib, "causal", "threshold exceeded", "tipping point reached", "phase transition", 770)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "delay")
+    push(kw, "lag")
+    push(kw, "latent")
+    p = _causal_add_seed(lib, "causal", "cause occurs with delay", "latent period", "delayed effect manifests", 730)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "common")
+    push(kw, "spurious")
+    push(kw, "correlation")
+    p = _causal_add_seed(lib, "causal", "common cause present", "spurious correlation observed", "no direct causal link", 690)
+    push(p, kw)
+}
+
+fn _causal_load_domain(lib) {
+    let kw = list_new()
+    push(kw, "medication")
+    push(kw, "absorption")
+    push(kw, "therapy")
+    let p = _causal_add_seed(lib, "domain", "medication administered", "absorption", "therapeutic effect", 840)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "code")
+    push(kw, "review")
+    push(kw, "quality")
+    p = _causal_add_seed(lib, "domain", "code reviewed", "bugs found", "quality improved", 860)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "training")
+    push(kw, "practice")
+    push(kw, "skill")
+    p = _causal_add_seed(lib, "domain", "training performed", "skill practice", "competence improved", 830)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "investment")
+    push(kw, "compound")
+    push(kw, "return")
+    p = _causal_add_seed(lib, "domain", "capital invested", "compound growth", "returns generated", 720)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "test")
+    push(kw, "diagnosis")
+    push(kw, "treatment")
+    p = _causal_add_seed(lib, "domain", "diagnostic test run", "condition identified", "targeted treatment", 810)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "maintenance")
+    push(kw, "inspection")
+    push(kw, "reliability")
+    p = _causal_add_seed(lib, "domain", "preventive maintenance", "wear detected early", "failure avoided", 850)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "education")
+    push(kw, "learning")
+    push(kw, "knowledge")
+    p = _causal_add_seed(lib, "domain", "education provided", "learning occurs", "knowledge acquired", 870)
+    push(p, kw)
+
+    kw = list_new()
+    push(kw, "policy")
+    push(kw, "enforcement")
+    push(kw, "compliance")
+    p = _causal_add_seed(lib, "domain", "policy enacted", "enforcement begins", "compliance increases", 740)
+    push(p, kw)
+}
+
+fn _causal_modifier_list() {
+    let mods = list_new()
+    push(mods, "rapidly")
+    push(mods, "slowly")
+    push(mods, "partially")
+    push(mods, "completely")
+    push(mods, "under_stress")
+    push(mods, "when_combined")
+    push(mods, "repeatedly")
+    push(mods, "intermittently")
+    push(mods, "at_scale")
+    push(mods, "with_delay")
+    push(mods, "in_isolation")
+    push(mods, "cascading")
+    push(mods, "reversible")
+    push(mods, "irreversible")
+    push(mods, "probabilistic")
+    push(mods, "threshold")
+    push(mods, "gradual")
+    push(mods, "sudden")
+    push(mods, "conditional")
+    return mods
+}
+
+fn _causal_strength_offset(mod_idx) {
+    if mod_idx == 0 {
+        return 50
+    }
+    if mod_idx == 1 {
+        return -50
+    }
+    if mod_idx == 2 {
+        return -80
+    }
+    if mod_idx == 3 {
+        return 70
+    }
+    if mod_idx == 4 {
+        return -60
+    }
+    if mod_idx == 5 {
+        return 30
+    }
+    if mod_idx == 6 {
+        return 40
+    }
+    if mod_idx == 7 {
+        return -70
+    }
+    if mod_idx == 8 {
+        return 60
+    }
+    if mod_idx == 9 {
+        return -90
+    }
+    if mod_idx == 10 {
+        return -40
+    }
+    if mod_idx == 11 {
+        return 80
+    }
+    if mod_idx == 12 {
+        return -30
+    }
+    if mod_idx == 13 {
+        return 90
+    }
+    if mod_idx == 14 {
+        return -100
+    }
+    if mod_idx == 15 {
+        return 50
+    }
+    if mod_idx == 16 {
+        return -50
+    }
+    if mod_idx == 17 {
+        return 70
+    }
+    if mod_idx == 18 {
+        return -60
+    }
+    return 0
+}
+
+fn _causal_generate_variations(lib) {
+    let old_patterns = lib[1]
+    let seed_count = lib[2]
+    let mods = _causal_modifier_list()
+    let mod_count = len(mods)
+    let total = seed_count + seed_count * mod_count
+    let all = list_new()
+    let i = 0
+    while i < total {
+        push(all, 0)
+        i = i + 1
+    }
+    let si = 0
+    while si < seed_count {
+        all[si] = old_patterns[si]
+        si = si + 1
+    }
+    let next_id = seed_count
+    si = 0
+    while si < seed_count {
+        let seed = old_patterns[si]
+        let seed_cat = seed[2]
+        let seed_pre = seed[3]
+        let seed_act = seed[4]
+        let seed_eff = seed[5]
+        let seed_str = seed[6]
+        let seed_kw = seed[7]
+        let mi = 0
+        while mi < mod_count {
+            let modifier = mods[mi]
+            let offset = _causal_strength_offset(mi)
+            let new_str = seed_str + offset
+            if new_str > 1000 {
+                new_str = 1000
+            }
+            if new_str < 0 {
+                new_str = 0
+            }
+            let var_pat = causal_pattern_new(next_id, seed_cat, seed_pre, seed_act, seed_eff, new_str)
+            push(var_pat, seed_kw)
+            all[next_id] = var_pat
+            next_id = next_id + 1
+            mi = mi + 1
+        }
+        si = si + 1
+    }
+    lib[1] = all
+    lib[2] = next_id
+}
+
+fn causal_lib_load(lib) {
+    if lib[4] == 1 {
+        return lib
+    }
+    _causal_load_physical(lib)
+    _causal_load_biological(lib)
+    _causal_load_social(lib)
+    _causal_load_computational(lib)
+    _causal_load_causal(lib)
+    _causal_load_domain(lib)
+    _causal_generate_variations(lib)
+    lib[4] = 1
+    return lib
+}
+
+fn causal_lib_count(lib) {
+    return lib[2]
+}
+
+fn causal_lib_get(lib, pattern_id) {
+    let patterns = lib[1]
+    let count = lib[2]
+    let i = 0
+    while i < count {
+        let pat = patterns[i]
+        if pat[1] == pattern_id {
+            return pat
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn causal_lib_search(lib, keyword) {
+    let patterns = lib[1]
+    let count = lib[2]
+    let results = list_new()
+    let i = 0
+    while i < count {
+        let pat = patterns[i]
+        let kws = pat[7]
+        let kw_count = len(kws)
+        let ki = 0
+        let found = 0
+        while ki < kw_count {
+            if kws[ki] == keyword {
+                found = 1
+                ki = kw_count
+            }
+            ki = ki + 1
+        }
+        if found == 1 {
+            push(results, pat[1])
+        }
+        i = i + 1
+    }
+    return results
+}
+
+fn causal_lib_search_category(lib, category) {
+    let patterns = lib[1]
+    let count = lib[2]
+    let results = list_new()
+    let i = 0
+    while i < count {
+        let pat = patterns[i]
+        if pat[2] == category {
+            push(results, pat[1])
+        }
+        i = i + 1
+    }
+    return results
+}
+
+fn causal_lib_apply(lib, pattern_id, entity, context) {
+    let pat = causal_lib_get(lib, pattern_id)
+    if pat == 0 {
+        let r = list_new()
+        push(r, "unknown")
+        push(r, 0)
+        push(r, 0)
+        return r
+    }
+    let precondition = pat[3]
+    let effect = pat[5]
+    let strength = pat[6]
+    let applicable = _causal_contains(context, precondition)
+    let effect_str = concat(entity, concat(": ", effect))
+    let result = list_new()
+    push(result, effect_str)
+    push(result, strength)
+    push(result, applicable)
+    return result
+}
+
+fn causal_lib_categories(lib) {
+    return lib[3]
+}
+
+fn causal_lib_describe(lib) {
+    let cats = lib[3]
+    let cat_count = len(cats)
+    let patterns = lib[1]
+    let total = lib[2]
+    println("CausalLibrary Summary")
+    print("  total patterns: ")
+    print_int(total)
+    println("")
+    let ci = 0
+    while ci < cat_count {
+        let cat_name = cats[ci]
+        let cat_total = 0
+        let pi = 0
+        while pi < total {
+            let pat = patterns[pi]
+            if pat[2] == cat_name {
+                cat_total = cat_total + 1
+            }
+            pi = pi + 1
+        }
+        print("  ")
+        print(cat_name)
+        print(": ")
+        print_int(cat_total)
+        println("")
+        ci = ci + 1
+    }
+}

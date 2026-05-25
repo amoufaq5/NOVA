@@ -1,0 +1,328 @@
+// Nova Tooling: Time-Travel Debugger (N22)
+// Step backward through moment stream, inspect snapshots, replay with modifications.
+// Layout: [TM_TAG, capacity, tick_ids, snapshots, trajectory_count, trajectories, active]
+
+let TM_TAG = 510
+let TM_IDX_TAG = 0
+let TM_IDX_CAPACITY = 1
+let TM_IDX_TICK_IDS = 2
+let TM_IDX_SNAPSHOTS = 3
+let TM_IDX_TRAJ_COUNT = 4
+let TM_IDX_TRAJECTORIES = 5
+let TM_IDX_ACTIVE = 6
+
+fn tm_new(capacity) {
+    let tm = list_new()
+    push(tm, TM_TAG)
+    push(tm, capacity)
+    push(tm, list_new())
+    push(tm, list_new())
+    push(tm, 0)
+    push(tm, list_new())
+    push(tm, 1)
+    return tm
+}
+
+fn tm_record_tick(tm, tick_id, snapshot) {
+    if tm[TM_IDX_ACTIVE] == 0 {
+        return 0
+    }
+    let tick_ids = tm[TM_IDX_TICK_IDS]
+    let snapshots = tm[TM_IDX_SNAPSHOTS]
+    let capacity = tm[TM_IDX_CAPACITY]
+    let count = len(tick_ids)
+    if count >= capacity {
+        list_remove(tick_ids, 0)
+        list_remove(snapshots, 0)
+    }
+    push(tick_ids, tick_id)
+    push(snapshots, snapshot)
+    return 1
+}
+
+fn tm_tick_count(tm) {
+    return len(tm[TM_IDX_TICK_IDS])
+}
+
+fn tm_rewind_to(tm, tick_id) {
+    let tick_ids = tm[TM_IDX_TICK_IDS]
+    let snapshots = tm[TM_IDX_SNAPSHOTS]
+    let count = len(tick_ids)
+    let i = 0
+    while i < count {
+        if tick_ids[i] == tick_id {
+            return snapshots[i]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn tm_get_tick_range(tm) {
+    let tick_ids = tm[TM_IDX_TICK_IDS]
+    let count = len(tick_ids)
+    let result = list_new()
+    if count == 0 {
+        push(result, 0)
+        push(result, 0)
+        return result
+    }
+    push(result, tick_ids[0])
+    push(result, tick_ids[count - 1])
+    return result
+}
+
+fn _tm_copy_snapshot(snapshot) {
+    let copy = list_new()
+    let count = len(snapshot)
+    let i = 0
+    while i < count {
+        let pair = snapshot[i]
+        let new_pair = list_new()
+        push(new_pair, pair[0])
+        push(new_pair, pair[1])
+        push(copy, new_pair)
+        i = i + 1
+    }
+    return copy
+}
+
+fn _tm_apply_modifications(snapshot, mod_tick, modifications) {
+    let m = 0
+    while m < len(modifications) {
+        let mod_entry = modifications[m]
+        let mt = mod_entry[0]
+        let mod_node_id = mod_entry[1]
+        let new_activation = mod_entry[2]
+        if mt == mod_tick {
+            let s = 0
+            let found = 0
+            while s < len(snapshot) {
+                let pair = snapshot[s]
+                if pair[0] == mod_node_id {
+                    pair[1] = new_activation
+                    found = 1
+                }
+                s = s + 1
+            }
+            if found == 0 {
+                let new_pair = list_new()
+                push(new_pair, mod_node_id)
+                push(new_pair, new_activation)
+                push(snapshot, new_pair)
+            }
+        }
+        m = m + 1
+    }
+}
+
+fn tm_replay_from(tm, tick_id, modifications) {
+    let tick_ids = tm[TM_IDX_TICK_IDS]
+    let snapshots = tm[TM_IDX_SNAPSHOTS]
+    let count = len(tick_ids)
+    let start_idx = -1
+    let i = 0
+    while i < count {
+        if tick_ids[i] == tick_id {
+            start_idx = i
+            i = count
+        }
+        i = i + 1
+    }
+    if start_idx == -1 {
+        return list_new()
+    }
+    let trajectory = list_new()
+    let t = start_idx
+    while t < count {
+        let current_tick = tick_ids[t]
+        let snap_copy = _tm_copy_snapshot(snapshots[t])
+        _tm_apply_modifications(snap_copy, current_tick, modifications)
+        push(trajectory, snap_copy)
+        t = t + 1
+    }
+    return trajectory
+}
+
+fn tm_compare_trajectories(tm, traj_a, traj_b) {
+    let len_a = len(traj_a)
+    let len_b = len(traj_b)
+    let min_len = len_a
+    if len_b < min_len {
+        min_len = len_b
+    }
+    let result = list_new()
+    let tick_idx = 0
+    while tick_idx < min_len {
+        let snap_a = traj_a[tick_idx]
+        let snap_b = traj_b[tick_idx]
+        let divergence = 0
+        let node_ids_a = list_new()
+        let activations_a = list_new()
+        let na = len(snap_a)
+        let ia = 0
+        while ia < na {
+            let pair_a = snap_a[ia]
+            push(node_ids_a, pair_a[0])
+            push(activations_a, pair_a[1])
+            ia = ia + 1
+        }
+        let node_ids_b = list_new()
+        let activations_b = list_new()
+        let nb = len(snap_b)
+        let ib = 0
+        while ib < nb {
+            let pair_b = snap_b[ib]
+            push(node_ids_b, pair_b[0])
+            push(activations_b, pair_b[1])
+            ib = ib + 1
+        }
+        let all_node_ids = list_new()
+        let ja = 0
+        while ja < len(node_ids_a) {
+            let nid = node_ids_a[ja]
+            let already = 0
+            let check = 0
+            while check < len(all_node_ids) {
+                if all_node_ids[check] == nid {
+                    already = 1
+                }
+                check = check + 1
+            }
+            if already == 0 {
+                push(all_node_ids, nid)
+            }
+            ja = ja + 1
+        }
+        let jb = 0
+        while jb < len(node_ids_b) {
+            let nid = node_ids_b[jb]
+            let already = 0
+            let check = 0
+            while check < len(all_node_ids) {
+                if all_node_ids[check] == nid {
+                    already = 1
+                }
+                check = check + 1
+            }
+            if already == 0 {
+                push(all_node_ids, nid)
+            }
+            jb = jb + 1
+        }
+        let ni = 0
+        while ni < len(all_node_ids) {
+            let nid = all_node_ids[ni]
+            let val_a = 0
+            let fa = 0
+            while fa < len(node_ids_a) {
+                if node_ids_a[fa] == nid {
+                    val_a = activations_a[fa]
+                }
+                fa = fa + 1
+            }
+            let val_b = 0
+            let fb = 0
+            while fb < len(node_ids_b) {
+                if node_ids_b[fb] == nid {
+                    val_b = activations_b[fb]
+                }
+                fb = fb + 1
+            }
+            let diff = val_a - val_b
+            if diff < 0 {
+                diff = 0 - diff
+            }
+            divergence = divergence + diff
+            ni = ni + 1
+        }
+        let entry = list_new()
+        push(entry, tick_idx)
+        push(entry, divergence)
+        push(result, entry)
+        tick_idx = tick_idx + 1
+    }
+    return result
+}
+
+fn tm_save_trajectory(tm, trajectory) {
+    let traj_id = tm[TM_IDX_TRAJ_COUNT]
+    let traj_obj = list_new()
+    push(traj_obj, traj_id)
+    push(traj_obj, 0)
+    push(traj_obj, trajectory)
+    let trajectories = tm[TM_IDX_TRAJECTORIES]
+    push(trajectories, traj_obj)
+    tm[TM_IDX_TRAJ_COUNT] = traj_id + 1
+    return traj_id
+}
+
+fn tm_get_trajectory(tm, traj_id) {
+    let trajectories = tm[TM_IDX_TRAJECTORIES]
+    let count = len(trajectories)
+    let i = 0
+    while i < count {
+        let traj = trajectories[i]
+        if traj[0] == traj_id {
+            return traj[2]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn tm_snapshot_at(tm, tick_id, node_id) {
+    let snapshot = tm_rewind_to(tm, tick_id)
+    if snapshot == 0 {
+        return -1
+    }
+    let count = len(snapshot)
+    let i = 0
+    while i < count {
+        let pair = snapshot[i]
+        if pair[0] == node_id {
+            return pair[1]
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn tm_pause(tm) {
+    tm[TM_IDX_ACTIVE] = 0
+}
+
+fn tm_resume(tm) {
+    tm[TM_IDX_ACTIVE] = 1
+}
+
+fn tm_clear(tm) {
+    tm[TM_IDX_TICK_IDS] = list_new()
+    tm[TM_IDX_SNAPSHOTS] = list_new()
+    tm[TM_IDX_TRAJ_COUNT] = 0
+    tm[TM_IDX_TRAJECTORIES] = list_new()
+}
+
+fn tm_describe(tm) {
+    let count = tm_tick_count(tm)
+    let capacity = tm[TM_IDX_CAPACITY]
+    let active = tm[TM_IDX_ACTIVE]
+    let traj_count = tm[TM_IDX_TRAJ_COUNT]
+    print("TimeMachine(ticks=")
+    print_int(count)
+    print("/")
+    print_int(capacity)
+    print(", trajectories=")
+    print_int(traj_count)
+    print(", active=")
+    print_int(active)
+    if count > 0 {
+        let tick_range = tm_get_tick_range(tm)
+        print(", range=[")
+        print_int(tick_range[0])
+        print("..")
+        print_int(tick_range[1])
+        print("]")
+    }
+    println(")")
+}

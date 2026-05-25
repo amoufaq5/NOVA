@@ -1,0 +1,109 @@
+// Nova Audio Processing Demo
+// Demonstrates audio signal analysis and feature extraction.
+
+fn main() {
+    println("=== Nova Audio Processing Demo ===")
+    println("")
+
+    // Create audio buffer at 16000 Hz sample rate
+    let rate = 16000
+    let audio = audio_new(rate)
+
+    // Generate a simple sine-like waveform (simulated samples)
+    println("--- Generating Audio ---")
+    let samples = list_new()
+    let i = 0
+    while i < 160 {
+        // Approximate a 100Hz tone at 16kHz sample rate
+        let val = (i * 7) % 100 - 50
+        push(samples, val)
+        i = i + 1
+    }
+    audio_append_samples(audio, samples)
+    print("Sample count: ")
+    print_int(audio_sample_count(audio))
+    println("")
+
+    // Read back a few samples
+    print("First 5 samples: ")
+    let j = 0
+    while j < 5 {
+        print_int(audio_get_sample(audio, j))
+        print(" ")
+        j = j + 1
+    }
+    println("")
+    println("")
+
+    // Energy measurement
+    println("--- Energy ---")
+    let energy = audio_energy(audio)
+    print("Signal energy: ")
+    print_int(energy)
+    println("")
+    println("")
+
+    // Normalize the signal
+    println("--- Normalization ---")
+    let normed = audio_normalize(audio)
+    let e_before = audio_energy(audio)
+    let e_after = audio_energy(normed)
+    print("Energy before: ")
+    print_int(e_before)
+    println("")
+    print("Energy after:  ")
+    print_int(e_after)
+    println(" (normalized)")
+    println("")
+
+    // STFT analysis
+    println("--- STFT Analysis ---")
+    let frame_size = 32
+    let hop_size = 16
+    let stft = audio_stft(audio, frame_size, hop_size)
+    print("STFT frames: ")
+    print_int(len(stft))
+    println("")
+
+    // Magnitude spectrum of first frame
+    let mag = audio_magnitude_spectrum(stft[0])
+    print("Frame 0 spectrum bins: ")
+    print_int(len(mag))
+    println("")
+    println("")
+
+    // Voice activity detection
+    println("--- Voice Activity Detection ---")
+    let vad = audio_voice_activity(audio, frame_size, 50)
+    print("VAD frames: ")
+    print_int(len(vad))
+    println("")
+    let active = 0
+    let k = 0
+    while k < len(vad) {
+        if vad[k] == 1 {
+            active = active + 1
+        }
+        k = k + 1
+    }
+    print("Active frames: ")
+    print_int(active)
+    print(" of ")
+    print_int(len(vad))
+    println("")
+
+    // Build audio from raw samples
+    println("")
+    println("--- From Samples ---")
+    let raw = [10, 20, 30, 40, 50]
+    let clip = audio_from_samples(raw, 8000)
+    print("Clip samples: ")
+    print_int(audio_sample_count(clip))
+    print(", rate=8000")
+    println("")
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

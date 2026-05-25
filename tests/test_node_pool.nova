@@ -1,0 +1,67 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Node Pool Tests ===")
+
+    let p = pool_new(10, 4)
+    assert_test(pool_capacity(p) == 10, "capacity = 10")
+    assert_test(pool_used(p) == 0, "used = 0 initially")
+    assert_test(pool_available(p) == 10, "available = 10 initially")
+
+    let id0 = pool_claim(p)
+    assert_test(id0 >= 0, "claim returns valid id")
+    assert_test(pool_used(p) == 1, "used = 1 after claim")
+    assert_test(pool_is_used(p, id0) == 1, "claimed slot is used")
+
+    let data = list_new()
+    push(data, 42)
+    push(data, 99)
+    push(data, 7)
+    pool_set(p, id0, data)
+    let vals = pool_get_values(p, id0, 3)
+    assert_test(vals[0] == 42, "stored value 0 = 42")
+    assert_test(vals[1] == 99, "stored value 1 = 99")
+    assert_test(vals[2] == 7, "stored value 2 = 7")
+
+    let id1 = pool_claim(p)
+    let id2 = pool_claim(p)
+    assert_test(pool_used(p) == 3, "used = 3 after 3 claims")
+
+    pool_release(p, id1)
+    assert_test(pool_used(p) == 2, "used = 2 after release")
+    assert_test(pool_is_used(p, id1) == 0, "released slot is free")
+
+    let id3 = pool_claim(p)
+    assert_test(id3 == id1, "reclaimed slot matches released id")
+
+    let ci = 0
+    while ci < 7 {
+        pool_claim(p)
+        ci = ci + 1
+    }
+    assert_test(pool_used(p) == 10, "all 10 slots claimed")
+    assert_test(pool_available(p) == 0, "0 available")
+    let exhausted = pool_claim(p)
+    assert_test(exhausted == -1, "exhausted pool returns -1")
+
+    pool_clear(p)
+    assert_test(pool_used(p) == 0, "clear resets used to 0")
+    assert_test(pool_available(p) == 10, "clear restores availability")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

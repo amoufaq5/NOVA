@@ -1,0 +1,61 @@
+// Nova Hopfield Associative Memory Demo
+// Demonstrates pattern storage and recall with energy-based retrieval.
+
+fn main() {
+    println("=== Nova Associative Memory Demo ===")
+    println("")
+
+    // Create a Hopfield network with capacity 8, dimension 4
+    let net = associative_new(8, 4)
+
+    // Store binary-style patterns as lists
+    let patA = [1, 0, 1, 0]
+    let patB = [0, 1, 0, 1]
+    let patC = [1, 1, 0, 0]
+
+    associative_store(net, patA)
+    associative_store(net, patB)
+    associative_store(net, patC)
+    println("Stored 3 patterns in Hopfield network")
+    println("")
+
+    // Recall from a noisy/partial version of pattern A
+    println("--- Pattern Recall ---")
+    let partial = [1, 0, 0, 0]
+    print("Partial input:   ")
+    println(list_to_str(partial))
+    let recalled = associative_recall(net, partial)
+    print("Recalled pattern: ")
+    println(list_to_str(recalled))
+    println("")
+
+    // Compute energy for each stored pattern
+    println("--- Energy Landscape ---")
+    let eA = associative_energy(net, patA)
+    print("Energy of pattern A: ")
+    print_int(eA)
+    println("")
+    let eB = associative_energy(net, patB)
+    print("Energy of pattern B: ")
+    print_int(eB)
+    println("")
+    let eC = associative_energy(net, patC)
+    print("Energy of pattern C: ")
+    print_int(eC)
+    println("")
+    println("")
+
+    // Find nearest stored pattern to a query
+    println("--- Nearest Lookup ---")
+    let query = [0, 1, 1, 1]
+    print("Query:   ")
+    println(list_to_str(query))
+    let nearest = associative_nearest(net, query)
+    print("Nearest: ")
+    println(list_to_str(nearest))
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

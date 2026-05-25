@@ -1,0 +1,251 @@
+// N19 Resonance Kernel: similarity-based node response computation.
+// Computes how strongly a node responds to incoming signals based on
+// learned preference vectors. Uses fixed-point scale-1000 arithmetic.
+
+let RESONANCE_TAG = 470
+let RESONANCE_SIGNAL_TYPE_COUNT = 1
+let RESONANCE_PATTERN_DIM = 2
+let RESONANCE_PREFERENCES = 3
+let RESONANCE_WEIGHTS = 4
+let RESONANCE_ACTIVATION_FN = 5
+let RESONANCE_HISTORY_COUNT = 6
+let RESONANCE_HISTORY_ACTIVATIONS = 7
+
+fn resonance_new(signal_type_count, pattern_dim) {
+    let kernel = list_new()
+    push(kernel, RESONANCE_TAG)
+    push(kernel, signal_type_count)
+    push(kernel, pattern_dim)
+    let preferences = list_new()
+    let s = 0
+    while s < signal_type_count {
+        let pref = list_new()
+        let d = 0
+        while d < pattern_dim {
+            push(pref, 0)
+            d = d + 1
+        }
+        push(preferences, pref)
+        s = s + 1
+    }
+    push(kernel, preferences)
+    let weights = list_new()
+    let uniform_w = 1000 / signal_type_count
+    s = 0
+    while s < signal_type_count {
+        push(weights, uniform_w)
+        s = s + 1
+    }
+    push(kernel, weights)
+    push(kernel, 0)
+    push(kernel, 0)
+    push(kernel, list_new())
+    return kernel
+}
+
+fn resonance_set_preference(kernel, signal_type, preference_vector) {
+    let preferences = kernel[RESONANCE_PREFERENCES]
+    preferences[signal_type] = preference_vector
+}
+
+fn resonance_set_weight(kernel, signal_type, weight) {
+    let weights = kernel[RESONANCE_WEIGHTS]
+    weights[signal_type] = weight
+}
+
+fn resonance_set_activation(kernel, activation_fn) {
+    kernel[RESONANCE_ACTIVATION_FN] = activation_fn
+}
+
+fn _resonance_dot_product(a, b, dim) {
+    let sum = 0
+    let i = 0
+    while i < dim {
+        let prod = int_mul(a[i], b[i])
+        sum = int_add(sum, int_div(prod, 1000))
+        i = i + 1
+    }
+    return sum
+}
+
+fn _resonance_apply_activation(activation_fn, x) {
+    if activation_fn == 0 {
+        if x > 6000 {
+            return 1000
+        }
+        if x < -6000 {
+            return 0
+        }
+        return int_add(500, int_div(int_mul(x, 250), 1000))
+    }
+    if activation_fn == 1 {
+        if x > 0 {
+            return x
+        }
+        return 0
+    }
+    if x < 0 {
+        return 0
+    }
+    if x > 1000 {
+        return 1000
+    }
+    return x
+}
+
+fn resonance_compute(kernel, incoming_signals) {
+    let signal_type_count = kernel[RESONANCE_SIGNAL_TYPE_COUNT]
+    let pattern_dim = kernel[RESONANCE_PATTERN_DIM]
+    let preferences = kernel[RESONANCE_PREFERENCES]
+    let weights = kernel[RESONANCE_WEIGHTS]
+    let activation_fn = kernel[RESONANCE_ACTIVATION_FN]
+    let total = 0
+    let num_signals = len(incoming_signals)
+    let si = 0
+    while si < num_signals {
+        let signal = incoming_signals[si]
+        let sig_type = signal[0]
+        let magnitude = signal[1]
+        let source_pattern = signal[2]
+        let pref = preferences[sig_type]
+        let dot = _resonance_dot_product(pref, source_pattern, pattern_dim)
+        let weighted = int_div(int_mul(dot, magnitude), 1000)
+        let w = weights[sig_type]
+        weighted = int_div(int_mul(weighted, w), 1000)
+        total = int_add(total, weighted)
+        si = si + 1
+    }
+    let activation = _resonance_apply_activation(activation_fn, total)
+    let history = kernel[RESONANCE_HISTORY_ACTIVATIONS]
+    push(history, activation)
+    kernel[RESONANCE_HISTORY_COUNT] = kernel[RESONANCE_HISTORY_COUNT] + 1
+    return activation
+}
+
+fn resonance_update_preference(kernel, signal_type, observed_pattern, learning_rate) {
+    let pattern_dim = kernel[RESONANCE_PATTERN_DIM]
+    let preferences = kernel[RESONANCE_PREFERENCES]
+    let pref = preferences[signal_type]
+    let i = 0
+    while i < pattern_dim {
+        let diff = int_sub(observed_pattern[i], pref[i])
+        let delta = int_div(int_mul(learning_rate, diff), 1000)
+        pref[i] = pref[i] + delta
+        i = i + 1
+    }
+}
+
+fn _resonance_isqrt(x) {
+    if x <= 0 {
+        return 0
+    }
+    if x == 1 {
+        return 1
+    }
+    let guess = int_div(x, 2)
+    if guess == 0 {
+        guess = 1
+    }
+    let iter = 0
+    while iter < 10 {
+        let div = int_div(x, guess)
+        guess = int_div(int_add(guess, div), 2)
+        iter = iter + 1
+    }
+    return guess
+}
+
+fn resonance_similarity(kernel, signal_type, pattern) {
+    let pattern_dim = kernel[RESONANCE_PATTERN_DIM]
+    let preferences = kernel[RESONANCE_PREFERENCES]
+    let pref = preferences[signal_type]
+    let dot = 0
+    let norm_a = 0
+    let norm_b = 0
+    let i = 0
+    while i < pattern_dim {
+        dot = int_add(dot, int_mul(pref[i], pattern[i]))
+        norm_a = int_add(norm_a, int_mul(pref[i], pref[i]))
+        norm_b = int_add(norm_b, int_mul(pattern[i], pattern[i]))
+        i = i + 1
+    }
+    if norm_a == 0 {
+        return 0
+    }
+    if norm_b == 0 {
+        return 0
+    }
+    let product = int_mul(int_div(norm_a, 1000), int_div(norm_b, 1000))
+    let denom = _resonance_isqrt(product)
+    if denom == 0 {
+        return 0
+    }
+    let similarity = int_div(int_mul(int_div(dot, 1000), 1000), denom)
+    return similarity
+}
+
+fn resonance_reset(kernel) {
+    let signal_type_count = kernel[RESONANCE_SIGNAL_TYPE_COUNT]
+    let pattern_dim = kernel[RESONANCE_PATTERN_DIM]
+    let preferences = kernel[RESONANCE_PREFERENCES]
+    let s = 0
+    while s < signal_type_count {
+        let pref = preferences[s]
+        let d = 0
+        while d < pattern_dim {
+            pref[d] = 0
+            d = d + 1
+        }
+        s = s + 1
+    }
+}
+
+fn resonance_history(kernel) {
+    return kernel[RESONANCE_HISTORY_ACTIVATIONS]
+}
+
+fn resonance_describe(kernel) {
+    let signal_type_count = kernel[RESONANCE_SIGNAL_TYPE_COUNT]
+    let pattern_dim = kernel[RESONANCE_PATTERN_DIM]
+    let preferences = kernel[RESONANCE_PREFERENCES]
+    let weights = kernel[RESONANCE_WEIGHTS]
+    let activation_fn = kernel[RESONANCE_ACTIVATION_FN]
+    let history_count = kernel[RESONANCE_HISTORY_COUNT]
+    print("Resonance Kernel (")
+    print_int(signal_type_count)
+    print(" signal types, dim=")
+    print_int(pattern_dim)
+    println(")")
+    print("  activation: ")
+    if activation_fn == 0 {
+        println("sigmoid")
+    } else {
+        if activation_fn == 1 {
+            println("relu")
+        } else {
+            println("linear")
+        }
+    }
+    let s = 0
+    while s < signal_type_count {
+        print("  signal_type ")
+        print_int(s)
+        print(": weight=")
+        print_int(weights[s])
+        print(" pref=[")
+        let pref = preferences[s]
+        let d = 0
+        while d < pattern_dim {
+            if d > 0 {
+                print(",")
+            }
+            print_int(pref[d])
+            d = d + 1
+        }
+        println("]")
+        s = s + 1
+    }
+    print("  history_count: ")
+    print_int(history_count)
+    println("")
+}

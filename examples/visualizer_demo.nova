@@ -1,0 +1,84 @@
+// Signal-Flow Visualizer Demo (N21)
+// Logs signal flow through nodes and exports to HTML visualization.
+
+fn main() {
+    println("=== Signal-Flow Visualizer Demo ===")
+    println("")
+
+    let v = viz_new()
+
+    // Register nodes with positions
+    viz_register_node(v, "Sense", "Sense", 100, 300)
+    viz_register_node(v, "Think", "Think", 400, 150)
+    viz_register_node(v, "Feel", "Feel", 400, 450)
+    viz_register_node(v, "Act", "Act", 700, 300)
+
+    // Register synapses (connections)
+    viz_register_synapse(v, "Sense", "Think")
+    viz_register_synapse(v, "Sense", "Feel")
+    viz_register_synapse(v, "Think", "Act")
+    viz_register_synapse(v, "Feel", "Think")
+
+    print("Nodes: ")
+    print_int(viz_node_count(v))
+    println("")
+    viz_describe(v)
+    println("")
+
+    // Log signal flow events (type, from, to, magnitude)
+    println("--- Logging Signals ---")
+    viz_log_signal(v, 1, "Sense", "Think", 800)
+    viz_log_signal(v, 1, "Sense", "Feel", 600)
+    viz_log_signal(v, 2, "Feel", "Think", 400)
+    viz_log_signal(v, 1, "Think", "Act", 900)
+    viz_log_signal(v, 1, "Sense", "Think", 750)
+    viz_log_signal(v, 1, "Think", "Act", 850)
+
+    // Log node activations
+    viz_log_activation(v, "Think", 700)
+    viz_log_activation(v, "Act", 950)
+
+    print("Total events: ")
+    print_int(viz_event_count(v))
+    println("")
+    println("")
+
+    // Find hottest nodes (most active)
+    println("--- Hottest Nodes ---")
+    let hot = viz_hottest_nodes(v, 3)
+    let i = 0
+    while i < len(hot) {
+        let pair = hot[i]
+        print("  ")
+        print(pair[0])
+        print(": ")
+        print_int(pair[1])
+        println(" events")
+        i = i + 1
+    }
+    println("")
+
+    // Measure flow between specific nodes
+    println("--- Flow Counts ---")
+    print("Sense -> Think: ")
+    print_int(viz_flow_between(v, "Sense", "Think"))
+    println("")
+    print("Think -> Act: ")
+    print_int(viz_flow_between(v, "Think", "Act"))
+    println("")
+    print("Feel -> Think: ")
+    print_int(viz_flow_between(v, "Feel", "Think"))
+    println("")
+    println("")
+
+    // Export HTML visualization
+    viz_export_html(v, "/tmp/nova_viz_demo.html")
+    println("Exported to /tmp/nova_viz_demo.html")
+    println("")
+
+    viz_describe(v)
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

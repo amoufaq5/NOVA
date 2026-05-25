@@ -1,0 +1,84 @@
+// Nova Federation / Insight Sharing Demo (N29)
+// Demonstrates multi-node federation with trust, subscriptions, and insight exchange.
+
+fn main() {
+    println("=== Nova Federation Demo ===")
+    println("")
+
+    let peers = ["node_B", "node_C"]
+    let node_a = fed_node_new("node_A", peers)
+
+    let peers_b = ["node_A", "node_C"]
+    let node_b = fed_node_new("node_B", peers_b)
+
+    println("--- Node Setup ---")
+    println(fed_describe(node_a))
+    println(fed_describe(node_b))
+    println("")
+
+    println("--- Trust Configuration ---")
+    fed_set_trust(node_a, "node_B", 85)
+    fed_set_trust(node_a, "node_C", 60)
+    print("Trust node_A -> node_B: ")
+    print_int(fed_get_trust(node_a, "node_B"))
+    println("")
+    print("Trust node_A -> node_C: ")
+    print_int(fed_get_trust(node_a, "node_C"))
+    println("")
+    println("")
+
+    println("--- Subscriptions ---")
+    fed_subscribe(node_a, "reasoning")
+    fed_subscribe(node_a, "perception")
+    fed_subscribe(node_b, "reasoning")
+    println("node_A subscribed to: reasoning, perception")
+    println("node_B subscribed to: reasoning")
+    println("")
+
+    println("--- Insight Exchange ---")
+    let insight1 = fed_extract_insight(node_a, "reasoning", "pattern_detected", 90)
+    print("Extracted insight: ")
+    println(insight1)
+
+    fed_publish_insight(node_a, insight1)
+    print("node_A outbox: ")
+    print_int(fed_outbox_count(node_a))
+    println(" insights")
+
+    let valid = fed_validate_insight(node_b, insight1)
+    print("node_B validates insight: ")
+    print_int(valid)
+    println("")
+
+    fed_receive_insight(node_b, insight1)
+    print("node_B inbox: ")
+    print_int(fed_inbox_count(node_b))
+    println(" insights")
+    println("")
+
+    let insight2 = fed_extract_insight(node_b, "perception", "anomaly_found", 70)
+    fed_publish_insight(node_b, insight2)
+    fed_receive_insight(node_a, insight2)
+
+    println("--- Final State ---")
+    print("node_A inbox: ")
+    print_int(fed_inbox_count(node_a))
+    print("  outbox: ")
+    print_int(fed_outbox_count(node_a))
+    println("")
+    print("node_B inbox: ")
+    print_int(fed_inbox_count(node_b))
+    print("  outbox: ")
+    print_int(fed_outbox_count(node_b))
+    println("")
+    println("")
+
+    println("--- Node Descriptions ---")
+    println(fed_describe(node_a))
+    println(fed_describe(node_b))
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

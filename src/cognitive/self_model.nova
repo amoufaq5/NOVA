@@ -1,0 +1,306 @@
+// N28 Self-Model Query API: native introspection primitive that reads identity, state, and goals.
+// Provides a "describe yourself" capability without depending on soul.nova at import time.
+// Takes a soul handle as a parameter and reads OCEAN values directly from the list structure.
+
+let SM_TAG = 570
+let SM_SOUL_HANDLE = 1
+let SM_CURRENT_EMOTION = 2
+let SM_CURRENT_FOCUS = 3
+let SM_CURRENT_CONFIDENCE = 4
+let SM_ACTIVE_GOALS = 5
+let SM_HISTORY_CAPACITY = 6
+let SM_HISTORY_EMOTIONS = 7
+let SM_HISTORY_FOCUSES = 8
+let SM_HISTORY_CONFIDENCES = 9
+let SM_HISTORY_TIMESTAMPS = 10
+let SM_HISTORY_COUNT = 11
+
+fn sm_new(soul_handle, history_capacity) {
+    let sm = list_new()
+    push(sm, SM_TAG)
+    push(sm, soul_handle)
+    push(sm, "neutral")
+    push(sm, "idle")
+    push(sm, 500)
+    push(sm, list_new())
+    push(sm, history_capacity)
+    let h_emotions = list_new()
+    let h_focuses = list_new()
+    let h_confidences = list_new()
+    let h_timestamps = list_new()
+    let i = 0
+    while i < history_capacity {
+        push(h_emotions, "")
+        push(h_focuses, "")
+        push(h_confidences, 0)
+        push(h_timestamps, 0)
+        i = i + 1
+    }
+    push(sm, h_emotions)
+    push(sm, h_focuses)
+    push(sm, h_confidences)
+    push(sm, h_timestamps)
+    push(sm, 0)
+    return sm
+}
+
+fn sm_update_state(sm, emotion, focus, confidence) {
+    sm[SM_CURRENT_EMOTION] = emotion
+    sm[SM_CURRENT_FOCUS] = focus
+    if confidence < 0 {
+        confidence = 0
+    }
+    if confidence > 1000 {
+        confidence = 1000
+    }
+    sm[SM_CURRENT_CONFIDENCE] = confidence
+    let cap = sm[SM_HISTORY_CAPACITY]
+    if cap > 0 {
+        let count = sm[SM_HISTORY_COUNT]
+        let idx = int_mod(count, cap)
+        let h_emotions = sm[SM_HISTORY_EMOTIONS]
+        let h_focuses = sm[SM_HISTORY_FOCUSES]
+        let h_confidences = sm[SM_HISTORY_CONFIDENCES]
+        let h_timestamps = sm[SM_HISTORY_TIMESTAMPS]
+        list_set(h_emotions, idx, emotion)
+        list_set(h_focuses, idx, focus)
+        list_set(h_confidences, idx, confidence)
+        list_set(h_timestamps, idx, count)
+        sm[SM_HISTORY_COUNT] = count + 1
+    }
+}
+
+fn sm_update_goals(sm, goals_list) {
+    sm[SM_ACTIVE_GOALS] = goals_list
+}
+
+fn sm_add_goal(sm, goal) {
+    let goals = sm[SM_ACTIVE_GOALS]
+    push(goals, goal)
+}
+
+fn sm_remove_goal(sm, goal) {
+    let goals = sm[SM_ACTIVE_GOALS]
+    let new_goals = list_new()
+    let i = 0
+    while i < len(goals) {
+        if goals[i] != goal {
+            push(new_goals, goals[i])
+        }
+        i = i + 1
+    }
+    sm[SM_ACTIVE_GOALS] = new_goals
+}
+
+fn sm_current_emotion(sm) {
+    return sm[SM_CURRENT_EMOTION]
+}
+
+fn sm_current_focus(sm) {
+    return sm[SM_CURRENT_FOCUS]
+}
+
+fn sm_current_confidence(sm) {
+    return sm[SM_CURRENT_CONFIDENCE]
+}
+
+fn sm_active_goals(sm) {
+    return sm[SM_ACTIVE_GOALS]
+}
+
+fn sm_goal_count(sm) {
+    return len(sm[SM_ACTIVE_GOALS])
+}
+
+fn sm_set_soul(sm, soul_handle) {
+    sm[SM_SOUL_HANDLE] = soul_handle
+}
+
+fn _sm_ocean_label(value) {
+    if value > 700 {
+        return "high"
+    }
+    if value < 400 {
+        return "low"
+    }
+    return "moderate"
+}
+
+fn sm_describe(sm) {
+    let soul_ref = sm[SM_SOUL_HANDLE]
+    let identity_info = ""
+    let personality_summary = list_new()
+    if soul_ref != 0 {
+        identity_info = "soul-linked"
+        let openness = soul_ref[1]
+        let conscientiousness = soul_ref[2]
+        let extraversion = soul_ref[3]
+        let agreeableness = soul_ref[4]
+        let neuroticism = soul_ref[5]
+        push(personality_summary, "openness:" + _sm_ocean_label(openness))
+        push(personality_summary, "conscientiousness:" + _sm_ocean_label(conscientiousness))
+        push(personality_summary, "extraversion:" + _sm_ocean_label(extraversion))
+        push(personality_summary, "agreeableness:" + _sm_ocean_label(agreeableness))
+        push(personality_summary, "neuroticism:" + _sm_ocean_label(neuroticism))
+    } else {
+        identity_info = "default-identity"
+    }
+    let emotional_state = sm[SM_CURRENT_EMOTION]
+    let focus_state = sm[SM_CURRENT_FOCUS]
+    let confidence = sm[SM_CURRENT_CONFIDENCE]
+    let goals = sm[SM_ACTIVE_GOALS]
+    let result = list_new()
+    push(result, identity_info)
+    push(result, emotional_state)
+    push(result, focus_state)
+    push(result, confidence)
+    push(result, goals)
+    push(result, personality_summary)
+    return result
+}
+
+fn sm_describe_natural_language(sm) {
+    let emotion = sm[SM_CURRENT_EMOTION]
+    let focus = sm[SM_CURRENT_FOCUS]
+    let confidence = sm[SM_CURRENT_CONFIDENCE]
+    let goals = sm[SM_ACTIVE_GOALS]
+    let goal_count = len(goals)
+    let soul_ref = sm[SM_SOUL_HANDLE]
+    let desc = "I am currently feeling " + emotion
+    if confidence > 700 {
+        desc = desc + " with high confidence"
+    } else {
+        if confidence > 300 {
+            desc = desc + " with moderate confidence"
+        } else {
+            desc = desc + " with low confidence"
+        }
+    }
+    desc = desc + " (" + int_to_str(confidence) + "/1000)."
+    desc = desc + " My focus is on " + focus + "."
+    desc = desc + " I have " + int_to_str(goal_count) + " active goals."
+    if soul_ref != 0 {
+        let openness = soul_ref[1]
+        let conscientiousness = soul_ref[2]
+        let extraversion = soul_ref[3]
+        let agreeableness = soul_ref[4]
+        let neuroticism = soul_ref[5]
+        desc = desc + " My personality tends toward"
+        desc = desc + " " + _sm_ocean_label(openness) + " openness"
+        desc = desc + " and " + _sm_ocean_label(conscientiousness) + " conscientiousness"
+        desc = desc + ", " + _sm_ocean_label(extraversion) + " extraversion"
+        desc = desc + ", " + _sm_ocean_label(agreeableness) + " agreeableness"
+        desc = desc + ", and " + _sm_ocean_label(neuroticism) + " neuroticism."
+    }
+    return desc
+}
+
+fn sm_history(sm, count) {
+    let total = sm[SM_HISTORY_COUNT]
+    let cap = sm[SM_HISTORY_CAPACITY]
+    let available = total
+    if available > cap {
+        available = cap
+    }
+    if count > available {
+        count = available
+    }
+    let result = list_new()
+    if count <= 0 {
+        return result
+    }
+    let start = total - count
+    let i = 0
+    while i < count {
+        let idx = int_mod(start + i, cap)
+        let h_emotions = sm[SM_HISTORY_EMOTIONS]
+        let h_focuses = sm[SM_HISTORY_FOCUSES]
+        let h_confidences = sm[SM_HISTORY_CONFIDENCES]
+        let h_timestamps = sm[SM_HISTORY_TIMESTAMPS]
+        let entry = list_new()
+        push(entry, h_emotions[idx])
+        push(entry, h_focuses[idx])
+        push(entry, h_confidences[idx])
+        push(entry, h_timestamps[idx])
+        push(result, entry)
+        i = i + 1
+    }
+    return result
+}
+
+fn sm_emotion_trend(sm, count) {
+    let total = sm[SM_HISTORY_COUNT]
+    let cap = sm[SM_HISTORY_CAPACITY]
+    let available = total
+    if available > cap {
+        available = cap
+    }
+    if count > available {
+        count = available
+    }
+    if count <= 0 {
+        return sm[SM_CURRENT_EMOTION]
+    }
+    let h_emotions = sm[SM_HISTORY_EMOTIONS]
+    let start = total - count
+    let unique_emotions = list_new()
+    let unique_counts = list_new()
+    let i = 0
+    while i < count {
+        let idx = int_mod(start + i, cap)
+        let emo = h_emotions[idx]
+        let found = -1
+        let j = 0
+        while j < len(unique_emotions) {
+            if unique_emotions[j] == emo {
+                found = j
+                j = len(unique_emotions)
+            } else {
+                j = j + 1
+            }
+        }
+        if found >= 0 {
+            list_set(unique_counts, found, unique_counts[found] + 1)
+        } else {
+            push(unique_emotions, emo)
+            push(unique_counts, 1)
+        }
+        i = i + 1
+    }
+    let best_idx = 0
+    let best_count = 0
+    let k = 0
+    while k < len(unique_emotions) {
+        if unique_counts[k] > best_count {
+            best_count = unique_counts[k]
+            best_idx = k
+        }
+        k = k + 1
+    }
+    return unique_emotions[best_idx]
+}
+
+fn sm_confidence_trend(sm, count) {
+    let total = sm[SM_HISTORY_COUNT]
+    let cap = sm[SM_HISTORY_CAPACITY]
+    let available = total
+    if available > cap {
+        available = cap
+    }
+    if count > available {
+        count = available
+    }
+    if count <= 0 {
+        return sm[SM_CURRENT_CONFIDENCE]
+    }
+    let h_confidences = sm[SM_HISTORY_CONFIDENCES]
+    let start = total - count
+    let sum = 0
+    let i = 0
+    while i < count {
+        let idx = int_mod(start + i, cap)
+        sum = int_add(sum, h_confidences[idx])
+        i = i + 1
+    }
+    return int_div(sum, count)
+}

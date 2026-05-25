@@ -1,0 +1,91 @@
+// Nova Time Series Analysis Demo
+// Demonstrates time-indexed data collection and statistical queries.
+
+fn main() {
+    println("=== Nova Time Series Demo ===")
+    println("")
+
+    let ts = ts_new(100)
+
+    // Simulate hourly temperature readings over a day
+    println("--- Recording Temperatures ---")
+    ts_append(ts, 0, 15)
+    ts_append(ts, 1, 14)
+    ts_append(ts, 2, 13)
+    ts_append(ts, 3, 12)
+    ts_append(ts, 4, 13)
+    ts_append(ts, 5, 14)
+    ts_append(ts, 6, 16)
+    ts_append(ts, 7, 18)
+    ts_append(ts, 8, 20)
+    ts_append(ts, 9, 22)
+    ts_append(ts, 10, 24)
+    ts_append(ts, 11, 26)
+    ts_append(ts, 12, 27)
+    ts_append(ts, 13, 28)
+    ts_append(ts, 14, 27)
+    ts_append(ts, 15, 25)
+    ts_append(ts, 16, 23)
+    ts_append(ts, 17, 21)
+    ts_append(ts, 18, 19)
+    ts_append(ts, 19, 17)
+    ts_append(ts, 20, 16)
+    ts_append(ts, 21, 15)
+    ts_append(ts, 22, 14)
+    ts_append(ts, 23, 14)
+
+    print("Total readings: ")
+    print_int(ts_count(ts))
+    println("")
+    println("")
+
+    // Full-day statistics
+    println("--- Full Day Stats (hours 0-23) ---")
+    print("Sum:      ")
+    print_int(ts_sum(ts, 0, 23))
+    println("")
+    print("Mean:     ")
+    print_int(ts_mean(ts, 0, 23))
+    println("")
+    print("Max:      ")
+    print_int(ts_max(ts, 0, 23))
+    println("")
+    print("Min:      ")
+    print_int(ts_min(ts, 0, 23))
+    println("")
+    print("Variance: ")
+    print_int(ts_variance(ts, 0, 23))
+    println("")
+    println("")
+
+    // Morning vs afternoon comparison
+    println("--- Morning (6-11) vs Afternoon (12-17) ---")
+    print("Morning mean:   ")
+    print_int(ts_mean(ts, 6, 11))
+    println("")
+    print("Afternoon mean: ")
+    print_int(ts_mean(ts, 12, 17))
+    println("")
+    println("")
+
+    // Windowed query
+    println("--- Night Window (20-23) ---")
+    let window = ts_window(ts, 20, 23)
+    print("Window length: ")
+    print_int(len(window))
+    println(" readings")
+    print("Night max: ")
+    print_int(ts_max(ts, 20, 23))
+    println("")
+    println("")
+
+    // Resample to 6-hour intervals
+    println("--- Resampled (6-hour intervals) ---")
+    let resampled = ts_resample(ts, 6)
+    ts_describe(resampled)
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

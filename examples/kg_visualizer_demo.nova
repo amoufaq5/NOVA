@@ -1,0 +1,123 @@
+// Knowledge Graph Visualizer Demo (N23)
+// Builds a knowledge graph, then visualizes subgraphs,
+// searches entities, and exports to HTML and DOT.
+
+fn main() {
+    println("=== KG Visualizer Demo ===")
+    println("")
+
+    // Build a knowledge graph
+    let kg = kg_new()
+    kg_add_entity(kg, "cat", 0)
+    kg_add_entity(kg, "dog", 0)
+    kg_add_entity(kg, "animal", 0)
+    kg_add_entity(kg, "pet", 0)
+    kg_add_entity(kg, "car", 0)
+    kg_add_entity(kg, "vehicle", 0)
+    kg_add_entity(kg, "truck", 0)
+
+    kg_add_relation(kg, "cat", "is_a", "animal", 95)
+    kg_add_relation(kg, "dog", "is_a", "animal", 95)
+    kg_add_relation(kg, "cat", "is_a", "pet", 90)
+    kg_add_relation(kg, "dog", "is_a", "pet", 90)
+    kg_add_relation(kg, "car", "is_a", "vehicle", 95)
+    kg_add_relation(kg, "truck", "is_a", "vehicle", 95)
+    kg_add_relation(kg, "cat", "chases", "dog", 60)
+    kg_add_relation(kg, "dog", "chases", "car", 40)
+
+    // Create visualizer
+    let v = kgviz_new(kg)
+    kgviz_set_depth(v, 2)
+    kgviz_describe(v)
+    println("")
+
+    // Get stats
+    println("--- Graph Stats ---")
+    let stats = kgviz_stats(v)
+    print("Entities: ")
+    print_int(stats[0])
+    println("")
+    print("Relations: ")
+    print_int(stats[1])
+    println("")
+    print("Max relations per entity: ")
+    print_int(stats[2])
+    println("")
+    println("")
+
+    // Search for entities
+    println("--- Search ---")
+    let results = kgviz_search(v, "ca")
+    print("Search 'ca': ")
+    let ri = 0
+    while ri < len(results) {
+        if ri > 0 { print(", ") }
+        print(results[ri])
+        ri = ri + 1
+    }
+    println("")
+    println("")
+
+    // Entity info
+    println("--- Entity Info: cat ---")
+    let info = kgviz_entity_info(v, "cat")
+    print("Name: ")
+    println(info[0])
+    let outgoing = info[1]
+    let incoming = info[2]
+    print("Outgoing relations: ")
+    print_int(len(outgoing))
+    println("")
+    let oi = 0
+    while oi < len(outgoing) {
+        let r = outgoing[oi]
+        print("  " + r[0] + " --" + r[1] + "--> " + r[2])
+        print(" (w=")
+        print_int(r[3])
+        println(")")
+        oi = oi + 1
+    }
+    println("")
+
+    // Render subgraph from 'animal' at depth 2
+    println("--- Subgraph from 'animal' ---")
+    let sub = kgviz_render_subgraph(v, "animal", 2)
+    let ents = sub[0]
+    let rels = sub[1]
+    print("Entities: ")
+    let ei = 0
+    while ei < len(ents) {
+        if ei > 0 { print(", ") }
+        print(ents[ei])
+        ei = ei + 1
+    }
+    println("")
+    print("Relations: ")
+    print_int(len(rels))
+    println("")
+    println("")
+
+    // Filter to only 'is_a' relations
+    println("--- Filtered: is_a only ---")
+    kgviz_add_filter(v, "is_a")
+    let sub2 = kgviz_render_subgraph(v, "animal", 2)
+    print("Entities with is_a filter: ")
+    print_int(len(sub2[0]))
+    print(", relations: ")
+    print_int(len(sub2[1]))
+    println("")
+    println("")
+
+    // Export
+    kgviz_export_html(v, "animal", 2, "/tmp/nova_kg.html")
+    println("Exported HTML to /tmp/nova_kg.html")
+    kgviz_export_dot(v, "animal", 2, "/tmp/nova_kg.dot")
+    println("Exported DOT to /tmp/nova_kg.dot")
+    println("")
+
+    kgviz_describe(v)
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

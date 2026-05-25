@@ -1,0 +1,88 @@
+// Node Pool Demo (N18)
+// Demonstrates pre-allocated object pool with O(1) claim/release.
+
+fn main() {
+    println("=== Node Pool Demo ===")
+    println("")
+
+    // Create a pool with 5 slots, each holding 4 words
+    let pool = pool_new(5, 4)
+    pool_describe(pool)
+    println("")
+
+    // Claim three slots
+    let s0 = pool_claim(pool)
+    let s1 = pool_claim(pool)
+    let s2 = pool_claim(pool)
+    print("Claimed slots: ")
+    print_int(s0)
+    print(", ")
+    print_int(s1)
+    print(", ")
+    print_int(s2)
+    println("")
+    print("Used: ")
+    print_int(pool_used(pool))
+    print("  Available: ")
+    print_int(pool_available(pool))
+    println("")
+
+    // Store data in each slot
+    let data0 = [100, 200, 300, 400]
+    let data1 = [10, 20, 30, 40]
+    let data2 = [999, 888, 777, 666]
+    pool_set(pool, s0, data0)
+    pool_set(pool, s1, data1)
+    pool_set(pool, s2, data2)
+
+    // Read values back
+    let v0 = pool_get_values(pool, s0, 4)
+    let v1 = pool_get_values(pool, s1, 4)
+    print("Slot 0 first word: ")
+    print_int(v0[0])
+    println("")
+    print("Slot 1 first word: ")
+    print_int(v1[0])
+    println("")
+
+    // Release middle slot and reclaim it
+    println("")
+    println("--- Release slot " + int_to_str(s1) + " ---")
+    pool_release(pool, s1)
+    print("Used after release: ")
+    print_int(pool_used(pool))
+    println("")
+
+    let s3 = pool_claim(pool)
+    print("Re-claimed slot: ")
+    print_int(s3)
+    println("")
+
+    // Fill remaining capacity
+    let s4 = pool_claim(pool)
+    let s5 = pool_claim(pool)
+    print("Pool full? available=")
+    print_int(pool_available(pool))
+    println("")
+
+    // Try to claim from full pool
+    let overflow = pool_claim(pool)
+    print("Claim from full pool: ")
+    print_int(overflow)
+    println(" (-1 = none)")
+    println("")
+
+    // Clear and verify
+    pool_clear(pool)
+    print("After clear - capacity: ")
+    print_int(pool_capacity(pool))
+    print(", used: ")
+    print_int(pool_used(pool))
+    println("")
+
+    pool_describe(pool)
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

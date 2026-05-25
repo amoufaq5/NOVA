@@ -1,0 +1,77 @@
+// Nova Hyperdimensional Computing Demo
+// Demonstrates vector symbolic architecture for encoding and reasoning.
+
+fn main() {
+    println("=== Nova HDC Demo ===")
+    println("")
+
+    let dims = 64
+    let hdc = hdc_new(dims, 42)
+    print("HDC space: ")
+    print_int(hdc_dimensions(hdc))
+    println(" dimensions")
+    println("")
+
+    // Generate random hypervectors for concepts
+    let dog = hdc_random_vector(hdc)
+    let cat = hdc_random_vector(hdc)
+    let animal = hdc_random_vector(hdc)
+    let pet = hdc_random_vector(hdc)
+    println("Created hypervectors: dog, cat, animal, pet")
+
+    // Bind: associate concept pairs (dog+animal, cat+pet)
+    println("")
+    println("--- Binding ---")
+    let dog_animal = hdc_bind(dog, animal)
+    let cat_pet = hdc_bind(cat, pet)
+    println("Bound dog*animal and cat*pet")
+
+    // Unbind: recover one element from a binding
+    let recovered = hdc_unbind(dog_animal, dog)
+    let sim = hdc_similarity(recovered, animal)
+    print("Unbind(dog*animal, dog) ~ animal: similarity = ")
+    print_int(sim)
+    println("")
+    println("")
+
+    // Bundle: create a set-like superposition
+    println("--- Bundling ---")
+    let members = list_new()
+    push(members, dog)
+    push(members, cat)
+    let pets_vec = hdc_bundle(members)
+    println("Bundled {dog, cat} into pets vector")
+
+    let sim_dog = hdc_similarity(pets_vec, dog)
+    let sim_cat = hdc_similarity(pets_vec, cat)
+    let sim_animal = hdc_similarity(pets_vec, animal)
+    print("pets ~ dog:    ")
+    print_int(sim_dog)
+    println("")
+    print("pets ~ cat:    ")
+    print_int(sim_cat)
+    println("")
+    print("pets ~ animal: ")
+    print_int(sim_animal)
+    println(" (unrelated)")
+    println("")
+
+    // Permute: encode sequence order
+    println("--- Permutation (sequence encoding) ---")
+    let v = hdc_random_vector(hdc)
+    let v_p1 = hdc_permute(v)
+    let v_p2 = hdc_permute(v_p1)
+    let s1 = hdc_similarity(v, v_p1)
+    let s2 = hdc_similarity(v, v_p2)
+    print("v ~ permute(v):  ")
+    print_int(s1)
+    println("")
+    print("v ~ permute^2(v): ")
+    print_int(s2)
+    println(" (decorrelated)")
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

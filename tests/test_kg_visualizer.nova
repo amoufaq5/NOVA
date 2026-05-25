@@ -1,0 +1,61 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== KG Visualizer Tests ===")
+
+    let kg = kg_new()
+    kg_add_entity(kg, "dog", 0)
+    kg_add_entity(kg, "cat", 0)
+    kg_add_entity(kg, "animal", 0)
+    kg_add_entity(kg, "pet", 0)
+    kg_add_relation(kg, "dog", "is_a", "animal", 1000)
+    kg_add_relation(kg, "cat", "is_a", "animal", 1000)
+    kg_add_relation(kg, "dog", "is_a", "pet", 900)
+    kg_add_relation(kg, "cat", "is_a", "pet", 900)
+
+    let viz = kgviz_new(kg)
+    assert_test(viz[0] == 520, "tag is KGVIZ_TAG")
+
+    let stats = kgviz_stats(viz)
+    assert_test(stats[0] == 4, "4 entities")
+    assert_test(stats[1] == 4, "4 relations")
+
+    let sub = kgviz_render_subgraph(viz, "dog", 1)
+    let entities = sub[0]
+    let relations = sub[1]
+    assert_test(len(entities) >= 1, "subgraph has entities")
+    assert_test(len(relations) >= 1, "subgraph has relations")
+
+    let results = kgviz_search(viz, "cat")
+    assert_test(len(results) >= 1, "search finds cat")
+
+    let info = kgviz_entity_info(viz, "dog")
+    assert_test(info[0] == "dog", "entity info for dog")
+    let outgoing = info[1]
+    assert_test(len(outgoing) == 2, "dog has 2 outgoing relations")
+
+    kgviz_set_depth(viz, 3)
+    kgviz_add_filter(viz, "is_a")
+
+    let sub2 = kgviz_render_subgraph(viz, "animal", 2)
+    assert_test(len(sub2[0]) >= 1, "filtered subgraph has entities")
+
+    kgviz_clear_filters(viz)
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

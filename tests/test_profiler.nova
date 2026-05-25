@@ -1,0 +1,76 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Profiler Tests ===")
+
+    let p = prof_new()
+    assert_test(p[0] == 530, "tag is PROF_TAG")
+
+    prof_start_section(p, "outer")
+    prof_tick(p)
+    prof_tick(p)
+    prof_tick(p)
+
+    prof_start_section(p, "inner")
+    prof_tick(p)
+    prof_tick(p)
+    prof_end_section(p, "inner")
+
+    prof_tick(p)
+    prof_end_section(p, "outer")
+
+    let outer_total = prof_section_total(p, "outer")
+    assert_test(outer_total == 6, "outer section total = 6 ticks")
+
+    let inner_total = prof_section_total(p, "inner")
+    assert_test(inner_total == 2, "inner section total = 2 ticks")
+
+    let outer_count = prof_section_count(p, "outer")
+    assert_test(outer_count == 1, "outer invoked once")
+
+    prof_start_section(p, "outer")
+    prof_tick(p)
+    prof_tick(p)
+    prof_end_section(p, "outer")
+    assert_test(prof_section_count(p, "outer") == 2, "outer invoked twice")
+    assert_test(prof_section_total(p, "outer") == 8, "outer total = 8 ticks")
+
+    let avg = prof_section_average(p, "outer")
+    assert_test(avg == 4, "outer average = 4 ticks")
+
+    prof_count_event(p, "signal", "fire")
+    prof_count_event(p, "signal", "fire")
+    prof_count_event(p, "signal", "fire")
+    prof_count_event(p, "node", "activate")
+    let fires = prof_get_count(p, "signal", "fire")
+    assert_test(fires == 3, "3 signal/fire events")
+    let activates = prof_get_count(p, "node", "activate")
+    assert_test(activates == 1, "1 node/activate event")
+
+    prof_count_event_n(p, "signal", "fire", 10)
+    assert_test(prof_get_count(p, "signal", "fire") == 13, "13 after bulk add")
+
+    let report = prof_report(p)
+    assert_test(len(report) > 0, "report is non-empty string")
+
+    prof_reset(p)
+    assert_test(prof_section_total(p, "outer") == 0, "reset clears sections")
+    assert_test(prof_get_count(p, "signal", "fire") == 0, "reset clears counters")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

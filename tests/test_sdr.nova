@@ -1,0 +1,70 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== SDR Tests ===")
+
+    let s1 = sdr_new(256, 10)
+    assert_test(sdr_active_count(s1) == 0, "new SDR has 0 active bits")
+
+    let idx1 = list_new()
+    push(idx1, 5)
+    push(idx1, 10)
+    push(idx1, 20)
+    push(idx1, 50)
+    push(idx1, 100)
+    sdr_set(s1, idx1)
+    assert_test(sdr_active_count(s1) == 5, "set 5 active bits")
+
+    let s2 = sdr_new(256, 10)
+    let idx2 = list_new()
+    push(idx2, 10)
+    push(idx2, 20)
+    push(idx2, 30)
+    push(idx2, 50)
+    push(idx2, 80)
+    sdr_set(s2, idx2)
+
+    let overlap = sdr_overlap(s1, s2)
+    assert_test(overlap == 3, "overlap of {5,10,20,50,100} and {10,20,30,50,80} = 3")
+
+    let inter = sdr_intersection(s1, s2)
+    assert_test(sdr_active_count(inter) == 3, "intersection has 3 active bits")
+
+    let union_list = list_new()
+    push(union_list, s1)
+    push(union_list, s2)
+    let u = sdr_union(union_list)
+    assert_test(sdr_active_count(u) == 7, "union has 7 unique bits")
+
+    let sub = sdr_subsample(s1, 3)
+    assert_test(sdr_active_count(sub) == 3, "subsample to 3 bits")
+
+    let r = sdr_random(256, 10, 42)
+    let r_count = sdr_active_count(r)
+    assert_test(r_count > 0, "random SDR has active bits")
+    assert_test(r_count == 25, "random SDR has 256*10/100 = 25 bits")
+
+    let sim = sdr_similarity(s1, s2)
+    assert_test(sim > 0, "similarity is positive")
+    assert_test(sim <= 1000, "similarity <= 1000")
+
+    let enc = sdr_encode_scalar(50, 0, 100, 256, 10)
+    assert_test(sdr_active_count(enc) == 10, "scalar encoding has 10 active bits")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

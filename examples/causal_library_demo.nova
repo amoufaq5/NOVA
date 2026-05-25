@@ -1,0 +1,68 @@
+// Nova Causal Pattern Library Demo (N25)
+// Demonstrates loading, searching, and applying causal patterns.
+
+fn main() {
+    println("=== Nova Causal Library Demo ===")
+    println("")
+
+    let lib = causal_lib_new()
+    causal_lib_load(lib)
+    print("Loaded library with ")
+    print_int(causal_lib_count(lib))
+    println(" causal patterns")
+    println("")
+
+    println("--- Browse Categories ---")
+    let cats = causal_lib_categories(lib)
+    let i = 0
+    while i < len(cats) {
+        print("  - ")
+        println(cats[i])
+        i = i + 1
+    }
+    println("")
+
+    println("--- Lookup by ID ---")
+    let pattern = causal_lib_get(lib, 0)
+    print("Pattern 0: ")
+    println(pattern)
+    println("")
+
+    println("--- Search by Keyword ---")
+    let results = causal_lib_search(lib, "feedback")
+    print("Found ")
+    print_int(len(results))
+    println(" patterns matching 'feedback':")
+    let j = 0
+    while j < len(results) {
+        print("  ")
+        println(results[j])
+        j = j + 1
+    }
+    println("")
+
+    println("--- Search by Category ---")
+    let cat_results = causal_lib_search_category(lib, "reinforcement")
+    print("Found ")
+    print_int(len(cat_results))
+    println(" reinforcement patterns")
+    println("")
+
+    println("--- Apply Pattern ---")
+    let entity = "agent_alpha"
+    let context = "learning_task"
+    let outcome = causal_lib_apply(lib, 0, entity, context)
+    print("Applied pattern 0 to ")
+    print(entity)
+    print(": ")
+    println(outcome)
+    println("")
+
+    println("--- Library Description ---")
+    println(causal_lib_describe(lib))
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

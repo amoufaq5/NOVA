@@ -1,0 +1,156 @@
+// Nova Runtime: Pre-Allocated Node Pool
+// O(1) claim/release of fixed-size memory slots using an embedded free list.
+// Slots live in a contiguous raw memory block; free slots chain via first word.
+
+let POOL_TAG = 460
+let POOL_CAPACITY = 1
+let POOL_NODE_SIZE = 2
+let POOL_USED_COUNT = 3
+let POOL_DATA_PTR = 4
+let POOL_FREE_HEAD = 5
+let POOL_SLOT_STATUS = 6
+
+fn _pool_slot_ptr(pool, node_id) {
+    let data_ptr = pool[POOL_DATA_PTR]
+    let node_size = pool[POOL_NODE_SIZE]
+    let byte_size = int_mul(node_size, 8)
+    let offset = int_mul(node_id, byte_size)
+    return int_add(data_ptr, offset)
+}
+
+fn pool_new(capacity, node_size) {
+    let byte_size = int_mul(node_size, 8)
+    let total_bytes = int_mul(capacity, byte_size)
+    let data_ptr = alloc(total_bytes)
+    let slot_status = list_new()
+    let i = 0
+    while i < capacity {
+        push(slot_status, 0)
+        i = i + 1
+    }
+    let pool = list_new()
+    push(pool, POOL_TAG)
+    push(pool, capacity)
+    push(pool, node_size)
+    push(pool, 0)
+    push(pool, data_ptr)
+    push(pool, 0)
+    push(pool, slot_status)
+    i = 0
+    while i < capacity {
+        let slot_ptr = int_add(data_ptr, int_mul(i, byte_size))
+        if i < capacity - 1 {
+            mem_write_i64(slot_ptr, i + 1)
+        } else {
+            mem_write_i64(slot_ptr, -1)
+        }
+        i = i + 1
+    }
+    return pool
+}
+
+fn pool_claim(pool) {
+    let head = pool[POOL_FREE_HEAD]
+    if head == -1 {
+        return -1
+    }
+    let slot_ptr = _pool_slot_ptr(pool, head)
+    let next_free = mem_read_i64(slot_ptr)
+    pool[POOL_FREE_HEAD] = next_free
+    pool[POOL_USED_COUNT] = pool[POOL_USED_COUNT] + 1
+    let status = pool[POOL_SLOT_STATUS]
+    status[head] = 1
+    return head
+}
+
+fn pool_release(pool, node_id) {
+    let slot_ptr = _pool_slot_ptr(pool, node_id)
+    let old_head = pool[POOL_FREE_HEAD]
+    mem_write_i64(slot_ptr, old_head)
+    pool[POOL_FREE_HEAD] = node_id
+    pool[POOL_USED_COUNT] = pool[POOL_USED_COUNT] - 1
+    let status = pool[POOL_SLOT_STATUS]
+    status[node_id] = 0
+}
+
+fn pool_get(pool, node_id) {
+    return _pool_slot_ptr(pool, node_id)
+}
+
+fn pool_set(pool, node_id, content) {
+    let slot_ptr = _pool_slot_ptr(pool, node_id)
+    let count = len(content)
+    let i = 0
+    while i < count {
+        let word_ptr = int_add(slot_ptr, int_mul(i, 8))
+        mem_write_i64(word_ptr, content[i])
+        i = i + 1
+    }
+}
+
+fn pool_get_values(pool, node_id, count) {
+    let slot_ptr = _pool_slot_ptr(pool, node_id)
+    let result = list_new()
+    let i = 0
+    while i < count {
+        let word_ptr = int_add(slot_ptr, int_mul(i, 8))
+        let val = mem_read_i64(word_ptr)
+        push(result, val)
+        i = i + 1
+    }
+    return result
+}
+
+fn pool_capacity(pool) {
+    return pool[POOL_CAPACITY]
+}
+
+fn pool_used(pool) {
+    return pool[POOL_USED_COUNT]
+}
+
+fn pool_available(pool) {
+    return pool[POOL_CAPACITY] - pool[POOL_USED_COUNT]
+}
+
+fn pool_is_used(pool, node_id) {
+    let status = pool[POOL_SLOT_STATUS]
+    return status[node_id]
+}
+
+fn pool_clear(pool) {
+    let capacity = pool[POOL_CAPACITY]
+    let node_size = pool[POOL_NODE_SIZE]
+    let data_ptr = pool[POOL_DATA_PTR]
+    let byte_size = int_mul(node_size, 8)
+    let status = pool[POOL_SLOT_STATUS]
+    let i = 0
+    while i < capacity {
+        status[i] = 0
+        let slot_ptr = int_add(data_ptr, int_mul(i, byte_size))
+        if i < capacity - 1 {
+            mem_write_i64(slot_ptr, i + 1)
+        } else {
+            mem_write_i64(slot_ptr, -1)
+        }
+        i = i + 1
+    }
+    pool[POOL_FREE_HEAD] = 0
+    pool[POOL_USED_COUNT] = 0
+}
+
+fn pool_describe(pool) {
+    println("Pool:")
+    print("  capacity=")
+    println(pool[POOL_CAPACITY])
+    print("  node_size=")
+    println(pool[POOL_NODE_SIZE])
+    print("  used=")
+    println(pool[POOL_USED_COUNT])
+    print("  available=")
+    println(pool[POOL_CAPACITY] - pool[POOL_USED_COUNT])
+    print("  free_head=")
+    println(pool[POOL_FREE_HEAD])
+    print("  data_ptr=")
+    println(pool[POOL_DATA_PTR])
+}

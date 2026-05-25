@@ -1,0 +1,218 @@
+// Nova Runtime: Federation Primitives (N29)
+// Anonymous insight sharing across tenant instances for v2 enterprise preparation.
+// Local-only mode: simulates federation between instances in the same process.
+
+let FED_TAG = 580
+let INSIGHT_TAG = 585
+
+let FED_IDX_TAG = 0
+let FED_IDX_INSTANCE_ID = 1
+let FED_IDX_PEER_IDS = 2
+let FED_IDX_INBOX = 3
+let FED_IDX_OUTBOX = 4
+let FED_IDX_SUBSCRIPTIONS = 5
+let FED_IDX_TRUST_IDS = 6
+let FED_IDX_TRUST_VALS = 7
+let FED_IDX_INSIGHT_COUNT = 8
+let FED_IDX_ACTIVE = 9
+
+let INS_IDX_TAG = 0
+let INS_IDX_ID = 1
+let INS_IDX_SOURCE = 2
+let INS_IDX_CATEGORY = 3
+let INS_IDX_CONTENT = 4
+let INS_IDX_WEIGHT = 5
+let INS_IDX_TIMESTAMP = 6
+let INS_IDX_SIGNATURE = 7
+
+fn _fed_hash_string(s) {
+    let hash = 0
+    let slen = len(s)
+    let i = 0
+    while i < slen {
+        let ch = substr(s, i, 1)
+        let code = char_code(ch)
+        hash = int_add(int_mul(hash, 31), code)
+        hash = int_mod(hash, 999983)
+        i = i + 1
+    }
+    return hash
+}
+
+fn fed_node_new(instance_id, peer_ids) {
+    let node = list_new()
+    push(node, FED_TAG)
+    push(node, instance_id)
+    push(node, peer_ids)
+    push(node, list_new())
+    push(node, list_new())
+    push(node, list_new())
+    let trust_ids = list_new()
+    let trust_vals = list_new()
+    let i = 0
+    while i < len(peer_ids) {
+        push(trust_ids, peer_ids[i])
+        push(trust_vals, 500)
+        i = i + 1
+    }
+    push(node, trust_ids)
+    push(node, trust_vals)
+    push(node, 0)
+    push(node, 1)
+    return node
+}
+
+fn fed_extract_insight(node, category, raw_data, evidence_weight) {
+    let iid = node[FED_IDX_INSIGHT_COUNT]
+    node[FED_IDX_INSIGHT_COUNT] = iid + 1
+    let source_id = node[FED_IDX_INSTANCE_ID]
+    let content = raw_data
+    let sig = _fed_hash_string(content)
+    let timestamp = iid
+    let insight = list_new()
+    push(insight, INSIGHT_TAG)
+    push(insight, iid)
+    push(insight, source_id)
+    push(insight, category)
+    push(insight, content)
+    push(insight, evidence_weight)
+    push(insight, timestamp)
+    push(insight, sig)
+    return insight
+}
+
+fn fed_publish_insight(node, insight) {
+    let outbox = node[FED_IDX_OUTBOX]
+    push(outbox, insight)
+    return 1
+}
+
+fn fed_receive_insight(node, insight) {
+    let inbox = node[FED_IDX_INBOX]
+    push(inbox, insight)
+}
+
+fn fed_subscribe(node, category) {
+    let subs = node[FED_IDX_SUBSCRIPTIONS]
+    let pair = list_new()
+    push(pair, category)
+    push(pair, 0)
+    push(subs, pair)
+    return 1
+}
+
+fn fed_unsubscribe(node, category) {
+    let subs = node[FED_IDX_SUBSCRIPTIONS]
+    let new_subs = list_new()
+    let found = 0
+    let i = 0
+    while i < len(subs) {
+        if subs[i][0] == category {
+            found = 1
+        } else {
+            push(new_subs, subs[i])
+        }
+        i = i + 1
+    }
+    node[FED_IDX_SUBSCRIPTIONS] = new_subs
+    return found
+}
+
+fn fed_validate_insight(node, insight) {
+    let source = insight[INS_IDX_SOURCE]
+    let base_trust = fed_get_trust(node, source)
+    let weight = insight[INS_IDX_WEIGHT]
+    let adjusted = int_div(int_mul(base_trust, weight), 1000)
+    let content = insight[INS_IDX_CONTENT]
+    let expected_sig = _fed_hash_string(content)
+    let actual_sig = insight[INS_IDX_SIGNATURE]
+    if expected_sig != actual_sig {
+        return 0
+    }
+    return adjusted
+}
+
+fn fed_integrate_insight(node, insight, kg) {
+    let content = insight[INS_IDX_CONTENT]
+    let source = insight[INS_IDX_SOURCE]
+    let weight = insight[INS_IDX_WEIGHT]
+    kg_add_entity(kg, content, 0)
+    kg_add_relation(kg, source, "insight_from", content, weight)
+}
+
+fn fed_set_trust(node, peer_id, trust) {
+    let ids = node[FED_IDX_TRUST_IDS]
+    let vals = node[FED_IDX_TRUST_VALS]
+    let i = 0
+    while i < len(ids) {
+        if ids[i] == peer_id {
+            vals[i] = trust
+            return 1
+        }
+        i = i + 1
+    }
+    push(ids, peer_id)
+    push(vals, trust)
+    return 1
+}
+
+fn fed_get_trust(node, peer_id) {
+    let ids = node[FED_IDX_TRUST_IDS]
+    let vals = node[FED_IDX_TRUST_VALS]
+    let i = 0
+    while i < len(ids) {
+        if ids[i] == peer_id {
+            return vals[i]
+        }
+        i = i + 1
+    }
+    return 500
+}
+
+fn fed_inbox_count(node) {
+    return len(node[FED_IDX_INBOX])
+}
+
+fn fed_outbox_count(node) {
+    return len(node[FED_IDX_OUTBOX])
+}
+
+fn fed_get_inbox(node, index) {
+    let inbox = node[FED_IDX_INBOX]
+    if index < 0 { return 0 }
+    if index >= len(inbox) { return 0 }
+    return inbox[index]
+}
+
+fn fed_get_outbox(node, index) {
+    let outbox = node[FED_IDX_OUTBOX]
+    if index < 0 { return 0 }
+    if index >= len(outbox) { return 0 }
+    return outbox[index]
+}
+
+fn fed_clear_inbox(node) {
+    node[FED_IDX_INBOX] = list_new()
+}
+
+fn fed_close(node) {
+    node[FED_IDX_ACTIVE] = 0
+}
+
+fn fed_describe(node) {
+    print("FedNode(id=")
+    print(node[FED_IDX_INSTANCE_ID])
+    print(", peers=")
+    print_int(len(node[FED_IDX_PEER_IDS]))
+    print(", inbox=")
+    print_int(len(node[FED_IDX_INBOX]))
+    print(", outbox=")
+    print_int(len(node[FED_IDX_OUTBOX]))
+    print(", subs=")
+    print_int(len(node[FED_IDX_SUBSCRIPTIONS]))
+    print(", insights=")
+    print_int(node[FED_IDX_INSIGHT_COUNT])
+    print(", active=")
+    print_int(node[FED_IDX_ACTIVE])
+    println(")")
+}

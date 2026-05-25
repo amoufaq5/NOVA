@@ -1,0 +1,62 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Skill Tests ===")
+
+    let s = skill_new("greet", "greeting skill")
+    assert_test(skill_name(s) == "greet", "name = greet")
+    assert_test(skill_description(s) == "greeting skill", "description matches")
+    assert_test(skill_is_active(s) == 1, "active by default")
+
+    skill_add_trigger(s, "hello")
+    skill_add_trigger(s, "hi")
+    assert_test(len(skill_triggers(s)) == 2, "2 triggers added")
+
+    skill_add_action(s, "wave")
+    skill_add_action(s, "say hello")
+    assert_test(len(skill_actions(s)) == 2, "2 actions added")
+
+    skill_add_precondition(s, "person_nearby")
+    assert_test(len(skill_preconditions(s)) == 1, "1 precondition")
+
+    assert_test(skill_matches_trigger(s, "hello world") == 1, "matches hello trigger")
+    assert_test(skill_matches_trigger(s, "goodbye") == 0, "no match for goodbye")
+
+    assert_test(skill_check_preconditions(s, "person_nearby and facing") == 1, "precondition met")
+    assert_test(skill_check_preconditions(s, "empty room") == 0, "precondition not met")
+
+    skill_record_outcome(s, 1, "person_nearby")
+    skill_record_outcome(s, 1, "person_nearby")
+    skill_record_outcome(s, 0, "person_far")
+    assert_test(skill_attempt_count(s) == 3, "3 attempts")
+    assert_test(skill_success_rate(s) == 666, "success rate = 666 (2/3)")
+
+    let app = skill_applicability(s, "hello person_nearby")
+    assert_test(app > 0, "applicability is positive for matching context")
+
+    skill_disable(s)
+    assert_test(skill_is_active(s) == 0, "disabled")
+    skill_enable(s)
+    assert_test(skill_is_active(s) == 1, "re-enabled")
+
+    skill_reset_stats(s)
+    assert_test(skill_attempt_count(s) == 0, "stats reset")
+    assert_test(skill_success_rate(s) == 500, "default rate after reset")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

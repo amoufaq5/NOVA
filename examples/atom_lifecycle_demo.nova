@@ -1,0 +1,97 @@
+// Atom Birth/Death Lifecycle Demo (N20)
+// Monitors co-activation patterns for birth promotion and
+// activity decay for death release.
+
+fn main() {
+    println("=== Atom Lifecycle Demo ===")
+    println("")
+
+    // --- Birth Monitor ---
+    println("--- Birth Monitor (threshold=3) ---")
+    let bm = birth_monitor_new(3)
+
+    // Observe co-activation patterns (node IDs that fire together)
+    let pat_a = [1, 2, 3]
+    let pat_b = [4, 5]
+    birth_observe(bm, pat_a, 100)
+    birth_observe(bm, pat_a, 200)
+    birth_observe(bm, pat_b, 150)
+    print("Patterns tracked: ")
+    print_int(birth_pattern_count(bm))
+    println("")
+
+    let pending = birth_pending_births(bm)
+    print("Pending births (need 3): ")
+    print_int(len(pending))
+    println("")
+
+    // Third observation of pattern A triggers birth eligibility
+    birth_observe(bm, pat_a, 300)
+    let pending2 = birth_pending_births(bm)
+    print("After 3rd obs of pattern A: ")
+    print_int(len(pending2))
+    println(" pending")
+
+    // Promote the pattern to a new atom
+    let entry = pending2[0]
+    let hash = entry[0]
+    let atom_id = birth_promote(bm, hash)
+    print("Promoted atom ID: ")
+    print_int(atom_id)
+    println("")
+    print("Patterns remaining: ")
+    print_int(birth_pattern_count(bm))
+    println("")
+    println("")
+
+    // --- Death Monitor ---
+    println("--- Death Monitor ---")
+    // decay=800/1000, death threshold=100, sustained ticks=3
+    let dm = death_monitor_new(800, 100, 3)
+
+    // Register two atoms
+    death_register_atom(dm, atom_id)
+    death_register_atom(dm, 42)
+    death_describe(dm)
+    println("")
+
+    // Simulate activity: atom 1 stays active, atom 42 goes silent
+    println("Simulating decay ticks...")
+    let t = 0
+    while t < 5 {
+        death_observe(dm, atom_id, 500)
+        death_tick(dm)
+        t = t + 1
+    }
+
+    print("Atom " + int_to_str(atom_id) + " activity: ")
+    print_int(death_atom_activity(dm, atom_id))
+    println("")
+    print("Atom 42 activity: ")
+    print_int(death_atom_activity(dm, 42))
+    println("")
+
+    let dying = death_pending_deaths(dm)
+    print("Pending deaths: ")
+    print_int(len(dying))
+    println("")
+
+    // Release dead atoms
+    if len(dying) > 0 {
+        let di = 0
+        while di < len(dying) {
+            print("  Releasing atom ")
+            print_int(dying[di])
+            println("")
+            death_release(dm, dying[di])
+            di = di + 1
+        }
+    }
+    println("")
+
+    death_describe(dm)
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

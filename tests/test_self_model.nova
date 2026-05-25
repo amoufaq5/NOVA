@@ -1,0 +1,65 @@
+let _test_pass = 0
+let _test_fail = 0
+
+fn assert_test(cond, name) {
+    if cond {
+        println("  PASS: " + name)
+        _test_pass = _test_pass + 1
+    } else {
+        println("  FAIL: " + name)
+        _test_fail = _test_fail + 1
+    }
+}
+
+fn main() {
+    println("=== Self Model Tests ===")
+
+    let sm = sm_new(0, 20)
+    assert_test(sm_current_emotion(sm) == "neutral", "default emotion = neutral")
+    assert_test(sm_current_focus(sm) == "idle", "default focus = idle")
+    assert_test(sm_current_confidence(sm) == 500, "default confidence = 500")
+
+    sm_update_state(sm, "excited", "learning", 800)
+    assert_test(sm_current_emotion(sm) == "excited", "emotion updated")
+    assert_test(sm_current_focus(sm) == "learning", "focus updated")
+    assert_test(sm_current_confidence(sm) == 800, "confidence updated")
+
+    sm_add_goal(sm, "learn_nova")
+    sm_add_goal(sm, "build_agent")
+    assert_test(sm_goal_count(sm) == 2, "2 goals added")
+
+    sm_remove_goal(sm, "learn_nova")
+    assert_test(sm_goal_count(sm) == 1, "1 goal after removal")
+
+    let goals = list_new()
+    push(goals, "goal_a")
+    push(goals, "goal_b")
+    push(goals, "goal_c")
+    sm_update_goals(sm, goals)
+    assert_test(sm_goal_count(sm) == 3, "goals replaced with 3")
+
+    sm_update_state(sm, "calm", "reasoning", 700)
+    sm_update_state(sm, "calm", "planning", 650)
+    sm_update_state(sm, "excited", "exploring", 900)
+
+    let hist = sm_history(sm, 3)
+    assert_test(len(hist) >= 3, "history returns 3+ entries")
+
+    let trend = sm_emotion_trend(sm, 4)
+    assert_test(len(trend) > 0, "emotion trend returns a string")
+
+    let avg_conf = sm_confidence_trend(sm, 4)
+    assert_test(avg_conf > 0, "confidence trend is positive")
+
+    let desc = sm_describe(sm)
+    assert_test(len(desc) >= 4, "structured description has entries")
+
+    let nl = sm_describe_natural_language(sm)
+    assert_test(len(nl) > 0, "natural language description is non-empty")
+
+    println("")
+    println("Passed: " + int_to_str(_test_pass) + "/" + int_to_str(_test_pass + _test_fail))
+    if _test_fail > 0 { exit(1) }
+}
+
+main()

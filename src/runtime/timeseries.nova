@@ -1,0 +1,388 @@
+// Nova Runtime: Time-Series Primitives (N16)
+// Windowed aggregation, decay functions, and temporal joins.
+// Values stored as scale-1000 integers for fractional representation.
+
+let TS_TAG = 440
+let TS_IDX_TAG = 0
+let TS_IDX_CAP = 1
+let TS_IDX_COUNT = 2
+let TS_IDX_TIMESTAMPS = 3
+let TS_IDX_VALUES = 4
+
+fn ts_new(capacity) {
+    let ts = list_new()
+    push(ts, TS_TAG)
+    push(ts, capacity)
+    push(ts, 0)
+    push(ts, list_new())
+    push(ts, list_new())
+    return ts
+}
+
+fn _ts_find_start(timestamps, target) {
+    let lo = 0
+    let hi = len(timestamps)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if timestamps[mid] < target {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+fn ts_append(ts, timestamp, value) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let capacity = ts[TS_IDX_CAP]
+    if count == 0 {
+        push(timestamps, timestamp)
+        push(values, value)
+        ts[TS_IDX_COUNT] = 1
+        return 0
+    }
+    if timestamp >= timestamps[count - 1] {
+        push(timestamps, timestamp)
+        push(values, value)
+        count = count + 1
+    } else {
+        let new_ts = list_new()
+        let new_vs = list_new()
+        let inserted = 0
+        let i = 0
+        while i < count {
+            if inserted == 0 {
+                if timestamp <= timestamps[i] {
+                    push(new_ts, timestamp)
+                    push(new_vs, value)
+                    inserted = 1
+                }
+            }
+            push(new_ts, timestamps[i])
+            push(new_vs, values[i])
+            i = i + 1
+        }
+        if inserted == 0 {
+            push(new_ts, timestamp)
+            push(new_vs, value)
+        }
+        ts[TS_IDX_TIMESTAMPS] = new_ts
+        ts[TS_IDX_VALUES] = new_vs
+        count = len(new_ts)
+    }
+    if count > capacity {
+        let trim_ts = list_new()
+        let trim_vs = list_new()
+        let j = count - capacity
+        while j < count {
+            push(trim_ts, ts[TS_IDX_TIMESTAMPS][j])
+            push(trim_vs, ts[TS_IDX_VALUES][j])
+            j = j + 1
+        }
+        ts[TS_IDX_TIMESTAMPS] = trim_ts
+        ts[TS_IDX_VALUES] = trim_vs
+        count = capacity
+    }
+    ts[TS_IDX_COUNT] = count
+    return 0
+}
+
+fn ts_count(ts) {
+    return ts[TS_IDX_COUNT]
+}
+
+fn ts_get(ts, index) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    if index < 0 { return 0 }
+    if index >= count { return 0 }
+    let pair = list_new()
+    push(pair, timestamps[index])
+    push(pair, values[index])
+    return pair
+}
+
+fn ts_window(ts, start_time, end_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let result = list_new()
+    let i = _ts_find_start(timestamps, start_time)
+    while i < count {
+        let t = timestamps[i]
+        if t > end_time { break }
+        let pair = list_new()
+        push(pair, t)
+        push(pair, values[i])
+        push(result, pair)
+        i = i + 1
+    }
+    return result
+}
+
+fn ts_sum(ts, start_time, end_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let total = 0
+    let i = _ts_find_start(timestamps, start_time)
+    while i < count {
+        if timestamps[i] > end_time { break }
+        total = total + values[i]
+        i = i + 1
+    }
+    return total
+}
+
+fn ts_mean(ts, start_time, end_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let total = 0
+    let n = 0
+    let i = _ts_find_start(timestamps, start_time)
+    while i < count {
+        if timestamps[i] > end_time { break }
+        total = total + values[i]
+        n = n + 1
+        i = i + 1
+    }
+    if n == 0 { return 0 }
+    return int_div(total, n)
+}
+
+fn ts_max(ts, start_time, end_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let i = _ts_find_start(timestamps, start_time)
+    let found = 0
+    let result = 0
+    while i < count {
+        if timestamps[i] > end_time { break }
+        if found == 0 {
+            result = values[i]
+            found = 1
+        } else {
+            if values[i] > result {
+                result = values[i]
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn ts_min(ts, start_time, end_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let i = _ts_find_start(timestamps, start_time)
+    let found = 0
+    let result = 0
+    while i < count {
+        if timestamps[i] > end_time { break }
+        if found == 0 {
+            result = values[i]
+            found = 1
+        } else {
+            if values[i] < result {
+                result = values[i]
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn ts_count_window(ts, start_time, end_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let count = ts[TS_IDX_COUNT]
+    let n = 0
+    let i = _ts_find_start(timestamps, start_time)
+    while i < count {
+        if timestamps[i] > end_time { break }
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+fn ts_variance(ts, start_time, end_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let i = _ts_find_start(timestamps, start_time)
+    let n = 0
+    let total = 0
+    let win_vals = list_new()
+    while i < count {
+        if timestamps[i] > end_time { break }
+        let v = values[i]
+        push(win_vals, v)
+        total = total + v
+        n = n + 1
+        i = i + 1
+    }
+    if n < 2 { return 0 }
+    let mean = int_div(total, n)
+    let sum_sq = 0
+    let j = 0
+    while j < n {
+        let diff = win_vals[j] - mean
+        sum_sq = int_add(sum_sq, int_mul(diff, diff))
+        j = j + 1
+    }
+    return int_div(int_mul(sum_sq, 1000), n)
+}
+
+fn ts_decay_exponential(ts, half_life, current_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let capacity = ts[TS_IDX_CAP]
+    let result = ts_new(capacity)
+    let i = 0
+    while i < count {
+        let t = timestamps[i]
+        let v = values[i]
+        let age = current_time - t
+        let hl2 = int_mul(half_life, 2)
+        let decay_factor = 0
+        if hl2 > 0 {
+            decay_factor = 1000 - int_div(int_mul(age, 1000), hl2)
+        }
+        if decay_factor < 0 { decay_factor = 0 }
+        if decay_factor > 1000 { decay_factor = 1000 }
+        let new_val = int_div(int_mul(v, decay_factor), 1000)
+        ts_append(result, t, new_val)
+        i = i + 1
+    }
+    return result
+}
+
+fn ts_decay_power_law(ts, exponent, current_time) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    let capacity = ts[TS_IDX_CAP]
+    let result = ts_new(capacity)
+    let i = 0
+    while i < count {
+        let t = timestamps[i]
+        let v = values[i]
+        let age = current_time - t + 1
+        if age < 1 { age = 1 }
+        let age_pow = 1
+        let e = 0
+        while e < exponent {
+            age_pow = int_mul(age_pow, age)
+            e = e + 1
+        }
+        let decay_factor = 0
+        if age_pow > 0 {
+            decay_factor = int_div(1000, age_pow)
+        }
+        if decay_factor < 0 { decay_factor = 0 }
+        if decay_factor > 1000 { decay_factor = 1000 }
+        let new_val = int_div(int_mul(v, decay_factor), 1000)
+        ts_append(result, t, new_val)
+        i = i + 1
+    }
+    return result
+}
+
+fn ts_join(ts_a, ts_b, tolerance) {
+    let ts_a_timestamps = ts_a[TS_IDX_TIMESTAMPS]
+    let ts_a_values = ts_a[TS_IDX_VALUES]
+    let ts_a_count = ts_a[TS_IDX_COUNT]
+    let ts_b_timestamps = ts_b[TS_IDX_TIMESTAMPS]
+    let ts_b_values = ts_b[TS_IDX_VALUES]
+    let ts_b_count = ts_b[TS_IDX_COUNT]
+    let result = list_new()
+    let i = 0
+    while i < ts_a_count {
+        let t_a = ts_a_timestamps[i]
+        let v_a = ts_a_values[i]
+        let lo_time = t_a - tolerance
+        let hi_time = t_a + tolerance
+        let j = _ts_find_start(ts_b_timestamps, lo_time)
+        while j < ts_b_count {
+            let t_b = ts_b_timestamps[j]
+            if t_b > hi_time { break }
+            let triple = list_new()
+            push(triple, t_a)
+            push(triple, v_a)
+            push(triple, ts_b_values[j])
+            push(result, triple)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn ts_resample(ts, interval) {
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    let values = ts[TS_IDX_VALUES]
+    let count = ts[TS_IDX_COUNT]
+    if count == 0 { return ts_new(1) }
+    let t_start = timestamps[0]
+    let t_end = timestamps[count - 1]
+    let num_points = int_div(t_end - t_start, interval) + 1
+    let capacity = num_points
+    let result = ts_new(capacity)
+    let p = 0
+    while p < num_points {
+        let t = t_start + int_mul(p, interval)
+        let right = _ts_find_start(timestamps, t)
+        if right == 0 {
+            ts_append(result, t, values[0])
+        } else {
+            if right >= count {
+                ts_append(result, t, values[count - 1])
+            } else {
+                if timestamps[right] == t {
+                    ts_append(result, t, values[right])
+                } else {
+                    let left = right - 1
+                    let t_left = timestamps[left]
+                    let t_right = timestamps[right]
+                    let v_left = values[left]
+                    let v_right = values[right]
+                    let dt = t_right - t_left
+                    let interp = 0
+                    if dt > 0 {
+                        interp = v_left + int_div(int_mul(v_right - v_left, t - t_left), dt)
+                    } else {
+                        interp = v_left
+                    }
+                    ts_append(result, t, interp)
+                }
+            }
+        }
+        p = p + 1
+    }
+    return result
+}
+
+fn ts_describe(ts) {
+    let count = ts[TS_IDX_COUNT]
+    let capacity = ts[TS_IDX_CAP]
+    let timestamps = ts[TS_IDX_TIMESTAMPS]
+    print("TS(count=")
+    print_int(count)
+    print(", capacity=")
+    print_int(capacity)
+    if count > 0 {
+        print(", t_min=")
+        print_int(timestamps[0])
+        print(", t_max=")
+        print_int(timestamps[count - 1])
+    }
+    println(")")
+}

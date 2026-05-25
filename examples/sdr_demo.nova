@@ -1,0 +1,88 @@
+// Nova Sparse Distributed Representations Demo
+// Demonstrates SDR encoding, overlap, and set operations.
+
+fn main() {
+    println("=== Nova SDR Demo ===")
+    println("")
+
+    // Create SDRs with 256 dimensions, 5% sparsity
+    let dims = 256
+    let sparsity = 5
+
+    // Encode two overlapping concepts
+    let sdr_a = sdr_new(dims, sparsity)
+    let sdr_b = sdr_new(dims, sparsity)
+
+    // Set active bits for concept A (e.g., "warm weather")
+    let bits_a = [3, 17, 45, 88, 102, 150, 200]
+    sdr_set(sdr_a, bits_a)
+
+    // Set active bits for concept B (e.g., "sunny day") -- overlaps at 17, 88
+    let bits_b = [7, 17, 52, 88, 130, 175, 210]
+    sdr_set(sdr_b, bits_b)
+
+    println("--- SDR Properties ---")
+    print("SDR-A active bits: ")
+    print_int(sdr_active_count(sdr_a))
+    println("")
+    print("SDR-B active bits: ")
+    print_int(sdr_active_count(sdr_b))
+    println("")
+    println("")
+
+    // Overlap and similarity
+    println("--- Overlap & Similarity ---")
+    let overlap = sdr_overlap(sdr_a, sdr_b)
+    print("Overlap (shared bits): ")
+    print_int(overlap)
+    println("")
+    let sim = sdr_similarity(sdr_a, sdr_b)
+    print("Similarity score: ")
+    print_int(sim)
+    println("")
+    println("")
+
+    // Set operations
+    println("--- Set Operations ---")
+    let u = sdr_union(sdr_a, sdr_b)
+    print("Union active bits:        ")
+    print_int(sdr_active_count(u))
+    println("")
+    let isect = sdr_intersection(sdr_a, sdr_b)
+    print("Intersection active bits: ")
+    print_int(sdr_active_count(isect))
+    println("")
+    println("")
+
+    // Scalar encoding
+    println("--- Scalar Encoding ---")
+    let enc = sdr_new(dims, sparsity)
+    sdr_encode_scalar(enc, 25, 0, 100)
+    print("Encoded value 25 (0-100), active: ")
+    print_int(sdr_active_count(enc))
+    println("")
+
+    let enc2 = sdr_new(dims, sparsity)
+    sdr_encode_scalar(enc2, 30, 0, 100)
+    let near_sim = sdr_similarity(enc, enc2)
+    print("Similarity(25, 30): ")
+    print_int(near_sim)
+    println(" (nearby values)")
+
+    let enc3 = sdr_new(dims, sparsity)
+    sdr_encode_scalar(enc3, 90, 0, 100)
+    let far_sim = sdr_similarity(enc, enc3)
+    print("Similarity(25, 90): ")
+    print_int(far_sim)
+    println(" (distant values)")
+    println("")
+
+    // Describe
+    println("--- Describe ---")
+    sdr_describe(sdr_a)
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()

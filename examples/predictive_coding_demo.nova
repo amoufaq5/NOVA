@@ -1,0 +1,70 @@
+// Nova Predictive Coding Network Demo (N26)
+// Demonstrates hierarchical prediction, error computation, and learning.
+
+fn main() {
+    println("=== Nova Predictive Coding Demo ===")
+    println("")
+
+    println("--- Single Layer ---")
+    let layer = pc_layer_new(3, 2)
+    println(pc_describe(layer))
+
+    let input = [100, 50, 75]
+    let pred = pc_predict(layer, input)
+    print("Input:      ")
+    print("[" + int_to_str(input[0]) + ", " + int_to_str(input[1]) + ", " + int_to_str(input[2]) + "]")
+    println("")
+    print("Prediction: ")
+    print("[" + int_to_str(pred[0]) + ", " + int_to_str(pred[1]) + "]")
+    println("")
+
+    let actual = [80, 60]
+    let error = pc_compute_error(layer, pred, actual)
+    print("Actual:     [" + int_to_str(actual[0]) + ", " + int_to_str(actual[1]) + "]")
+    println("")
+    print("Error:      [" + int_to_str(error[0]) + ", " + int_to_str(error[1]) + "]")
+    println("")
+    println("")
+
+    println("--- Learning Loop ---")
+    let step = 0
+    while step < 5 {
+        let p = pc_predict(layer, input)
+        let e = pc_compute_error(layer, p, actual)
+        pc_update_weights(layer, e, input, 10)
+        print("Step " + int_to_str(step) + " error: [" + int_to_str(e[0]) + ", " + int_to_str(e[1]) + "]")
+        println("")
+        step = step + 1
+    }
+    println("")
+
+    println("--- Hierarchical Stack ---")
+    let dims = [4, 3, 2]
+    let stack = pc_stack_new(dims)
+
+    let obs = [90, 70, 40, 60]
+    println("Observation: [90, 70, 40, 60]")
+
+    let result = pc_stack_run(stack, obs)
+    print("Top-level output: ")
+    print("[" + int_to_str(result[0]) + ", " + int_to_str(result[1]) + "]")
+    println("")
+
+    pc_stack_learn(stack, obs, 5)
+    println("Learning step applied")
+
+    let imagined = pc_stack_imagine(stack, [50, 30])
+    print("Imagined from top: [")
+    let m = 0
+    while m < len(imagined) {
+        if m > 0 { print(", ") }
+        print_int(imagined[m])
+        m = m + 1
+    }
+    println("]")
+
+    println("")
+    println("=== Demo Complete ===")
+}
+
+main()
