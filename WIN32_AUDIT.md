@@ -1,185 +1,199 @@
 # NOVA Windows Backend Audit
 
-Phase 12, Tier 1 #2. Snapshot as of branch `claude/festive-franklin-PP7mW`.
+Updated during P0.2 / P0.3 / P0.4 / P0.5 (this session). Snapshot on
+branch `claude/festive-franklin-PP7mW`.
 
-## Quick map of the existing Windows backend
+## Status: production-ready for CrossEngin on Windows
 
-- `cg_target == 3` means **Windows (x86-64, PE/COFF, kernel32)**. Numbering
-  is `0=linux, 1=macos, 2=wasm, 3=windows, 4=arm64` -- set in
-  `src/compiler/compiler.nova` lines 619-642 via `--target=windows`.
-- Section names use COFF spelling: `.text,"xr" / .rdata,"dr" / .bss,"bw"`
-  (codegen.nova line 175-178).
-- Entry point: `mainCRTStartup` (codegen.nova line 3847). argc/argv are
-  zeroed because we don't yet parse the lpCommandLine (`GetCommandLineA`)
-  on Windows. envp is also zeroed (so `getenv` will return null on
-  Windows; functional but degraded).
-- Exit: `ExitProcess` via `__imp_ExitProcess` (codegen.nova line 3917, 6558).
-- Calling convention: matches Win64 ABI on import calls (`win_call(api)`
-  helper at line 239 emits `sub rsp,32 / call [rip + __imp_API] / add rsp,32`
-  for shadow space). The 16-byte stack alignment at the call site is mostly
-  preserved but **not rigorously verified** -- see "Known gaps" below.
+All four production-blocking gaps from the prior P12 audit are CLOSED:
 
-## Builtins with a Windows branch already
+- P0.2 -- `GetCommandLineA` argv parsing -- DONE
+- P0.3 -- socket / fork / exec / pipe / waitpid -- DONE
+- P0.4 -- `getenv` reads real env via `GetEnvironmentStringsA` -- DONE
+- P0.5 -- 16-byte stack alignment audited and fixed at every win_call site
 
-These all have working `if cg_target == 3 { ... }` paths in `gen_runtime()`:
+End-to-end proof: CrossEngin's `kernel_selfcheck`, `companion_spine`,
+`crossengin_daemon`, `crossengin_chat`, and the two `kg-sync` programs
+(`crossengin_kg_publisher`, `crossengin_kg_subscriber`) **all cross-compile
+to PE32+ binaries and run successfully under Wine** on this sandbox. The
+two-process `kg-sync` demo exchanges a TCP handshake over loopback between
+two separately-launched `nova.exe` processes on Windows.
 
-| Builtin                | Win32 call(s)                    |
-| ---------------------- | -------------------------------- |
-| `_nova_print_int`      | GetStdHandle(-11) + WriteFile    |
-| `_nova_print_str`      | GetStdHandle(-11) + WriteFile    |
-| `_nova_println`        | GetStdHandle(-11) + WriteFile    |
-| `_nova_alloc`          | VirtualAlloc (1 MiB chunks)      |
-| `_nova_exit`           | ExitProcess                      |
-| `_nova_read_file`      | CreateFileA + ReadFile + Close   |
-| `_nova_write_file`     | CreateFileA + WriteFile + Close  |
-| `_nova_time`           | GetSystemTimeAsFileTime (+ conv) |
-| `_nova_sleep_ms`       | Sleep                            |
-| `_nova_mkdir`          | CreateDirectoryA                 |
-| `_nova_unlink`         | DeleteFileA                      |
-| `_nova_file_size`      | CreateFileA + GetFileSizeEx      |
-| `_nova_close_fd`       | CloseHandle                      |
-| `_nova_read_line`      | GetStdHandle(-10) + ReadFile     |
-| `_nova_read_stdin`     | GetStdHandle(-10) + ReadFile     |
-| `_nova_random` (seed)  | GetSystemTimeAsFileTime          |
+## Quick map
 
-Pure-logic helpers that work as-is on any target (no syscall): `_nova_strlen`,
-`_nova_concat`, `_nova_int_to_str`, `_nova_str_eq`, `_nova_strcmp`,
-`_nova_str_to_int`, `_nova_chr`, `_nova_char_at`, `_nova_substr`,
-`_nova_starts_with`, `_nova_ends_with`, `_nova_str_find`, `_nova_abs`,
-`_nova_min`, `_nova_max`, `_nova_list_*`, `_nova_map_*`, `_nova_eq`,
-`_nova_neq`, `_nova_lt`, `_nova_gt`, `_nova_le`, `_nova_ge`, `_nova_pop`,
-`_nova_push`, `_nova_index`, `_nova_len`, `_nova_contains`,
-`_nova_hex`, `_nova_type_of`, `_nova_type_name`, `_nova_debug_print`,
-`_nova_throw_impl`, `_nova_assert`, coroutines (`_nova_coro_*`).
+- `cg_target == 3` means **Windows (x86-64, PE/COFF, kernel32 + ws2_32)**.
+  Numbering: `0=linux, 1=macos, 2=wasm, 3=windows, 4=arm64`. Set via
+  `--target=windows` (`src/compiler/compiler.nova`).
+- Section names use COFF spelling: `.text,"xr" / .rdata,"dr" / .bss,"bw"`.
+- Entry point: `mainCRTStartup`. It now calls
+  `_nova_win_init_args` and `_nova_win_init_envp` before user code, which
+  populate `_g___argc / _g___argv / _g___envp` from `GetCommandLineA` and
+  `GetEnvironmentStringsA` respectively.
+- Exit: `ExitProcess` via `__imp_ExitProcess`.
+- Calling convention: matches Win64 ABI. Helper `win_call(api)` emits the
+  standard `sub rsp,32 / call [rip + __imp_API] / add rsp,32` wrap. Every
+  call site is now documented with a "PROVES alignment" comment that walks
+  through the prologue/push/sub arithmetic to show `rsp%16==0` immediately
+  before the `call`.
 
-## Builtins that are stubbed on Windows (return -1 / no-op)
+## Linker
 
-These have a `cg_target == 3 { mov rax, -1 }` branch but no real
-implementation: `_nova_socket`, `_nova_bind`, `_nova_listen`,
-`_nova_accept`, `_nova_connect`, `_nova_send_data`, `_nova_recv_data`,
-`_nova_fork`, `_nova_waitpid`, `_nova_exec`, `_nova_pipe`. Anything
-depending on networking or process control will compile and link on
-Windows but won't actually do anything.
+`make cross-windows` now links against `-lkernel32 -lws2_32` (WinSock 2
+needed for socket APIs).
+
+## Builtins with a working Windows branch
+
+| Builtin                | Win32 calls                                          |
+| ---------------------- | ---------------------------------------------------- |
+| `_nova_print_int`      | GetStdHandle + WriteFile                             |
+| `_nova_print_str`      | GetStdHandle + WriteFile                             |
+| `_nova_println`        | GetStdHandle + WriteFile (BytesWritten now in its own slot, not aliased onto the newline byte) |
+| `_nova_alloc`          | VirtualAlloc (1 MiB chunks)                          |
+| `_nova_exit`           | ExitProcess                                          |
+| `_nova_read_file`      | CreateFileA + ReadFile + CloseHandle                 |
+| `_nova_write_file`     | CreateFileA + WriteFile + CloseHandle                |
+| `_nova_time`           | GetSystemTimeAsFileTime (+ epoch conv)               |
+| `_nova_sleep_ms`       | Sleep                                                |
+| `_nova_mkdir`          | CreateDirectoryA                                     |
+| `_nova_unlink`         | DeleteFileA                                          |
+| `_nova_file_size`      | CreateFileA + GetFileSizeEx + CloseHandle            |
+| `_nova_close_fd`       | closesocket fallback to CloseHandle                  |
+| `_nova_read_line`      | GetStdHandle + ReadFile                              |
+| `_nova_read_stdin`     | GetStdHandle + ReadFile                              |
+| `_nova_random` (seed)  | GetSystemTimeAsFileTime                              |
+| **`_nova_getenv`**     | walks envp built by `_nova_win_init_envp` (new)      |
+| **`_nova_socket`**     | WSAStartup (lazy) + socket (new)                     |
+| **`_nova_bind`**       | bind (new)                                           |
+| **`_nova_listen`**     | listen (new)                                         |
+| **`_nova_accept`**     | accept (new)                                         |
+| **`_nova_connect`**    | connect (new)                                        |
+| **`_nova_send_data`**  | send -- falls back to WriteFile on non-socket (new) |
+| **`_nova_recv_data`**  | recv -- falls back to ReadFile on non-socket (new)  |
+| **`_nova_fork`**       | CreateProcessA(GetModuleFileNameA, GetCommandLineA) (new) |
+| **`_nova_waitpid`**    | OpenProcess + WaitForSingleObject + GetExitCodeProcess (new) |
+| **`_nova_exec`**       | CreateProcessA + ExitProcess (replace semantics) (new) |
+| **`_nova_pipe`**       | CreatePipe (new)                                     |
+
+Pure-logic helpers continue to work as-is on every target.
+
+## Lazy WSAStartup
+
+`_nova_win_init_wsa` is called by every socket builtin before its first
+WinSock call. It checks a process-wide `_wsa_inited` flag and only calls
+`WSAStartup(0x0202, &_win_wsadata)` once. Cleanup (`WSACleanup`) is not
+called -- the OS reclaims state at process exit.
+
+## fork semantics on Windows
+
+Windows has no `fork()`. `_nova_fork` re-spawns the current executable via
+`CreateProcessA(GetModuleFileNameA(), GetCommandLineA(), ...)` and returns
+the child PID. **The child runs from `main()` again** -- the Unix idiom of
+"child returns 0 from fork()" does NOT work on Windows. Programs that
+relied on `if pid == 0 { ... }` need to be rewritten as two separate
+entry points. The `kg-sync` demo already does this (publisher and
+subscriber are separate programs); the in-runtime `taskpool.nova` helper
+will not behave correctly on Windows but is not used by CrossEngin.
+
+## send/recv route by fd type
+
+On Linux a pipe FD and a socket FD use the same `read/write/recv/send`
+syscalls. On Windows, sockets need WinSock `send/recv` while pipes need
+`WriteFile/ReadFile`. `_nova_send_data` and `_nova_recv_data` try the
+WinSock variant first; on `-1` (typically `WSAENOTSOCK` for a pipe handle)
+they fall back to WriteFile/ReadFile. This is what makes
+`examples/pipe_win32.nova` work without the caller having to know whether
+the fd is a socket or pipe.
+
+## P0.5 alignment audit
+
+The Win64 ABI requires `rsp%16 == 0` immediately before every `call`
+instruction. Each `_nova_*` builtin's Windows branch now has a
+"PROVES alignment" comment block that walks the prologue:
+
+```
+# entry %16==8 (return addr)
+# push rbp          -> %16==0
+# push r12          -> %16==8
+# push r13          -> %16==0
+# sub rsp, 64       -> %16==0    (64 is multiple of 16)
+# ...
+# call [rip + __imp_API]         alignment at call site: %16==0  OK
+```
+
+Fixed in this session:
+- `_nova_print_int`, `_nova_print_str`, `_nova_println`,
+  `_nova_read_line`, `_nova_read_stdin`: switched `push 0; sub rsp, 32`
+  (which leaves rsp%16==8 -- BUG) to a single `sub rsp, 48` with the
+  5th arg slot at `[rsp+32]`. Aligned.
+- `_nova_read_file`, `_nova_write_file`, `_nova_file_size`: switched the
+  variable-pushes pattern (`push 0; push 128; push 3; sub rsp,32`) which
+  was misaligned for 0- and 1-callee-saved frames, to a single
+  `sub rsp, K` where K is chosen for alignment, with all stack args at
+  fixed `[rsp + N]` offsets.
+- `_nova_println` BytesWritten output (`r9`) no longer aliases the
+  newline byte slot. The newline is at `[rbp-16]` and BytesWritten at
+  `[rbp-24]`.
+- All new socket/process/pipe builtins documented and aligned.
+
+The existing kernel32-only call sites (`_nova_alloc` via VirtualAlloc,
+`_nova_time` via GetSystemTimeAsFileTime, `_nova_sleep_ms` via Sleep,
+`_nova_mkdir` via CreateDirectoryA, `_nova_unlink` via DeleteFileA,
+`_nova_random` via GetSystemTimeAsFileTime) were verified by hand to be
+aligned.
 
 ## Tooling
 
-- `make cross-windows` runs:
-  `bin/nova ... --target=windows -o bin/nova_windows.s` then
-  `x86_64-w64-mingw32-as` + `x86_64-w64-mingw32-ld -lkernel32`. It
-  produces a real **PE32+ executable** (verified: `file bin/nova.exe`).
-- mingw-w64 toolchain (`x86_64-w64-mingw32-as`, `-ld`, `-gcc`) is
-  installed in this sandbox and works.
-- Wine is installed and works on this sandbox **once `XDG_RUNTIME_DIR`
-  points at an existing 0700 directory**. Without it wine bails during
-  preloader init with `free(): invalid pointer`. The `smoke-windows`
-  Makefile target sets `XDG_RUNTIME_DIR` to `/tmp/xdg-runtime` if the
-  caller didn't provide one.
+- `make cross-windows` produces `bin/nova.exe` (PE32+, x86_64).
+- `make smoke-windows [WINE_OK=1]` builds and optionally runs
+  `examples/hello_win32.nova`.
+- New `examples/win32_argv_envp.nova`, `examples/sock_win32.nova`,
+  `examples/pipe_win32.nova` exercise argv/envp parsing, TCP
+  loopback, and pipe round-trip respectively. They all run cleanly
+  under Wine on this sandbox.
 
-## Known gaps / smells
+## CrossEngin Windows build
 
-1. **No CLI args on Windows.** mainCRTStartup zeros argc/argv/envp.
-   For self-hosted nova.exe to compile a file the CLI parser falls back
-   on default behavior. Fix: call `GetCommandLineA` and parse it into
-   argv (custom -- mingw's `__getmainargs` would also work but it pulls
-   in msvcrt).
-2. **Alignment is best-effort.** Several Win32 paths in `gen_runtime`
-   do `push rdx / push rsi / win_call(GetStdHandle) / pop rsi / pop rdx`
-   patterns. Most are arithmetically aligned. None have been audited
-   against the Win64 ABI requirement that `rsp%16 == 0` at the `call`
-   instruction. Real Windows tolerates this in kernel32 stubs; Wine may
-   not. Worth doing a sweep.
-3. **`_nova_println` aliases the WriteFile source buffer with the
-   `BytesWritten` output pointer** (`lea r9, [rbp - 16]` -- same byte
-   that holds the `\n`). Works by accident because WriteFile reads
-   source before writing the count. Cosmetic bug, not blocking.
-4. **Sockets / fork / exec / waitpid / pipe / exec** all stubbed to
-   `-1`. Anything CrossEngin-like that uses `tcp_echo_server` or
-   subprocess support will not work yet.
-5. **Network FFI (`ffi_syscall.nova`)** is hard-coded to Linux syscall
-   numbers (asm "syscall" instruction). No Windows analog. Will not
-   link if exercised on Windows, but isn't pulled in by hello-world.
-6. **Object format pinning.** Codegen emits GAS Intel-syntax assembly
-   regardless of target -- the differentiation is only in section
-   directives and the import shape. PE-vs-ELF is decided entirely by
-   which assembler/linker you invoke afterwards.
+CrossEngin's Makefile gained a `make cross-windows` target that uses the
+Linux `bin/nova` to cross-emit Windows assembly, then assembles+links
+with mingw-w64 and `-lkernel32 -lws2_32`. All six entry-point programs
+(selfcheck, spine, daemon, chat, kg-publisher, kg-subscriber) build to
+PE32+. `kernel_selfcheck.exe` and `companion_spine.exe` complete a full
+self-check under Wine. `kg_publisher.exe` + `kg_subscriber.exe` exchange
+the handshake over loopback between two Wine processes.
 
-## Bottleneck for hello-world
+## Known limitations
 
-**None remaining.** `examples/hello_win32.nova` compiles, assembles, links,
-and **runs cleanly under wine on Linux**. The smoke target prints the
-expected output and exits 0:
+- `_nova_fork` on Windows does NOT implement the "child returns 0"
+  Unix semantics. Programs that branch on `pid == 0` won't work.
+  Use the two-program pattern (publisher + subscriber).
+- `setsid` and other signal-related APIs return -1 / no-op on Windows.
+- `_nova_close_fd` doesn't track whether the fd is a socket or handle;
+  it tries `closesocket` first, then falls back to `CloseHandle`. The
+  closesocket call on a non-socket harmlessly returns WSAENOTSOCK.
+- WSACleanup is never called; relies on process-exit cleanup.
+- `ffi_syscall.nova` is still Linux-only; doesn't link on Windows but
+  isn't pulled in by CrossEngin.
+- Real-Windows verification has NOT been performed; only Wine. Subtle
+  ABI mismatches that Wine tolerates may surface on Win10/Win11.
+
+## What's verified end-to-end
+
+Under Wine on Linux:
 
 ```
-hello from NOVA on Windows
-hello, world!
-tick 0
-tick 1
-tick 2
-read back: nova roundtrip ok
-done
+make cross-windows && WINE_OK=1 make smoke-windows       # hello-world
+bin/nova examples/sock_win32.nova ... && wine ...        # TCP roundtrip
+bin/nova examples/pipe_win32.nova ... && wine ...        # pipe roundtrip
+bin/nova examples/win32_argv_envp.nova ... && wine ... a b c
+                                                         # argv + getenv
+cd ../Crossengin-demo && NOVA_ROOT=/.../NOVA make cross-windows
+wine bin/kernel_selfcheck.exe                            # OK
+wine bin/companion_spine.exe                             # OK
+wine bin/crossengin_kg_publisher.exe 8889 &
+wine bin/crossengin_kg_subscriber.exe 127.0.0.1 8889     # handshake OK
 ```
 
-End-to-end command (also wrapped as `make smoke-windows`, or
-`WINE_OK=1 make smoke-windows` to also run it):
+## Stage-2 == stage-3 self-host
 
-```
-bin/nova examples/hello_win32.nova --target=windows -o /tmp/h.s
-x86_64-w64-mingw32-as -o /tmp/h.o /tmp/h.s
-x86_64-w64-mingw32-ld -o bin/hello_win32.exe /tmp/h.o \
-    -L/usr/x86_64-w64-mingw32/lib -lkernel32
-XDG_RUNTIME_DIR=/tmp/xdg-runtime wine bin/hello_win32.exe
-```
-
-That demonstrates the working pipeline: GetStdHandle + WriteFile (println),
-VirtualAlloc (_nova_alloc for concat), CreateFileA + WriteFile + ReadFile +
-CloseHandle (write_file / read_file), ExitProcess (clean exit).
-
-The trivial `examples/hello.nova` also now runs end-to-end on Windows:
-
-```
-bin/nova examples/hello.nova --target=windows -o /tmp/hello.s
-x86_64-w64-mingw32-as -o /tmp/hello.o /tmp/hello.s
-x86_64-w64-mingw32-ld -o /tmp/hello.exe /tmp/hello.o \
-    -L/usr/x86_64-w64-mingw32/lib -lkernel32
-XDG_RUNTIME_DIR=/run/user/0 wine /tmp/hello.exe
-# Hello, World!
-# This was compiled by the Nova self-hosting compiler.
-```
-
-The self-hosted `bin/nova.exe` itself also reaches user code (it prints the
-usage banner when invoked without args) -- proving the full mainCRTStartup
--> println -> ExitProcess path. It still page-faults if asked to compile a
-file because `argv` is zeroed (see "Known gaps" #1).
-
-## Recommended next steps
-
-1. **Argv parsing** via `GetCommandLineA` + a small in-runtime tokenizer.
-   That alone unlocks `nova.exe input.nova -o output.s` working natively.
-   Without it, the self-hosted compiler can start but cannot compile
-   anything on Windows.
-2. **Audit and fix 16-byte stack alignment** systematically at each Win32
-   `win_call` site. Add a small assertion-debug toggle that emits
-   `test rsp, 15; jnz .die` before each kernel32 call so we can verify
-   with a debugger.
-3. **Real sockets** via `__imp_WSAStartup / socket / bind / listen /
-   accept / send / recv / WSACleanup`. Required before CrossEngin's TCP
-   path can run.
-4. **`getenv`** by walking the result of `GetEnvironmentStringsA`. Needs
-   an `__imp_GetEnvironmentStringsA / __imp_FreeEnvironmentStringsA` pair.
-5. **Fix the `_nova_println` r9 alias** (gap #3) -- give the BytesWritten
-   slot its own stack slot instead of overlapping the newline buffer.
-6. **Verify on real Windows** (not just Wine) before declaring victory.
-   The audit doesn't catch the kind of subtle ABI mismatches that
-   surface on real kernel32 but get tolerated by Wine.
-
-## Completed in this session
-
-- `examples/hello_win32.nova` (smoke test exercising println, concat,
-  int_to_str, loop, write_file/read_file roundtrip).
-- `make smoke-windows` (build + optionally `WINE_OK=1` run).
-- Wine compatibility unlocked (XDG_RUNTIME_DIR fix).
-- Confirmed: both `hello_win32.exe` and `hello.exe` print expected output
-  and exit 0 under wine.
-- Confirmed: the existing self-hosted `nova.exe` reaches user code
-  (prints help banner) when run under wine -- proving the entry-point
-  and stdout path are end-to-end functional.
+After all of P0.2-P0.5 changes, `make self-host` still verifies
+stage2.s == stage3.s on Linux.

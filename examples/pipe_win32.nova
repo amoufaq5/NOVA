@@ -1,0 +1,43 @@
+// Windows-only smoke for pipe_create (P0.3).
+// Single-process: create a pipe, write to write-end, read from read-end.
+//
+// Compile:
+//   bin/nova examples/pipe_win32.nova --target=windows -o /tmp/pw.s
+//   x86_64-w64-mingw32-as -o /tmp/pw.o /tmp/pw.s
+//   x86_64-w64-mingw32-ld -o bin/pipe_win32.exe /tmp/pw.o \
+//       -L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32
+
+fn main() {
+    let pipes = pipe_create()
+    if len(pipes) < 2 {
+        println("pipe FAIL")
+        return
+    }
+    println("pipe ok")
+    let rd = pipes[0]
+    let wr = pipes[1]
+
+    let msg = "pipe-payload"
+    let n = send_data(wr, msg, 12)
+    print("send n=")
+    println(int_to_str(n))
+
+    let buf = alloc(64)
+    let rn = recv_data(rd, buf, 63)
+    if rn > 0 {
+        print("recv n=")
+        print(int_to_str(rn))
+        print(" '")
+        print(buf)
+        println("'")
+    } else {
+        print("recv FAIL n=")
+        println(int_to_str(rn))
+    }
+
+    close_fd(rd)
+    close_fd(wr)
+    println("done")
+}
+
+main()

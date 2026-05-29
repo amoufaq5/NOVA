@@ -8,6 +8,9 @@ output.s
 bin/nova
 bin/nova.exe
 bin/hello_win32.exe
+bin/sock_win32.exe
+bin/pipe_win32.exe
+bin/win32_argv_envp.exe
 bin/nova_macos.s
 
 # Bootstrap build intermediates

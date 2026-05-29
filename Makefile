@@ -62,7 +62,7 @@ cross-windows: bin/nova
 	cat $(COMPILER_SRC) > /tmp/nova_combined.nova
 	bin/nova /tmp/nova_combined.nova --target=windows -o bin/nova_windows.s
 	x86_64-w64-mingw32-as -o bin/nova_windows.o bin/nova_windows.s
-	x86_64-w64-mingw32-ld -o bin/nova.exe bin/nova_windows.o -L/usr/x86_64-w64-mingw32/lib -lkernel32
+	x86_64-w64-mingw32-ld -o bin/nova.exe bin/nova_windows.o -L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32
 	@echo "Windows executable written to bin/nova.exe"
 	@echo "Transfer to Windows and run: nova.exe <file.nova> -o output.s"
 
@@ -74,7 +74,7 @@ smoke-windows: bin/nova examples/hello_win32.nova
 	bin/nova examples/hello_win32.nova --target=windows -o /tmp/hello_win32.s
 	x86_64-w64-mingw32-as -o /tmp/hello_win32.o /tmp/hello_win32.s
 	x86_64-w64-mingw32-ld -o bin/hello_win32.exe /tmp/hello_win32.o \
-		-L/usr/x86_64-w64-mingw32/lib -lkernel32
+		-L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32
 	@echo "Windows smoke test written to bin/hello_win32.exe"
 	@file bin/hello_win32.exe
 	@if [ "$$WINE_OK" = "1" ]; then \
