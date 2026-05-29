@@ -123,6 +123,23 @@ fn sys_fstat(fd, statbuf) {
     }
 }
 
+fn sys_fsync(fd) {
+    asm {
+        "mov rax, 74"
+        "mov rdi, [rbp-8]"
+        "syscall"
+    }
+}
+
+fn sys_rename(oldpath, newpath) {
+    asm {
+        "mov rax, 82"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "syscall"
+    }
+}
+
 // Constants
 let O_RDONLY = 0
 let O_WRONLY = 1
