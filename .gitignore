@@ -12,6 +12,7 @@ bin/sock_win32.exe
 bin/pipe_win32.exe
 bin/win32_argv_envp.exe
 bin/nova_macos.s
+bin/hello_macos
 
 # Smoke-test scratch outputs (write_file/read_file roundtrip artifacts).
 hello_win32_scratch.txt

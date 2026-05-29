@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos
 
 all: bin/nova
 
@@ -87,6 +87,40 @@ smoke-windows: bin/nova examples/hello_win32.nova
 	else \
 		echo "(skipping wine run; set WINE_OK=1 to enable)"; \
 	fi
+
+# Build the macOS smoke test (hello-world + concat + int_to_str).
+# Pipeline: NOVA --target=macos emits GAS-syntax x86-64 asm with __TEXT/__DATA
+# Mach-O sections and Darwin BSD syscall numbers (write=0x2000004, exit=0x2000001).
+# This target assembles with `clang -target x86_64-apple-darwin -c` (LLVM MC
+# parser, accepts the same .intel_syntax noprefix dialect) and links with
+# `ld64.lld` to produce a real Mach-O 64-bit executable.
+#
+# The resulting binary CANNOT run on Linux (it needs the Darwin kernel for the
+# syscall path), but `file` and `llvm-objdump` verify the format. Run it on a
+# real macOS host or under an XNU emulator.
+#
+# Skips cleanly if the cross-toolchain isn't installed. On macOS proper,
+# clang/as/ld are all in the system toolchain; on Linux you need:
+#   apt install lld llvm clang   (or `brew install llvm lld` on macOS hosts
+#                                 that want the LLVM linker instead of system ld)
+smoke-macos: bin/nova examples/hello_macos.nova
+	@mkdir -p bin
+	@if ! command -v clang >/dev/null 2>&1; then \
+		echo "(skip: macos toolchain not available -- need clang with x86_64-apple-darwin support)"; \
+		exit 0; \
+	fi
+	@if ! command -v ld64.lld-18 >/dev/null 2>&1 && ! command -v ld64.lld >/dev/null 2>&1; then \
+		echo "(skip: macos toolchain not available -- need ld64.lld; apt install lld)"; \
+		exit 0; \
+	fi
+	@LD64=$$(command -v ld64.lld-18 || command -v ld64.lld); \
+	bin/nova examples/hello_macos.nova --target=macos -o /tmp/hello_macos.s && \
+	clang -target x86_64-apple-darwin -c /tmp/hello_macos.s -o /tmp/hello_macos.o && \
+	$$LD64 -arch x86_64 -platform_version macos 10.13 10.13 \
+		-e _main -o bin/hello_macos /tmp/hello_macos.o
+	@echo "macOS smoke test written to bin/hello_macos"
+	@file bin/hello_macos
+	@echo "(binary needs a real Darwin host to actually run; format verified above)"
 
 # Compile to WASM and run (requires Node.js + wabt npm package)
 wasm: bin/nova
