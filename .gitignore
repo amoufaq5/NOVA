@@ -7,6 +7,8 @@ output
 output.s
 bin/nova
 bin/nova.exe
+bin/hello_win32.exe
+bin/nova_macos.s
 
 # Bootstrap build intermediates
 boot/nova_boot.o

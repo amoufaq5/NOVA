@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows
 
 all: bin/nova
 
@@ -65,6 +65,28 @@ cross-windows: bin/nova
 	x86_64-w64-mingw32-ld -o bin/nova.exe bin/nova_windows.o -L/usr/x86_64-w64-mingw32/lib -lkernel32
 	@echo "Windows executable written to bin/nova.exe"
 	@echo "Transfer to Windows and run: nova.exe <file.nova> -o output.s"
+
+# Build the Windows smoke test (hello-world + concat + int_to_str + file IO).
+# Set WINE_OK=1 to also execute it under wine (requires a working wine + writable
+# XDG_RUNTIME_DIR -- the target sets one if missing).
+smoke-windows: bin/nova examples/hello_win32.nova
+	@mkdir -p bin
+	bin/nova examples/hello_win32.nova --target=windows -o /tmp/hello_win32.s
+	x86_64-w64-mingw32-as -o /tmp/hello_win32.o /tmp/hello_win32.s
+	x86_64-w64-mingw32-ld -o bin/hello_win32.exe /tmp/hello_win32.o \
+		-L/usr/x86_64-w64-mingw32/lib -lkernel32
+	@echo "Windows smoke test written to bin/hello_win32.exe"
+	@file bin/hello_win32.exe
+	@if [ "$$WINE_OK" = "1" ]; then \
+		echo "--- wine bin/hello_win32.exe ---"; \
+		mkdir -p $${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}; \
+		chmod 700 $${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}; \
+		XDG_RUNTIME_DIR=$${XDG_RUNTIME_DIR:-/tmp/xdg-runtime} \
+			WINEDEBUG=-all wine bin/hello_win32.exe; \
+		echo "wine exit=$$?"; \
+	else \
+		echo "(skipping wine run; set WINE_OK=1 to enable)"; \
+	fi
 
 # Compile to WASM and run (requires Node.js + wabt npm package)
 wasm: bin/nova

@@ -1,0 +1,51 @@
+// Cross-platform smoke test for the Windows codegen path.
+// Compile with:
+//     bin/nova examples/hello_win32.nova --target=windows -o /tmp/hello_win32.s
+//     x86_64-w64-mingw32-as -o /tmp/hello_win32.o /tmp/hello_win32.s
+//     x86_64-w64-mingw32-ld -o examples/hello_win32.exe /tmp/hello_win32.o \
+//         -L/usr/x86_64-w64-mingw32/lib -lkernel32
+// Then run under wine (if available):
+//     wine examples/hello_win32.exe
+//
+// Exercises:
+//   - println of a string literal      (GetStdHandle + WriteFile)
+//   - string concat (a + b)            (_nova_concat -> _nova_alloc -> VirtualAlloc)
+//   - int_to_str                       (pure-logic helper)
+//   - a hardcoded loop counter         (control flow)
+//   - write_file + read_file roundtrip (CreateFileA + WriteFile + ReadFile + CloseHandle)
+//   - clean exit                       (ExitProcess)
+
+fn main() {
+    println("hello from NOVA on Windows")
+
+    // Concat exercises _nova_concat + _nova_alloc.
+    let who = "world"
+    let greeting = "hello, " + who + "!"
+    println(greeting)
+
+    // int_to_str + concat together.
+    let i = 0
+    while i < 3 {
+        println("tick " + int_to_str(i))
+        i = i + 1
+    }
+
+    // Roundtrip a file through the Win32 file API.
+    let path = "hello_win32_scratch.txt"
+    let payload = "nova roundtrip ok"
+    let wrote = write_file(path, payload)
+    if wrote == 1 {
+        let got = read_file(path)
+        if got == 0 {
+            println("read_file failed")
+        } else {
+            println("read back: " + got)
+        }
+    } else {
+        println("write_file failed")
+    }
+
+    println("done")
+}
+
+main()
