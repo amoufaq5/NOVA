@@ -239,6 +239,50 @@ smoke-gpu: bin/nova examples/gpu_vector_add.nova
 			bin/gpu_vector_add.wgsl bin/gpu_vector_add.cfg; \
 	fi
 
+# Mobile native (iOS / Android ARM64). Both targets ship reference hand-
+# written ARM64 assembly that demonstrates exactly what NOVA's --target=arm64
+# codegen SHOULD emit; the toolchain end-to-end is validated, the codegen
+# gap is documented in MOBILE_AUDIT.md.
+#
+# NOVA's cg_target == 4 is currently a single-stub `_start: exit` and crashes
+# on real input -- the la_lower_function ARM64 lowering is the next codegen
+# task. These targets therefore assemble the hand-written REFERENCE .s files
+# (examples/hello_arm64_{android,ios}_reference.s) instead of calling
+# `bin/nova --target=arm64`, until the codegen is wired.
+#
+# Skips cleanly if clang's AArch64 backend isn't available.
+smoke-mobile-android: bin/nova examples/hello_arm64_android_reference.s
+	@mkdir -p bin
+	@if ! command -v clang >/dev/null 2>&1; then \
+		echo "(skip: mobile cross-toolchain not available -- need clang)"; \
+		exit 0; \
+	fi
+	@if ! clang --print-targets 2>&1 | grep -q aarch64; then \
+		echo "(skip: clang does not support aarch64 target)"; \
+		exit 0; \
+	fi
+	@clang -target aarch64-linux-android30 -c \
+		examples/hello_arm64_android_reference.s -o bin/hello_android.o
+	@echo "Android ARM64 reference object written to bin/hello_android.o"
+	@file bin/hello_android.o
+	@echo "(this .o links into an NDK .so via System.loadLibrary; see MOBILE_AUDIT.md)"
+
+smoke-mobile-ios: bin/nova examples/hello_arm64_ios_reference.s
+	@mkdir -p bin
+	@if ! command -v clang >/dev/null 2>&1; then \
+		echo "(skip: mobile cross-toolchain not available -- need clang)"; \
+		exit 0; \
+	fi
+	@if ! clang --print-targets 2>&1 | grep -q arm64; then \
+		echo "(skip: clang does not support arm64 target)"; \
+		exit 0; \
+	fi
+	@clang -target arm64-apple-ios13.0 -c \
+		examples/hello_arm64_ios_reference.s -o bin/hello_ios.o
+	@echo "iOS ARM64 reference object written to bin/hello_ios.o"
+	@file bin/hello_ios.o
+	@echo "(this .o links into an Xcode .app bundle via bridging headers; see MOBILE_AUDIT.md)"
+
 # Run individual tests
 test: bin/nova
 	@echo "--- test_add ---"

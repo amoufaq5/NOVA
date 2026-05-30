@@ -2,6 +2,7 @@
 *.o
 *.s
 !boot/*.s
+!examples/hello_arm64_*_reference.s
 a.out
 output
 output.s
@@ -15,6 +16,9 @@ bin/nova_macos.s
 bin/hello_macos
 bin/hello.wat
 bin/hello.wasm
+bin/hello_android.o
+bin/hello_ios.o
+bin/hello_arm64.s
 bin/gpu_vector_add.wgsl
 bin/gpu_vector_add.cfg
 
