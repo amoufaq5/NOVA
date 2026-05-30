@@ -884,6 +884,26 @@ make wasm FILE=examples/hello.nova
 
 See [docs/LANGUAGE_REFERENCE.md](docs/LANGUAGE_REFERENCE.md) for the complete language reference.
 
+## Stability & Versioning
+
+Effective 2026-05-30 (commit `ac692f7`), NOVA tracks a real semver line.
+
+- Current version: see `VERSION` (`0.1.0`).
+- Stability inventory: see `STABILITY_AUDIT.md` — language syntax, the
+  152-function builtin set, the five codegen targets (Linux,
+  Windows-Wine, macOS minimum-viable, WASM hello-world, ARM64 stubbed),
+  the 167-symbol `_nova_*` runtime ABI, the standard library, the
+  PTR_THRESHOLD bug class, and a ranked roadmap to 1.0.
+- Breaking-change log: see `COMPAT.md`. Only one breaking change in the
+  past 100 commits (`str_new` format reconciliation in 56322bb).
+- Known-bug docs: see `NOVA_BUG_THRESHOLD.md` (PTR_THRESHOLD details
+  and `int_*` escape hatch).
+- Target audits: `WIN32_AUDIT.md`, `MACOS_AUDIT.md`, `WASM_AUDIT.md`,
+  `MOBILE_AUDIT.md`, `SIMD_AUDIT.md`, `GPU_AUDIT.md`.
+
+Versioning policy: MAJOR for language/builtin/ABI break, MINOR for new
+builtin/target/stdlib module, PATCH for bug fix or refactor.
+
 ## Contributing
 
 Contributions are welcome. The compiler is written entirely in Nova (`src/compiler/`), so you can read and modify it without knowing any other language.
