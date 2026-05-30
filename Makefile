@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm smoke-gpu bench-simd
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm smoke-gpu bench-simd bench-int-safe
 
 all: bin/nova
 
@@ -207,6 +207,17 @@ bench-simd: bin/nova examples/bench_dot_i32.nova
 	@$(AS) -o /tmp/bench_dot_i32.o /tmp/bench_dot_i32.s
 	@$(LD) -o /tmp/bench_dot_i32 /tmp/bench_dot_i32.o
 	@/tmp/bench_dot_i32
+
+# Build + run the int_* scalar-builtin microbench.
+# Compares NOVA's smart `+` / `*` (which dispatch through PTR_THRESHOLD)
+# against the `int_add` / `int_mul` / ... scalar builtins. Also exercises
+# correctness above the smart-op threshold (where `*` would crash).
+# Documented in NOVA_BUG_THRESHOLD.md.
+bench-int-safe: bin/nova examples/bench_int_safe.nova
+	@bin/nova examples/bench_int_safe.nova -o /tmp/bench_int_safe.s
+	@$(AS) -o /tmp/bench_int_safe.o /tmp/bench_int_safe.s
+	@$(LD) -o /tmp/bench_int_safe /tmp/bench_int_safe.o
+	@/tmp/bench_int_safe
 
 # Build + run the GPU vector-add smoke test (WGSL via wgpu).
 # Pipeline:

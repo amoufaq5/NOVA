@@ -1,0 +1,168 @@
+// bench_int_safe.nova
+//
+// Microbenchmark comparing NOVA's "smart" operators (`+`, `*`, which dispatch
+// via `_nova_add` / `_nova_mul` and check the pointer-threshold heuristic)
+// against the explicit scalar builtins (`int_add`, `int_mul`, etc.) which
+// bypass the dispatch entirely and emit a single ADD / IMUL.
+//
+// Why this exists -- see NOVA_BUG_THRESHOLD.md:
+//   `_nova_add` / `_nova_mul` treat any operand >= 0x100000 (1 MB) as a
+//   "likely heap pointer" and route the call to string-concat / list-repeat.
+//   That is correct for the smart-op fast path but BREAKS for plain large
+//   integer arithmetic, e.g. `a * b` where a,b > 2**20. The `int_*` builtins
+//   are the escape hatch: they always do scalar arithmetic.
+//
+// This bench reports two facts:
+//   1. CORRECTNESS: for large operands the scalar builtins return the right
+//      answer; the smart ops would crash, so we don't even try them >= 2**20.
+//   2. SPEED: for small operands the scalar builtins are faster than the smart
+//      ops because they skip the two `cmp ... jge` branches.
+//
+// Build / run:
+//   bin/nova examples/bench_int_safe.nova -o /tmp/b.s
+//   as -o /tmp/b.o /tmp/b.s && ld -o /tmp/b /tmp/b.o && /tmp/b
+// or:
+//   make bench-int-safe
+
+import "std/io"
+
+// --- Smart-op (`+`, `*`) hot loop: small values only --------------------
+// At >= 2**20 the smart-ops would jump into str_repeat with garbage operands.
+// We constrain i to keep i*(j+1) < 0x100000 and mask the accumulator to 16
+// bits so EVERY smart-op operand stays well below PTR_THRESHOLD.
+fn smart_mul_sum(reps, inner) {
+    let acc = 0
+    let r = 0
+    while r < reps {
+        let j = 1
+        while j < inner {
+            // j < 512, j+1 < 513, j*(j+1) < 2**18 -- safe.
+            acc = (acc + j * (j + 1)) % 65536
+            j = j + 1
+        }
+        r = r + 1
+    }
+    return acc
+}
+
+// --- int_mul / int_add scalar hot loop, same shape ---------------------
+fn scalar_mul_sum(reps, inner) {
+    let acc = 0
+    let r = 0
+    while r < reps {
+        let j = 1
+        while j < inner {
+            acc = int_mod(int_add(acc, int_mul(j, int_add(j, 1))), 65536)
+            j = j + 1
+        }
+        r = r + 1
+    }
+    return acc
+}
+
+// --- Large-value correctness check (smart-op would crash here) ---------
+// 2 * 2**20 == 2097152, well above PTR_THRESHOLD.
+fn big_mul_check() {
+    let a = 2097152          // 2 * 0x100000
+    let b = 2097153          // a + 1
+    let prod = int_mul(a, b) // = 4398048608256
+    return prod
+}
+
+fn big_add_check() {
+    let a = 2097152
+    let b = 3145728          // 3 * 0x100000
+    return int_add(a, b)     // = 5242880
+}
+
+fn big_bitops_check() {
+    let m20 = 1048575         // (1 << 20) - 1
+    let v = 4294967295        // (1 << 32) - 1
+    let lo = int_and(v, m20)  // == 1048575
+    let hi = int_shr(v, 20)   // == 4095
+    let rebuilt = int_or(int_shl(hi, 20), lo) // == 4294967295
+    return rebuilt
+}
+
+fn main() {
+    println("=== NOVA int_* vs smart-op microbench ===")
+
+    // --- Correctness for large values (only int_* can handle this) ---
+    let bm = big_mul_check()
+    print("  big_mul (2097152 * 2097153) = ")
+    print_int(bm)
+    println("")
+    if bm == 4398048608256 {
+        println("    PASS: int_mul correct above PTR_THRESHOLD")
+    } else {
+        println("    FAIL: int_mul wrong")
+    }
+
+    let ba = big_add_check()
+    print("  big_add (2097152 + 3145728) = ")
+    print_int(ba)
+    println("")
+    if ba == 5242880 {
+        println("    PASS: int_add correct above PTR_THRESHOLD")
+    } else {
+        println("    FAIL: int_add wrong")
+    }
+
+    let bb = big_bitops_check()
+    print("  big_bitops (and/shr/shl/or roundtrip 0xFFFFFFFF) = ")
+    print_int(bb)
+    println("")
+    if bb == 4294967295 {
+        println("    PASS: int_and / int_shr / int_shl / int_or correct")
+    } else {
+        println("    FAIL: bitops roundtrip wrong")
+    }
+
+    // --- Throughput: small-value hot loop ----------------------------------
+    let reps  = 2000     // outer
+    let inner = 512      // inner; j*(j+1) max ~2**18, safe for smart-ops
+    let total = int_mul(reps, inner)
+
+    // Warm up both paths.
+    let _w1 = smart_mul_sum(2, inner)
+    let _w2 = scalar_mul_sum(2, inner)
+
+    let t0 = nanotime()
+    let smart_r = smart_mul_sum(reps, inner)
+    let t1 = nanotime()
+    let smart_ns = int_sub(t1, t0)
+
+    let t2 = nanotime()
+    let scalar_r = scalar_mul_sum(reps, inner)
+    let t3 = nanotime()
+    let scalar_ns = int_sub(t3, t2)
+
+    print("  iterations: "); print_int(total); println("")
+    print("  smart-op   result: "); print_int(smart_r);  println("")
+    print("  int_*      result: "); print_int(scalar_r); println("")
+    if smart_r == scalar_r {
+        println("    MATCH: smart and scalar agree.")
+    } else {
+        println("    MISMATCH: smart != scalar (unexpected)")
+    }
+
+    print("  smart-op   time (ns): "); print_int(smart_ns);  println("")
+    print("  int_*      time (ns): "); print_int(scalar_ns); println("")
+
+    // Print int_*-vs-smart speedup (x100 for one decimal place).
+    if scalar_ns > 0 {
+        let ratio_x100 = int_div(int_mul(smart_ns, 100), scalar_ns)
+        let whole = int_div(ratio_x100, 100)
+        let frac  = ratio_x100 % 100
+        print("  int_* speedup: ~")
+        print_int(whole)
+        print(".")
+        if frac < 10 { print("0") }
+        print_int(frac)
+        println("x")
+    } else {
+        println("  scalar time too small to measure")
+    }
+}
+
+main()

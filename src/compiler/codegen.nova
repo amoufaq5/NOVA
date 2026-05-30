@@ -993,6 +993,11 @@ fn is_builtin_fn(name) {
     if name == "int_sub" { return 1 }
     if name == "int_div" { return 1 }
     if name == "int_mod" { return 1 }
+    if name == "int_shl" { return 1 }
+    if name == "int_shr" { return 1 }
+    if name == "int_and" { return 1 }
+    if name == "int_or"  { return 1 }
+    if name == "int_xor" { return 1 }
     if name == "chars" { return 1 }
     if name == "str_replace" { return 1 }
     if name == "str_repeat" { return 1 }
@@ -10782,6 +10787,30 @@ fn gen_runtime() {
     out("    cqo")
     out("    idiv rsi")
     out("    mov rax, rdx")
+    out("    ret")
+    // --- int_shl / int_shr: arithmetic shift via cl ---
+    out_label("int_shl")
+    out("    mov rax, rdi")
+    out("    mov rcx, rsi")
+    out("    shl rax, cl")
+    out("    ret")
+    out_label("int_shr")
+    out("    mov rax, rdi")
+    out("    mov rcx, rsi")
+    out("    sar rax, cl")
+    out("    ret")
+    // --- int_and / int_or / int_xor: bitwise on full 64 bits ---
+    out_label("int_and")
+    out("    mov rax, rdi")
+    out("    and rax, rsi")
+    out("    ret")
+    out_label("int_or")
+    out("    mov rax, rdi")
+    out("    or rax, rsi")
+    out("    ret")
+    out_label("int_xor")
+    out("    mov rax, rdi")
+    out("    xor rax, rsi")
     out("    ret")
     out_label("chars")
     out("    jmp _nova_str_to_chars")
