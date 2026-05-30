@@ -1,0 +1,27 @@
+// Cross-platform smoke test for the WebAssembly (WASI) codegen path.
+// Compile with:
+//     bin/nova examples/hello_wasm.nova --target=wasm -o /tmp/hello_wasm.wat
+//     wat2wasm /tmp/hello_wasm.wat -o bin/hello.wasm
+//
+// Run under any WASI host:
+//     wasmtime bin/hello.wasm
+//     node --experimental-wasi-unstable-preview1 -e "..."
+//
+// Exercises:
+//   - println of a string literal     (WASI fd_write to stdout)
+//   - clean exit                      (WASI proc_exit)
+//
+// Skipped vs hello_macos/hello_win32 for this minimum-scope round:
+//   - string concat (depends on the bump allocator + UTF-8 byte copy paths
+//     that the WASM runtime stubs out, but exercising them is gated on a
+//     larger CrossEngin-on-WASM milestone).
+//   - int_to_str loop counter (same gating).
+//   - file IO (WASI fd_open/fd_read/fd_write roundtrip is a P3 task).
+//
+// See WASM_AUDIT.md for the full scope plan.
+
+fn main() {
+    println("hello from NOVA on WASM")
+}
+
+main()

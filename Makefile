@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos bench-simd
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm bench-simd
 
 all: bin/nova
 
@@ -142,6 +142,48 @@ wasm: bin/nova
 	WebAssembly.instantiate(wasm, importObject).then(({instance}) => {\
 	  wasi.start(instance);\
 	}).catch(e => { console.error('WASM error:', e.message); process.exit(1); });" 2>/dev/null
+
+# Build the WASM smoke test (hello-world via WASI fd_write + proc_exit).
+# Pipeline: NOVA --target=wasm emits WebAssembly Text (WAT) referencing
+# wasi_snapshot_preview1.{fd_write,proc_exit}. wat2wasm (from the `wabt`
+# package: apt install wabt) finalizes to a real .wasm binary. Optionally
+# runs under wasmtime (preferred) or node's --experimental-wasi-unstable-
+# preview1 if WASM_OK=1 is set in the environment.
+#
+# Skips cleanly with a clear message if the toolchain isn't installed.
+# See WASM_AUDIT.md for the full design + gap list.
+smoke-wasm: bin/nova examples/hello_wasm.nova
+	@mkdir -p bin
+	@bin/nova examples/hello_wasm.nova --target=wasm -o bin/hello.wat
+	@echo "WAT written to bin/hello.wat ($$(wc -l < bin/hello.wat) lines)"
+	@if ! command -v wat2wasm >/dev/null 2>&1; then \
+		echo "(skip: wasm toolchain not available -- need wat2wasm; apt install wabt)"; \
+		echo "(bin/hello.wat is still produced and inspectable.)"; \
+		exit 0; \
+	fi
+	@wat2wasm bin/hello.wat -o bin/hello.wasm
+	@echo "WASM written to bin/hello.wasm"
+	@file bin/hello.wasm
+	@if [ "$$WASM_OK" = "1" ]; then \
+		if command -v wasmtime >/dev/null 2>&1; then \
+			echo "--- wasmtime bin/hello.wasm ---"; \
+			wasmtime bin/hello.wasm; \
+			echo "wasmtime exit=$$?"; \
+		elif command -v node >/dev/null 2>&1; then \
+			echo "--- node --experimental-wasi-unstable-preview1 bin/hello.wasm ---"; \
+			node --experimental-wasi-unstable-preview1 -e "\
+				const {WASI} = require('node:wasi'); const fs = require('node:fs'); \
+				const wasi = new WASI({version: 'preview1', args: [], env: {}, preopens: {}}); \
+				const wasm = fs.readFileSync('bin/hello.wasm'); \
+				WebAssembly.instantiate(wasm, {wasi_snapshot_preview1: wasi.wasiImport}).then(({instance}) => { \
+				  wasi.start(instance); \
+				}).catch(e => { console.error('WASM error:', e.message); process.exit(1); });" 2>&1 | grep -v "ExperimentalWarning\|trace-warnings"; \
+		else \
+			echo "(WASM_OK=1 set but no wasmtime or node available)"; \
+		fi; \
+	else \
+		echo "(skipping wasm run; set WASM_OK=1 to enable via wasmtime/node)"; \
+	fi
 
 # Compile a .nova file to a binary
 %.out: %.nova bin/nova
