@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm bench-simd
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm smoke-gpu bench-simd
 
 all: bin/nova
 
@@ -207,6 +207,37 @@ bench-simd: bin/nova examples/bench_dot_i32.nova
 	@$(AS) -o /tmp/bench_dot_i32.o /tmp/bench_dot_i32.s
 	@$(LD) -o /tmp/bench_dot_i32 /tmp/bench_dot_i32.o
 	@/tmp/bench_dot_i32
+
+# Build + run the GPU vector-add smoke test (WGSL via wgpu).
+# Pipeline:
+#   1. examples/gpu_vector_add.nova emits the WGSL shader + a small
+#      "key=value" config file (bin/gpu_vector_add.{wgsl,cfg}).
+#   2. scripts/wgpu_dispatch is a standalone Rust binary that uses
+#      the `wgpu` crate to dispatch the compute kernel, validate
+#      against a CPU baseline, and print timings.
+#
+# Skips cleanly with a clear message if `cargo` is missing OR if
+# `wgpu` cannot find a usable adapter on this host (the dispatcher
+# exits 0 with `(skip: no wgpu adapter available)` in that case).
+#
+# See GPU_AUDIT.md for the full design + alternatives (CUDA, OpenCL).
+smoke-gpu: bin/nova examples/gpu_vector_add.nova
+	@mkdir -p bin
+	@bin/nova examples/gpu_vector_add.nova -o /tmp/gpu_vector_add.s
+	@$(AS) -o /tmp/gpu_vector_add.o /tmp/gpu_vector_add.s
+	@$(LD) -o /tmp/gpu_vector_add /tmp/gpu_vector_add.o
+	@/tmp/gpu_vector_add
+	@if ! command -v cargo >/dev/null 2>&1; then \
+		echo "(skip: rust toolchain / wgpu unavailable -- cargo not found)"; \
+	elif ! ( cd scripts/wgpu_dispatch && cargo build --release 2>&1 ); then \
+		echo "(skip: rust toolchain / wgpu unavailable -- cargo build failed)"; \
+	elif [ ! -x scripts/wgpu_dispatch/target/release/wgpu_dispatch ]; then \
+		echo "(skip: rust toolchain / wgpu unavailable -- dispatcher binary missing)"; \
+	else \
+		echo "--- dispatching ---"; \
+		./scripts/wgpu_dispatch/target/release/wgpu_dispatch \
+			bin/gpu_vector_add.wgsl bin/gpu_vector_add.cfg; \
+	fi
 
 # Run individual tests
 test: bin/nova

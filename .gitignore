@@ -15,9 +15,15 @@ bin/nova_macos.s
 bin/hello_macos
 bin/hello.wat
 bin/hello.wasm
+bin/gpu_vector_add.wgsl
+bin/gpu_vector_add.cfg
 
 # Smoke-test scratch outputs (write_file/read_file roundtrip artifacts).
 hello_win32_scratch.txt
+
+# Rust build artifacts for the GPU compute dispatch shim
+scripts/wgpu_dispatch/target/
+scripts/wgpu_dispatch/Cargo.lock
 
 # Bootstrap build intermediates
 boot/nova_boot.o
