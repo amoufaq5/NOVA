@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos bench-simd
 
 all: bin/nova
 
@@ -156,6 +156,15 @@ ffi: bin/nova
 	$(AS) -o /tmp/nova_ffi.o /tmp/nova_ffi.s && \
 	gcc -o /tmp/nova_ffi /tmp/nova_ffi.o -ldl -no-pie && \
 	/tmp/nova_ffi
+
+# Build + run the AVX2 dot-product benchmark.
+# Linux x86-64 only. Prints scalar ns, SIMD ns, speedup ratio.
+# Documented in SIMD_AUDIT.md.
+bench-simd: bin/nova examples/bench_dot_i32.nova
+	@bin/nova examples/bench_dot_i32.nova -o /tmp/bench_dot_i32.s
+	@$(AS) -o /tmp/bench_dot_i32.o /tmp/bench_dot_i32.s
+	@$(LD) -o /tmp/bench_dot_i32 /tmp/bench_dot_i32.o
+	@/tmp/bench_dot_i32
 
 # Run individual tests
 test: bin/nova

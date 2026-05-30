@@ -1034,6 +1034,7 @@ fn is_builtin_fn(name) {
     if name == "store8" { return 1 }
     if name == "load8" { return 1 }
     if name == "memcpy_raw" { return 1 }
+    if name == "__intrinsic_dot_i32" { return 1 }
     return 0
 }
 
@@ -10873,6 +10874,82 @@ fn gen_runtime() {
     out("    rep movsb")
     out("    pop rax")
     out("    ret")
+
+    // --- __intrinsic_dot_i32(a, b, n) -> int (AVX2; Linux x86-64) ---
+    // Computes sum(a[i] * b[i]) for n int32 elements.
+    // Args: rdi=a_ptr, rsi=b_ptr, rdx=n.
+    // Returns: rax = int64-extended dot product.
+    // Loop processes 8 int32s per iter via vmovdqu+vpmulld+vpaddd; tail is scalar.
+    // Documented in SIMD_AUDIT.md.  Linux-only; Win64 / macOS callers must guard.
+    out_label("__intrinsic_dot_i32")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")                    // rax = 0 (covers no-vector case)
+        out("    vpxor ymm2, ymm2, ymm2")          // accumulator = 0
+        out("    mov rcx, rdx")                    // rcx = n
+        out("    shr rcx, 3")                      // rcx = n / 8 (vector iters)
+        out("    test rcx, rcx")
+        out("    jz .dot_i32_tail")
+        out(".dot_i32_loop:")
+        out("    vmovdqu ymm0, [rdi]")             // load 8 ints from A
+        out("    vmovdqu ymm1, [rsi]")             // load 8 ints from B
+        out("    vpmulld ymm0, ymm0, ymm1")        // lanewise 32-bit multiply
+        out("    vpaddd ymm2, ymm2, ymm0")         // accumulate
+        out("    add rdi, 32")
+        out("    add rsi, 32")
+        out("    dec rcx")
+        out("    jnz .dot_i32_loop")
+        // Horizontal reduce ymm2 (8 int32) -> rax (int64).
+        // Pairwise: vphaddd ymm2, ymm2, ymm2 -> 4 sums in low 64 of each lane.
+        // Again to fold pairs: still cross-lane garbage in upper half, so we
+        // extract the upper 128 and add to lower 128, then phaddd twice in xmm.
+        out("    vextracti128 xmm0, ymm2, 1")      // high 128 -> xmm0
+        out("    vpaddd xmm2, xmm2, xmm0")         // sum of 4 lanes (in-lane)
+        out("    vphaddd xmm2, xmm2, xmm2")        // pairs of pairs
+        out("    vphaddd xmm2, xmm2, xmm2")        // all 4 -> low lane
+        out("    vmovd eax, xmm2")                 // extract low int32
+        out("    movsxd rax, eax")                 // sign-extend to int64
+        out(".dot_i32_tail:")
+        out("    and rdx, 7")                      // tail count = n & 7
+        out("    test rdx, rdx")
+        out("    jz .dot_i32_done")
+        out(".dot_i32_tail_loop:")
+        out("    mov r8d, [rdi]")                  // load int32 from A
+        out("    imul r8d, [rsi]")                 // multiply by int32 from B
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")                     // accumulate sign-extended
+        out("    add rdi, 4")
+        out("    add rsi, 4")
+        out("    dec rdx")
+        out("    jnz .dot_i32_tail_loop")
+        out(".dot_i32_done:")
+        // Zero ymm scratch to avoid SSE/AVX transition penalty for callers.
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        // Non-Linux targets get a scalar fallback so cross-compiles still link.
+        // Win64 ABI: args in rcx, rdx, r8 (not rdi/rsi/rdx). macOS uses SysV.
+        // We use SysV-style here; Windows callers are documented as unsafe.
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    test rdx, rdx")
+        out("    jz .dot_i32s_done")
+        out(".dot_i32s_loop:")
+        out("    mov r8d, [rdi]")
+        out("    imul r8d, [rsi]")
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")
+        out("    add rdi, 4")
+        out("    add rsi, 4")
+        out("    dec rdx")
+        out("    jnz .dot_i32s_loop")
+        out(".dot_i32s_done:")
+        out("    pop rbp")
+        out("    ret")
+    }
 
     // --- str_to_chars: convert string to list of char codes ---
     out_label("_nova_str_to_chars")

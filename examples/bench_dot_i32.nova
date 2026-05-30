@@ -1,0 +1,117 @@
+// bench_dot_i32.nova
+//
+// Microbenchmark for NOVA's AVX2 builtin `__intrinsic_dot_i32` against
+// a NOVA scalar loop. Allocates two arrays of 1M int32 deterministic values,
+// computes the dot product both ways, prints wall-clock timings (ns) and
+// the speedup ratio.
+//
+// Documented in SIMD_AUDIT.md. Run: `make bench-simd` (or build/run by hand).
+//
+// Expected on a modern x86-64 Linux host: 4-8x speedup.
+//
+// Note: we use int_add / int_mul / int_sub / int_div / int_mod (raw integer
+// ops, bypassing NOVA's smart-op pointer-promotion threshold at 0x100000).
+// For pointer arithmetic spanning > 1MB we MUST avoid `+` and `*` directly,
+// since `_nova_add(ptr, 0x100000)` would dispatch to string-concat.
+
+import "std/io"
+
+// Pack a 32-bit little-endian integer into bytes at `buf + off`.
+fn store_i32_le(buf, off, v) {
+    store8(int_add(buf, off),          v % 256)
+    store8(int_add(buf, int_add(off, 1)), int_div(v, 256) % 256)
+    store8(int_add(buf, int_add(off, 2)), int_div(v, 65536) % 256)
+    store8(int_add(buf, int_add(off, 3)), int_div(v, 16777216) % 256)
+}
+
+// Read a 32-bit little-endian unsigned int from `buf + off`. The values we
+// store are small and non-negative, so we don't sign-extend here.
+fn load_i32_le(buf, off) {
+    let b0 = load8(int_add(buf, off))
+    let b1 = load8(int_add(buf, int_add(off, 1)))
+    let b2 = load8(int_add(buf, int_add(off, 2)))
+    let b3 = load8(int_add(buf, int_add(off, 3)))
+    return b0 + int_mul(b1, 256) + int_mul(b2, 65536) + int_mul(b3, 16777216)
+}
+
+// Deterministic seed values, kept small so both scalar and SIMD accumulators
+// stay within int32 range. With values in 0..15, max element product is
+// 15*15 = 225; sum over 1M elements <= 2.25e8, well below int32 max (2.1e9).
+// (The SIMD path reduces in int32; if we used 0..127, the SIMD sum would
+// wrap and disagree with the scalar int64 accumulator.)
+fn fill_array(buf, n, m, c) {
+    let i = 0
+    while i < n {
+        let v = (int_mul(i, m) + c) % 16
+        store_i32_le(buf, int_mul(i, 4), v)
+        i = i + 1
+    }
+}
+
+// Pure-NOVA scalar dot product. This is the reference implementation
+// every CrossEngin tight loop looks like before SIMD adoption.
+fn scalar_dot_i32(a, b, n) {
+    let acc = 0
+    let i = 0
+    while i < n {
+        let off = int_mul(i, 4)
+        acc = acc + int_mul(load_i32_le(a, off), load_i32_le(b, off))
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    let n = 1000000
+    let bytes = int_mul(n, 4)
+    println("=== NOVA AVX2 dot product benchmark ===")
+    print("  elements: "); print_int(n); println("")
+
+    let a = alloc(bytes + 32)   // +32 so the SIMD loop never reads past end
+    let b = alloc(bytes + 32)
+    fill_array(a, n, 13, 7)
+    fill_array(b, n, 17, 3)
+
+    // Warm up both paths once (CPU caches, branch predictor).
+    let _wa = scalar_dot_i32(a, b, 1024)
+    let _wb = __intrinsic_dot_i32(a, b, 1024)
+
+    // --- Scalar timing ---
+    let t0 = nanotime()
+    let scalar_r = scalar_dot_i32(a, b, n)
+    let t1 = nanotime()
+    let scalar_ns = t1 - t0
+
+    // --- SIMD timing ---
+    let t2 = nanotime()
+    let simd_r = __intrinsic_dot_i32(a, b, n)
+    let t3 = nanotime()
+    let simd_ns = t3 - t2
+
+    print("  scalar result: "); print_int(scalar_r); println("")
+    print("  SIMD   result: "); print_int(simd_r); println("")
+    if scalar_r == simd_r {
+        println("  MATCH: scalar and SIMD agree.")
+    } else {
+        println("  MISMATCH: scalar != SIMD")
+    }
+
+    print("  scalar time (ns): "); print_int(scalar_ns); println("")
+    print("  SIMD   time (ns): "); print_int(simd_ns); println("")
+
+    // Integer speedup x100 (so we get one decimal place of precision).
+    if simd_ns > 0 {
+        let ratio_x100 = int_div(int_mul(scalar_ns, 100), simd_ns)
+        print("  speedup (x100): "); print_int(ratio_x100); println("")
+        let whole = int_div(ratio_x100, 100)
+        let frac  = ratio_x100 % 100
+        print("  speedup: ~"); print_int(whole); print(".")
+        if frac < 10 { print("0") }
+        print_int(frac)
+        println("x")
+    } else {
+        println("  SIMD time too small to measure")
+    }
+}
+
+main()
