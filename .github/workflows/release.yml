@@ -1,0 +1,127 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            artifact: nova
+            tar_name: nova-linux-x86_64.tar.gz
+          - target: windows-x86_64
+            artifact: nova.exe
+            tar_name: nova-windows-x86_64.tar.gz
+          - target: macos-x86_64
+            artifact: nova_macos.o
+            tar_name: nova-macos-x86_64.tar.gz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils build-essential
+          if [ "${{ matrix.target }}" = "windows-x86_64" ]; then
+            sudo apt-get install -y mingw-w64
+          fi
+          if [ "${{ matrix.target }}" = "macos-x86_64" ]; then
+            sudo apt-get install -y clang
+          fi
+
+      - name: Bootstrap (build stage1 nova on Linux)
+        run: |
+          make bootstrap
+          make bin/nova
+
+      - name: Build Linux artifact
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          mkdir -p dist
+          cp bin/nova dist/nova
+
+      - name: Cross-build Windows artifact
+        if: matrix.target == 'windows-x86_64'
+        run: |
+          mkdir -p dist
+          make cross-windows
+          cp bin/nova.exe dist/nova.exe
+
+      - name: Cross-build macOS object artifact
+        if: matrix.target == 'macos-x86_64'
+        run: |
+          mkdir -p dist
+          make cross-macos
+          clang -target x86_64-apple-darwin -c bin/nova_macos.s -o dist/nova_macos.o
+          cp bin/nova_macos.s dist/nova_macos.s
+
+      - name: Stage release tree
+        run: |
+          mkdir -p staging/nova
+          cp dist/${{ matrix.artifact }} staging/nova/
+          cp README.md INSTALL.md LICENSE staging/nova/ 2>/dev/null || true
+          tar -C staging -czf ${{ matrix.tar_name }} nova
+          ls -la ${{ matrix.tar_name }}
+          sha256sum ${{ matrix.tar_name }} > ${{ matrix.tar_name }}.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ matrix.tar_name }}
+            ${{ matrix.tar_name }}.sha256
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) \
+            -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: Nova ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            release/*.tar.gz
+            release/*.sha256

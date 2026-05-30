@@ -58,3 +58,12 @@ package.json
 Thumbs.db
 core
 core.*
+
+# IDE tooling artifacts
+tools/nova-lsp/__pycache__/
+tools/nova-lsp/**/__pycache__/
+tools/nova-lsp/*.egg-info/
+tools/nova-lsp/build/
+tools/nova-lsp/dist/
+tools/vscode-nova/*.vsix
+tools/vscode-nova/node_modules/

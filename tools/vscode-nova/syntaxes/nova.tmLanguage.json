@@ -1,0 +1,194 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Nova",
+  "scopeName": "source.nova",
+  "fileTypes": ["nova"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#asm-block" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#builtins" },
+    { "include": "#functions" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.nova",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.nova",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.nova",
+              "match": "\\\\(n|r|t|0|\\\\|\"|x[0-9A-Fa-f]{2})"
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.nova",
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.nova",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.nova",
+          "match": "\\b[0-9][0-9_]*\\.[0-9_]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.nova",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.nova",
+          "match": "\\b(if|else|while|for|in|return|break|continue)\\b"
+        },
+        {
+          "name": "keyword.declaration.nova",
+          "match": "\\b(fn|let|struct|extern|import)\\b"
+        },
+        {
+          "name": "keyword.other.asm.nova",
+          "match": "\\basm\\b"
+        },
+        {
+          "name": "constant.language.boolean.nova",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.none.nova",
+          "match": "\\bnone\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.nova",
+          "match": "\\b(int|str|list|float|bool|map)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.io.nova",
+          "match": "\\b(print|println|eprint|eprintln|print_int|read_line|read_file|write_file|append_file)\\b"
+        },
+        {
+          "name": "support.function.builtin.string.nova",
+          "match": "\\b(len|substr|char_at|str_eq|str_len|str_concat|str_to_int|int_to_str|str_split|str_index_of|str_contains)\\b"
+        },
+        {
+          "name": "support.function.builtin.list.nova",
+          "match": "\\b(list_new|list_len|list_push|push|pop|list_get|list_set|list_pop)\\b"
+        },
+        {
+          "name": "support.function.builtin.map.nova",
+          "match": "\\b(map_new|map_set|map_get|map_has|map_keys|map_values|map_len|map_delete)\\b"
+        },
+        {
+          "name": "support.function.builtin.memory.nova",
+          "match": "\\b(alloc|rt_alloc|rt_realloc|arena_alloc|mem_alloc|mem_alloc_zeroed|mem_free|mem_copy|mem_read_i64|mem_write_i64)\\b"
+        },
+        {
+          "name": "support.function.builtin.intrinsic.nova",
+          "match": "\\b(__intrinsic_dot_i32|int_shl|int_shr|int_and|int_or|int_xor)\\b"
+        }
+      ]
+    },
+    "asm-block": {
+      "name": "meta.embedded.asm.nova",
+      "begin": "\\basm\\s*\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "keyword.other.asm.nova" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.block.end.nova" }
+      },
+      "patterns": [
+        { "include": "#strings" },
+        { "include": "#comments" }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "\\bfn\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.function.nova" }
+          }
+        },
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.call.nova" }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.nova",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.nova",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.assignment.nova",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.nova",
+          "match": "\\+|-|\\*|/|%"
+        },
+        {
+          "name": "keyword.operator.bitwise.nova",
+          "match": "&|\\||\\^|~|<<|>>"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.comma.nova",
+          "match": ","
+        },
+        {
+          "name": "punctuation.terminator.semicolon.nova",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.colon.nova",
+          "match": ":"
+        }
+      ]
+    }
+  }
+}
