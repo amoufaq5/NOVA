@@ -3200,24 +3200,697 @@ fn gen_function(nd) {
     out("    ret")
 }
 
+// =====================================================================
+// ARM64 (AArch64) backend - standalone AST-walking codegen
+//
+// Emits GNU-as / clang-MC compatible ARM64 assembly for Linux/Android.
+// Stack-based evaluation: every expression leaves its result in x0.
+// Function parameters x0-x7 are spilled to locals on entry (so local
+// access is uniform). Locals live below x29 (the frame pointer).
+//
+// Calling convention (AAPCS64):
+//   x0-x7  : integer args / return
+//   x29    : frame pointer
+//   x30    : link register
+//   sp     : stack pointer (16-byte aligned at function boundaries)
+//
+// Syscalls (Linux/Android ARM64):
+//   svc #0 with x8=syscall_num, args in x0-x5
+//   write = 64, exit = 93
+//
+// NOTE: this path is intentionally INDEPENDENT of `lower_arm64.nova`
+// (the IR-based la_* pass). That module is shipped as an importable
+// package but is NOT in COMPILER_SRC, so calling la_init/la_out from
+// here used to segfault on any input. The codegen below walks the AST
+// directly and emits enough ARM64 assembly to build the mobile smoke
+// programs (hello_arm64.nova) via:
+//   clang -target aarch64-linux-android30 -c <output.s>
+//
+// Supported subset: fn declarations + return; let bindings (locals on
+// stack via x29-offset); if/while; integer +/-/*/// and comparisons;
+// function calls (AAPCS64 reg shuffle); println(string). Builtins
+// list_new/push/len/read_file/write_file are stubbed to exit(1) with a
+// printable error so the codegen never falls through to undefined
+// behaviour; asm blocks are skipped.
+// =====================================================================
+
+let arm_locals = 0
+let arm_local_count = 0
+let arm_params = 0
+let arm_param_count = 0
+let arm_strings = 0
+let arm_str_count = 0
+let arm_label_count = 0
+let arm_fns = 0
+let arm_output = 0
+let arm_break_label = ""
+let arm_continue_label = ""
+let arm_current_fn_name = ""
+
+fn arm_out(s) {
+    push(arm_output, s)
+}
+
+fn arm_label(name) {
+    push(arm_output, name + ":")
+}
+
+fn arm_new_label() {
+    arm_label_count = arm_label_count + 1
+    return ".LA" + int_to_str(arm_label_count)
+}
+
+fn arm_add_string(s) {
+    let i = 0
+    while i < arm_str_count {
+        if arm_strings[i] == s { return i }
+        i = i + 1
+    }
+    let idx = arm_str_count
+    push(arm_strings, s)
+    arm_str_count = arm_str_count + 1
+    return idx
+}
+
+fn arm_has_local(name) {
+    let i = 0
+    while i < arm_local_count {
+        if arm_locals[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn arm_local_off(name) {
+    let i = 0
+    while i < arm_local_count {
+        if arm_locals[i] == name {
+            return (i + 1) * 8
+        }
+        i = i + 1
+    }
+    push(arm_locals, name)
+    arm_local_count = arm_local_count + 1
+    return arm_local_count * 8
+}
+
+fn arm_current_fn() { return arm_current_fn_name }
+
+// Collect names introduced by `let` inside an arbitrary AST subtree so
+// the function prologue can reserve a fixed-size stack frame.
+fn arm_collect_locals(nd) {
+    if nd == 0 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_LET_STMT {
+        let nm = nd[1]
+        if arm_has_local(nm) == 0 {
+            push(arm_locals, nm)
+            arm_local_count = arm_local_count + 1
+        }
+        arm_collect_locals(nd[2])
+        return 0
+    }
+    if t == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            arm_collect_locals(stmts[i])
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_IF_STMT {
+        arm_collect_locals(nd[1])
+        arm_collect_locals(nd[2])
+        arm_collect_locals(nd[3])
+        return 0
+    }
+    if t == AST_WHILE_STMT {
+        arm_collect_locals(nd[1])
+        arm_collect_locals(nd[2])
+        return 0
+    }
+    if t == AST_RETURN_STMT { arm_collect_locals(nd[1]); return 0 }
+    if t == AST_EXPR_STMT { arm_collect_locals(nd[1]); return 0 }
+    if t == AST_ASSIGN_STMT { arm_collect_locals(nd[2]); return 0 }
+    if t == AST_BIN_OP { arm_collect_locals(nd[2]); arm_collect_locals(nd[3]); return 0 }
+    if t == AST_UNARY_OP { arm_collect_locals(nd[2]); return 0 }
+    if t == AST_AND_EXPR { arm_collect_locals(nd[1]); arm_collect_locals(nd[2]); return 0 }
+    if t == AST_OR_EXPR { arm_collect_locals(nd[1]); arm_collect_locals(nd[2]); return 0 }
+    if t == AST_CALL {
+        let args = nd[2]
+        let i = 0
+        while i < len(args) {
+            arm_collect_locals(args[i])
+            i = i + 1
+        }
+        return 0
+    }
+    return 0
+}
+
+// Materialise a 64-bit signed integer into the given xN register, using
+// the AArch64 movz/movk sequence (movn for negatives).
+fn arm_emit_load_imm(reg, val) {
+    if val == 0 {
+        arm_out("    mov " + reg + ", #0")
+        return 0
+    }
+    if val > 0 {
+        if val < 65536 {
+            arm_out("    mov " + reg + ", #" + int_to_str(val))
+            return 0
+        }
+        arm_out("    movz " + reg + ", #" + int_to_str(val % 65536))
+        let shift = val / 65536
+        if shift > 0 {
+            arm_out("    movk " + reg + ", #" + int_to_str(shift % 65536) + ", lsl #16")
+            shift = shift / 65536
+            if shift > 0 {
+                arm_out("    movk " + reg + ", #" + int_to_str(shift % 65536) + ", lsl #32")
+                shift = shift / 65536
+                if shift > 0 {
+                    arm_out("    movk " + reg + ", #" + int_to_str(shift % 65536) + ", lsl #48")
+                }
+            }
+        }
+        return 0
+    }
+    // Negative: encode as ~(-val-1) bits using movn / movk sequence.
+    let inv = 0 - val - 1
+    arm_out("    movn " + reg + ", #" + int_to_str(inv % 65536))
+    let upper = inv / 65536
+    if upper > 0 {
+        arm_out("    movk " + reg + ", #" + int_to_str(upper % 65536) + ", lsl #16")
+    }
+    return 0
+}
+
+fn arm_push_x0() {
+    arm_out("    str x0, [sp, #-16]!")
+}
+
+fn arm_pop_to(reg) {
+    arm_out("    ldr " + reg + ", [sp], #16")
+}
+
+fn arm_gen_call(nd) {
+    let callee = nd[1]
+    let args = nd[2]
+    let name = ""
+    if ast_tag(callee) == AST_IDENT { name = callee[1] }
+
+    if name == "println" {
+        if len(args) >= 1 {
+            arm_gen_expr(args[0])
+        } else {
+            arm_out("    mov x0, #0")
+        }
+        arm_out("    bl _nova_arm_println")
+        return 0
+    }
+    if name == "print" {
+        if len(args) >= 1 {
+            arm_gen_expr(args[0])
+        } else {
+            arm_out("    mov x0, #0")
+        }
+        arm_out("    bl _nova_arm_print")
+        return 0
+    }
+    if name == "exit" {
+        if len(args) >= 1 { arm_gen_expr(args[0]) } else { arm_out("    mov x0, #0") }
+        arm_out("    mov x8, #93")
+        arm_out("    svc #0")
+        return 0
+    }
+    if name == "list_new" {
+        arm_out("    bl _nova_arm_stub_list_new")
+        return 0
+    }
+    if name == "push" {
+        arm_out("    bl _nova_arm_stub_push")
+        return 0
+    }
+    if name == "len" {
+        arm_out("    bl _nova_arm_stub_len")
+        return 0
+    }
+    if name == "read_file" {
+        arm_out("    bl _nova_arm_stub_read_file")
+        return 0
+    }
+    if name == "write_file" {
+        arm_out("    bl _nova_arm_stub_write_file")
+        return 0
+    }
+
+    // Generic user-function call.
+    let argc = len(args)
+    if argc > 8 {
+        arm_out("    // ERROR: arm64 codegen supports at most 8 args")
+        argc = 8
+    }
+    let i = 0
+    while i < argc {
+        arm_gen_expr(args[i])
+        arm_push_x0()
+        i = i + 1
+    }
+    i = argc - 1
+    while i >= 0 {
+        arm_pop_to("x" + int_to_str(i))
+        i = i - 1
+    }
+    arm_out("    bl " + name)
+    return 0
+}
+
+fn arm_gen_expr(nd) {
+    let t = ast_tag(nd)
+    if t == AST_INT_LIT {
+        arm_emit_load_imm("x0", nd[1])
+        return 0
+    }
+    if t == AST_BOOL_LIT {
+        if nd[1] == 1 {
+            arm_out("    mov x0, #1")
+        } else {
+            arm_out("    mov x0, #0")
+        }
+        return 0
+    }
+    if t == AST_NONE_LIT {
+        arm_out("    mov x0, #0")
+        return 0
+    }
+    if t == AST_STR_LIT {
+        let idx = arm_add_string(nd[1])
+        arm_out("    adrp x0, _str_" + int_to_str(idx))
+        arm_out("    add x0, x0, :lo12:_str_" + int_to_str(idx))
+        return 0
+    }
+    if t == AST_IDENT {
+        let nm = nd[1]
+        if arm_has_local(nm) == 1 {
+            let off = arm_local_off(nm)
+            arm_out("    ldr x0, [x29, #-" + int_to_str(off) + "]")
+            return 0
+        }
+        // Treat unknown ident as a function address.
+        arm_out("    adrp x0, " + nm)
+        arm_out("    add x0, x0, :lo12:" + nm)
+        return 0
+    }
+    if t == AST_BIN_OP {
+        let op = nd[1]
+        arm_gen_expr(nd[2])
+        arm_push_x0()
+        arm_gen_expr(nd[3])
+        arm_out("    mov x1, x0")
+        arm_pop_to("x0")
+        if op == "+" { arm_out("    add x0, x0, x1"); return 0 }
+        if op == "-" { arm_out("    sub x0, x0, x1"); return 0 }
+        if op == "*" { arm_out("    mul x0, x0, x1"); return 0 }
+        if op == "/" { arm_out("    sdiv x0, x0, x1"); return 0 }
+        if op == "%" {
+            arm_out("    sdiv x2, x0, x1")
+            arm_out("    msub x0, x2, x1, x0")
+            return 0
+        }
+        if op == "==" { arm_out("    cmp x0, x1"); arm_out("    cset x0, eq"); return 0 }
+        if op == "!=" { arm_out("    cmp x0, x1"); arm_out("    cset x0, ne"); return 0 }
+        if op == "<" { arm_out("    cmp x0, x1"); arm_out("    cset x0, lt"); return 0 }
+        if op == ">" { arm_out("    cmp x0, x1"); arm_out("    cset x0, gt"); return 0 }
+        if op == "<=" { arm_out("    cmp x0, x1"); arm_out("    cset x0, le"); return 0 }
+        if op == ">=" { arm_out("    cmp x0, x1"); arm_out("    cset x0, ge"); return 0 }
+        arm_out("    // unsupported arm64 binop: " + op)
+        return 0
+    }
+    if t == AST_UNARY_OP {
+        let op = nd[1]
+        arm_gen_expr(nd[2])
+        if op == "-" { arm_out("    neg x0, x0"); return 0 }
+        if op == "!" { arm_out("    cmp x0, #0"); arm_out("    cset x0, eq"); return 0 }
+        arm_out("    // unsupported arm64 unary: " + op)
+        return 0
+    }
+    if t == AST_AND_EXPR {
+        let end = arm_new_label()
+        arm_gen_expr(nd[1])
+        arm_out("    cbz x0, " + end)
+        arm_gen_expr(nd[2])
+        arm_label(end)
+        return 0
+    }
+    if t == AST_OR_EXPR {
+        let end = arm_new_label()
+        arm_gen_expr(nd[1])
+        arm_out("    cbnz x0, " + end)
+        arm_gen_expr(nd[2])
+        arm_label(end)
+        return 0
+    }
+    if t == AST_CALL {
+        arm_gen_call(nd)
+        return 0
+    }
+    arm_out("    // unsupported arm64 expression tag " + int_to_str(t))
+    arm_out("    mov x0, #0")
+    return 0
+}
+
+fn arm_gen_stmt(nd) {
+    let t = ast_tag(nd)
+    if t == AST_LET_STMT {
+        let nm = nd[1]
+        let val = nd[2]
+        arm_gen_expr(val)
+        let off = arm_local_off(nm)
+        arm_out("    str x0, [x29, #-" + int_to_str(off) + "]")
+        return 0
+    }
+    if t == AST_ASSIGN_STMT {
+        let nm = nd[1]
+        arm_gen_expr(nd[2])
+        let off = arm_local_off(nm)
+        arm_out("    str x0, [x29, #-" + int_to_str(off) + "]")
+        return 0
+    }
+    if t == AST_EXPR_STMT {
+        arm_gen_expr(nd[1])
+        return 0
+    }
+    if t == AST_RETURN_STMT {
+        let val = nd[1]
+        if val == 0 {
+            arm_out("    mov x0, #0")
+        } else {
+            arm_gen_expr(val)
+        }
+        arm_out("    b _arm_fn_epilogue_" + arm_current_fn())
+        return 0
+    }
+    if t == AST_IF_STMT {
+        let cond = nd[1]
+        let then_b = nd[2]
+        let else_b = nd[3]
+        let else_lbl = arm_new_label()
+        let end_lbl = arm_new_label()
+        arm_gen_expr(cond)
+        arm_out("    cbz x0, " + else_lbl)
+        arm_gen_stmt(then_b)
+        arm_out("    b " + end_lbl)
+        arm_label(else_lbl)
+        if else_b != 0 {
+            arm_gen_stmt(else_b)
+        }
+        arm_label(end_lbl)
+        return 0
+    }
+    if t == AST_WHILE_STMT {
+        let head_lbl = arm_new_label()
+        let end_lbl = arm_new_label()
+        let saved_break = arm_break_label
+        let saved_cont = arm_continue_label
+        arm_break_label = end_lbl
+        arm_continue_label = head_lbl
+        arm_label(head_lbl)
+        arm_gen_expr(nd[1])
+        arm_out("    cbz x0, " + end_lbl)
+        arm_gen_stmt(nd[2])
+        arm_out("    b " + head_lbl)
+        arm_label(end_lbl)
+        arm_break_label = saved_break
+        arm_continue_label = saved_cont
+        return 0
+    }
+    if t == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            arm_gen_stmt(stmts[i])
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_BREAK_STMT {
+        if len(arm_break_label) > 0 {
+            arm_out("    b " + arm_break_label)
+        }
+        return 0
+    }
+    if t == AST_CONTINUE_STMT {
+        if len(arm_continue_label) > 0 {
+            arm_out("    b " + arm_continue_label)
+        }
+        return 0
+    }
+    arm_out("    // unsupported arm64 stmt tag " + int_to_str(t))
+    return 0
+}
+
+fn arm_gen_function(nd) {
+    let name = nd[1]
+    let params = nd[2]
+    let body = nd[3]
+
+    arm_locals = list_new()
+    arm_local_count = 0
+    arm_params = params
+    arm_param_count = len(params)
+    arm_current_fn_name = name
+
+    let pi = 0
+    while pi < arm_param_count {
+        push(arm_locals, params[pi])
+        arm_local_count = arm_local_count + 1
+        pi = pi + 1
+    }
+    arm_collect_locals(body)
+
+    let frame_bytes = arm_local_count * 8
+    let rem = frame_bytes % 16
+    if rem > 0 { frame_bytes = frame_bytes + (16 - rem) }
+    if frame_bytes < 16 { frame_bytes = 16 }
+
+    arm_out("")
+    arm_out(".globl " + name)
+    arm_out(".p2align 2")
+    arm_label(name)
+    arm_out("    stp x29, x30, [sp, #-16]!")
+    arm_out("    mov x29, sp")
+    arm_out("    sub sp, sp, #" + int_to_str(frame_bytes))
+
+    let ai = 0
+    while ai < arm_param_count {
+        if ai < 8 {
+            let off = (ai + 1) * 8
+            arm_out("    str x" + int_to_str(ai) + ", [x29, #-" + int_to_str(off) + "]")
+        }
+        ai = ai + 1
+    }
+
+    arm_gen_stmt(body)
+
+    arm_out("    mov x0, #0")
+    arm_label("_arm_fn_epilogue_" + name)
+    arm_out("    add sp, sp, #" + int_to_str(frame_bytes))
+    arm_out("    ldp x29, x30, [sp], #16")
+    arm_out("    ret")
+}
+
+fn arm_emit_stub(label, msg) {
+    let idx = arm_add_string(msg)
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label(label)
+    arm_out("    adrp x0, _str_" + int_to_str(idx))
+    arm_out("    add x0, x0, :lo12:_str_" + int_to_str(idx))
+    arm_out("    bl _nova_arm_println")
+    arm_out("    mov x0, #1")
+    arm_out("    mov x8, #93")
+    arm_out("    svc #0")
+}
+
+// Tiny ARM64 runtime: just enough to make println(string) work and to
+// give a clear error when an unsupported builtin (list_new, etc.) is
+// invoked. All routines preserve the AAPCS64 frame discipline.
+fn arm_emit_runtime() {
+    // ---- _nova_arm_strlen: count bytes of NUL-terminated string in x0 ----
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_strlen")
+    arm_out("    mov x1, x0")
+    arm_out("    mov x2, #0")
+    arm_label(".Larm_strlen_loop")
+    arm_out("    ldrb w3, [x1, x2]")
+    arm_out("    cbz w3, .Larm_strlen_done")
+    arm_out("    add x2, x2, #1")
+    arm_out("    b .Larm_strlen_loop")
+    arm_label(".Larm_strlen_done")
+    arm_out("    mov x0, x2")
+    arm_out("    ret")
+
+    // ---- _nova_arm_print: write(1, x0=ptr, strlen(x0)) ----
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_print")
+    arm_out("    stp x29, x30, [sp, #-16]!")
+    arm_out("    mov x29, sp")
+    arm_out("    mov x19, x0")
+    arm_out("    str x19, [sp, #-16]!")
+    arm_out("    bl _nova_arm_strlen")
+    arm_out("    mov x2, x0")
+    arm_out("    ldr x19, [sp], #16")
+    arm_out("    mov x1, x19")
+    arm_out("    mov x0, #1")
+    arm_out("    mov x8, #64")
+    arm_out("    svc #0")
+    arm_out("    ldp x29, x30, [sp], #16")
+    arm_out("    ret")
+
+    // ---- _nova_arm_println: print + newline ----
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_println")
+    arm_out("    stp x29, x30, [sp, #-16]!")
+    arm_out("    mov x29, sp")
+    arm_out("    bl _nova_arm_print")
+    arm_out("    sub sp, sp, #16")
+    arm_out("    mov w0, #10")
+    arm_out("    strb w0, [sp]")
+    arm_out("    mov x0, #1")
+    arm_out("    mov x1, sp")
+    arm_out("    mov x2, #1")
+    arm_out("    mov x8, #64")
+    arm_out("    svc #0")
+    arm_out("    add sp, sp, #16")
+    arm_out("    ldp x29, x30, [sp], #16")
+    arm_out("    ret")
+
+    arm_emit_stub("_nova_arm_stub_list_new", "ARM64: list_new not yet supported")
+    arm_emit_stub("_nova_arm_stub_push", "ARM64: push not yet supported")
+    arm_emit_stub("_nova_arm_stub_len", "ARM64: len not yet supported")
+    arm_emit_stub("_nova_arm_stub_read_file", "ARM64: read_file not yet supported")
+    arm_emit_stub("_nova_arm_stub_write_file", "ARM64: write_file not yet supported")
+}
+
+fn arm64_gen_program(program) {
+    arm_locals = list_new()
+    arm_local_count = 0
+    arm_params = list_new()
+    arm_param_count = 0
+    arm_strings = list_new()
+    arm_str_count = 0
+    arm_label_count = 0
+    arm_fns = list_new()
+    arm_output = list_new()
+    arm_break_label = ""
+    arm_continue_label = ""
+
+    let decls = program[1]
+
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            push(arm_fns, d[1])
+        }
+        i = i + 1
+    }
+
+    arm_out(".text")
+
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            arm_gen_function(d)
+        }
+        i = i + 1
+    }
+
+    // Emit `_start` for top-level statements.
+    arm_locals = list_new()
+    arm_local_count = 0
+    arm_params = list_new()
+    arm_param_count = 0
+    arm_current_fn_name = "_start"
+
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        let dt = ast_tag(d)
+        let count_this = 1
+        if dt == AST_FN_DECL { count_this = 0 }
+        if dt == AST_STRUCT_DECL { count_this = 0 }
+        if dt == AST_ENUM_DECL { count_this = 0 }
+        if dt == AST_METHOD_DECL { count_this = 0 }
+        if dt == AST_EXTERN_FN { count_this = 0 }
+        if dt == AST_ASM { count_this = 0 }
+        if count_this == 1 {
+            arm_collect_locals(d)
+        }
+        i = i + 1
+    }
+    let start_frame = arm_local_count * 8
+    let srem = start_frame % 16
+    if srem > 0 { start_frame = start_frame + (16 - srem) }
+    if start_frame < 16 { start_frame = 16 }
+
+    arm_out("")
+    arm_out(".globl _start")
+    arm_label("_start")
+    arm_out("    stp x29, x30, [sp, #-16]!")
+    arm_out("    mov x29, sp")
+    arm_out("    sub sp, sp, #" + int_to_str(start_frame))
+
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        let dt = ast_tag(d)
+        let skip = 0
+        if dt == AST_FN_DECL { skip = 1 }
+        if dt == AST_STRUCT_DECL { skip = 1 }
+        if dt == AST_ENUM_DECL { skip = 1 }
+        if dt == AST_METHOD_DECL { skip = 1 }
+        if dt == AST_EXTERN_FN { skip = 1 }
+        if dt == AST_ASM { skip = 1 }
+        if skip == 0 {
+            arm_gen_stmt(d)
+        }
+        i = i + 1
+    }
+
+    arm_out("    add sp, sp, #" + int_to_str(start_frame))
+    arm_out("    ldp x29, x30, [sp], #16")
+    arm_out("    mov x0, #0")
+    arm_out("    mov x8, #93")
+    arm_out("    svc #0")
+
+    arm_emit_runtime()
+
+    if arm_str_count > 0 {
+        arm_out("")
+        arm_out(".data")
+        let si = 0
+        while si < arm_str_count {
+            arm_label("_str_" + int_to_str(si))
+            arm_out("    .asciz " + DQ + escape_for_asm(arm_strings[si]) + DQ)
+            si = si + 1
+        }
+    }
+
+    return join(arm_output, chr(10))
+}
+
 fn gen_program(program) {
     if cg_target == 2 {
         return wasm_gen_program(program)
     }
-    // ARM64 target: initialize lowering pass and delegate to la_* functions
     if cg_target == 4 {
-        la_init(4)
-        la_source_file = cg_source_file
-        // TODO: walk AST, generate IR, then call la_lower_function() per function
-        // For now, emit a minimal stub that exits cleanly
-        la_out(".text")
-        la_out(".globl _start")
-        la_out("_start:")
-        la_out("    mov x0, #0")
-        la_out("    mov x8, #93")
-        la_out("    svc #0")
-        let arm64_lines = la_get_output()
-        return join(arm64_lines, chr(10))
+        return arm64_gen_program(program)
     }
     let decls = program[1]
 
@@ -5658,6 +6331,253 @@ fn wasm_gen_rt_extra() {
     wasm_indent = wasm_indent - 1
     wi(")")
     wi("")
+
+    // ---- WASI file I/O scratch layout (linear memory offsets 16..63) ----
+    //   16   opened_fd_out   (4 bytes) -- path_open writes the fd here
+    //   32   iovec.buf_ptr   (4 bytes) -- fd_read/fd_write iovec
+    //   36   iovec.buf_len   (4 bytes)
+    //   48   n_io_out        (4 bytes) -- fd_read nread / fd_write nwritten
+    // Offsets 0..15 belong to print (its own iovec lives at 0..8 with
+    // the fd_write byte-count slot at offset 8). File I/O therefore
+    // never clobbers print's working area.
+
+    // _nova_wasi_path_offset -- skip leading '/' and the first directory
+    // component so the path passed to path_open is relative to the
+    // preopen directory mounted on that prefix. E.g. /tmp/out.txt
+    // becomes out.txt (preopen /tmp maps to dirfd 3 in node WASI).
+    // Returns the offset (relative to the original string ptr) of the
+    // first byte to send to path_open. If the path has no leading '/',
+    // returns 0 (treat as already-relative).
+    wi("(func $_nova_wasi_path_offset (param $s i32) (result i32)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $i i32)")
+    wi("(local $c i32)")
+    wi("local.get $s")
+    wi("i32.load8_u")
+    wi("i32.const 47")
+    wi("i32.ne")
+    wi("if")
+    wi("  i32.const 0")
+    wi("  return")
+    wi("end")
+    wi("i32.const 1")
+    wi("local.set $i")
+    wi("block $done")
+    wi("loop $scan")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $s")
+    wi("local.get $i")
+    wi("i32.add")
+    wi("i32.load8_u")
+    wi("local.set $c")
+    wi("local.get $c")
+    wi("i32.eqz")
+    wi("br_if $done")
+    wi("local.get $c")
+    wi("i32.const 47")
+    wi("i32.eq")
+    wi("if")
+    wi("  local.get $i")
+    wi("  i32.const 1")
+    wi("  i32.add")
+    wi("  return")
+    wi("end")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $scan")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    // No second '/' found -- fall back to skipping just the leading '/'.
+    wi("i32.const 1")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // read_file(path) -> string ptr (NUL-terminated) on success, 0 on failure.
+    // WASI sequence:
+    //   path_open(dirfd=3, dirflags=0, path_ptr, path_len, oflags=0,
+    //             fs_rights_base=ALL_RIGHTS, fs_rights_inheriting=ALL_RIGHTS,
+    //             fdflags=0, opened_fd_out=&scratch[16])
+    //   fd_read(fd, iovs=&scratch[32], iovs_len=1, nread_out=&scratch[48])
+    //   fd_close(fd)
+    // The dirfd of 3 matches node's preopen ordering (stdin=0, stdout=1,
+    // stderr=2, first preopen=3). Buffer is allocated through the bump
+    // allocator at 524288 bytes (matches the native read_file budget).
+    wi("(func $read_file (param $path i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $p i32)")
+    wi("(local $rel i32)")
+    wi("(local $plen i32)")
+    wi("(local $buf i32)")
+    wi("(local $fd i32)")
+    wi("(local $rc i32)")
+    wi("(local $nread i32)")
+    wi("local.get $path")
+    wi("i32.wrap_i64")
+    wi("local.set $p")
+    wi("local.get $p")
+    wi("call $_nova_wasi_path_offset")
+    wi("local.set $rel")
+    wi("local.get $p")
+    wi("local.get $rel")
+    wi("i32.add")
+    wi("local.set $rel")
+    wi("local.get $rel")
+    wi("call $rt_strlen")
+    wi("local.set $plen")
+    // Allocate the read buffer up front so we can store its ptr in the
+    // iovec before path_open (path_open does not touch the iovec).
+    wi("i64.const 524288")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $buf")
+    wi("i32.const 32")
+    wi("local.get $buf")
+    wi("i32.store")
+    wi("i32.const 36")
+    wi("i32.const 524287")
+    wi("i32.store")
+    wi("i32.const 48")
+    wi("i32.const 0")
+    wi("i32.store")
+    wi("i32.const 16")
+    wi("i32.const 0")
+    wi("i32.store")
+    // path_open(dirfd=3, dirflags=0, path_ptr=$rel, path_len=$plen,
+    //            oflags=0, rights_base=ALL_RIGHTS, rights_inherit=ALL_RIGHTS,
+    //            fdflags=0, fd_out=16)
+    wi("i32.const 3")
+    wi("i32.const 0")
+    wi("local.get $rel")
+    wi("local.get $plen")
+    wi("i32.const 0")
+    wi("i64.const 536870911")
+    wi("i64.const 536870911")
+    wi("i32.const 0")
+    wi("i32.const 16")
+    wi("call $path_open")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if")
+    wi("  i64.const 0")
+    wi("  return")
+    wi("end")
+    wi("i32.const 16")
+    wi("i32.load")
+    wi("local.set $fd")
+    wi("local.get $fd")
+    wi("i32.const 32")
+    wi("i32.const 1")
+    wi("i32.const 48")
+    wi("call $fd_read")
+    wi("drop")
+    wi("i32.const 48")
+    wi("i32.load")
+    wi("local.set $nread")
+    wi("local.get $buf")
+    wi("local.get $nread")
+    wi("i32.add")
+    wi("i32.const 0")
+    wi("i32.store8")
+    wi("local.get $fd")
+    wi("call $fd_close")
+    wi("drop")
+    wi("local.get $buf")
+    wi("i64.extend_i32_u")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // write_file(path, data) -> 1 on success, 0 on failure.
+    // WASI sequence:
+    //   path_open(dirfd=3, dirflags=0, path_ptr, path_len,
+    //             oflags=OFLAGS_CREAT|OFLAGS_TRUNC (0x09),
+    //             fs_rights_base=ALL_RIGHTS, fs_rights_inheriting=ALL_RIGHTS,
+    //             fdflags=0, opened_fd_out=&scratch[16])
+    //   fd_write(fd, iovs=&scratch[32], iovs_len=1, nwritten_out=&scratch[48])
+    //   fd_close(fd)
+    // We always pass strlen($data) bytes (NOVA strings are NUL-terminated;
+    // the NUL itself is not written, matching the native write_file).
+    wi("(func $write_file (param $path i64) (param $data i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $p i32)")
+    wi("(local $rel i32)")
+    wi("(local $plen i32)")
+    wi("(local $d i32)")
+    wi("(local $dlen i32)")
+    wi("(local $fd i32)")
+    wi("(local $rc i32)")
+    wi("local.get $path")
+    wi("i32.wrap_i64")
+    wi("local.set $p")
+    wi("local.get $p")
+    wi("call $_nova_wasi_path_offset")
+    wi("local.set $rel")
+    wi("local.get $p")
+    wi("local.get $rel")
+    wi("i32.add")
+    wi("local.set $rel")
+    wi("local.get $rel")
+    wi("call $rt_strlen")
+    wi("local.set $plen")
+    wi("local.get $data")
+    wi("i32.wrap_i64")
+    wi("local.set $d")
+    wi("local.get $d")
+    wi("call $rt_strlen")
+    wi("local.set $dlen")
+    wi("i32.const 32")
+    wi("local.get $d")
+    wi("i32.store")
+    wi("i32.const 36")
+    wi("local.get $dlen")
+    wi("i32.store")
+    wi("i32.const 48")
+    wi("i32.const 0")
+    wi("i32.store")
+    wi("i32.const 16")
+    wi("i32.const 0")
+    wi("i32.store")
+    // path_open with O_CREAT|O_TRUNC (0x01|0x08 = 0x09) and ALL_RIGHTS.
+    wi("i32.const 3")
+    wi("i32.const 0")
+    wi("local.get $rel")
+    wi("local.get $plen")
+    wi("i32.const 9")
+    wi("i64.const 536870911")
+    wi("i64.const 536870911")
+    wi("i32.const 0")
+    wi("i32.const 16")
+    wi("call $path_open")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if")
+    wi("  i64.const 0")
+    wi("  return")
+    wi("end")
+    wi("i32.const 16")
+    wi("i32.load")
+    wi("local.set $fd")
+    wi("local.get $fd")
+    wi("i32.const 32")
+    wi("i32.const 1")
+    wi("i32.const 48")
+    wi("call $fd_write")
+    wi("drop")
+    wi("local.get $fd")
+    wi("call $fd_close")
+    wi("drop")
+    wi("i64.const 1")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
 }
 
 fn wasm_gen_program(program) {
@@ -5697,6 +6617,10 @@ fn wasm_gen_program(program) {
     // Module header
     out("(module")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_write" + Q + " (func $fd_write (param i32 i32 i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_read" + Q + " (func $fd_read (param i32 i32 i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_close" + Q + " (func $fd_close (param i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_seek" + Q + " (func $fd_seek (param i32 i64 i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "path_open" + Q + " (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "proc_exit" + Q + " (func $proc_exit (param i32)))")
     out("  (memory (export " + Q + "memory" + Q + ") 256)")
     out("  (global $heap_ptr (mut i64) (i64.const 65536))")
@@ -6602,8 +7526,19 @@ fn gen_runtime() {
     out("")
     out_label("_nova_exit")
     if cg_target == 3 {
+        // PROVES alignment:
+        //   entry %16==8 (return addr from caller). win_call wraps with
+        //   sub rsp,32 which yields %16==8 -- MISALIGNED for Win64 ABI.
+        //   Bump to 40 so we land at %16==0 right before the call. The
+        //   tail-call shape (no frame, no caller-saves, no return) means
+        //   we don't need to undo the sub. Without this fix, an explicit
+        //   exit(0) from user code (e.g. chat /quit handler) trips an
+        //   SEH invalid-frame error inside Wine ExitProcess unwind,
+        //   leaving the process exit code at 5 instead of 0.
         out("    mov ecx, edi")
-        win_call("ExitProcess")
+        out("    sub rsp, 40")
+        out("    call [rip + __imp_ExitProcess]")
+        // No need to restore rsp -- ExitProcess never returns.
     } else {
         if cg_link_libc == 1 {
             out("    and rsp, -16")
