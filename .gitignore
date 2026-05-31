@@ -22,6 +22,9 @@ bin/hello_arm64.s
 bin/gpu_vector_add.wgsl
 bin/gpu_vector_add.cfg
 
+# release-dry-run.sh output (matches GH Actions release artifact layout)
+dist/
+
 # Smoke-test scratch outputs (write_file/read_file roundtrip artifacts).
 hello_win32_scratch.txt
 
