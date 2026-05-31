@@ -17,12 +17,13 @@
 // They link into Xcode app bundles (iOS) or NDK shared libraries (Android),
 // which Gradle/Xcode package into the final APK/IPA. See MOBILE_AUDIT.md.
 //
-// Status: cg_target == 4 is currently a single-stub `_start: exit` and
-// crashes on any real input. The la_lower_function ARM64 lowering is the
-// next NOVA codegen task. This file documents what the codegen SHOULD do
-// once that work lands, and is used by `make smoke-mobile-*` for the
-// toolchain-only smoke (the hand-written reference assembly lives at
-// `examples/hello_arm64_reference.s` and `examples/hello_ios_reference.s`).
+// Status: cg_target == 4 is now wired (see codegen.nova arm64_gen_program).
+// `bin/nova examples/hello_arm64.nova --target=arm64 -o out.s` emits valid
+// ARM64 assembly that clang -target aarch64-linux-android30 turns into a
+// proper ELF object. The smoke-mobile-android make target now exercises
+// this path. The iOS target still uses the hand-written reference .s
+// because the emitted relocations are GAS/Android-flavoured (adrp + :lo12:
+// instead of @PAGE/@PAGEOFF). See MOBILE_AUDIT.md.
 
 fn main() {
     println("hello from NOVA on ARM64")

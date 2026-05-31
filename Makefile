@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm smoke-gpu bench-simd bench-int-safe
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm smoke-wasm-file smoke-gpu bench-simd bench-int-safe
 
 all: bin/nova
 
@@ -185,6 +185,51 @@ smoke-wasm: bin/nova examples/hello_wasm.nova
 		echo "(skipping wasm run; set WASM_OK=1 to enable via wasmtime/node)"; \
 	fi
 
+# Build + run the WASM file I/O round-trip smoke test.
+# Pipeline:
+#   1. NOVA compiles examples/file_wasm.nova -> bin/file_wasm.wat with
+#      --target=wasm. The .wat imports wasi_snapshot_preview1.{path_open,
+#      fd_read, fd_write, fd_close, fd_seek, proc_exit}.
+#   2. wat2wasm finalizes to bin/file_wasm.wasm.
+#   3. node --experimental-wasi-unstable-preview1 runs it with
+#      preopens={'/tmp':'/tmp'} so the WASM sandbox sees /tmp as dirfd 3.
+#   4. The program writes "nova" to /tmp/out.txt, reads it back, and
+#      asserts the round-trip succeeded. Exit 0 = pass, 1 = fail.
+#
+# Skips cleanly with a clear message if wat2wasm or node is missing.
+# See WASM_AUDIT.md for the full WASI surface.
+smoke-wasm-file: bin/nova examples/file_wasm.nova
+	@mkdir -p bin
+	@bin/nova examples/file_wasm.nova --target=wasm -o bin/file_wasm.wat
+	@echo "WAT written to bin/file_wasm.wat ($$(wc -l < bin/file_wasm.wat) lines)"
+	@if ! command -v wat2wasm >/dev/null 2>&1; then \
+		echo "(skip: wasm toolchain not available -- need wat2wasm; apt install wabt)"; \
+		exit 0; \
+	fi
+	@wat2wasm bin/file_wasm.wat -o bin/file_wasm.wasm
+	@echo "WASM written to bin/file_wasm.wasm"
+	@if ! command -v node >/dev/null 2>&1; then \
+		echo "(skip: node not available -- file I/O round-trip needs node WASI)"; \
+		exit 0; \
+	fi
+	@rm -f /tmp/out.txt
+	@echo "--- node --experimental-wasi-unstable-preview1 (preopens=/tmp) ---"
+	@node --experimental-wasi-unstable-preview1 -e "\
+		const {WASI} = require('node:wasi'); const fs = require('node:fs'); \
+		const wasi = new WASI({version: 'preview1', args: [], env: {}, preopens: {'/tmp': '/tmp'}}); \
+		const wasm = fs.readFileSync('bin/file_wasm.wasm'); \
+		WebAssembly.instantiate(wasm, {wasi_snapshot_preview1: wasi.wasiImport}).then(({instance}) => { \
+		  wasi.start(instance); \
+		}).catch(e => { console.error('WASM error:', e.message); process.exit(1); });" 2>&1 \
+		| grep -v "ExperimentalWarning\|trace-warnings"
+	@if [ -f /tmp/out.txt ] && [ "$$(cat /tmp/out.txt)" = "nova" ]; then \
+		echo "--- /tmp/out.txt contents verified: nova ---"; \
+	else \
+		echo "FAIL: /tmp/out.txt missing or wrong content"; \
+		[ -f /tmp/out.txt ] && cat /tmp/out.txt; \
+		exit 1; \
+	fi
+
 # Compile a .nova file to a binary
 %.out: %.nova bin/nova
 	bin/nova $< -o /tmp/$*.s
@@ -250,19 +295,20 @@ smoke-gpu: bin/nova examples/gpu_vector_add.nova
 			bin/gpu_vector_add.wgsl bin/gpu_vector_add.cfg; \
 	fi
 
-# Mobile native (iOS / Android ARM64). Both targets ship reference hand-
-# written ARM64 assembly that demonstrates exactly what NOVA's --target=arm64
-# codegen SHOULD emit; the toolchain end-to-end is validated, the codegen
-# gap is documented in MOBILE_AUDIT.md.
+# Mobile native (iOS / Android ARM64).
 #
-# NOVA's cg_target == 4 is currently a single-stub `_start: exit` and crashes
-# on real input -- the la_lower_function ARM64 lowering is the next codegen
-# task. These targets therefore assemble the hand-written REFERENCE .s files
-# (examples/hello_arm64_{android,ios}_reference.s) instead of calling
-# `bin/nova --target=arm64`, until the codegen is wired.
+# Android: NOVA's --target=arm64 backend now compiles hello_arm64.nova
+# end-to-end (see codegen.nova arm64_gen_program). The smoke assembles
+# the NOVA-emitted .s instead of the hand-written reference, proving the
+# codegen path is real. Also re-asserts the reference path to catch
+# toolchain regressions.
+#
+# iOS: still uses the hand-written reference .s (NOVA's adrp/lo12
+# relocations are GAS/Android-flavoured; iOS Mach-O wants @PAGE/@PAGEOFF
+# which is not yet emitted). Tracked in MOBILE_AUDIT.md.
 #
 # Skips cleanly if clang's AArch64 backend isn't available.
-smoke-mobile-android: bin/nova examples/hello_arm64_android_reference.s
+smoke-mobile-android: bin/nova examples/hello_arm64.nova examples/hello_arm64_android_reference.s
 	@mkdir -p bin
 	@if ! command -v clang >/dev/null 2>&1; then \
 		echo "(skip: mobile cross-toolchain not available -- need clang)"; \
@@ -272,10 +318,16 @@ smoke-mobile-android: bin/nova examples/hello_arm64_android_reference.s
 		echo "(skip: clang does not support aarch64 target)"; \
 		exit 0; \
 	fi
-	@clang -target aarch64-linux-android30 -c \
-		examples/hello_arm64_android_reference.s -o bin/hello_android.o
-	@echo "Android ARM64 reference object written to bin/hello_android.o"
+	@echo "--- NOVA --target=arm64 -> Android ARM64 ELF ---"
+	@bin/nova examples/hello_arm64.nova --target=arm64 -o /tmp/hello_arm64.s
+	@clang -target aarch64-linux-android30 -c /tmp/hello_arm64.s -o bin/hello_android.o
+	@echo "Android ARM64 object written to bin/hello_android.o (compiled by NOVA)"
 	@file bin/hello_android.o
+	@echo ""
+	@echo "--- reference .s -> Android ARM64 ELF (sanity) ---"
+	@clang -target aarch64-linux-android30 -c \
+		examples/hello_arm64_android_reference.s -o /tmp/hello_android_ref.o
+	@file /tmp/hello_android_ref.o
 	@echo "(this .o links into an NDK .so via System.loadLibrary; see MOBILE_AUDIT.md)"
 
 smoke-mobile-ios: bin/nova examples/hello_arm64_ios_reference.s
