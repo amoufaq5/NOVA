@@ -5,6 +5,52 @@
 // Usage: nova_boot src/compiler/compiler.nova <input.nova> -o <output.s>
 // Or when self-compiled: ./nova <input.nova> -o <output.s>
 
+// Fallback version string used if VERSION can't be located via read_file
+// (e.g. nova installed to ~/.local/bin/ with no VERSION alongside it).
+// Kept in sync with the VERSION file at the repo root by tools/RELEASE.md.
+let NOVA_VERSION_FALLBACK = "0.1.0"
+
+fn _read_version_file() {
+    let raw = read_file("VERSION")
+    if raw == 0 { return NOVA_VERSION_FALLBACK }
+    let n = len(raw)
+    if n == 0 { return NOVA_VERSION_FALLBACK }
+    let end = n
+    let trimming = 1
+    while trimming == 1 {
+        if end <= 0 { trimming = 0 }
+        if trimming == 1 {
+            let c = char_at(raw, end - 1)
+            let is_ws = 0
+            if c == 10 { is_ws = 1 }
+            if c == 13 { is_ws = 1 }
+            if c == 32 { is_ws = 1 }
+            if c == 9 { is_ws = 1 }
+            if is_ws == 1 { end = end - 1 }
+            if is_ws == 0 { trimming = 0 }
+        }
+    }
+    if end <= 0 { return NOVA_VERSION_FALLBACK }
+    return substr(raw, 0, end)
+}
+
+fn _print_usage() {
+    println("Usage: nova <input.nova> [-o output.s] [options]")
+    println("")
+    println("Options:")
+    println("  -o <file>              Output assembly file (default: output.s)")
+    println("  --target=<t>           Target: linux, macos, wasm, windows, arm64")
+    println("  --check                Syntax check only (no codegen)")
+    println("  --stats                Show compilation statistics")
+    println("  --debug / --no-debug   Enable/disable debug info")
+    println("  --link-libc            Link with libc (enables FFI)")
+    println("  --version, -V          Show compiler version and exit")
+    println("  --help, -h             Show this help message and exit")
+    println("")
+    println("Subcommands:")
+    println("  nova pkg <init|add|remove|list|install>")
+}
+
 fn extract_dir(fpath) {
     let last_slash = 0 - 1
     let i = 0
@@ -597,6 +643,28 @@ fn main() {
     let ai = 0
     let cur = __arg(ai)
 
+    // Early-dispatch --version / --help / -V / -h. install.sh,
+    // brew test, and the Homebrew `system "nova", "--version"` test
+    // all probe these flags and need parseable stdout + exit 0.
+    if cur == "--version" {
+        print("nova ")
+        println(_read_version_file())
+        exit(0)
+    }
+    if cur == "-V" {
+        print("nova ")
+        println(_read_version_file())
+        exit(0)
+    }
+    if cur == "--help" {
+        _print_usage()
+        exit(0)
+    }
+    if cur == "-h" {
+        _print_usage()
+        exit(0)
+    }
+
     // Check for pkg subcommand
     if cur == "pkg" {
         let pkg_args = list_new()
@@ -666,8 +734,8 @@ fn main() {
                                         println("Mode: linking with libc (FFI enabled)")
                                     } else {
                                         if cur == "--version" {
-                                            println("Nova compiler v4.0.0 (self-hosting, x86-64, SSE2 SIMD, FFI, BLAS, cognitive LLM)")
-                                            println("Target: Linux/macOS/WASM/Windows")
+                                            print("nova ")
+                                            println(_read_version_file())
                                             exit(0)
                                         } else {
                                             input_file = cur
@@ -685,18 +753,7 @@ fn main() {
     }
 
     if input_file == "" {
-        println("Usage: nova <input.nova> [-o output.s] [options]")
-        println("")
-        println("Options:")
-        println("  -o <file>              Output assembly file (default: output.s)")
-        println("  --target=<t>           Target: linux, macos, wasm, windows, arm64")
-        println("  --check                Syntax check only (no codegen)")
-        println("  --stats                Show compilation statistics")
-        println("  --debug / --no-debug   Enable/disable debug info")
-        println("  --version              Show compiler version")
-        println("")
-        println("Subcommands:")
-        println("  nova pkg <init|add|remove|list|install>")
+        _print_usage()
         exit(1)
     }
 
@@ -723,6 +780,16 @@ fn main() {
     println(concat("Compiled: ", concat(input_file, concat(" -> ", output_file))))
 }
 
-// Run main
-println("=== Nova Compiler Starting ===")
+// Run main. Suppress the "Nova Compiler Starting" banner for probe-only
+// flags so `nova --version` produces parseable stdout (`nova 0.1.0`)
+// for install.sh, brew test, and Homebrew's formula test.
+let _arg0 = __arg(0)
+let _is_probe = 0
+if _arg0 == "--version" { _is_probe = 1 }
+if _arg0 == "-V" { _is_probe = 1 }
+if _arg0 == "--help" { _is_probe = 1 }
+if _arg0 == "-h" { _is_probe = 1 }
+if _is_probe == 0 {
+    println("=== Nova Compiler Starting ===")
+}
 main()

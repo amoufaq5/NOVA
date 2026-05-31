@@ -89,6 +89,50 @@ Each tarball is accompanied by `*.sha256` for integrity checking.
 
 ---
 
+## Verifying your install
+
+After any of the install paths above, confirm the compiler is wired up
+correctly:
+
+```bash
+nova --version    # should print: nova 0.1.0
+nova --help       # should print the usage banner with all flags
+```
+
+Both flags are inert probes: they print to stdout and exit `0` without
+touching any source file. The Homebrew formula's `test` block, the
+`curl-bash` installer's final hint, and CI smoke jobs all use
+`nova --version` as the readiness check.
+
+If `nova --version` instead prints `=== Nova Compiler Starting ===`
+followed by `Nova compiler v4.0.0 …`, you have an older pre-`v0.1.0`
+binary — re-run the installer (which picks up the latest release)
+or rebuild from source.
+
+To validate the full release pipeline locally without pushing a tag,
+run the dry-run script:
+
+```bash
+tools/release-dry-run.sh                 # all targets
+tools/release-dry-run.sh linux           # just the host target
+```
+
+This produces `dist/release/nova-${target}.tar.gz` (with a matching
+`.sha256`) using the same `make bin/nova`, `make cross-windows`, and
+`make cross-macos` rules that `.github/workflows/release.yml` runs.
+It reports what *would* be uploaded but doesn't push anything to
+GitHub.
+
+To smoke-test the installer against a dry-run tarball:
+
+```bash
+NOVA_URL=file://$(pwd)/dist/release/nova-linux-x86_64.tar.gz \
+    NOVA_PREFIX=$(mktemp -d)/bin \
+    sh tools/install.sh
+```
+
+---
+
 ## Editor support
 
 After installing the compiler:

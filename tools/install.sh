@@ -57,7 +57,10 @@ case "$TARGET" in
     *) die "no prebuilt release for ${TARGET} yet — please build from source (see INSTALL.md)" ;;
 esac
 
-URL="https://github.com/${NOVA_REPO}/releases/download/${LATEST_VERSION}/${TARBALL}"
+# Default URL points at GitHub release; can be overridden via NOVA_URL
+# for testing (e.g. `file:///path/to/local/dry-run/tarball`). The
+# release-dry-run.sh script prints a one-liner using NOVA_URL.
+URL="${NOVA_URL:-https://github.com/${NOVA_REPO}/releases/download/${LATEST_VERSION}/${TARBALL}}"
 info "platform     : ${TARGET}"
 info "version      : ${LATEST_VERSION}"
 info "downloading  : ${URL}"
@@ -68,6 +71,13 @@ trap 'rm -rf "$TMPDIR_NOVA"' EXIT INT TERM
 
 fetch() {
     src="$1"; dst="$2"
+    # file:// URLs: just copy. Lets tools/release-dry-run.sh smoke-test
+    # this script end-to-end without round-tripping through GitHub.
+    case "$src" in
+        file://*)
+            cp "${src#file://}" "$dst" || die "failed to copy local file: ${src#file://}"
+            return 0 ;;
+    esac
     if have curl; then
         curl -fSL --retry 3 -o "$dst" "$src"
     elif have wget; then
