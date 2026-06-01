@@ -1,0 +1,93 @@
+// Test the secure_random(buf, n) builtin.
+//
+// Per-target source:
+//   Linux x86-64: getrandom syscall #318 (fallback /dev/urandom)
+//   Linux ARM64:  getrandom syscall #278
+//   macOS:        BSD getentropy syscall #500, chunked at 256 bytes
+//   Windows:      BCryptGenRandom from bcrypt.dll
+//   WASM:         wasi_snapshot_preview1.random_get
+//
+// Verifies:
+//   1. secure_random(buf, 32) returns 32 (full fill)
+//   2. Calling twice yields different buffers (entropy check)
+//   3. A 1024-byte sample has reasonable byte distribution
+//      (no single byte value occupying > 12% of the sample).
+
+fn main() {
+    // ---- Test 1: 32-byte fill returns 32 ----
+    let buf_a = alloc(32)
+    let n_a = secure_random(buf_a, 32)
+    print("32-byte fill returned: ")
+    print_int(n_a)
+    println("")
+    assert(n_a == 32, "secure_random(32) should return 32")
+    println("OK 32-byte fill")
+
+    // ---- Test 2: distinct buffers on repeat ----
+    let buf_b = alloc(32)
+    let n_b = secure_random(buf_b, 32)
+    assert(n_b == 32, "second secure_random(32) should return 32")
+    // Compare byte-by-byte; at least one byte must differ.
+    let differ = 0
+    let i = 0
+    while i < 32 {
+        let a_i = load8(int_add(buf_a, i))
+        let b_i = load8(int_add(buf_b, i))
+        if a_i != b_i { differ = 1 }
+        i = i + 1
+    }
+    assert(differ == 1, "two secure_random calls must produce different bytes")
+    println("OK distinct-on-repeat (entropy check)")
+
+    // ---- Test 3: 1024-byte sample, byte distribution ----
+    let big = alloc(1024)
+    let n_big = secure_random(big, 1024)
+    print("1024-byte fill returned: ")
+    print_int(n_big)
+    println("")
+    assert(n_big == 1024, "secure_random(1024) should return 1024")
+
+    // Tally byte counts. Heuristic: with 1024 samples over 256 values
+    // the expected mean is 4. Real CSPRNG sees most counts in [0, 12];
+    // a stuck-at byte would push a single count well above this.
+    // We flag if any byte value occupies >12% of the sample (>122).
+    let counts = list_new()
+    let k = 0
+    while k < 256 {
+        push(counts, 0)
+        k = k + 1
+    }
+    let j = 0
+    while j < 1024 {
+        let v = load8(int_add(big, j))
+        list_set(counts, v, counts[v] + 1)
+        j = j + 1
+    }
+    let stuck = 0
+    let bad_val = -1
+    let bad_count = 0
+    let m = 0
+    while m < 256 {
+        let c = counts[m]
+        if c > 122 {
+            stuck = 1
+            bad_val = m
+            bad_count = c
+        }
+        m = m + 1
+    }
+    if stuck == 1 {
+        print("BAD: byte value ")
+        print_int(bad_val)
+        print(" appeared ")
+        print_int(bad_count)
+        print(" times out of 1024 (>12%)")
+        println("")
+    }
+    assert(stuck == 0, "byte distribution unreasonably skewed")
+    println("OK byte distribution (1024 bytes, no stuck value)")
+
+    println("test_secure_random: PASS")
+}
+
+main()

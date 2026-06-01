@@ -1261,6 +1261,7 @@ fn is_builtin_fn(name) {
     if name == "getenv" { return 1 }
     if name == "random" { return 1 }
     if name == "random_seed" { return 1 }
+    if name == "secure_random" { return 1 }
     if name == "map_new" { return 1 }
     if name == "map_set" { return 1 }
     if name == "map_get" { return 1 }
@@ -3812,6 +3813,25 @@ fn arm_gen_call(nd) {
         arm_out("    bl _nova_arm_stub_write_file")
         return 0
     }
+    if name == "secure_random" {
+        // secure_random(buf, n) -> bytes_written, or -1 on error.
+        // ARM64 Linux: getrandom syscall #278; flags=0 in x2.
+        let argc_sr = len(args)
+        if argc_sr >= 2 {
+            arm_gen_expr(args[0])
+            arm_push_x0()
+            arm_gen_expr(args[1])
+            arm_out("    mov x1, x0")
+            arm_pop_to("x0")
+        } else {
+            arm_out("    mov x0, #0")
+            arm_out("    mov x1, #0")
+        }
+        arm_out("    mov x2, #0")              // flags
+        arm_out("    mov x8, #278")            // SYS_getrandom on ARM64 Linux
+        arm_out("    svc #0")
+        return 0
+    }
 
     // Generic user-function call.
     let argc = len(args)
@@ -5063,6 +5083,9 @@ fn gen_program(program) {
         out(".extern __imp_send")
         out(".extern __imp_recv")
         out(".extern __imp_closesocket")
+        // bcrypt.dll: BCryptGenRandom (cryptographically secure RNG).
+        // Linked via -lbcrypt in cross-windows / smoke-secure-random.
+        out(".extern __imp_BCryptGenRandom")
     }
 
     // Emit FFI extern declarations when linking with libc
@@ -6979,6 +7002,32 @@ fn wasm_gen_rt_extra() {
     wasm_indent = wasm_indent - 1
     wi(")")
     wi("")
+
+    // secure_random(buf_ptr i64, n_bytes i64) -> i64
+    //
+    // WASI random_get(buf, len) fills `buf..buf+len` with high-quality
+    // entropy. Returns 0 on success; we map to n_bytes on success,
+    // -1 on failure. Distinct from any deterministic helper above.
+    wi("(func $secure_random (param $buf i64) (param $n i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $rc i32)")
+    wi("local.get $buf")
+    wi("i32.wrap_i64")
+    wi("local.get $n")
+    wi("i32.wrap_i64")
+    wi("call $random_get")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.eq")
+    wi("if (result i64)")
+    wi("  local.get $n")
+    wi("else")
+    wi("  i64.const -1")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
 }
 
 fn wasm_gen_program(program) {
@@ -7022,6 +7071,7 @@ fn wasm_gen_program(program) {
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_close" + Q + " (func $fd_close (param i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_seek" + Q + " (func $fd_seek (param i32 i64 i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "path_open" + Q + " (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "random_get" + Q + " (func $random_get (param i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "proc_exit" + Q + " (func $proc_exit (param i32)))")
     out("  (memory (export " + Q + "memory" + Q + ") 256)")
     out("  (global $heap_ptr (mut i64) (i64.const 65536))")
@@ -10021,6 +10071,163 @@ fn gen_runtime() {
     out("    mov [rip + _rand_state], rdi")
     out("    ret")
 
+    // --- secure_random(buf_ptr, n_bytes) -> bytes_written, or -1 on error ---
+    //
+    // Cryptographically secure RNG via the OS interface. Distinct from
+    // _nova_random which is a deterministic xorshift LCG (documented as
+    // weak in random_seed's commit). This is the production-grade path
+    // for private keys, nonces, DP noise.
+    //
+    // Linux x64: getrandom(buf, n, 0) syscall #318 (kernel 3.17+). On
+    //   -ENOSYS (older kernel) we fall back to open("/dev/urandom",
+    //   O_RDONLY) + read + close.
+    // macOS: BSD syscall #500 (getentropy). Kernel writes exactly n
+    //   bytes when 0 < n <= 256, otherwise errors. We loop in 256-byte
+    //   chunks to handle larger requests.
+    // Windows: BCryptGenRandom(NULL, buf, n,
+    //   BCRYPT_USE_SYSTEM_PREFERRED_RNG=0x00000002) from bcrypt.dll.
+    //   Returns NTSTATUS; 0 = STATUS_SUCCESS.
+    // ARM64: served by lower_arm64 / arm64 path (syscall #278).
+    out("")
+    out_label("_nova_secure_random")
+    if cg_target == 3 {
+        // Windows: BCryptGenRandom(hAlgorithm=NULL, pbBuffer=buf,
+        //   cbBuffer=n, dwFlags=BCRYPT_USE_SYSTEM_PREFERRED_RNG=2)
+        //
+        // Alignment: entry %16==8; push rbp -> 0; sub rsp,48 -> 0.
+        //   shadow space [rsp+0..31], saved n_bytes at [rsp+32].
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 48")
+        out("    mov [rsp + 32], rsi")   // save n_bytes
+        out("    xor rcx, rcx")           // hAlgorithm = NULL
+        out("    mov rdx, rdi")           // pbBuffer = buf
+        out("    mov r8, rsi")            // cbBuffer = n
+        out("    mov r9d, 2")             // BCRYPT_USE_SYSTEM_PREFERRED_RNG
+        out("    call [rip + __imp_BCryptGenRandom]")
+        out("    test eax, eax")
+        out("    jnz .sr_win_fail")
+        out("    mov rax, [rsp + 32]")    // return n_bytes
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+        out(".sr_win_fail:")
+        out("    mov rax, -1")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        if cg_target == 1 {
+            // macOS: BSD getentropy syscall (#500 -> 0x2000000+500
+            //   = 33554932). Kernel only accepts n <= 256, so loop.
+            //
+            // Layout: r12=remaining, r13=current buf ptr, r14=chunk,
+            //   r15=original total (returned on success).
+            //
+            // Alignment: entry %16==8; push rbp -> 0; push r12 -> 8;
+            //   push r13 -> 0; push r14 -> 8; push r15 -> 0.
+            out("    push rbp")
+            out("    mov rbp, rsp")
+            out("    push r12")
+            out("    push r13")
+            out("    push r14")
+            out("    push r15")
+            out("    mov r12, rsi")            // remaining
+            out("    mov r13, rdi")            // current ptr
+            out("    mov r15, rsi")            // original total (returned on ok)
+            out(".sr_mac_loop:")
+            out("    test r12, r12")
+            out("    jz .sr_mac_done")
+            out("    mov rax, r12")
+            out("    cmp rax, 256")
+            out("    jle .sr_mac_chunk_ok")
+            out("    mov rax, 256")
+            out(".sr_mac_chunk_ok:")
+            out("    mov rdi, r13")
+            out("    mov rsi, rax")
+            out("    mov r14, rax")            // chunk size
+            out("    mov rax, 33554932")        // BSD getentropy
+            out("    syscall")
+            out("    jc .sr_mac_fail")          // BSD: CF=1 on error
+            out("    add r13, r14")
+            out("    sub r12, r14")
+            out("    jmp .sr_mac_loop")
+            out(".sr_mac_done:")
+            out("    mov rax, r15")
+            out("    pop r15")
+            out("    pop r14")
+            out("    pop r13")
+            out("    pop r12")
+            out("    pop rbp")
+            out("    ret")
+            out(".sr_mac_fail:")
+            out("    mov rax, -1")
+            out("    pop r15")
+            out("    pop r14")
+            out("    pop r13")
+            out("    pop r12")
+            out("    pop rbp")
+            out("    ret")
+        } else {
+            // Linux x64: getrandom(buf, n, flags=0) syscall #318.
+            //   On success returns bytes read; on -ENOSYS (=-38) we
+            //   fall back to /dev/urandom. Other negative returns
+            //   propagate as -1.
+            //
+            // Alignment: entry %16==8; push rbp -> 0; push r12 -> 8;
+            //   push r13 -> 0. Frame is 16 bytes (saved regs); intra-
+            //   block push/pop happens only at fallback.
+            out("    push rbp")
+            out("    mov rbp, rsp")
+            out("    push r12")
+            out("    push r13")
+            out("    mov r12, rdi")            // save buf
+            out("    mov r13, rsi")            // save n
+            out("    mov rax, 318")            // getrandom
+            // rdi/rsi already hold buf/n
+            out("    xor rdx, rdx")            // flags = 0
+            out("    syscall")
+            out("    cmp rax, -38")            // -ENOSYS?
+            out("    je .sr_lin_fallback")
+            out("    test rax, rax")
+            out("    js .sr_lin_fail")
+            out("    pop r13")
+            out("    pop r12")
+            out("    pop rbp")
+            out("    ret")
+            out(".sr_lin_fail:")
+            out("    mov rax, -1")
+            out("    pop r13")
+            out("    pop r12")
+            out("    pop rbp")
+            out("    ret")
+            out(".sr_lin_fallback:")
+            // open("/dev/urandom", O_RDONLY=0)
+            out("    lea rdi, [rip + _sr_urandom_path]")
+            out("    xor rsi, rsi")
+            out("    xor rdx, rdx")
+            emit_syscall(2)
+            out("    test rax, rax")
+            out("    js .sr_lin_fail")
+            // rax = fd. Stash on stack (callee-saved regs already used).
+            out("    push rax")                 // saved fd
+            out("    mov rdi, rax")             // fd
+            out("    mov rsi, r12")             // buf
+            out("    mov rdx, r13")             // count
+            emit_syscall(0)                     // read
+            out("    pop rdi")                  // restore fd
+            out("    push rax")                 // saved nbytes
+            emit_syscall(3)                     // close
+            out("    pop rax")                  // restore nbytes
+            out("    test rax, rax")
+            out("    js .sr_lin_fail")
+            out("    pop r13")
+            out("    pop r12")
+            out("    pop rbp")
+            out("    ret")
+        }
+    }
+
     // --- map_new() -> map pointer ---
     // Map layout: [magic=-2, count, capacity, entries_ptr] (32 bytes)
     // Entry layout: [key, value, occupied] = 24 bytes per entry
@@ -12188,6 +12395,8 @@ fn gen_runtime() {
     out("    jmp _nova_random")
     out_label("random_seed")
     out("    jmp _nova_random_seed")
+    out_label("secure_random")
+    out("    jmp _nova_secure_random")
     out_label("map_new")
     out("    jmp _nova_map_new")
     out_label("map_set")
@@ -12838,6 +13047,10 @@ fn gen_runtime() {
     out("    .asciz " + DQ + "-" + DQ)
     out_label("_str_list_repr")
     out("    .asciz " + DQ + "[list]" + DQ)
+    // secure_random fallback path (Linux only, exercised when
+    // getrandom syscall returns -ENOSYS on pre-3.17 kernels).
+    out_label("_sr_urandom_path")
+    out("    .asciz " + DQ + "/dev/urandom" + DQ)
     if cg_has_flow == 1 {
         out_label("_flow_ctx_key")
         out("    .asciz " + DQ + "context" + DQ)

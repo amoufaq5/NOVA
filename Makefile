@@ -65,7 +65,7 @@ cross-windows: bin/nova
 	cat $(COMPILER_SRC) > /tmp/nova_combined.nova
 	bin/nova /tmp/nova_combined.nova --target=windows -o bin/nova_windows.s
 	x86_64-w64-mingw32-as -o bin/nova_windows.o bin/nova_windows.s
-	x86_64-w64-mingw32-ld -o bin/nova.exe bin/nova_windows.o -L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32 -lmsvcrt
+	x86_64-w64-mingw32-ld -o bin/nova.exe bin/nova_windows.o -L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32 -lmsvcrt -lbcrypt
 	@echo "Windows executable written to bin/nova.exe"
 	@echo "Transfer to Windows and run: nova.exe <file.nova> -o output.s"
 
@@ -77,7 +77,7 @@ smoke-windows: bin/nova examples/hello_win32.nova
 	bin/nova examples/hello_win32.nova --target=windows -o /tmp/hello_win32.s
 	x86_64-w64-mingw32-as -o /tmp/hello_win32.o /tmp/hello_win32.s
 	x86_64-w64-mingw32-ld -o bin/hello_win32.exe /tmp/hello_win32.o \
-		-L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32 -lmsvcrt
+		-L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32 -lmsvcrt -lbcrypt
 	@echo "Windows smoke test written to bin/hello_win32.exe"
 	@file bin/hello_win32.exe
 	@if [ "$$WINE_OK" = "1" ]; then \
@@ -89,6 +89,21 @@ smoke-windows: bin/nova examples/hello_win32.nova
 		echo "wine exit=$$?"; \
 	else \
 		echo "(skipping wine run; set WINE_OK=1 to enable)"; \
+	fi
+	@echo ""
+	@echo "--- secure_random.exe (BCryptGenRandom roundtrip) ---"
+	@bin/nova tests/test_secure_random.nova --target=windows -o /tmp/secure_random.s
+	@x86_64-w64-mingw32-as -o /tmp/secure_random.o /tmp/secure_random.s 2>&1 | grep -v "Warning: end of file" || true
+	@x86_64-w64-mingw32-ld -o bin/secure_random.exe /tmp/secure_random.o \
+		-L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32 -lmsvcrt -lbcrypt
+	@file bin/secure_random.exe
+	@if [ "$$WINE_OK" = "1" ]; then \
+		echo "--- wine bin/secure_random.exe ---"; \
+		mkdir -p $${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}; \
+		chmod 700 $${XDG_RUNTIME_DIR:-/tmp/xdg-runtime}; \
+		XDG_RUNTIME_DIR=$${XDG_RUNTIME_DIR:-/tmp/xdg-runtime} \
+			WINEDEBUG=-all wine bin/secure_random.exe 2>&1 | grep -v "wine: configuration\|^$$" | head -10; \
+		echo "wine secure_random exit=$$?"; \
 	fi
 
 # Build the macOS smoke test (hello-world + concat + int_to_str).
@@ -124,6 +139,15 @@ smoke-macos: bin/nova examples/hello_macos.nova
 	@echo "macOS smoke test written to bin/hello_macos"
 	@file bin/hello_macos
 	@echo "(binary needs a real Darwin host to actually run; format verified above)"
+	@echo ""
+	@echo "--- secure_random macOS (BSD getentropy syscall #500) ---"
+	@LD64=$$(command -v ld64.lld-18 || command -v ld64.lld); \
+	bin/nova tests/test_secure_random.nova --target=macos -o /tmp/secure_random_macos.s && \
+	clang -target x86_64-apple-darwin -c /tmp/secure_random_macos.s -o /tmp/secure_random_macos.o && \
+	$$LD64 -arch x86_64 -platform_version macos 10.13 10.13 \
+		-e _main -o bin/secure_random_macos /tmp/secure_random_macos.o
+	@file bin/secure_random_macos
+	@echo "(BSD syscall 0x2000000 + 500 emitted; needs Darwin host to actually run)"
 
 # Compile to WASM and run (requires Node.js + wabt npm package)
 wasm: bin/nova
@@ -186,6 +210,24 @@ smoke-wasm: bin/nova examples/hello_wasm.nova
 		fi; \
 	else \
 		echo "(skipping wasm run; set WASM_OK=1 to enable via wasmtime/node)"; \
+	fi
+	@echo ""
+	@echo "--- secure_random WASM (wasi_snapshot_preview1.random_get import) ---"
+	@bin/nova examples/hello_secure_random_wasm.nova --target=wasm -o /tmp/hsr.wat
+	@if command -v wat2wasm >/dev/null 2>&1; then \
+		wat2wasm /tmp/hsr.wat -o bin/hello_secure_random.wasm && \
+		echo "secure_random.wasm built ($$(stat -c%s bin/hello_secure_random.wasm) bytes)"; \
+		if [ "$$WASM_OK" = "1" ] && command -v node >/dev/null 2>&1; then \
+			node --experimental-wasi-unstable-preview1 -e "\
+				const {WASI} = require('node:wasi'); const fs = require('node:fs'); \
+				const wasi = new WASI({version: 'preview1', args: [], env: {}, preopens: {}}); \
+				const wasm = fs.readFileSync('bin/hello_secure_random.wasm'); \
+				WebAssembly.instantiate(wasm, {wasi_snapshot_preview1: wasi.wasiImport}).then(({instance}) => { \
+				  wasi.start(instance); \
+				}).catch(e => { console.error('WASM error:', e.message); process.exit(1); });" 2>&1 | grep -v "ExperimentalWarning\|trace-warnings"; \
+		fi; \
+	else \
+		echo "(skip: wat2wasm not present; .wat still produced)"; \
 	fi
 
 # Build + run the WASM file I/O round-trip smoke test.

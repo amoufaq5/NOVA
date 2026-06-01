@@ -54,9 +54,9 @@ sentinel and `"0"` boundary). Categories:
   `ac692f7` as escape hatches around `PTR_THRESHOLD`).
 - Floats (9): `float_add/sub/mul/div`, `float_cmp`, `float_to_str`,
   `to_float`, `from_float`, `fsqrt`.
-- Runtime + introspection (13): `assert`, `type_of`, `typename`,
+- Runtime + introspection (14): `assert`, `type_of`, `typename`,
   `debug_print`, `time`, `sleep_ms`, `alloc`, `getenv`, `random`,
-  `random_seed`, `get_error`, `__arg`, `exit`.
+  `random_seed`, `secure_random`, `get_error`, `__arg`, `exit`.
 - Sockets (9): `socket`, `bind_socket`, `listen_socket`,
   `accept_conn`, `connect_socket`, `send_data`, `recv_data`,
   `make_sockaddr_in`, `close_fd`.
@@ -72,9 +72,15 @@ sentinel and `"0"` boundary). Categories:
 **Recent additions (NOT breaking):** `int_*` (10 fns, ac692f7),
 `__intrinsic_dot_i32` (b543be3), `sum` and `product` (c0de38c,
 75aaee5), `pad_left/pad_right/str_count` (e74c663), `enumerate`
-(9ee83ba), `typename` (91cf5b9). **No builtin has been removed or had
-its signature changed in any of the 63 commits** that comprise the
-repo's full history. **Gap:** there is no machine-readable arity /
+(9ee83ba), `typename` (91cf5b9), `secure_random` (this commit) —
+the CSPRNG counterpart to the deterministic-xorshift `random`/
+`random_seed` pair; per-target real OS entropy (Linux getrandom #318,
+ARM64 Linux getrandom #278, macOS BSD getentropy #500 in 256-byte
+chunks, Windows BCryptGenRandom from bcrypt.dll, WASM
+`wasi_snapshot_preview1.random_get`); replaces the LCG seeding for DP
+P3.6, SecAgg item 6, and DH key agreement (R3C/R4D). **No builtin
+has been removed or had its signature changed in any of the 63
+commits** that comprise the repo's full history. **Gap:** there is no machine-readable arity /
 return-type contract. A future `BUILTINS.md` table would lock the
 152-fn surface as an explicit promise; this audit names the gap.
 
