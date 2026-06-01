@@ -1,32 +1,63 @@
 """Nova Debug Adapter Protocol server.
 
-A minimum-viable DAP server that drives ``gdb --interpreter=mi3`` under
-the hood. VS Code (or any DAP-speaking client) sends DAP JSON over
-stdio; we translate each request into one or more MI commands via
+A DAP server that drives ``gdb --interpreter=mi3`` under the hood. VS
+Code (or any DAP-speaking client) sends DAP JSON over stdio; we
+translate each request into one or more MI commands via
 :class:`nova_dap.gdb_bridge.GdbBridge`, then translate gdb's async
 records back into DAP events.
 
 Supported requests
 ------------------
 
-* ``initialize``          — declares MVP capabilities.
+* ``initialize``          — declares capabilities (incl.
+                             ``supportsSingleThreadExecutionRequests``).
 * ``launch``              — spawns gdb, loads the binary, optionally
                              sets ``cwd`` and ``args`` for the inferior.
+                             Enables ``non-stop`` + ``mi-async`` on gdb
+                             so each thread can be stepped / continued
+                             independently.
 * ``setBreakpoints``      — translates each source-line breakpoint via
                              ``-break-insert``.
 * ``configurationDone``   — runs the inferior (``-exec-run``).
-* ``threads``             — single-threaded stub.
-* ``stackTrace``          — ``-stack-list-frames``.
-* ``scopes``              — single "Locals" scope per frame.
-* ``variables``           — ``-stack-list-variables --all-values``.
-* ``continue`` / ``next`` / ``stepIn`` / ``stepOut`` — exec controls.
+* ``threads``             — real multi-thread list from ``-thread-info``.
+                             For single-thread programs this still
+                             returns ``[{id:1,name:"main"}]``.
+* ``stackTrace``          — ``-stack-list-frames`` for the requested
+                             thread (``--thread`` argument).
+* ``scopes``              — single "Locals" scope per frame (the frame
+                             id encodes ``(threadId, level)`` so the
+                             ``variables`` request can route back to the
+                             right thread).
+* ``variables``           — ``-stack-list-variables --all-values`` after
+                             selecting the right thread + frame.
+* ``continue`` / ``next`` / ``stepIn`` / ``stepOut`` — exec controls,
+                             accepting DAP's ``threadId`` and
+                             ``singleThread`` arguments. When
+                             ``singleThread`` is true we pass
+                             ``--thread <id>`` to gdb so only that
+                             thread runs; otherwise gdb resumes the
+                             whole process.
+* ``pause``               — interrupt one thread (or all) via
+                             ``-exec-interrupt`` with the appropriate
+                             ``--thread`` / ``--all`` flag.
 * ``disconnect``          — ``-gdb-exit``.
 
 Supported events
 ----------------
 
 * ``initialized``  — after ``initialize`` succeeds.
-* ``stopped``      — emitted on any gdb ``*stopped`` async record.
+* ``stopped``      — emitted on any gdb ``*stopped`` async record. The
+                     ``threadId`` field is taken from the MI record,
+                     and ``allThreadsStopped`` reflects whether the
+                     ``stopped-threads`` field is the literal string
+                     ``"all"`` (non-stop mode reports the actual
+                     stopped thread ids).
+* ``continued``    — DAP ``continued`` event when a thread (or all
+                     threads) start running again, carrying the
+                     originating ``threadId`` and ``allThreadsContinued``.
+* ``thread``       — DAP ``thread`` lifecycle event (``started`` /
+                     ``exited``) mapped from gdb ``=thread-created`` /
+                     ``=thread-exited`` notifications.
 * ``output``       — wraps gdb console / target stream records.
 * ``terminated`` + ``exited`` — emitted on ``*stopped reason=exited*``
                                   or ``=thread-group-exited``.
@@ -130,7 +161,30 @@ class Session:
     stopped_reported: bool = False
     terminated_reported: bool = False
     last_stop_reason: str = "entry"
-    # variablesReference allocator.
+    # Multi-thread bookkeeping.
+    # `known_threads` is the mirrored view of gdb's thread set — keyed
+    # by integer DAP thread id (== gdb's MI thread id). Each value is a
+    # dict ``{"name": str, "running": bool}``. The set is updated from
+    # ``=thread-created`` / ``=thread-exited`` notifications and (as a
+    # backstop) by every ``threads`` request via ``-thread-info``.
+    known_threads: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    threads_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Set to True after we successfully negotiate ``set non-stop on`` +
+    # ``set mi-async on`` with gdb. When False, all step/continue/pause
+    # commands are issued without ``--thread`` (all-stop mode fallback).
+    non_stop: bool = False
+    # Frame id encoding: each (threadId, frame_level) pair gets a
+    # stable integer DAP frame id. We assign them lazily and never
+    # recycle — DAP clients keep frame ids alive across requests.
+    # ``next_frame_id`` is the high-water mark; ``frame_table`` maps
+    # frame id -> (threadId, frame_level).
+    next_frame_id: int = 1
+    frame_table: Dict[int, Tuple[int, int]] = field(default_factory=dict)
+    # Reverse lookup so we don't double-issue frame ids for the same
+    # (thread, level) pair within a single session.
+    frame_lookup: Dict[Tuple[int, int], int] = field(default_factory=dict)
+    # variablesReference allocator. Each vRef maps back to a frame id
+    # (and the frame id then maps back to a (threadId, frame_level)).
     next_var_ref: int = 1000
     frame_refs: Dict[int, int] = field(default_factory=dict)  # vRef -> frameId
 
@@ -139,6 +193,51 @@ class Session:
         self.next_var_ref += 1
         self.frame_refs[ref] = frame_id
         return ref
+
+    def frame_id_for(self, thread_id: int, level: int) -> int:
+        """Return the stable DAP frame id for ``(threadId, level)``,
+        allocating one the first time we see it."""
+        key = (thread_id, level)
+        existing = self.frame_lookup.get(key)
+        if existing is not None:
+            return existing
+        fid = self.next_frame_id
+        self.next_frame_id += 1
+        self.frame_table[fid] = key
+        self.frame_lookup[key] = fid
+        return fid
+
+    def frame_lookup_by_id(self, frame_id: int) -> Tuple[int, int]:
+        """Inverse of :meth:`frame_id_for`. Returns ``(threadId, level)``;
+        falls back to ``(self.threadId, 0)`` for unknown ids so legacy
+        clients that pass synthetic frame ids still work."""
+        return self.frame_table.get(frame_id, (self.threadId, 0))
+
+    def register_thread(self, thread_id: int, name: str = "", running: bool = True) -> None:
+        with self.threads_lock:
+            entry = self.known_threads.setdefault(
+                thread_id, {"name": name or f"thread-{thread_id}", "running": running}
+            )
+            if name:
+                entry["name"] = name
+            entry["running"] = running
+
+    def remove_thread(self, thread_id: int) -> None:
+        with self.threads_lock:
+            self.known_threads.pop(thread_id, None)
+
+    def mark_thread_running(self, thread_id: int, running: bool) -> None:
+        with self.threads_lock:
+            entry = self.known_threads.get(thread_id)
+            if entry is not None:
+                entry["running"] = running
+
+    def thread_snapshot(self) -> List[Dict[str, Any]]:
+        with self.threads_lock:
+            return [
+                {"id": tid, "name": info.get("name") or f"thread-{tid}"}
+                for tid, info in sorted(self.known_threads.items())
+            ]
 
 
 # ---------------------------------------------------------------------------
@@ -189,13 +288,46 @@ def _on_gdb_event(session: Session, rec: GdbAsyncRecord) -> None:
     _log(f"gdb-event {rec.kind} {rec.cls} {rec.fields}")
     if rec.cls == "stopped":
         _handle_stopped(session, rec)
+    elif rec.cls == "running":
+        _handle_running(session, rec)
     elif rec.cls == "thread-group-exited":
         _handle_exited(session, rec)
     elif rec.cls == "thread-created":
-        # Single-thread model for MVP: we always report id=1, so no-op.
-        pass
+        _handle_thread_created(session, rec)
     elif rec.cls == "thread-exited":
-        pass
+        _handle_thread_exited(session, rec)
+
+
+def _parse_thread_id(raw: Any) -> Optional[int]:
+    """Extract an integer thread id from an MI field, tolerating
+    decimal strings, raw ints, and the literal ``"all"``."""
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return None
+
+
+def _stopped_threads(rec: GdbAsyncRecord) -> Tuple[List[int], bool]:
+    """Return ``(thread_ids, all_threads_stopped)`` for a ``*stopped``
+    record. gdb reports ``stopped-threads="all"`` in all-stop mode and
+    a list of ids in non-stop mode."""
+    raw = rec.fields.get("stopped-threads")
+    if isinstance(raw, str) and raw == "all":
+        return ([], True)
+    if isinstance(raw, list):
+        ids: List[int] = []
+        for entry in raw:
+            tid = _parse_thread_id(entry)
+            if tid is not None:
+                ids.append(tid)
+        return (ids, False)
+    # Fall back to the single ``thread-id`` field — older gdb / single
+    # thread inferiors only emit that.
+    tid = _parse_thread_id(rec.fields.get("thread-id"))
+    if tid is not None:
+        return ([tid], False)
+    return ([], False)
 
 
 def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
@@ -218,15 +350,100 @@ def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
     dap_reason = dap_reason_map.get(reason, reason or "pause")
     session.last_stop_reason = dap_reason
     session.stopped_reported = True
+
+    # Which thread (or threads) stopped?
+    stopped_ids, all_stopped = _stopped_threads(rec)
+    primary_tid = _parse_thread_id(rec.fields.get("thread-id"))
+    if primary_tid is None and stopped_ids:
+        primary_tid = stopped_ids[0]
+    if primary_tid is None:
+        primary_tid = session.threadId
+    else:
+        # Track the most-recently-stopped thread so DAP requests that
+        # don't carry a thread id (e.g. ``threads`` -> ``stackTrace``
+        # without a ``threadId`` arg in older clients) target the right
+        # frame chain.
+        session.threadId = primary_tid
+
+    # Mark thread states. In all-stop mode every known thread is
+    # stopped; in non-stop mode only the listed ids are.
+    if all_stopped:
+        with session.threads_lock:
+            for tid_entry in session.known_threads.values():
+                tid_entry["running"] = False
+        # Ensure the primary thread is in the table even if we missed
+        # the ``=thread-created`` notification (e.g. single-thread
+        # programs where gdb never emits one before the first stop).
+        session.register_thread(primary_tid, running=False)
+    else:
+        # Make sure each stopped id is registered as well.
+        for tid in stopped_ids:
+            session.register_thread(tid, running=False)
+        if primary_tid is not None:
+            session.register_thread(primary_tid, running=False)
+
     body: Dict[str, Any] = {
         "reason": dap_reason,
-        "threadId": session.threadId,
-        "allThreadsStopped": True,
+        "threadId": primary_tid,
+        "allThreadsStopped": all_stopped,
+        "preserveFocusHint": False,
     }
     bkptno = rec.fields.get("bkptno")
     if isinstance(bkptno, str) and bkptno.isdigit():
         body["hitBreakpointIds"] = [int(bkptno)]
     send_event(session, "stopped", body)
+
+
+def _handle_running(session: Session, rec: GdbAsyncRecord) -> None:
+    """Translate ``*running,thread-id=X`` (or ``thread-id="all"``) to a
+    DAP ``continued`` event. The DAP spec says clients SHOULD update
+    their UI when threads resume so the "running" indicator is
+    visible per-thread."""
+    raw_tid = rec.fields.get("thread-id")
+    if isinstance(raw_tid, str) and raw_tid == "all":
+        with session.threads_lock:
+            for entry in session.known_threads.values():
+                entry["running"] = True
+        send_event(
+            session,
+            "continued",
+            {"threadId": session.threadId, "allThreadsContinued": True},
+        )
+        return
+    tid = _parse_thread_id(raw_tid)
+    if tid is None:
+        return
+    session.mark_thread_running(tid, True)
+    send_event(
+        session,
+        "continued",
+        {"threadId": tid, "allThreadsContinued": False},
+    )
+
+
+def _handle_thread_created(session: Session, rec: GdbAsyncRecord) -> None:
+    tid = _parse_thread_id(rec.fields.get("id"))
+    if tid is None:
+        return
+    name = f"thread-{tid}" if tid != 1 else "main"
+    session.register_thread(tid, name=name, running=True)
+    send_event(
+        session,
+        "thread",
+        {"reason": "started", "threadId": tid},
+    )
+
+
+def _handle_thread_exited(session: Session, rec: GdbAsyncRecord) -> None:
+    tid = _parse_thread_id(rec.fields.get("id"))
+    if tid is None:
+        return
+    session.remove_thread(tid)
+    send_event(
+        session,
+        "thread",
+        {"reason": "exited", "threadId": tid},
+    )
 
 
 def _handle_exited(session: Session, rec: GdbAsyncRecord) -> None:
@@ -280,9 +497,11 @@ def _capabilities() -> Dict[str, Any]:
         "supportsLogPoints": False,
         "supportsExceptionInfoRequest": False,
         "supportsDelayedStackTraceLoading": False,
-        # We never need separate ``threads`` to be requested explicitly,
-        # but VS Code asks anyway after the first stopped event.
         "supportsClipboardContext": False,
+        # Multi-thread coordination: each step / continue / pause
+        # request may carry ``threadId`` + ``singleThread`` so only
+        # the target thread is resumed/stopped.
+        "supportsSingleThreadExecutionRequests": True,
     }
 
 
@@ -328,6 +547,23 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     session.bridge = bridge
     session.program = program
 
+    # Try to negotiate non-stop + mi-async so individual threads can
+    # be paused / continued. If gdb rejects either (e.g. it's running
+    # against a target that doesn't support non-stop), fall back to
+    # the all-stop model — the DAP wire protocol still works, we just
+    # can't honour ``singleThread`` and stops will report
+    # ``allThreadsStopped=true``.
+    #
+    # IMPORTANT: ``mi-async`` MUST be set before ``non-stop`` and both
+    # MUST be set before the first ``-exec-run``. Once a target is
+    # selected gdb refuses to flip these.
+    async_ok = bridge.command("-gdb-set mi-async on").ok
+    non_stop_ok = False
+    if async_ok:
+        non_stop_ok = bridge.command("-gdb-set non-stop on").ok
+    session.non_stop = bool(async_ok and non_stop_ok)
+    _log(f"thread mode: non_stop={session.non_stop} mi_async={async_ok}")
+
     cwd = args.get("cwd")
     if cwd:
         bridge.command(f"-environment-cd {quote_path(cwd)}")
@@ -347,6 +583,12 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
             message=f"gdb failed to load program: {result.error_message}",
         )
         return
+
+    # Pre-populate the thread table with thread 1 so a ``threads``
+    # request issued before the inferior actually starts doesn't return
+    # an empty list. gdb will overwrite this with ``=thread-created``
+    # records once the inferior runs.
+    session.register_thread(1, name="main", running=True)
 
     # Don't pause on entry by default; configurationDone runs the program.
     send_response(session, req, body={})
@@ -418,7 +660,12 @@ def handle_configuration_done(session: Session, req: Dict[str, Any]) -> None:
         send_response(session, req, success=False, message="not launched")
         return
     # If the inferior has never run, -exec-run; otherwise -exec-continue.
-    cmd = "-exec-continue" if session.stopped_reported else "-exec-run"
+    # In non-stop mode -exec-continue defaults to the current thread
+    # only — we want all threads to start running, so add ``--all``.
+    if session.stopped_reported:
+        cmd = "-exec-continue --all" if session.non_stop else "-exec-continue"
+    else:
+        cmd = "-exec-run"
     result = bridge.command(cmd)
     if not result.ok:
         send_response(session, req, success=False, message=result.error_message)
@@ -426,12 +673,64 @@ def handle_configuration_done(session: Session, req: Dict[str, Any]) -> None:
     send_response(session, req, body={})
 
 
+def _refresh_threads_from_gdb(session: Session) -> None:
+    """Issue ``-thread-info`` and reconcile ``session.known_threads``
+    with gdb's actual thread list. Used as a backstop in case we
+    missed an ``=thread-created`` notification (e.g. when threads
+    spawn between MI commands)."""
+    bridge = session.bridge
+    if bridge is None:
+        return
+    try:
+        result = bridge.command("-thread-info", timeout=2.0)
+    except (TimeoutError, RuntimeError):
+        return
+    if not result.ok:
+        return
+    threads = result.fields.get("threads") or []
+    if not isinstance(threads, list):
+        return
+    seen: List[int] = []
+    for entry in threads:
+        if not isinstance(entry, dict):
+            continue
+        tid = _parse_thread_id(entry.get("id"))
+        if tid is None:
+            continue
+        seen.append(tid)
+        name = entry.get("target-id")
+        if not isinstance(name, str):
+            name = ""
+        # Prefer a short, human-readable name; gdb's ``target-id`` is
+        # like "Thread 0x...  (LWP 12345)". Stash the more useful
+        # ``name`` field if present (per-thread name set by
+        # pthread_setname_np); otherwise fall back to "thread-N".
+        explicit_name = entry.get("name")
+        if isinstance(explicit_name, str) and explicit_name:
+            display = explicit_name
+        elif tid == 1:
+            display = "main"
+        else:
+            display = f"thread-{tid}"
+        state = entry.get("state")
+        running = isinstance(state, str) and state == "running"
+        session.register_thread(tid, name=display, running=running)
+    # Drop threads gdb no longer knows about.
+    with session.threads_lock:
+        stale = [tid for tid in session.known_threads if tid not in seen]
+        for tid in stale:
+            session.known_threads.pop(tid, None)
+
+
 def handle_threads(session: Session, req: Dict[str, Any]) -> None:
-    send_response(
-        session,
-        req,
-        body={"threads": [{"id": session.threadId, "name": "main"}]},
-    )
+    # Reconcile with gdb. If the bridge isn't up yet (pre-launch) or
+    # the inferior hasn't started, return whatever we have cached
+    # (always at least thread 1 from launch).
+    _refresh_threads_from_gdb(session)
+    threads = session.thread_snapshot()
+    if not threads:
+        threads = [{"id": session.threadId, "name": "main"}]
+    send_response(session, req, body={"threads": threads})
 
 
 def handle_stack_trace(session: Session, req: Dict[str, Any]) -> None:
@@ -439,11 +738,19 @@ def handle_stack_trace(session: Session, req: Dict[str, Any]) -> None:
     start = int(args.get("startFrame") or 0)
     levels_arg = args.get("levels")
     levels = int(levels_arg) if levels_arg else 0  # 0 means "all"
+    thread_id = _parse_thread_id(args.get("threadId")) or session.threadId
     bridge = session.bridge
     if bridge is None:
         send_response(session, req, body={"stackFrames": [], "totalFrames": 0})
         return
-    result = bridge.command("-stack-list-frames")
+    # ``-stack-list-frames`` is implicitly per-thread; in non-stop mode
+    # we explicitly route via ``--thread`` so a request that targets a
+    # stopped thread always sees that thread's frames even if gdb's
+    # ``current-thread-id`` has drifted.
+    cmd = "-stack-list-frames"
+    if session.non_stop:
+        cmd = f"-stack-list-frames --thread {thread_id}"
+    result = bridge.command(cmd)
     if not result.ok:
         send_response(session, req, success=False, message=result.error_message)
         return
@@ -474,7 +781,11 @@ def handle_stack_trace(session: Session, req: Dict[str, Any]) -> None:
             fullname = fr.get("fullname") or fr.get("file") or ""
             short = fr.get("file") or os.path.basename(fullname) if fullname else ""
             frame: Dict[str, Any] = {
-                "id": level + 1,  # DAP frame ids are arbitrary nonzero ints
+                # Frame ids are stable per (threadId, level) so a
+                # ``variables`` request for thread A's frame doesn't
+                # accidentally select thread B's frame at the same
+                # level.
+                "id": session.frame_id_for(thread_id, level),
                 "name": name if isinstance(name, str) else "<unknown>",
                 "line": line,
                 "column": 1,
@@ -490,7 +801,7 @@ def handle_stack_trace(session: Session, req: Dict[str, Any]) -> None:
 def handle_scopes(session: Session, req: Dict[str, Any]) -> None:
     args = req.get("arguments", {}) or {}
     frame_id = int(args.get("frameId") or 1)
-    var_ref = session.alloc_var_ref(frame_id - 1)  # back-translate to MI level
+    var_ref = session.alloc_var_ref(frame_id)
     send_response(
         session,
         req,
@@ -515,8 +826,14 @@ def handle_variables(session: Session, req: Dict[str, Any]) -> None:
     if bridge is None:
         send_response(session, req, body={"variables": []})
         return
-    frame_level = session.frame_refs.get(var_ref, 0)
-    # Select the frame, then list its locals + arguments.
+    frame_id = session.frame_refs.get(var_ref, 0)
+    thread_id, frame_level = session.frame_lookup_by_id(frame_id)
+    # Select the right thread first (no-op in all-stop mode where
+    # there's only one stopped thread), then the right frame, then
+    # list locals + arguments. Routing via ``--thread`` on every MI
+    # command is also fine but adds noise; selecting once is enough.
+    if session.non_stop:
+        bridge.command(f"-thread-select {thread_id}")
     bridge.command(f"-stack-select-frame {frame_level}")
     result = bridge.command("-stack-list-variables --all-values")
     if not result.ok:
@@ -545,16 +862,59 @@ def handle_variables(session: Session, req: Dict[str, Any]) -> None:
     send_response(session, req, body={"variables": out})
 
 
+def _thread_args(session: Session, req_args: Dict[str, Any]) -> Tuple[Optional[int], bool]:
+    """Extract ``(threadId, singleThread)`` from a DAP request body.
+
+    Per the DAP spec, ``singleThread`` is optional and defaults to
+    false; clients that don't set it expect the whole process to be
+    resumed/stepped. ``threadId`` is required by the spec for all
+    step / continue requests."""
+    tid = _parse_thread_id(req_args.get("threadId"))
+    single = bool(req_args.get("singleThread", False))
+    return tid, single
+
+
+def _exec_with_thread(
+    session: Session, base_cmd: str, thread_id: Optional[int], single: bool
+) -> str:
+    """Compose a gdb MI exec command that targets either one thread
+    (``singleThread=true``) or all threads (default). In all-stop mode
+    we always issue the command without ``--thread`` because gdb
+    resumes every stopped thread on ``-exec-continue`` regardless."""
+    if not session.non_stop:
+        return base_cmd
+    if single and thread_id is not None:
+        return f"{base_cmd} --thread {thread_id}"
+    # ``--all`` resumes every stopped thread in non-stop mode. Without
+    # it gdb only resumes the currently-selected thread, which is the
+    # opposite of what a DAP ``continue`` without ``singleThread``
+    # asks for.
+    return f"{base_cmd} --all"
+
+
 def handle_continue(session: Session, req: Dict[str, Any]) -> None:
     bridge = session.bridge
     if bridge is None:
         send_response(session, req, success=False, message="not launched")
         return
-    result = bridge.command("-exec-continue")
+    args = req.get("arguments", {}) or {}
+    tid, single = _thread_args(session, args)
+    cmd = _exec_with_thread(session, "-exec-continue", tid, single)
+    result = bridge.command(cmd)
     if not result.ok:
         send_response(session, req, success=False, message=result.error_message)
         return
-    send_response(session, req, body={"allThreadsContinued": True})
+    all_continued = not (single and session.non_stop and tid is not None)
+    # Mark thread state in our mirror so a follow-up ``threads`` query
+    # reflects the resume immediately (gdb's ``*running`` async record
+    # will also do this but it's racy w.r.t. the response).
+    if single and tid is not None:
+        session.mark_thread_running(tid, True)
+    else:
+        with session.threads_lock:
+            for entry in session.known_threads.values():
+                entry["running"] = True
+    send_response(session, req, body={"allThreadsContinued": all_continued})
 
 
 def handle_next(session: Session, req: Dict[str, Any]) -> None:
@@ -574,7 +934,24 @@ def _step(session: Session, req: Dict[str, Any], mi: str) -> None:
     if bridge is None:
         send_response(session, req, success=False, message="not launched")
         return
-    result = bridge.command(mi)
+    args = req.get("arguments", {}) or {}
+    tid, single = _thread_args(session, args)
+    # Step commands are intrinsically per-thread in DAP — they target a
+    # specific thread id. In non-stop mode we route via ``--thread`` so
+    # other threads keep running (or stay stopped) independently. In
+    # all-stop mode gdb steps the currently-selected thread and
+    # resumes others to do it; that matches DAP's expectation when
+    # ``singleThread`` is false. If ``singleThread`` is true in
+    # all-stop mode we fall back to a regular step (gdb has no way to
+    # step a single thread while keeping others paused without
+    # non-stop).
+    if session.non_stop and tid is not None:
+        cmd = f"{mi} --thread {tid}"
+    else:
+        cmd = mi
+    if tid is not None:
+        session.mark_thread_running(tid, True)
+    result = bridge.command(cmd)
     if not result.ok:
         send_response(session, req, success=False, message=result.error_message)
         return
@@ -586,7 +963,17 @@ def handle_pause(session: Session, req: Dict[str, Any]) -> None:
     if bridge is None:
         send_response(session, req, success=False, message="not launched")
         return
-    bridge.command("-exec-interrupt")
+    args = req.get("arguments", {}) or {}
+    tid, _single = _thread_args(session, args)
+    # ``pause`` always targets one thread in DAP — clients that want
+    # to pause everything send one ``pause`` per thread. We honour
+    # that by routing via ``--thread``. If the client sends ``pause``
+    # without a thread id we interrupt everything (``--all``).
+    if session.non_stop:
+        cmd = f"-exec-interrupt --thread {tid}" if tid is not None else "-exec-interrupt --all"
+    else:
+        cmd = "-exec-interrupt"
+    bridge.command(cmd)
     send_response(session, req, body={})
 
 

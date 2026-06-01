@@ -163,3 +163,52 @@ identical results (modpow round-trips, Montgomery vs legacy parity).
    adding type guards for string pointers in `_cg_ht_hash`)
 3. Example programs are standalone demos — they don't compile/run without
    library source concatenation (by design, matching existing examples)
+4. Surface NOVA coroutines as DAP threads. Today coroutines share a single
+   OS thread and are not visible to gdb as separate LWPs, so the DAP server
+   reports them as one thread. A coroutine-aware mapping would need either
+   (a) compiler-emitted DWARF that describes coroutine frames as separate
+   thread ids, or (b) the DAP server reading NOVA's coroutine table out of
+   the inferior's heap via the gdb python API and synthesizing virtual
+   threads for it.
+
+## R7D — Multi-thread DAP coordination
+
+`tools/nova-dap` now exposes 17 DAP capabilities; the multi-thread
+coordination layer was added on top of R4A's `.debug_info` work and the
+existing single-thread step/breakpoint/stack/variable plumbing.
+
+Changes (`tools/nova-dap/nova_dap/server.py`):
+- Enable gdb `mi-async on` + `non-stop on` during launch so each thread
+  can be paused / continued independently. Fall back to all-stop mode
+  if gdb refuses (e.g. unsupported target).
+- Session tracks a `known_threads` table mirroring gdb's thread set,
+  updated from `=thread-created` / `=thread-exited` notifications and
+  reconciled via `-thread-info` on every DAP `threads` request.
+- Stable per-(threadId, level) DAP frame ids; `scopes` and `variables`
+  route via `-thread-select` + `-stack-select-frame` so thread A's
+  locals never leak into thread B's variables panel.
+- `continue` / `next` / `stepIn` / `stepOut` / `pause` accept DAP
+  `threadId` + `singleThread`. `singleThread:true` issues
+  `-exec-{continue,next,step,finish,interrupt} --thread <id>`;
+  otherwise `--all` (or no flag in all-stop mode).
+- `*stopped` records produce DAP `stopped` events with `threadId` from
+  the MI record and `allThreadsStopped=true` only when MI
+  `stopped-threads="all"` (so in non-stop mode a breakpoint hit on
+  thread A doesn't claim thread B is stopped).
+- New events: `continued` (per-thread resume) and `thread` (lifecycle).
+- New capability: `supportsSingleThreadExecutionRequests: true`.
+
+Thread model: real OS threads, surfaced from gdb-MI in non-stop mode.
+For a single-threaded NOVA program (no FFI, no pthreads) this collapses
+to one thread (`id=1`, name=`main`) — the wire protocol still works
+end-to-end, there's just only one thread to address.
+
+Tests:
+- `tools/nova-dap/tests/dap_smoke.py` (pre-existing single-thread
+  smoke) — still passes.
+- `tools/nova-dap/tests/dap_multi_thread.py` (new) — builds a small
+  pthread C fixture (`tests/fixtures/multi_thread.c`) on demand and
+  exercises `threads`, per-thread `stackTrace` + `scopes` + `variables`
+  isolation, per-thread `next`/`stepIn`/`stepOut`, `pause`, and
+  `continue` (with and without `singleThread`). SKIPs cleanly if
+  `gcc` or `gdb` is unavailable.
