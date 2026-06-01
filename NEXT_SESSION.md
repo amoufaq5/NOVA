@@ -431,3 +431,54 @@ Verification:
 - Native Linux x86-64 also runs `examples/wasi_file_roundtrip.nova`
   via the syscall-backed `_nova_wasi_*` runtime; the same source
   cross-compiles + executes correctly on both targets.
+
+## Tree-sitter grammar bundle (R9E)
+
+Round-9 extends `tools/tree-sitter-nova/` to a complete editor-ready
+bundle for non-VS-Code hosts (Neovim, Helix, Emacs, Zed, ...).
+
+### Changes
+
+- `grammar.js` — added `-> Type` return-type annotation on `fn_decl`,
+  `extern_fn_decl`, and `lambda_expression`, plus a precedence fix
+  on the string-interpolation lexer rule so `${expr}` inside
+  `"..."` is now captured as an `(interpolation ...)` node instead
+  of being swallowed by `_string_content`.
+- `queries/folds.scm` — NEW. Fold-region patterns for editors that
+  consume tree-sitter folding (function bodies, control-flow
+  blocks, struct/enum/match bodies, block comments, list literals).
+- `queries/locals.scm` — NEW. Lexical-scope + def-ref tracking for
+  goto-definition fallback in editors that don't run nova-lsp
+  (covers fn/lambda/block/if/while/for/match scopes; definitions
+  for fn, extern fn, parameter, let, for-binding, struct/enum
+  types, struct fields; references for every identifier slot).
+- `queries/highlights.scm` — added `->`, type-annotation captures
+  on parameters / let / return-type slots.
+- `test/corpus/literals.txt` — NEW. 7 new tests: escape sequences,
+  hex escapes, `${...}` interpolation, numeric underscores, empty
+  + nested list literals, `none` literal.
+- `test/corpus/declarations.txt` — NEW. 7 new tests: type-annotated
+  parameter + return type, typed let, single + multi-variant enums
+  (with trailing comma), typed struct fields, no-arg extern fn,
+  nested module imports.
+- `INSTALL_NEOVIM.md` + `README.md` — documented all three query
+  files, capability matrix per editor, install snippet for
+  fold + locals modules.
+
+### Verification
+
+- `tree-sitter generate` → portable parser.c (379 KiB).
+- `tree-sitter test` → **41 / 41 corpus tests pass** (was 27).
+- `tree-sitter parse` on representative files:
+  - `examples/hello.nova` → 0 ERROR / 0 MISSING nodes.
+  - `examples/wasi_file_roundtrip.nova` → 0 ERROR / 0 MISSING nodes.
+  - `examples/showcase.nova` → 0 ERROR / 0 MISSING nodes, includes
+    two `(interpolation ...)` captures.
+  - Sweep over all `examples/*.nova`: **59 / 65 (~91%)** clean,
+    same 6 cognitive-DSL files (`soul`/`mind`/`system`) still
+    out of scope (documented in `tools/tree-sitter-nova/README.md`).
+- `tree-sitter query queries/highlights.scm hello.nova` produces
+  expected captures (keyword, function, function.builtin, string,
+  punctuation.bracket).
+- `tree-sitter query queries/folds.scm` and
+  `tree-sitter query queries/locals.scm` both load + match.

@@ -82,3 +82,14 @@ tools/nova-lsp/build/
 tools/nova-lsp/dist/
 tools/vscode-nova/*.vsix
 tools/vscode-nova/node_modules/
+
+# tree-sitter build artifacts (the grammar's own .gitignore covers the
+# in-tree generated src/parser.c et al; these patterns catch builds
+# triggered from the repo root by IDE bundle scripts).
+tools/tree-sitter-nova/build/
+tools/tree-sitter-nova/node_modules/
+tools/tree-sitter-nova/prebuilds/
+tools/tree-sitter-nova/src/parser.c
+tools/tree-sitter-nova/src/grammar.json
+tools/tree-sitter-nova/src/node-types.json
+tools/tree-sitter-nova/src/tree_sitter/

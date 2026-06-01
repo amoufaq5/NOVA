@@ -55,22 +55,40 @@ not found"*, install it first:
 npm install -g tree-sitter-cli
 ```
 
-## Step 3 — install highlight queries
+## Step 3 — install editor queries
 
-`nvim-treesitter` looks for highlight queries under
-`runtimepath/queries/<lang>/highlights.scm`. Copy the bundled query
-into your runtime path:
+`nvim-treesitter` looks for queries under
+`runtimepath/queries/<lang>/<query>.scm`. Copy all three bundled
+queries (highlights, folds, locals) into your runtime path:
 
 ```bash
 mkdir -p ~/.config/nvim/queries/nova
 cp tools/tree-sitter-nova/queries/highlights.scm ~/.config/nvim/queries/nova/
+cp tools/tree-sitter-nova/queries/folds.scm      ~/.config/nvim/queries/nova/
+cp tools/tree-sitter-nova/queries/locals.scm     ~/.config/nvim/queries/nova/
 ```
 
-Alternatively, symlink it for live editing:
+Alternatively, symlink them for live editing:
 
 ```bash
-ln -s "$(pwd)/tools/tree-sitter-nova/queries/highlights.scm" \
-      ~/.config/nvim/queries/nova/highlights.scm
+for q in highlights folds locals; do
+  ln -sf "$(pwd)/tools/tree-sitter-nova/queries/${q}.scm" \
+        ~/.config/nvim/queries/nova/${q}.scm
+done
+```
+
+Then enable the corresponding modules in your `nvim-treesitter` setup:
+
+```lua
+require("nvim-treesitter.configs").setup({
+  ensure_installed = { "nova" },
+  highlight = { enable = true },
+  -- Folding (also requires `set foldmethod=expr` +
+  -- `set foldexpr=nvim_treesitter#foldexpr()` in init.vim/init.lua):
+  fold      = { enable = true },
+  -- Locals (drives goto-definition fallback when no LSP is present):
+  locals    = { enable = true },
+})
 ```
 
 ## Step 4 — verify

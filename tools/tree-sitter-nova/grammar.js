@@ -103,6 +103,7 @@ module.exports = grammar({
       '(',
       field('parameters', optional($.parameter_list)),
       ')',
+      optional(seq('->', field('return_type', $.type_expression))),
       optional(';'),
     ),
 
@@ -112,6 +113,10 @@ module.exports = grammar({
       '(',
       field('parameters', optional($.parameter_list)),
       ')',
+      // Optional `-> Type` return-type annotation. The compiler doesn't
+      // require it today but the task spec and forward-looking syntax
+      // (cf. nova-lsp signature help) reserve it.
+      optional(seq('->', field('return_type', $.type_expression))),
       field('body', $.block),
     ),
 
@@ -271,6 +276,7 @@ module.exports = grammar({
       '(',
       field('parameters', optional($.parameter_list)),
       ')',
+      optional(seq('->', field('return_type', $.type_expression))),
       field('body', $.block),
     ),
 
@@ -386,16 +392,21 @@ module.exports = grammar({
     // currency sign in `"$1000"`) doesn't get mis-tokenised as the
     // beginning of an interpolation marker. The trailing `$` before
     // the closing quote (e.g. `"price = $"`) is captured as a
-    // standalone `$` chunk.
-    _string_content: $ => token.immediate(prec(1, choice(
+    // standalone `$` chunk. The interpolation `${...}` token (below)
+    // has its own higher precedence so it wins the lexer race against
+    // a lone `$`.
+    _string_content: $ => token.immediate(choice(
       /[^"\\$]+/,
       // `$` followed by any non-{/non-quote/non-backslash char keeps
       // the `$` as plain text; `${` is captured separately as the
       // interpolation token below.
       /\$[^{"\\]/,
       // Bare `$` (when the next char is `"`, `\`, or end of string).
+      // The interpolation rule's `token.immediate('${')` has higher
+      // intrinsic precedence (longer match) so `${` is not consumed
+      // here.
       /\$/,
-    ))),
+    )),
 
     escape_sequence: $ => token.immediate(seq(
       '\\',
@@ -405,9 +416,11 @@ module.exports = grammar({
       ),
     )),
 
-    // ${ expr } style interpolation as seen in showcase.nova.
+    // ${ expr } style interpolation as seen in showcase.nova. Higher
+    // precedence than `_string_content` so that the lexer picks
+    // `${` over a bare `$` when both could match.
     interpolation: $ => seq(
-      token.immediate('${'),
+      token.immediate(prec(2, '${')),
       $._expression,
       '}',
     ),

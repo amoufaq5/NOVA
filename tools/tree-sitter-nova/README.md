@@ -28,6 +28,8 @@ could not express precisely:
 | `for` loop (incl. `for i, x in xs`) | full        |
 | `return` / `break` / `continue` | full            |
 | `extern fn`                     | full            |
+| `-> Type` return-type annotation | full           |
+| `name: Type` type annotations (params + let) | full |
 | `import "path.nova"`            | full            |
 | `struct` declaration            | full            |
 | `enum` declaration              | full            |
@@ -40,13 +42,16 @@ could not express precisely:
 | Operators with C-like precedence | full           |
 | Cognitive DSL (`soul`/`mind`/`system`/`~>`) | not yet — see [Out of scope](#out-of-scope) |
 
-Empirically, the grammar parses **55 / 61 (~90%)** of the canonical
-sample programs under `examples/` cleanly. The 6 that still produce
-`(ERROR …)` nodes all use the experimental cognitive-system DSL
-(`soul`/`mind`/`system`/`~>` and friends), which neither the
-TextMate grammar nor the current self-hosting compiler treats as
-first-class — they are recognised lexically as identifiers and let
-through to be lowered by a separate macro pass.
+Empirically, the grammar parses **59 / 65 (~91%)** of the canonical
+sample programs under `examples/` cleanly, including the WASI
+round-trip (`wasi_file_roundtrip.nova`), `concurrency.nova`,
+`game_of_life.nova`, `brainfuck.nova`, `showcase.nova` (with
+`${expr}` interpolation), and every R8/R9-era example. The 6 that
+still produce `(ERROR …)` nodes all use the experimental
+cognitive-system DSL (`soul`/`mind`/`system`/`~>` and friends),
+which neither the TextMate grammar nor the current self-hosting
+compiler treats as first-class — they are recognised lexically as
+identifiers and let through to be lowered by a separate macro pass.
 
 ### Out of scope
 
@@ -63,7 +68,7 @@ existing `~` bitwise-not unary operator on tree-sitter's lexer).
 cd tools/tree-sitter-nova
 npm install                           # installs tree-sitter-cli
 npx tree-sitter generate              # writes src/parser.c
-npx tree-sitter test                  # 27 corpus tests should pass
+npx tree-sitter test                  # 41 corpus tests should pass
 npx tree-sitter parse path/to.nova    # print the CST for a file
 ```
 
@@ -89,7 +94,9 @@ tree-sitter-nova/
 ├── binding.gyp             ← node-gyp native binding build
 ├── Cargo.toml              ← Rust binding (optional, for Helix/embedded)
 ├── queries/
-│   └── highlights.scm      ← editor highlight scopes
+│   ├── highlights.scm      ← editor highlight scopes
+│   ├── folds.scm           ← fold-region patterns (functions, blocks, …)
+│   └── locals.scm          ← lexical-scope / def-ref tracking
 ├── test/
 │   └── corpus/
 │       └── basics.txt      ← round-trip CST snapshots
@@ -100,8 +107,32 @@ tree-sitter-nova/
 
 See `INSTALL_NEOVIM.md` for a worked Neovim example. Other editors
 share the same install shape: build the parser as a shared library,
-drop the `queries/highlights.scm` into the editor's tree-sitter
-runtime path, register the file extension.
+drop the `queries/*.scm` files into the editor's tree-sitter runtime
+path, register the file extension.
+
+### Query files
+
+The grammar ships three editor query files under `queries/`:
+
+| File              | Purpose                                                      |
+| ----------------- | ------------------------------------------------------------ |
+| `highlights.scm`  | Token → highlight-scope mapping (keywords, calls, strings…). |
+| `folds.scm`       | Foldable regions (function bodies, control-flow blocks…).    |
+| `locals.scm`      | Lexical-scope tracking for goto-def / rename in editors that lack a full LSP. |
+
+Editor capability matrix:
+
+| Editor   | highlights | folds | locals |
+| -------- | :--------: | :---: | :----: |
+| Neovim   | yes        | yes   | yes    |
+| Helix    | yes        | yes   | yes    |
+| Emacs    | yes        | yes   | yes    |
+| Zed      | yes        | yes   | n/a    |
+| VS Code* | yes        | n/a   | n/a    |
+
+\* VS Code consumes `highlights.scm` only when paired with a tree-sitter
+host extension; the bundled `tools/vscode-nova` TextMate grammar is the
+default. Folding and locals in VS Code come from `nova-lsp`.
 
 ## Versioning
 

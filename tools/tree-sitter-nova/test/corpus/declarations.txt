@@ -1,0 +1,131 @@
+================================================================================
+type-annotated parameter and return type
+================================================================================
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (type_expression
+          (identifier)))
+      (parameter
+        name: (identifier)
+        type: (type_expression
+          (identifier))))
+    return_type: (type_expression
+      (identifier))
+    body: (block
+      (return_statement
+        value: (binary_expression
+          left: (identifier)
+          right: (identifier))))))
+
+================================================================================
+let with type annotation
+================================================================================
+
+let n: int = 42
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    type: (type_expression
+      (identifier))
+    value: (number)))
+
+================================================================================
+enum with single variant
+================================================================================
+
+enum Color {
+    Red
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_decl
+    name: (identifier)
+    (identifier)))
+
+================================================================================
+enum with multiple variants and trailing comma
+================================================================================
+
+enum Direction {
+    North,
+    South,
+    East,
+    West,
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_decl
+    name: (identifier)
+    (identifier)
+    (identifier)
+    (identifier)
+    (identifier)))
+
+================================================================================
+struct with typed fields
+================================================================================
+
+struct Point {
+    x: int,
+    y: int
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_decl
+    name: (identifier)
+    (struct_field_list
+      (struct_field
+        name: (identifier)
+        type: (type_expression
+          (identifier)))
+      (struct_field
+        name: (identifier)
+        type: (type_expression
+          (identifier))))))
+
+================================================================================
+extern fn declaration with no parameters
+================================================================================
+
+extern fn now()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (extern_fn_decl
+    name: (identifier)))
+
+================================================================================
+nested module import
+================================================================================
+
+import "src/core/moment.nova"
+import "src/runtime/wasi.nova"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    path: (string_literal))
+  (import_decl
+    path: (string_literal)))

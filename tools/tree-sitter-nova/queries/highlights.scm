@@ -105,7 +105,30 @@
   "%="
   "?"
   "=>"
+  "->"
 ] @operator
+
+; Return-type annotations in function signatures.
+(fn_decl
+  return_type: (type_expression
+    (identifier) @type))
+
+(extern_fn_decl
+  return_type: (type_expression
+    (identifier) @type))
+
+(lambda_expression
+  return_type: (type_expression
+    (identifier) @type))
+
+; Type annotations on parameters / let bindings.
+(parameter
+  type: (type_expression
+    (identifier) @type))
+
+(let_decl
+  type: (type_expression
+    (identifier) @type))
 
 [
   "("
