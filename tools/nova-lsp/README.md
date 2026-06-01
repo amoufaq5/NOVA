@@ -18,9 +18,9 @@ for the install hook.
 | `textDocument/hover`                | yes (function signatures from imports) |
 | `textDocument/completion`           | yes (builtins + fn/let scan, triggers on `.` and `(`) |
 | `textDocument/rename`               | yes (regex `\b<old>\b` across open docs + imports) |
-| `textDocument/references`           | yes (regex scan, open docs + imports) |
+| `textDocument/references`           | yes (regex scan, open docs + transitively imported files) |
 | `textDocument/codeAction`           | yes (extract function, organize imports, sort fn declarations) |
-| `textDocument/definition`           | future |
+| `textDocument/definition`           | yes (intra-file + follows `import "..."` transitively) |
 
 Hover scans the open document and every `import "..."` it transitively
 references for `fn name(args)` and `let X = ...` definitions, plus the
@@ -39,7 +39,22 @@ arrays for each `\b<oldname>\b` occurrence. It is a textual rename — it
 won't respect shadowing, but it handles the 80 % case.
 
 References uses the same regex scan and returns `Location[]` for every
-match in open documents + imported files.
+match in open documents + imported files. The scanner walks the transitive
+import graph rooted at the current document, then includes any other open
+buffers (and their import closures) so multi-root workspaces find
+references that aren't reachable from one root.
+
+Go-to-definition (`textDocument/definition`) looks up the identifier under
+the cursor against top-level `fn` and `let` definitions, searching the
+current document first and then walking `import "..."` statements
+transitively until it finds a match. Resolved paths are relative to the
+importing file's directory; absolute paths are honoured as-is. Builtins
+(`println`, `len`, `map_set`, ...) return an empty location list — they
+have no source position, so the editor falls back to hover for the
+signature. A per-file scan cache keyed by absolute path with mtime
+invalidation keeps repeat lookups O(1) when nothing has changed on disk;
+open buffers feed their live text in via a `text_overrides` map so
+unsaved edits beat stale on-disk content.
 
 Code actions surface three refactorings via the VS Code lightbulb menu:
 
@@ -85,9 +100,10 @@ python tools/nova-lsp/tests/completion_smoke.py
 python tools/nova-lsp/tests/rename_smoke.py
 python tools/nova-lsp/tests/references_smoke.py
 python tools/nova-lsp/tests/code_action_smoke.py
+python tools/nova-lsp/tests/definition_cross_file_smoke.py
 ```
 
-The four `tests/*_smoke.py` scripts use the bundled `_harness.py`
+The five `tests/*_smoke.py` scripts use the bundled `_harness.py`
 helper to drive `dispatch()` in-process (no subprocess), open a tiny
 workspace, and assert on the response payloads. They run in ~10 ms each.
 
@@ -134,10 +150,12 @@ tools/nova-lsp/
   nova_lsp/
     __init__.py
     __main__.py        # python -m nova_lsp
-    server.py          # all LSP logic
+    server.py          # LSP request handlers + dispatcher
+    imports.py         # import-graph walker + mtime-invalidated file cache
   tests/
     _harness.py        # in-process LSP client (no subprocess)
     completion_smoke.py
+    definition_cross_file_smoke.py
     rename_smoke.py
     references_smoke.py
     code_action_smoke.py

@@ -8,8 +8,10 @@ using only the Python standard library. Supports:
     * `textDocument/publishDiagnostics` (driven by `nova --check`)
     * `textDocument/hover` (symbol scan of `import`-ed runtime files)
     * `textDocument/completion` (builtins + fn/let from doc + imports)
+    * `textDocument/definition` (intra-file + transitively imported fns/lets)
     * `textDocument/rename` (regex-based workspace edit)
-    * `textDocument/references` (regex-based occurrence scan)
+    * `textDocument/references` (regex-based occurrence scan over the
+      transitive import graph)
     * `textDocument/codeAction` (extract function, organize imports,
       sort top-level fn declarations)
 
@@ -34,6 +36,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse, unquote
 
 from nova_lsp import __version__
+from nova_lsp.imports import FileCache, find_definition, walk_imports
 
 LOG_FILE = os.environ.get("NOVA_LSP_LOG")
 
@@ -275,6 +278,10 @@ class ServerState:
     root_path: Optional[str] = None
     nova_compiler: str = "nova"
     shutdown_requested: bool = False
+    # Shared file-scan cache used by definition/references. Imports are
+    # cheap to scan but we re-walk the graph on every hover/completion
+    # too, so keeping a mtime-keyed cache is a clear win.
+    file_cache: "FileCache" = field(default_factory=FileCache)
 
 
 # ---------------------------------------------------------------------------
@@ -673,13 +680,90 @@ def handle_rename(
 
 
 # ---------------------------------------------------------------------------
-# References.
+# Definition + References.
+#
+# Both walk the transitive import graph rooted at the current document via
+# `walk_imports`, which uses an mtime-keyed FileCache. Open documents are
+# fed in as `text_overrides` so live buffer edits stay authoritative even
+# before the user has saved.
 # ---------------------------------------------------------------------------
+
+
+def _text_overrides(state: ServerState) -> Dict[str, str]:
+    """Map of absolute path -> live buffer text for every open document.
+    Used by `walk_imports` so unsaved edits beat stale on-disk content."""
+    overrides: Dict[str, str] = {}
+    for d in state.documents.values():
+        p = uri_to_path(d.uri)
+        if p:
+            overrides[os.path.abspath(p)] = d.text
+    return overrides
+
+
+def _invalidate_for(state: ServerState, uri: str) -> None:
+    """Drop the cached scan for `uri` so the next definition/references
+    call re-reads the file (either from the live buffer or from disk).
+    Called on every didOpen/didChange/didSave/didClose."""
+    p = uri_to_path(uri)
+    if p:
+        state.file_cache.invalidate(p)
+
+
+def handle_definition(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Resolve the identifier under the cursor.
+
+    Strategy:
+      1. Read the word under the cursor.
+      2. Walk the import graph (start file first) for a top-level
+         `fn name(...)` or `let name = ...` matching that word.
+      3. Return the matched name's source span as an LSP `Location[]`,
+         or an empty list if the identifier is unknown (builtins return
+         empty because they have no source location)."""
+    uri = params.get("textDocument", {}).get("uri", "")
+    pos = params.get("position", {})
+    doc = state.documents.get(uri)
+    if not doc:
+        return []
+    name = word_at(doc.text, pos.get("line", 0), pos.get("character", 0))
+    if not name:
+        return []
+
+    start = uri_to_path(doc.uri)
+    if not start:
+        return []
+    hit = find_definition(
+        name,
+        os.path.abspath(start),
+        state.file_cache,
+        text_overrides=_text_overrides(state),
+    )
+    if hit is None:
+        # Unknown identifier (likely a builtin or undefined symbol).
+        # Builtins have no source location — return empty so the editor
+        # can fall back to hover for the signature.
+        return []
+    path, (line, c0, c1) = hit
+    return [{
+        "uri": path_to_uri(path),
+        "range": {
+            "start": {"line": line, "character": c0},
+            "end": {"line": line, "character": c1},
+        },
+    }]
 
 
 def handle_references(
     state: ServerState, params: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
+    """Find every `\\bname\\b` match across the import graph.
+
+    Walks `walk_imports` from the current doc (so the start file plus every
+    reachable import is scanned). Open documents contribute their live
+    buffer text via `text_overrides`. Also includes other open documents
+    that aren't reachable from the start file — they're independent roots
+    in a multi-buffer workspace, so users still expect references there."""
     uri = params.get("textDocument", {}).get("uri", "")
     pos = params.get("position", {})
     doc = state.documents.get(uri)
@@ -690,28 +774,46 @@ def handle_references(
         return []
 
     locations: List[Dict[str, Any]] = []
+    overrides = _text_overrides(state)
+    visited: Set[str] = set()
 
-    # Open documents (use live buffer text).
-    visited_paths: Set[str] = set()
+    # Walk from the current doc first.
+    start = uri_to_path(doc.uri)
+    if start:
+        entries = walk_imports(
+            os.path.abspath(start),
+            state.file_cache,
+            text_overrides=overrides,
+            visited=visited,
+        )
+        for entry in entries:
+            for e in _scan_file_for_identifier(entry.text, name):
+                locations.append({
+                    "uri": path_to_uri(entry.path),
+                    "range": e["range"],
+                })
+
+    # Other open documents (and their import closures) — independent roots
+    # that aren't reachable from the current doc.
     for d in state.documents.values():
-        for e in _scan_file_for_identifier(d.text, name):
-            locations.append({"uri": d.uri, "range": e["range"]})
         p = uri_to_path(d.uri)
-        if p:
-            visited_paths.add(p)
-
-    # Imported files on-disk.
-    for path in _candidate_paths(state):
-        if path in visited_paths:
+        if not p:
             continue
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except OSError:
+        abs_p = os.path.abspath(p)
+        if abs_p in visited:
             continue
-        for e in _scan_file_for_identifier(text, name):
-            locations.append({"uri": path_to_uri(path), "range": e["range"]})
-        visited_paths.add(path)
+        entries = walk_imports(
+            abs_p,
+            state.file_cache,
+            text_overrides=overrides,
+            visited=visited,
+        )
+        for entry in entries:
+            for e in _scan_file_for_identifier(entry.text, name):
+                locations.append({
+                    "uri": path_to_uri(entry.path),
+                    "range": e["range"],
+                })
 
     return locations
 
@@ -1226,6 +1328,7 @@ def server_capabilities() -> Dict[str, Any]:
             "triggerCharacters": [".", "("],
             "resolveProvider": False,
         },
+        "definitionProvider": True,
         "renameProvider": True,
         "referencesProvider": True,
         "codeActionProvider": {
@@ -1278,6 +1381,7 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         td = params.get("textDocument", {})
         doc = Document(uri=td.get("uri", ""), text=td.get("text", ""), version=td.get("version", 0))
         state.documents[doc.uri] = doc
+        _invalidate_for(state, doc.uri)
         publish_diagnostics(state, doc, out_stream)
         return True
     if method == "textDocument/didChange":
@@ -1287,6 +1391,7 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         if doc and changes:
             doc.text = changes[-1].get("text", doc.text)
             doc.version = params.get("textDocument", {}).get("version", doc.version + 1)
+            _invalidate_for(state, uri)
             publish_diagnostics(state, doc, out_stream)
         return True
     if method == "textDocument/didSave":
@@ -1296,11 +1401,13 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
             new_text = params.get("text")
             if isinstance(new_text, str):
                 doc.text = new_text
+            _invalidate_for(state, uri)
             publish_diagnostics(state, doc, out_stream)
         return True
     if method == "textDocument/didClose":
         uri = params.get("textDocument", {}).get("uri", "")
         state.documents.pop(uri, None)
+        _invalidate_for(state, uri)
         write_message(
             out_stream,
             {
@@ -1320,6 +1427,10 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "textDocument/rename":
         result = handle_rename(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/definition":
+        result = handle_definition(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
     if method == "textDocument/references":
