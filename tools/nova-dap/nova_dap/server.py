@@ -17,7 +17,10 @@ Supported requests
                              so each thread can be stepped / continued
                              independently.
 * ``setBreakpoints``      — translates each source-line breakpoint via
-                             ``-break-insert``.
+                             ``-break-insert``. If a breakpoint carries
+                             a ``condition`` string, it's forwarded
+                             via ``-break-insert -c "<expr>"`` so gdb
+                             only stops when the condition is true.
 * ``configurationDone``   — runs the inferior (``-exec-run``).
 * ``threads``             — real multi-thread list from ``-thread-info``.
                              For single-thread programs this still
@@ -30,6 +33,11 @@ Supported requests
                              right thread).
 * ``variables``           — ``-stack-list-variables --all-values`` after
                              selecting the right thread + frame.
+* ``evaluate``            — ``-data-evaluate-expression`` routed through
+                             the frame-id's (threadId, level). Returns
+                             a decoded ``{result, type}`` pair. Used
+                             for the watch window, debug-console REPL,
+                             and hover tooltips.
 * ``continue`` / ``next`` / ``stepIn`` / ``stepOut`` — exec controls,
                              accepting DAP's ``threadId`` and
                              ``singleThread`` arguments. When
@@ -76,6 +84,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from nova_dap import __version__
+from nova_dap.evaluator import evaluate_via_bridge
 from nova_dap.gdb_bridge import (
     GdbAsyncRecord,
     GdbBridge,
@@ -487,10 +496,18 @@ def _capabilities() -> Dict[str, Any]:
         "supportsStepBack": False,
         "supportsTerminateRequest": True,
         "supportsRestartRequest": False,
-        "supportsConditionalBreakpoints": False,
+        # Conditional breakpoints: ``-break-insert -c "<expr>"`` —
+        # gdb evaluates the expression at the breakpoint hit site and
+        # only stops when it's non-zero. See ``handle_set_breakpoints``.
+        "supportsConditionalBreakpoints": True,
         "supportsFunctionBreakpoints": False,
         "supportsHitConditionalBreakpoints": False,
-        "supportsEvaluateForHovers": False,
+        # Evaluate-for-hovers: hovering an identifier in the editor
+        # triggers an ``evaluate`` request with ``context="hover"``.
+        # We share the same gdb-MI path with the watch / repl contexts;
+        # gdb's evaluator is side-effect-free for plain reads so hover
+        # is safe to leave on.
+        "supportsEvaluateForHovers": True,
         "supportsSetVariable": False,
         "supportsCompletionsRequest": False,
         "supportsModulesRequest": False,
@@ -614,7 +631,17 @@ def handle_set_breakpoints(session: Session, req: Dict[str, Any]) -> None:
             out.append({"verified": False})
             continue
         loc = f"{raw_path}:{line}"
-        result = bridge.command(f"-break-insert {quote_path(loc)}")
+        # DAP carries the condition expression as ``bp["condition"]``
+        # (free-form text). gdb's ``-break-insert -c "<expr>"`` only
+        # stops when ``<expr>`` evaluates to non-zero. We forward the
+        # condition verbatim; if it's malformed gdb returns an
+        # ``^error`` which we surface as ``verified=false``.
+        condition = bp.get("condition")
+        cmd_parts = ["-break-insert"]
+        if isinstance(condition, str) and condition.strip():
+            cmd_parts.extend(["-c", quote_path(condition)])
+        cmd_parts.append(quote_path(loc))
+        result = bridge.command(" ".join(cmd_parts))
         if not result.ok:
             out.append(
                 {
@@ -862,6 +889,94 @@ def handle_variables(session: Session, req: Dict[str, Any]) -> None:
     send_response(session, req, body={"variables": out})
 
 
+def handle_evaluate(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``evaluate`` request.
+
+    The client sends ``{expression, frameId, context}`` where
+    ``context`` is one of ``"watch"`` / ``"repl"`` / ``"hover"`` /
+    ``"clipboard"``. We route the expression through gdb's
+    ``-data-evaluate-expression`` MI command with ``--thread`` /
+    ``--frame`` resolved from the DAP frame id table (the same
+    mapping ``variables`` uses).
+
+    Response shape::
+
+        {
+          "result": "<display text>",
+          "type":   "int" | "str" | "char" | "ptr" | "bool" | "raw",
+          "variablesReference": 0
+        }
+
+    ``variablesReference: 0`` means the result is a leaf — DAP clients
+    treat non-zero refs as expandable structured values, which we
+    don't synthesise yet. (List / struct introspection is the next
+    R-round; for now the user sees ``"0x7fff..."`` for opaque
+    pointers, which still matches what ``print`` shows in CLI gdb.)
+    """
+    args = req.get("arguments", {}) or {}
+    expression = args.get("expression")
+    if not isinstance(expression, str) or not expression:
+        send_response(
+            session,
+            req,
+            success=False,
+            message="evaluate requires non-empty 'expression' argument",
+        )
+        return
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, success=False, message="not launched")
+        return
+    # Resolve the frame id back to (threadId, frame_level). When the
+    # client doesn't supply a frame id (e.g. an ``evaluate`` without
+    # a current frame — happens for ``context=repl`` before the first
+    # stop) we fall back to the session's current thread + frame 0.
+    frame_id_raw = args.get("frameId")
+    if frame_id_raw is not None:
+        try:
+            frame_id = int(frame_id_raw)
+        except (TypeError, ValueError):
+            frame_id = 0
+        thread_id, frame_level = session.frame_lookup_by_id(frame_id)
+    else:
+        thread_id, frame_level = (session.threadId, 0)
+
+    # In all-stop mode we don't pass ``--thread`` because gdb has one
+    # selected thread and the routing is implicit. In non-stop mode
+    # we MUST pass ``--thread`` so the right scope is in view.
+    eff_thread: Optional[int] = thread_id if session.non_stop else None
+    eff_frame: Optional[int] = frame_level if session.non_stop else None
+    if not session.non_stop:
+        # All-stop: select the frame so the implicit scope matches.
+        # ``-stack-select-frame`` is a no-op when the level matches
+        # gdb's current frame, which is the common case for
+        # single-thread programs.
+        bridge.command(f"-stack-select-frame {frame_level}")
+
+    eval_result = evaluate_via_bridge(
+        bridge,
+        expression,
+        thread_id=eff_thread,
+        frame_level=eff_frame,
+        timeout=5.0,
+    )
+    if not eval_result.ok or eval_result.decoded is None:
+        send_response(
+            session,
+            req,
+            success=False,
+            message=eval_result.message or "evaluate failed",
+        )
+        return
+    decoded = eval_result.decoded
+    body: Dict[str, Any] = {
+        "result": decoded.display,
+        "type": decoded.type,
+        "variablesReference": 0,
+    }
+    send_response(session, req, body=body)
+
+
 def _thread_args(session: Session, req_args: Dict[str, Any]) -> Tuple[Optional[int], bool]:
     """Extract ``(threadId, singleThread)`` from a DAP request body.
 
@@ -1009,6 +1124,7 @@ HANDLERS = {
     "stackTrace": handle_stack_trace,
     "scopes": handle_scopes,
     "variables": handle_variables,
+    "evaluate": handle_evaluate,
     "continue": handle_continue,
     "next": handle_next,
     "stepIn": handle_step_in,

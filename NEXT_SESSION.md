@@ -251,6 +251,72 @@ stage2.s == stage3.s bit-identical.
    the inferior's heap via the gdb python API and synthesizing virtual
    threads for it.
 
+## R10E — DAP expression evaluation + conditional breakpoints
+
+`tools/nova-dap` now exposes 18 DAP requests with the addition of the
+`evaluate` handler (watch panel / REPL / hover tooltips), and the
+`setBreakpoints` handler honours per-breakpoint `condition` strings
+end-to-end. Both ride on top of R7D's per-thread frame plumbing and
+R4A's `.debug_info` work.
+
+Changes (`tools/nova-dap/nova_dap/evaluator.py`, NEW):
+- `decode_value(raw)` classifies a gdb-MI ``value="..."`` string into
+  one of `int` / `str` / `char` / `bool` / `ptr` / `raw`. Handles
+  decimal / hex / octal int literals, `0x... "text"` pointer-prefixed
+  C-strings (with `\\n`, `\\t`, `\\\\`, `\\"` escape decoding), the
+  `<int> 'c'` dual-form for chars, and bare-pointer pass-through.
+- `build_evaluate_command(expr, thread_id, frame_level)` composes the
+  MI command with optional `--thread <id> --frame <level>` routing.
+- `evaluate_via_bridge(bridge, expr, thread_id, frame_level)` drives
+  the bridge and returns an `EvaluationResult` carrying either a
+  `DecodedValue` or an error message.
+
+Changes (`tools/nova-dap/nova_dap/server.py`):
+- New `handle_evaluate(session, req)`: resolves the DAP `frameId` back
+  to `(threadId, frame_level)` via the existing frame table, calls
+  `evaluate_via_bridge` with the right routing, and returns
+  `{result, type, variablesReference: 0}`.
+- `handle_set_breakpoints` now reads the `condition` field per
+  breakpoint and forwards it via `-break-insert -c "<expr>"`. Empty /
+  blank conditions are treated as unconditional.
+- `_capabilities()` flips two flags from `False` to `True`:
+  `supportsConditionalBreakpoints` and `supportsEvaluateForHovers`.
+- HANDLERS table grows by one entry (`"evaluate"`), totalling 18 DAP
+  requests.
+
+Tests:
+- `tools/nova-dap/tests/test_evaluate.py` (NEW) — 100 assertions
+  (57 decoder + 43 end-to-end). Covers decoder tier classifications,
+  command-builder routing, fake-bridge integration, end-to-end DAP
+  wire test against a C fixture, frame-routing verification (frame 0
+  vs frame 1 vs unknown frame fallback), `context=hover`/`repl`
+  parity with `watch`, and a graceful undefined-variable error path.
+- `tools/nova-dap/tests/test_conditional_breakpoint.py` (NEW) — 54
+  assertions (15 unit + 39 end-to-end). Covers `-break-insert -c`
+  composition, empty-condition fallback, capability registration,
+  end-to-end loop where `condition: "x > 5"` correctly skips x=1..5
+  and fires at x=6, re-send of an unconditional bp clearing the
+  prior condition, and integration against the NOVA `hello_dwarf`
+  binary (`condition: "sum == 3"`).
+- `dap_smoke.py` + `dap_multi_thread.py` (pre-existing) still pass.
+
+Capability count: 17 → 18 DAP requests (added `evaluate`); 2 new
+boolean caps (`supportsConditionalBreakpoints`,
+`supportsEvaluateForHovers`).
+
+Verification:
+- `python tools/nova-dap/tests/test_evaluate.py` — OK, 100 assertions.
+- `python tools/nova-dap/tests/test_conditional_breakpoint.py` — OK,
+  54 assertions.
+- `python tools/nova-dap/tests/dap_smoke.py` — OK (pre-existing).
+- `python tools/nova-dap/tests/dap_multi_thread.py` — OK (pre-existing).
+- Integration: `evaluate "1+2"` against the NOVA `hello_dwarf` binary
+  returns `{result: "3", type: "int"}`; `evaluate "sum"` returns
+  `{result: "3", type: "int"}`; `evaluate "scaled"` returns
+  `{result: "30", type: "int"}`. A conditional breakpoint with
+  `condition: "sum == 999"` (never true) lets the program run to
+  termination with no stop event.
+
 ## R7D — Multi-thread DAP coordination
 
 `tools/nova-dap` now exposes 17 DAP capabilities; the multi-thread

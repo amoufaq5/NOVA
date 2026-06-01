@@ -17,13 +17,14 @@ ELF (see `DWARF_AUDIT.md` in the repo root and `make smoke-dwarf`).
 | ------------------------- | ------------------------------------------------- |
 | `initialize`              | Returns the capabilities table (see below).       |
 | `launch`                  | Spawns gdb, enables `mi-async` + `non-stop`, `-file-exec-and-symbols <program>`, optional `cwd` + `args`. |
-| `setBreakpoints`          | `-break-delete` then `-break-insert <src>:<line>` per breakpoint. |
+| `setBreakpoints`          | `-break-delete` then `-break-insert <src>:<line>` per breakpoint. Conditional breakpoints (`condition: "x > 5"`) are forwarded via `-break-insert -c "<expr>"`. |
 | `setExceptionBreakpoints` | Accepted, no-op (gdb has none for Nova).          |
 | `configurationDone`       | `-exec-run` first time; `-exec-continue --all` thereafter. |
 | `threads`                 | Multi-thread: backstop reconcile with `-thread-info`; tracks `=thread-created` / `=thread-exited` for live updates. |
 | `stackTrace`              | `-stack-list-frames --thread <threadId>`; frame ids are stable per `(threadId, level)`. |
 | `scopes`                  | One `Locals` scope per frame.                     |
 | `variables`               | `-thread-select` + `-stack-select-frame` + `-stack-list-variables --all-values` (so per-thread frame chains are isolated). |
+| `evaluate`                | `-data-evaluate-expression --thread <id> --frame <level> "<expr>"`; result string decoded into `{result, type}` where type is `int` / `str` / `char` / `bool` / `ptr` / `raw`. Used for watch panel, REPL, and hover tooltips. |
 | `continue` / `next` / `stepIn` / `stepOut` | `-exec-{continue,next,step,finish}` with `--thread <id>` when DAP carries `singleThread:true`, otherwise `--all`. |
 | `pause`                   | `-exec-interrupt --thread <id>` (or `--all`).     |
 | `disconnect` / `terminate`| `-gdb-exit` + reap child.                         |
@@ -34,6 +35,15 @@ Capabilities advertised:
 * `supportsStepBack: false`
 * `supportsTerminateRequest: true`
 * `supportsRestartRequest: false`
+* `supportsConditionalBreakpoints: true`
+  — `setBreakpoints` honours the per-breakpoint `condition` string,
+  forwarded verbatim to gdb's `-break-insert -c "<expr>"`. gdb only
+  fires the breakpoint when the expression is non-zero, so a loop
+  with `condition: "x > 5"` skips iterations where `x <= 5`.
+* `supportsEvaluateForHovers: true`
+  — `evaluate` accepts `context: "watch" | "repl" | "hover"`. All
+  three route through the same gdb path; hover is safe because
+  `-data-evaluate-expression` is side-effect-free for plain reads.
 * `supportsSingleThreadExecutionRequests: true`
   — every `continue` / `next` / `stepIn` / `stepOut` / `pause`
   honours the DAP `threadId` + `singleThread` arguments. When
@@ -85,13 +95,18 @@ is out of scope for this milestone.
 
 ## What does NOT work yet
 
-* **Conditional / hit-count breakpoints.** MI supports them, the
-  adapter just doesn't expose them yet.
+* **Hit-count breakpoints.** Conditional breakpoints are supported
+  (gdb's `-break-insert -c`), hit-count (`-break-insert -i N` /
+  `ignore N`) is not yet plumbed.
 * **NOVA coroutines as separate DAP threads.** See the thread-model
   note above — coroutines look like ordinary function calls to gdb.
 * **`stopOnEntry`.** The adapter runs straight to the first
   breakpoint.
-* **`evaluate` (REPL / hover).** Not wired up.
+* **Structured `evaluate` results.** Today `evaluate` returns a flat
+  `{result, type}` pair with `variablesReference: 0`. NOVA list /
+  struct / map values come back as bare pointer strings; expanding
+  them inline in the watch panel needs a debugger-side reader of
+  the smart-op runtime headers — deferred.
 * **Reverse debugging (`stepBack`).** Out of scope.
 
 ## Layout
@@ -99,16 +114,20 @@ is out of scope for this milestone.
 ```
 tools/nova-dap/
   pyproject.toml
-  README.md                       (this file)
+  README.md                              (this file)
   nova_dap/
     __init__.py
-    __main__.py                   `python -m nova_dap` entry point
-    server.py                     DAP request handlers + stdio loop
-    gdb_bridge.py                 GdbBridge subprocess wrapper + MI parser
+    __main__.py                          `python -m nova_dap` entry point
+    server.py                            DAP request handlers + stdio loop
+    gdb_bridge.py                        GdbBridge subprocess wrapper + MI parser
+    evaluator.py                         `-data-evaluate-expression` wrapper +
+                                          gdb-output decoder (int/str/char/ptr).
   tests/
-    dap_smoke.py                  end-to-end single-thread smoke test
-    dap_multi_thread.py           end-to-end multi-thread coordination test
-    fixtures/multi_thread.c       pthread fixture (built on demand by the test)
+    dap_smoke.py                         end-to-end single-thread smoke test
+    dap_multi_thread.py                  end-to-end multi-thread coordination test
+    test_evaluate.py                     evaluate request: decoder + REPL/watch/hover
+    test_conditional_breakpoint.py       conditional `setBreakpoints` with `condition`
+    fixtures/multi_thread.c              pthread fixture (built on demand by the test)
 ```
 
 The implementation is pure stdlib — no third-party Python deps.
@@ -175,6 +194,30 @@ python tools/nova-dap/tests/dap_multi_thread.py
 This test SKIPs cleanly if `gcc` (or `pthread`) is unavailable. The
 fixture is a small C program because NOVA itself doesn't yet emit
 multiple OS threads — see the "Thread model" section above.
+
+For the watch / REPL / hover evaluate path:
+
+```sh
+python tools/nova-dap/tests/test_evaluate.py
+# test_evaluate: OK
+#   decoder assertions: 57
+#   total assertions:   100
+#   end-to-end:        ok (43 extra checks)
+```
+
+For conditional breakpoints:
+
+```sh
+python tools/nova-dap/tests/test_conditional_breakpoint.py
+# test_conditional_breakpoint: OK
+#   unit assertions:    15
+#   total assertions:   54
+#   end-to-end:         ok (39 extra checks)
+```
+
+Both tests have a pure-Python phase that runs anywhere (no gdb
+required) plus an end-to-end phase that SKIPs cleanly when `gdb` /
+`gcc` are missing.
 
 ## VS Code integration
 
