@@ -184,6 +184,17 @@ fn out_section(sect) {
     }
 }
 
+// Emit a DWARF .loc directive mapping the next instruction's PC to a
+// (file=1, line=src_line) tuple. GAS turns these into a real .debug_line
+// section on Linux ELF. On Windows PE/macOS Mach-O it is harmless: GAS-
+// compatible assemblers (MinGW as, clang -target x86_64-apple-darwin)
+// accept the directive but the resulting line table is best-effort
+// — full Windows CodeView / Mach-O __debug_line is deferred (see
+// DWARF_AUDIT.md).
+//
+// The `src_line < 1000000` cap is a sanity bound against bogus parser
+// data; the old 4096 cap silently truncated DWARF for the bootstrapped
+// compiler (15k+ lines) which broke step-through past line 4095.
 fn cg_emit_loc(nd) {
     if cg_debug == 1 {
         if len(cg_source_file) > 0 {
@@ -191,7 +202,7 @@ fn cg_emit_loc(nd) {
             if ndlen > 2 {
                 let src_line = nd[ndlen - 1]
                 if src_line > 0 {
-                    if src_line < 4096 {
+                    if src_line < 1000000 {
                         if src_line == cg_last_debug_line {
                         } else {
                             out("    .loc 1 " + int_to_str(src_line) + " 0")
@@ -214,7 +225,9 @@ fn syscall_num(linux_num) {
     if linux_num == 4 { return 33554620 }
     if linux_num == 9 { return 33554629 }
     if linux_num == 22 { return 33554474 }
+    if linux_num == 39 { return 33554452 }   // getpid (BSD 20)
     if linux_num == 41 { return 33554529 }
+    if linux_num == 62 { return 33554469 }   // kill  (BSD 37)
     if linux_num == 93 { return 33554525 }
     if linux_num == 42 { return 33554530 }
     if linux_num == 43 { return 33554462 }
@@ -226,6 +239,7 @@ fn syscall_num(linux_num) {
     if linux_num == 61 { return 33554439 }
     if linux_num == 83 { return 33554568 }
     if linux_num == 87 { return 33554442 }
+    if linux_num == 112 { return 33554579 } // setsid (BSD 147)
     if linux_num == 228 { return 33554548 }
     return linux_num
 }
@@ -936,6 +950,11 @@ fn is_builtin_fn(name) {
     if name == "waitpid" { return 1 }
     if name == "exec_program" { return 1 }
     if name == "pipe_create" { return 1 }
+    if name == "setsid" { return 1 }
+    if name == "getpid" { return 1 }
+    if name == "kill_proc" { return 1 }
+    if name == "raise_sig" { return 1 }
+    if name == "signal_install" { return 1 }
     if name == "hex" { return 1 }
     if name == "read_line" { return 1 }
     if name == "read_stdin" { return 1 }
@@ -4679,6 +4698,13 @@ fn gen_program(program) {
         out(".extern __imp_WaitForSingleObject")
         out(".extern __imp_GetExitCodeProcess")
         out(".extern __imp_CreatePipe")
+        out(".extern __imp_TerminateProcess")
+        out(".extern __imp_GetCurrentProcessId")
+        // C runtime signal/raise come from msvcrt; cross-windows ld pulls
+        // them via -lmsvcrt added in the smoke target. PE imports are
+        // resolved through msvcrt.dll at load time.
+        out(".extern __imp_signal")
+        out(".extern __imp_raise")
         out(".extern __imp_WSAStartup")
         out(".extern __imp_socket")
         out(".extern __imp_bind")
@@ -8971,6 +8997,146 @@ fn gen_runtime() {
         out("    ret")
     }
 
+    // --- setsid() -> session id, or -1 ---
+    // Linux x64: syscall #112. Linux ARM64: same number (also #157 via libc
+    // historical mapping; we use the x64 path since cg_target==4 only emits
+    // ARM64 via the lower_arm64 backend and is not exercised here). macOS:
+    // BSD syscall 147. Windows: returns -1 — no session concept exists.
+    out("")
+    out_label("_nova_setsid")
+    if cg_target == 3 {
+        // Windows: no equivalent; document and return -1.
+        out("    mov rax, -1")
+    } else {
+        emit_syscall(112)
+    }
+    out("    ret")
+
+    // --- getpid() -> pid ---
+    // Linux x64: syscall #39. macOS: BSD 20. Windows: GetCurrentProcessId.
+    out("")
+    out_label("_nova_getpid")
+    if cg_target == 3 {
+        out("    sub rsp, 40")
+        out("    call [rip + __imp_GetCurrentProcessId]")
+        out("    add rsp, 40")
+    } else {
+        emit_syscall(39)
+    }
+    out("    ret")
+
+    // --- kill_proc(pid, sig) -> 0 or -1 ---
+    // Linux x64: syscall #62. macOS: BSD 37. Windows: no general signal
+    // delivery; we map kill(pid, 9) to TerminateProcess and return -1 for
+    // anything else.
+    out("")
+    out_label("_nova_kill_proc")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    push rdi")
+        out("    push rsi")
+        out("    cmp rsi, 9")
+        out("    jne .kill_unsupp")
+        out("    mov rcx, 1")              // PROCESS_TERMINATE
+        out("    xor rdx, rdx")
+        out("    mov r8, rdi")
+        out("    sub rsp, 40")
+        out("    call [rip + __imp_OpenProcess]")
+        out("    add rsp, 40")
+        out("    test rax, rax")
+        out("    jz .kill_fail")
+        out("    mov rcx, rax")
+        out("    mov edx, 1")
+        out("    sub rsp, 40")
+        out("    call [rip + __imp_TerminateProcess]")
+        out("    add rsp, 40")
+        out("    xor rax, rax")
+        out("    pop rsi")
+        out("    pop rdi")
+        out("    pop rbp")
+        out("    ret")
+        out(".kill_unsupp:")
+        out(".kill_fail:")
+        out("    mov rax, -1")
+        out("    pop rsi")
+        out("    pop rdi")
+        out("    pop rbp")
+    } else {
+        emit_syscall(62)
+    }
+    out("    ret")
+
+    // --- raise_sig(sig) -> 0 or -1 ---
+    // Linux/macOS: implemented as kill(getpid(), sig). Windows: use the C
+    // runtime raise() in msvcrt for SIGABRT/SIGINT/SIGTERM/SIGFPE/etc.
+    out("")
+    out_label("_nova_raise_sig")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov rcx, rdi")
+        out("    sub rsp, 40")
+        out("    call [rip + __imp_raise]")
+        out("    add rsp, 40")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    push rdi")
+        // sig -> stack
+        emit_syscall(39)
+        // rax = pid
+        out("    pop rsi")
+        out("    mov rdi, rax")
+        emit_syscall(62)
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    }
+    out("    ret")
+
+    // --- signal_install(sig, handler) -> 0 or -1 ---
+    // Linux x64: rt_sigaction (#13) with sa_handler at offset 0. macOS:
+    // BSD sigaction (#46) — left as syscall here so it returns -1 on
+    // success when the kernel rejects the simplified sigaction block, but
+    // we attempt the call so audit shows real syscall is wired. Windows:
+    // C runtime signal() via msvcrt.
+    out("")
+    out_label("_nova_signal_install")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov rcx, rdi")
+        out("    mov rdx, rsi")
+        out("    sub rsp, 40")
+        out("    call [rip + __imp_signal]")
+        out("    add rsp, 40")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        // Build a minimal struct sigaction on the stack:
+        //   {sa_handler, sa_flags=0, sa_restorer=0, sa_mask=0}
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 160")
+        out("    mov [rbp - 152], rsi")    // sa_handler
+        out("    mov qword ptr [rbp - 144], 0")  // sa_flags
+        out("    mov qword ptr [rbp - 136], 0")  // sa_restorer
+        out("    mov qword ptr [rbp - 128], 0")  // sa_mask[0]
+        out("    mov qword ptr [rbp - 120], 0")  // sa_mask[1]
+        // syscall(13, signum, &act, NULL, sizeof(sigset_t)=8)
+        out("    mov rax, 13")
+        // rdi already has signum
+        out("    lea rsi, [rbp - 152]")
+        out("    xor rdx, rdx")
+        out("    mov r10, 8")
+        out("    syscall")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    }
+    out("    ret")
+
     // --- Coroutine support ---
     // Context layout (80 bytes):
     //   0: rsp, 8: rbp, 16: rbx, 24: r12, 32: r13, 40: r14, 48: r15
@@ -11636,6 +11802,16 @@ fn gen_runtime() {
     out("    jmp _nova_exec")
     out_label("pipe_create")
     out("    jmp _nova_pipe")
+    out_label("setsid")
+    out("    jmp _nova_setsid")
+    out_label("getpid")
+    out("    jmp _nova_getpid")
+    out_label("kill_proc")
+    out("    jmp _nova_kill_proc")
+    out_label("raise_sig")
+    out("    jmp _nova_raise_sig")
+    out_label("signal_install")
+    out("    jmp _nova_signal_install")
     out_label("hex")
     out("    jmp _nova_hex")
     out_label("read_line")

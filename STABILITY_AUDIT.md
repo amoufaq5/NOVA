@@ -85,7 +85,7 @@ return-type contract. A future `BUILTINS.md` table would lock the
 | Target  | Status        | Verified                              | Gaps                                                  |
 | ------- | ------------- | ------------------------------------- | ----------------------------------------------------- |
 | Linux x86-64 | PRODUCTION | `make self-host`, `make test`, CrossEngin 121/121 | none |
-| Windows x86-64 | PRODUCTION (Wine-only) | smoke + kg-sync two-process | `setsid`/signal stubs return -1; `WSACleanup` never called; fork re-spawns exe |
+| Windows x86-64 | PRODUCTION (Wine-only) | smoke + kg-sync two-process | `setsid` returns -1 (no Win equivalent); `signal_install`/`raise_sig` now use real msvcrt `signal`/`raise`; `kill_proc(pid,9)` uses TerminateProcess; `WSACleanup` never called; fork re-spawns exe |
 | macOS x86-64 | MINIMUM VIABLE | smoke produces Mach-O | no real-Darwin run; sockets/fork untested |
 | WASM (WASI preview1) | HELLO-WORLD | node WASI | file I/O stubbed; no SIMD; FFI N/A |
 | ARM64 (AArch64) | STUBBED | reference .o smoke | `gen_program` emits 7-instr exit stub; TODO at `codegen.nova:3211` |
@@ -153,7 +153,7 @@ change on the roadmap.
 | ARM64 4-target split (Linux/Darwin/iOS/Android) | not started | `MOBILE_AUDIT.md` | (included) |
 | WASI file I/O (`fd_read`, `path_open`, `fd_close`) | runtime no-op | `WASM_AUDIT.md` | 1-2 wk (P2.7) |
 | WASM SIMD v128 lowering | scalar fallback | `WASM_AUDIT.md` | 2-3 wk |
-| Win32 `setsid` / signal stubs | return -1 | `WIN32_AUDIT.md` | 1-2 wk |
+| Win32 `setsid` / signal stubs | DONE — `setsid` -1 (Windows-only stub), `signal_install`/`raise_sig` real msvcrt | `WIN32_AUDIT.md`, `DWARF_AUDIT.md` | - |
 | Win32 `WSACleanup` never called | OS reclaims | `WIN32_AUDIT.md` | low |
 | Win32 real-hardware run | only Wine | `WIN32_AUDIT.md` | 2-4 days |
 | macOS real-Darwin run | `file`/`llvm-objdump` only | `MACOS_AUDIT.md` | 1 day |

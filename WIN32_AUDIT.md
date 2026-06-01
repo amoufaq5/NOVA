@@ -166,7 +166,16 @@ the handshake over loopback between two Wine processes.
 - `_nova_fork` on Windows does NOT implement the "child returns 0"
   Unix semantics. Programs that branch on `pid == 0` won't work.
   Use the two-program pattern (publisher + subscriber).
-- `setsid` and other signal-related APIs return -1 / no-op on Windows.
+- `setsid` returns -1 on Windows (no Windows session-leader concept; the
+  Linux side now uses real syscall #112). `signal_install` and
+  `raise_sig` are wired to msvcrt `signal()` / `raise()` on Windows
+  (real C-runtime behavior, not a stub). `getpid` uses
+  `GetCurrentProcessId`. `kill_proc(pid, 9)` maps to
+  `OpenProcess + TerminateProcess`; other signal numbers return -1.
+  Linux x64 versions of these now go through real syscalls
+  (`setsid`=112, `getpid`=39, `kill`=62, `rt_sigaction`=13). See the
+  same-commit codegen changes around `_nova_setsid` /
+  `_nova_signal_install` for the full table.
 - `_nova_close_fd` doesn't track whether the fd is a socket or handle;
   it tries `closesocket` first, then falls back to `CloseHandle`. The
   closesocket call on a non-socket harmlessly returns WSAENOTSOCK.

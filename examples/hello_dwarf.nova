@@ -1,0 +1,28 @@
+// Nova: hello_dwarf — exercises the DWARF .debug_line MVP.
+//
+// Compile to a Linux ELF binary with `make smoke-dwarf`, then inspect
+// the embedded line table with:
+//
+//     objdump --dwarf=decodedline bin/hello_dwarf
+//
+// Each PC range should map back to a (file, line) tuple in this source.
+// GDB can then set source-level breakpoints:
+//
+//     gdb bin/hello_dwarf -ex 'b main' -ex 'r' -ex 'where'
+//
+// See DWARF_AUDIT.md for the full scope (Linux ELF only in this MVP;
+// Windows PE / macOS Mach-O DWARF is deferred).
+
+fn greet(who) {
+    println(concat("Hello, ", who))
+}
+
+fn main() {
+    let a = 1
+    let b = 2
+    let sum = a + b
+    greet("DWARF")
+    println(concat("sum = ", int_to_str(sum)))
+}
+
+main()

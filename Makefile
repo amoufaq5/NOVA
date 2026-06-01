@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm smoke-wasm-file smoke-gpu bench-simd bench-int-safe
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm smoke-wasm-file smoke-gpu smoke-dwarf bench-simd bench-int-safe
 
 all: bin/nova
 
@@ -57,12 +57,15 @@ cross-macos: bin/nova
 	@echo "  ld -e _main -o nova nova.o"
 
 # Cross-compile for Windows (generates .exe; requires mingw-w64 toolchain)
+# msvcrt is now part of the link line so the new signal()/raise() shims
+# (used by _nova_signal_install / _nova_raise_sig on the Windows target)
+# resolve at link time. See WIN32_AUDIT.md.
 cross-windows: bin/nova
 	@mkdir -p bin
 	cat $(COMPILER_SRC) > /tmp/nova_combined.nova
 	bin/nova /tmp/nova_combined.nova --target=windows -o bin/nova_windows.s
 	x86_64-w64-mingw32-as -o bin/nova_windows.o bin/nova_windows.s
-	x86_64-w64-mingw32-ld -o bin/nova.exe bin/nova_windows.o -L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32
+	x86_64-w64-mingw32-ld -o bin/nova.exe bin/nova_windows.o -L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32 -lmsvcrt
 	@echo "Windows executable written to bin/nova.exe"
 	@echo "Transfer to Windows and run: nova.exe <file.nova> -o output.s"
 
@@ -74,7 +77,7 @@ smoke-windows: bin/nova examples/hello_win32.nova
 	bin/nova examples/hello_win32.nova --target=windows -o /tmp/hello_win32.s
 	x86_64-w64-mingw32-as -o /tmp/hello_win32.o /tmp/hello_win32.s
 	x86_64-w64-mingw32-ld -o bin/hello_win32.exe /tmp/hello_win32.o \
-		-L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32
+		-L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32 -lmsvcrt
 	@echo "Windows smoke test written to bin/hello_win32.exe"
 	@file bin/hello_win32.exe
 	@if [ "$$WINE_OK" = "1" ]; then \
@@ -229,6 +232,43 @@ smoke-wasm-file: bin/nova examples/file_wasm.nova
 		[ -f /tmp/out.txt ] && cat /tmp/out.txt; \
 		exit 1; \
 	fi
+
+# Build the DWARF .debug_line smoke test.
+# Compiles examples/hello_dwarf.nova to bin/hello_dwarf (Linux ELF), then
+# verifies:
+#   1. objdump --dwarf=decodedline prints a real PC->line table
+#   2. gdb resolves `b main` to the source line in hello_dwarf.nova
+#
+# This is the MVP DWARF coverage: .debug_line only (no .debug_info /
+# variable tracking / type info). Windows PE CodeView and macOS Mach-O
+# DWARF are documented as deferred — see DWARF_AUDIT.md.
+#
+# Skips cleanly if `objdump` or `gdb` aren't present.
+smoke-dwarf: bin/nova examples/hello_dwarf.nova
+	@mkdir -p bin
+	@bin/nova examples/hello_dwarf.nova -o /tmp/hello_dwarf.s
+	@$(AS) -o /tmp/hello_dwarf.o /tmp/hello_dwarf.s
+	@$(LD) -o bin/hello_dwarf /tmp/hello_dwarf.o
+	@echo "Linux ELF binary: bin/hello_dwarf"
+	@file bin/hello_dwarf
+	@echo ""
+	@if ! command -v objdump >/dev/null 2>&1; then \
+		echo "(skip: objdump not installed -- apt install binutils)"; \
+		exit 0; \
+	fi
+	@echo "--- objdump --dwarf=decodedline bin/hello_dwarf ---"
+	@objdump --dwarf=decodedline bin/hello_dwarf | sed -n '1,30p'
+	@if ! objdump --dwarf=decodedline bin/hello_dwarf | grep -q hello_dwarf.nova; then \
+		echo "FAIL: .debug_line section missing or empty"; exit 1; \
+	fi
+	@echo ""
+	@if ! command -v gdb >/dev/null 2>&1; then \
+		echo "(skip: gdb not installed)"; exit 0; \
+	fi
+	@echo "--- gdb b main / r / where ---"
+	@gdb bin/hello_dwarf -ex 'b main' -ex 'r' -ex 'where' -ex 'c' -ex 'q' -batch 2>&1 | tail -8
+	@echo ""
+	@echo "=== DWARF smoke PASSED ==="
 
 # Compile a .nova file to a binary
 %.out: %.nova bin/nova

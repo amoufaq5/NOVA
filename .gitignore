@@ -21,6 +21,11 @@ bin/hello_ios.o
 bin/hello_arm64.s
 bin/gpu_vector_add.wgsl
 bin/gpu_vector_add.cfg
+bin/hello_dwarf
+bin/file_wasm.wasm
+bin/file_wasm.wat
+bin/nova_windows.o
+bin/nova_windows.s
 
 # release-dry-run.sh output (matches GH Actions release artifact layout)
 dist/

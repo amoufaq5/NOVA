@@ -1,8 +1,15 @@
-# nova-dap (design note, not yet shipped)
+# nova-dap (design note, MVP DWARF shipping)
 
 This directory is a placeholder for a future Debug Adapter Protocol
-(DAP) implementation for Nova. No code is shipped here yet — this
-README documents what would be required and the current state.
+(DAP) implementation for Nova. No DAP server is shipped here yet —
+this README documents what would be required and the current state.
+
+**Update — DWARF `.debug_line` MVP is now shipping.** The compiler now
+emits a working `.debug_line` section on Linux ELF; see
+`/home/user/NOVA/DWARF_AUDIT.md`. GDB can already set source-level
+breakpoints on NOVA-compiled binaries today (`make smoke-dwarf`
+verifies this). The remaining DAP work (variable inspection, DAP
+adapter binary) is still tracked here.
 
 ## What DAP would need
 
@@ -36,10 +43,17 @@ A useful Nova DAP adapter would need each of the following in turn:
 
 ## Current state
 
-- `nova` codegen: emits GAS line comments only, no DWARF.
+- `nova` codegen: emits GAS `.file 1 ...` + `.loc 1 LINE 0` directives
+  on every statement boundary. GAS turns these into a real
+  `.debug_line` section on Linux ELF. `make smoke-dwarf` builds
+  `bin/hello_dwarf` and verifies `objdump --dwarf=decodedline` and
+  `gdb b main / r / where` both work end-to-end.
+- `.debug_info` (DWARF DIE entries for variables, parameters, types)
+  is NOT yet emitted. Source-level breakpoints work; variable
+  inspection on a stopped frame does not.
 - `nova-lsp`: ships in this same release with diagnostics + hover.
-- `nova-dap`: **not implemented** — print-debugging is the documented
-  path for this release.
+- `nova-dap`: **DAP server still not implemented** — print-debugging
+  + gdb breakpoints are the documented path for this release.
 
 ## Estimated effort to MVP DAP
 
@@ -49,7 +63,7 @@ for one engineer:
 
 | Sub-task                                                  | Estimate |
 | --------------------------------------------------------- | -------- |
-| DWARF `.debug_line` emission in `codegen.nova`            | 2-3 wk   |
+| DWARF `.debug_line` emission in `codegen.nova` (DONE)     | -        |
 | DWARF `.debug_info` (function / parameter / locals)       | 2 wk     |
 | Per-line breakpoint anchors + `int3` patching             | 1 wk     |
 | Variable-location tracking through regalloc               | 2 wk     |
