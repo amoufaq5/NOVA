@@ -271,7 +271,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - Trailing commas, multiline strings
 - Package manager: `nova pkg init`, `nova pkg install <name>`, `nova pkg build`
 - DWARF `.debug_line` + `.debug_info` on Linux ELF for source-level debugging (see `DWARF_AUDIT.md`)
-- **Debug Adapter Protocol** server (`tools/nova-dap`) — 18 capabilities: breakpoints, conditional breakpoints (`condition: "x > 5"`), step in/out/over, stack traces, scopes, live locals (via R4A's `.debug_info` DIE entries), expression evaluation (`evaluate` request for watch panel / REPL / hover tooltips), pause, continue, exception breakpoints, watchpoints, plus full multi-thread coordination (per-thread step/pause/continue, `threads` request, stop events with `threadId` + `allThreadsStopped`). gdb non-stop mode by default
+- **Debug Adapter Protocol** server (`tools/nova-dap`) — 19 capabilities: breakpoints, conditional breakpoints (`condition: "x > 5"`), data breakpoints / watchpoints (`dataBreakpointInfo` + `setDataBreakpoints` driving gdb hardware watchpoints; stops emit `reason: "data breakpoint"` with before/after values in the description), step in/out/over, stack traces, scopes, live locals (via R4A's `.debug_info` DIE entries), expression evaluation (`evaluate` request for watch panel / REPL / hover tooltips), pause, continue, exception breakpoints, plus full multi-thread coordination (per-thread step/pause/continue, `threads` request, stop events with `threadId` + `allThreadsStopped`). gdb non-stop mode by default
 - **Language Server Protocol** server (`tools/nova-lsp`) — completion, hover, definition (cross-file), references, workspace-wide rename (F2 across imports for top-level fn/let/const/type, with name-conflict detection), code actions, workspace symbol search (`workspace/symbol`, Cmd+T fuzzy picker)
 - `tree-sitter-nova` grammar (`tools/tree-sitter-nova/`) — full
   surface syntax (fn / let / if / while / for / match / struct / enum /
@@ -902,6 +902,29 @@ make smoke-wasi-preopens
 
 ### SIMD (SSE2)
 `simd_vec_new` `simd_vec_set` `simd_vec_get` `simd_add_f64` `simd_sub_f64` `simd_mul_f64` `simd_div_f64` `simd_dot_f64` `simd_scale_f64` `simd_sum_f64` `simd_norm_f64` `simd_fma_f64` `simd_relu_f64` `simd_max_f64`
+
+### SIMD i32x8 codegen intrinsics (R11D)
+Explicit 8-lane int32 SIMD builtins lowered directly by the compiler.
+All take raw 32-byte int32 buffers (caller-allocated with `alloc(32)`):
+`simd_add_i32x8(a, b, dst)` `simd_sub_i32x8(a, b, dst)`
+`simd_load_i32x8(src, dst)` `simd_store_i32x8(dst, src)`
+`simd_sum_abs_diff(a, b, n)` (returns int).
+
+Per-target lowering:
+
+| Target                | Lowering                                                  |
+| --------------------- | --------------------------------------------------------- |
+| Linux x86-64          | AVX2 (`vpaddd`, `vpsubd`, `vpabsd`, `vmovdqu`, ...)       |
+| ARM64 Linux           | NEON (2x 128-bit `add v0.4s` / `sub v0.4s` / `abs`)       |
+| ARM64 Windows         | NEON (same instruction set as Linux ARM64)                |
+| macOS x86-64          | scalar 8-iter loop fallback                               |
+| Windows x86-64        | scalar 8-iter loop fallback                               |
+| WebAssembly (WASI)    | not emitted -- use scalar code, see `NEXT_SESSION.md`     |
+
+The AVX2 path assumes the host CPU implements AVX2 (Intel Haswell 2013+
+or AMD Excavator 2015+). Run `make bench-simd-sad` to measure the AVX2
+SAD-on-1024 speedup; the existing `make bench-simd` covers
+`__intrinsic_dot_i32`. See `SIMD_AUDIT.md` for the design rationale.
 
 ### Tensor
 `tensor_new` `tensor_set` `tensor_get` `tensor_matmul` `tensor_add` `tensor_sub` `tensor_scale` `tensor_relu` `tensor_softmax` `tensor_transpose` `tensor_cosine_sim` `tensor_print`

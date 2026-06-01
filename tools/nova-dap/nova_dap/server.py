@@ -38,6 +38,17 @@ Supported requests
                              a decoded ``{result, type}`` pair. Used
                              for the watch window, debug-console REPL,
                              and hover tooltips.
+* ``dataBreakpointInfo``  — returns ``{dataId, description, accessTypes,
+                             canPersist: false}`` for a named variable.
+                             ``dataId`` is a base64-encoded JSON blob
+                             carrying the variable name + frame id so
+                             ``setDataBreakpoints`` can round-trip it.
+* ``setDataBreakpoints``  — installs gdb hardware watchpoints via
+                             ``-break-watch`` (write) / ``-break-watch
+                             -r`` (read) / ``-break-watch -a`` (rw)
+                             depending on the DAP ``accessType``.
+                             Watchpoint hits surface as ``stopped``
+                             events with ``reason: "data breakpoint"``.
 * ``continue`` / ``next`` / ``stepIn`` / ``stepOut`` — exec controls,
                              accepting DAP's ``threadId`` and
                              ``singleThread`` arguments. When
@@ -91,6 +102,19 @@ from nova_dap.gdb_bridge import (
     GdbResult,
     gdb_available,
     quote_path,
+)
+from nova_dap.watchpoints import (
+    WatchpointManager,
+    WatchpointRecord,
+    access_type_flag,
+    build_watch_command,
+    decode_data_id,
+    default_access_types,
+    describe_watch_change,
+    encode_data_id,
+    extract_watch_values,
+    is_watchpoint_stop,
+    parse_watchpoint_id,
 )
 
 
@@ -196,6 +220,11 @@ class Session:
     # (and the frame id then maps back to a (threadId, frame_level)).
     next_var_ref: int = 1000
     frame_refs: Dict[int, int] = field(default_factory=dict)  # vRef -> frameId
+    # Data breakpoint (watchpoint) registry. See
+    # ``nova_dap.watchpoints`` for the wire encoding + gdb integration.
+    # The manager is reset on every ``launch`` since gdb forgets all
+    # watchpoints when the inferior restarts.
+    watchpoints: WatchpointManager = field(default_factory=WatchpointManager)
 
     def alloc_var_ref(self, frame_id: int) -> int:
         ref = self.next_var_ref
@@ -355,6 +384,7 @@ def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
         "watchpoint-trigger": "data breakpoint",
         "read-watchpoint-trigger": "data breakpoint",
         "access-watchpoint-trigger": "data breakpoint",
+        "watchpoint-scope": "data breakpoint",
     }
     dap_reason = dap_reason_map.get(reason, reason or "pause")
     session.last_stop_reason = dap_reason
@@ -398,8 +428,34 @@ def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
         "preserveFocusHint": False,
     }
     bkptno = rec.fields.get("bkptno")
+    hit_id: Optional[int] = None
     if isinstance(bkptno, str) and bkptno.isdigit():
-        body["hitBreakpointIds"] = [int(bkptno)]
+        hit_id = int(bkptno)
+    elif isinstance(bkptno, int):
+        hit_id = bkptno
+    # Watchpoint stops have a different shape: gdb ships ``wpt={number,
+    # exp}`` (or ``hw-rwpt`` / ``hw-awpt``) directly in the *stopped
+    # record instead of populating ``bkptno``. Extract the watchpoint
+    # number from those fields so the DAP client gets the right
+    # ``hitBreakpointIds``.
+    if hit_id is None and is_watchpoint_stop(reason):
+        watch_id = parse_watchpoint_id(rec.fields)
+        if watch_id is not None:
+            hit_id = watch_id
+    if hit_id is not None:
+        body["hitBreakpointIds"] = [hit_id]
+    # For watchpoint stops, gdb ships the watched expression's
+    # before/after values in a ``value={old,new}`` tuple. We surface
+    # that as a human-readable ``description`` so the DAP client can
+    # render "Variable 'counter' changed (write): 5 -> 6" in the
+    # call-stack panel.
+    if is_watchpoint_stop(reason) and hit_id is not None:
+        record = session.watchpoints.lookup_by_gdb_id(hit_id)
+        if record is not None:
+            old_val, new_val = extract_watch_values(rec.fields)
+            body["description"] = describe_watch_change(
+                record.name, record.access_type, old_val, new_val
+            )
     send_event(session, "stopped", body)
 
 
@@ -519,6 +575,14 @@ def _capabilities() -> Dict[str, Any]:
         # request may carry ``threadId`` + ``singleThread`` so only
         # the target thread is resumed/stopped.
         "supportsSingleThreadExecutionRequests": True,
+        # Data breakpoints (watchpoints): ``dataBreakpointInfo`` +
+        # ``setDataBreakpoints``. We delegate to gdb's hardware
+        # watchpoint support (``-break-watch`` / ``-break-watch -r``
+        # / ``-break-watch -a``) so stops fire whenever a watched
+        # variable's value changes. See
+        # ``handle_data_breakpoint_info`` and
+        # ``handle_set_data_breakpoints``.
+        "supportsDataBreakpoints": True,
     }
 
 
@@ -563,6 +627,10 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     bridge.start()
     session.bridge = bridge
     session.program = program
+    # Fresh inferior -> no live watchpoints. Drop whatever a previous
+    # launch may have left in the registry so dataIds from the old
+    # session can't collide with the new gdb-assigned numbers.
+    session.watchpoints.clear_all()
 
     # Try to negotiate non-stop + mi-async so individual threads can
     # be paused / continued. If gdb rejects either (e.g. it's running
@@ -977,6 +1045,195 @@ def handle_evaluate(session: Session, req: Dict[str, Any]) -> None:
     send_response(session, req, body=body)
 
 
+def handle_data_breakpoint_info(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``dataBreakpointInfo`` request.
+
+    The client asks: "could I set a data breakpoint on this variable?"
+    For a named variable in a scope (``variablesReference`` >= 1, plus
+    a ``name`` string) we return a freshly-minted ``dataId`` the
+    client will pass back in ``setDataBreakpoints``, a human-readable
+    description, the list of access types we support, and
+    ``canPersist: false`` (watchpoints don't survive a relaunch).
+
+    The DAP spec also permits the client to query "is the expression
+    on the right-hand side of an assignment data-breakpointable?" via
+    ``{variablesReference: 0, name: <expression>}``. We support that
+    too — the expression is opaque to us; we just round-trip it as
+    the ``dataId``'s ``name`` field. gdb will then try to set a
+    watchpoint on it; if the expression isn't a watchable lvalue gdb
+    returns an error which we surface as ``verified: false`` in
+    ``setDataBreakpoints``."""
+    args = req.get("arguments", {}) or {}
+    name = args.get("name")
+    if not isinstance(name, str) or not name:
+        send_response(
+            session,
+            req,
+            success=False,
+            message="dataBreakpointInfo requires non-empty 'name' argument",
+        )
+        return
+    # ``variablesReference`` is optional — 0 means "evaluate the name
+    # as a free-form expression in the current scope".
+    var_ref_raw = args.get("variablesReference")
+    var_ref: Optional[int] = None
+    if var_ref_raw is not None:
+        try:
+            var_ref = int(var_ref_raw)
+        except (TypeError, ValueError):
+            var_ref = None
+    # If the client gave us a varRef, we can recover the originating
+    # frame id. That frame id ends up in the encoded dataId so a later
+    # ``setDataBreakpoints`` request knows which scope to install the
+    # watchpoint in. Without a frame id we still produce a dataId — it
+    # just falls back to the session's current frame at watch time.
+    frame_id: Optional[int] = None
+    if var_ref is not None and var_ref > 0:
+        frame_id = session.frame_refs.get(var_ref)
+    data_id = encode_data_id(
+        name, frame_id=frame_id, variables_reference=var_ref
+    )
+    description = name
+    # If we have a bridge + frame_id, append the current value to the
+    # description so the IDE shows e.g. "counter = 0" in its "add data
+    # breakpoint" dialog. Best-effort — silently fall back to the bare
+    # name if evaluation fails.
+    bridge = session.bridge
+    if bridge is not None and frame_id is not None:
+        try:
+            thread_id, frame_level = session.frame_lookup_by_id(frame_id)
+            ev = evaluate_via_bridge(
+                bridge,
+                name,
+                thread_id=thread_id if session.non_stop else None,
+                frame_level=frame_level if session.non_stop else None,
+                timeout=2.0,
+            )
+            if ev.ok and ev.decoded is not None:
+                description = f"{name} = {ev.decoded.display}"
+        except (TimeoutError, RuntimeError):
+            pass
+    body: Dict[str, Any] = {
+        "dataId": data_id,
+        "description": description,
+        "accessTypes": default_access_types(),
+        "canPersist": False,
+    }
+    send_response(session, req, body=body)
+
+
+def handle_set_data_breakpoints(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``setDataBreakpoints`` request.
+
+    Replaces the active set of watchpoints with the supplied list.
+    Each entry has ``{dataId, accessType?}``; we decode the dataId,
+    select the right frame (so the watch lands in the right scope),
+    and issue a gdb ``-break-watch [-r|-a] <expr>``.
+
+    Behaviour notes:
+
+    * Like ``setBreakpoints``, we tear down the existing watchpoint
+      set first so re-sends don't double-install. The teardown uses
+      ``-break-delete <id>`` per watchpoint so source-line breakpoints
+      survive (``-break-delete`` without args nukes everything).
+    * Each result entry mirrors the request shape: ``{verified, id?,
+      message?}``. ``verified=true`` iff gdb confirmed the install.
+    * Watchpoints that fail to install (e.g. variable out of scope,
+      no hardware watchpoint slots left) come back ``verified=false``
+      with gdb's error message in ``message`` so the IDE can render
+      a useful diagnostic."""
+    args = req.get("arguments", {}) or {}
+    bridge = session.bridge
+    if bridge is None:
+        send_response(
+            session,
+            req,
+            success=False,
+            message="not launched",
+        )
+        return
+    # Tear down any previously-installed watchpoints. We use the
+    # per-id delete so source-line breakpoints set via
+    # ``setBreakpoints`` aren't affected.
+    for old_id in session.watchpoints.clear_all():
+        try:
+            bridge.command(f"-break-delete {old_id}", timeout=2.0)
+        except (TimeoutError, RuntimeError):
+            pass
+    raw_breakpoints = args.get("breakpoints") or []
+    if not isinstance(raw_breakpoints, list):
+        raw_breakpoints = []
+    out: List[Dict[str, Any]] = []
+    for bp in raw_breakpoints:
+        if not isinstance(bp, dict):
+            out.append({"verified": False, "message": "malformed breakpoint entry"})
+            continue
+        data_id = bp.get("dataId")
+        if not isinstance(data_id, str) or not data_id:
+            out.append({"verified": False, "message": "missing dataId"})
+            continue
+        decoded = decode_data_id(data_id)
+        if decoded is None:
+            out.append({"verified": False, "message": "unrecognised dataId"})
+            continue
+        name = decoded["n"]
+        access_type = bp.get("accessType") or "write"
+        if access_type_flag(access_type) is None:
+            out.append(
+                {"verified": False, "message": f"unsupported accessType: {access_type!r}"}
+            )
+            continue
+        # Route to the right scope so the watch lives in the right
+        # frame's variable. In non-stop mode we ``-thread-select``;
+        # in all-stop mode the current thread is implicit.
+        frame_id = decoded.get("f")
+        if isinstance(frame_id, int):
+            thread_id, frame_level = session.frame_lookup_by_id(frame_id)
+            if session.non_stop:
+                try:
+                    bridge.command(f"-thread-select {thread_id}", timeout=2.0)
+                except (TimeoutError, RuntimeError):
+                    pass
+            try:
+                bridge.command(f"-stack-select-frame {frame_level}", timeout=2.0)
+            except (TimeoutError, RuntimeError):
+                pass
+        cmd = build_watch_command(name, access_type)
+        if cmd is None:
+            out.append({"verified": False, "message": "could not compose watch"})
+            continue
+        try:
+            result = bridge.command(cmd, timeout=5.0)
+        except TimeoutError as exc:
+            out.append({"verified": False, "message": f"gdb timed out: {exc}"})
+            continue
+        except RuntimeError as exc:
+            out.append({"verified": False, "message": f"gdb error: {exc}"})
+            continue
+        if not result.ok:
+            out.append(
+                {
+                    "verified": False,
+                    "message": result.error_message or "could not set watchpoint",
+                }
+            )
+            continue
+        gdb_id = parse_watchpoint_id(result.fields)
+        if gdb_id is None:
+            out.append({"verified": False, "message": "gdb returned no watchpoint id"})
+            continue
+        record = WatchpointRecord(
+            gdb_id=gdb_id,
+            data_id=data_id,
+            name=name,
+            access_type=access_type,
+            description=f"watch {name} ({access_type})",
+        )
+        session.watchpoints.register(record)
+        out.append({"verified": True, "id": gdb_id})
+    send_response(session, req, body={"breakpoints": out})
+
+
 def _thread_args(session: Session, req_args: Dict[str, Any]) -> Tuple[Optional[int], bool]:
     """Extract ``(threadId, singleThread)`` from a DAP request body.
 
@@ -1125,6 +1382,8 @@ HANDLERS = {
     "scopes": handle_scopes,
     "variables": handle_variables,
     "evaluate": handle_evaluate,
+    "dataBreakpointInfo": handle_data_breakpoint_info,
+    "setDataBreakpoints": handle_set_data_breakpoints,
     "continue": handle_continue,
     "next": handle_next,
     "stepIn": handle_step_in,

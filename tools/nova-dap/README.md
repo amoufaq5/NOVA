@@ -5,11 +5,13 @@ language. Translates DAP JSON messages (over stdio, Content-Length
 framed) into `gdb --interpreter=mi3` machine-interface commands and
 turns gdb's async records back into DAP events.
 
-This is the **MVP** of `nova-dap`: source-level breakpoints, step
-in / over / out, continue, stack traces, and a single Locals scope per
-frame. The adapter itself does **no DWARF parsing** — gdb does. The
-NOVA compiler already emits a working `.debug_line` section on Linux
-ELF (see `DWARF_AUDIT.md` in the repo root and `make smoke-dwarf`).
+This is the **MVP** of `nova-dap`: source-level breakpoints (incl.
+conditional + data breakpoints / watchpoints), step in / over / out,
+continue, stack traces, evaluate (watch / REPL / hover), and a single
+Locals scope per frame. The adapter itself does **no DWARF parsing**
+— gdb does. The NOVA compiler already emits a working `.debug_line`
+section on Linux ELF (see `DWARF_AUDIT.md` in the repo root and
+`make smoke-dwarf`).
 
 ## What works
 
@@ -25,6 +27,8 @@ ELF (see `DWARF_AUDIT.md` in the repo root and `make smoke-dwarf`).
 | `scopes`                  | One `Locals` scope per frame.                     |
 | `variables`               | `-thread-select` + `-stack-select-frame` + `-stack-list-variables --all-values` (so per-thread frame chains are isolated). |
 | `evaluate`                | `-data-evaluate-expression --thread <id> --frame <level> "<expr>"`; result string decoded into `{result, type}` where type is `int` / `str` / `char` / `bool` / `ptr` / `raw`. Used for watch panel, REPL, and hover tooltips. |
+| `dataBreakpointInfo`      | Returns `{dataId, description, accessTypes: ["write", "readWrite"], canPersist: false}` for a named variable. `dataId` is a base64-encoded JSON envelope `{n, f?, v?}` carrying the variable name + frame id so `setDataBreakpoints` can round-trip it without server-side state. |
+| `setDataBreakpoints`      | Tears down prior watchpoints via `-break-delete <id>` (per id, so source breakpoints are preserved) and installs gdb hardware watchpoints via `-break-watch <expr>` (write), `-break-watch -r <expr>` (read), or `-break-watch -a <expr>` (rw). Watchpoint hits surface as `stopped` events with `reason: "data breakpoint"` and a description like `Variable 'counter' changed (write): 5 -> 6`. |
 | `continue` / `next` / `stepIn` / `stepOut` | `-exec-{continue,next,step,finish}` with `--thread <id>` when DAP carries `singleThread:true`, otherwise `--all`. |
 | `pause`                   | `-exec-interrupt --thread <id>` (or `--all`).     |
 | `disconnect` / `terminate`| `-gdb-exit` + reap child.                         |
@@ -49,6 +53,16 @@ Capabilities advertised:
   honours the DAP `threadId` + `singleThread` arguments. When
   `singleThread:true` the request resumes / stops only the target
   thread; other threads remain in their current state.
+* `supportsDataBreakpoints: true`
+  — `dataBreakpointInfo` + `setDataBreakpoints` are wired up to
+  gdb's `-break-watch` (write), `-break-watch -r` (read), and
+  `-break-watch -a` (read+write) MI commands. The server
+  advertises `write` + `readWrite` as the supported access types
+  (pure read watchpoints depend on x86 debug-register semantics
+  that aren't universal). A watchpoint hit emits a `stopped` event
+  with `reason: "data breakpoint"`, `hitBreakpointIds: [<id>]`,
+  and a `description` carrying the before / after values
+  (`Variable 'counter' changed (write): 5 -> 6`).
 
 Events emitted:
 
@@ -122,13 +136,29 @@ tools/nova-dap/
     gdb_bridge.py                        GdbBridge subprocess wrapper + MI parser
     evaluator.py                         `-data-evaluate-expression` wrapper +
                                           gdb-output decoder (int/str/char/ptr).
+    watchpoints.py                       Data breakpoints (watchpoints): dataId
+                                          encoding, access-type mapping, gdb
+                                          `-break-watch` command builder,
+                                          `WatchpointManager` + stop classifier.
   tests/
     dap_smoke.py                         end-to-end single-thread smoke test
     dap_multi_thread.py                  end-to-end multi-thread coordination test
     test_evaluate.py                     evaluate request: decoder + REPL/watch/hover
     test_conditional_breakpoint.py       conditional `setBreakpoints` with `condition`
+    test_data_breakpoints.py             data breakpoints / watchpoints (dataBreakpointInfo + setDataBreakpoints)
     fixtures/multi_thread.c              pthread fixture (built on demand by the test)
 ```
+
+The `nova_dap.watchpoints` module is a small (~250 line) helper that
+covers four concerns:
+
+| Helper                       | What it does                                              |
+| ---------------------------- | --------------------------------------------------------- |
+| `encode_data_id` / `decode_data_id` | base64url-encoded JSON envelope `{n, f?, v?}` so a DAP `dataId` round-trips name + frame id + varRef without server-side state. |
+| `access_type_flag`           | DAP `accessType` (`"write"` / `"read"` / `"readWrite"`) -> gdb `-break-watch` flag (`""` / `"-r"` / `"-a"`). |
+| `build_watch_command`        | Composes the full MI command string for the watch insert. |
+| `WatchpointManager`          | Thread-safe registry of active watchpoints; the `Session` holds one and resets it on each `launch`. |
+| `is_watchpoint_stop`, `extract_watch_values`, `describe_watch_change`, `parse_watchpoint_id` | gdb `*stopped` record classification + value extraction + DAP description builder. |
 
 The implementation is pure stdlib — no third-party Python deps.
 
@@ -215,7 +245,18 @@ python tools/nova-dap/tests/test_conditional_breakpoint.py
 #   end-to-end:         ok (39 extra checks)
 ```
 
-Both tests have a pure-Python phase that runs anywhere (no gdb
+For data breakpoints (watchpoints):
+
+```sh
+python tools/nova-dap/tests/test_data_breakpoints.py
+# test_data_breakpoints: OK
+#   unit assertions:    98
+#   total assertions:   131
+#   end-to-end:         ok (3 watchpoint stops) (33 extra checks)
+#   NOVA integration:   ok
+```
+
+All four tests have a pure-Python phase that runs anywhere (no gdb
 required) plus an end-to-end phase that SKIPs cleanly when `gdb` /
 `gcc` are missing.
 
