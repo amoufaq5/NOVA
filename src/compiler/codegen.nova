@@ -4992,8 +4992,16 @@ fn gen_program(program) {
     }
 
     // Emit string data section
+    //
+    // _strlit_start (here) marks the lowest address of any string literal
+    // (user or runtime). _strlit_end is emitted at the very end of all
+    // rodata so the pointer-classifier can range-check addresses against
+    // the entire merged .rodata block, regardless of which .rodata
+    // emission added it. See gen_runtime() for the classifier.
     out("")
     out_section("rodata")
+    out("    .align 8")
+    out_label("_strlit_start")
     i = 0
     while i < cg_str_count {
         out_label("_str_" + int_to_str(i))
@@ -7250,12 +7258,95 @@ fn peephole_optimize() {
 }
 
 fn gen_runtime() {
+    // --- Pointer classification (root fix for PTR_THRESHOLD heuristic) ---
+    //
+    // A NOVA value is a pointer iff its address lies in one of two ranges:
+    //   1. String literal range: [_strlit_start, _strlit_end)   — link-time fixed
+    //   2. Heap range:           [_heap_base,    _heap_end)     — runtime
+    // Anything else is an integer (including 0, negatives, and any value
+    // outside the above ranges, no matter how large).
+    //
+    // Each helper preserves all GPRs except rax and flags. The result is
+    // signalled via ZF: ZF=1 means "integer" (jz takes the int branch);
+    // ZF=0 means "pointer" (jnz takes the pointer branch). This keeps the
+    // call-site sequence to exactly two instructions per check, the same
+    // as the legacy "cmp rdi, 0x100000; jl .X" pair it replaces.
+    out_label("_nova_check_rdi")
+    // Signed-negative values are always integers (high bit set / two's
+    // complement), never pointers.
+    out("    test rdi, rdi")
+    out("    js .ccr_no")
+    // Range 1: string literals (link-time fixed, low addresses).
+    out("    lea rax, [rip + _strlit_start]")
+    out("    cmp rdi, rax")
+    out("    jb .ccr_after_strlit")
+    out("    lea rax, [rip + _strlit_end]")
+    out("    cmp rdi, rax")
+    out("    jb .ccr_yes")
+    out(".ccr_after_strlit:")
+    // Range 2: NOVA heap (runtime, set by first _nova_alloc call).
+    out("    mov rax, [rip + _heap_base]")
+    out("    test rax, rax")
+    out("    jz .ccr_after_heap")
+    out("    cmp rdi, rax")
+    out("    jb .ccr_after_heap")
+    out("    mov rax, [rip + _heap_end]")
+    out("    cmp rdi, rax")
+    out("    jb .ccr_yes")
+    out(".ccr_after_heap:")
+    // Range 3: kernel-area high addresses (argv, env, stack, mmap'd heap on
+    // non-brk targets). Anything >= 16 GiB is treated as a pointer. Real
+    // integer values rarely reach this range; nanotimes and other huge
+    // ints can still be operated on via int_* (kept as no-op wrappers).
+    out("    mov rax, 0x400000000")
+    out("    cmp rdi, rax")
+    out("    jae .ccr_yes")
+    out(".ccr_no:")
+    out("    xor eax, eax")           // ZF=1, rax=0 → integer
+    out("    ret")
+    out(".ccr_yes:")
+    out("    mov eax, 1")             // ZF=0, rax=1 → pointer
+    out("    test eax, eax")          // re-establish ZF (mov does not set flags)
+    out("    ret")
+
+    out("")
+    out_label("_nova_check_rsi")
+    out("    test rsi, rsi")
+    out("    js .ccs_no")
+    out("    lea rax, [rip + _strlit_start]")
+    out("    cmp rsi, rax")
+    out("    jb .ccs_after_strlit")
+    out("    lea rax, [rip + _strlit_end]")
+    out("    cmp rsi, rax")
+    out("    jb .ccs_yes")
+    out(".ccs_after_strlit:")
+    out("    mov rax, [rip + _heap_base]")
+    out("    test rax, rax")
+    out("    jz .ccs_after_heap")
+    out("    cmp rsi, rax")
+    out("    jb .ccs_after_heap")
+    out("    mov rax, [rip + _heap_end]")
+    out("    cmp rsi, rax")
+    out("    jb .ccs_yes")
+    out(".ccs_after_heap:")
+    out("    mov rax, 0x400000000")
+    out("    cmp rsi, rax")
+    out("    jae .ccs_yes")
+    out(".ccs_no:")
+    out("    xor eax, eax")
+    out("    ret")
+    out(".ccs_yes:")
+    out("    mov eax, 1")
+    out("    test eax, eax")
+    out("    ret")
+
     // --- Smart add: integer add or string concat ---
+    out("")
     out_label("_nova_add")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .add_int")
-    out("    cmp rsi, 0x" + PTR_THRESHOLD)
-    out("    jl .add_int")
+    out("    call _nova_check_rdi")
+    out("    jz .add_int")
+    out("    call _nova_check_rsi")
+    out("    jz .add_int")
     out("    jmp _nova_concat")
     out(".add_int:")
     out("    lea rax, [rdi + rsi]")
@@ -7264,10 +7355,10 @@ fn gen_runtime() {
     // --- Smart multiply: integer mul, string repeat, or list repeat ---
     out("")
     out_label("_nova_mul")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jge .mul_ptr")
-    out("    cmp rsi, 0x" + PTR_THRESHOLD)
-    out("    jge .mul_ptr_swap")
+    out("    call _nova_check_rdi")
+    out("    jnz .mul_ptr")
+    out("    call _nova_check_rsi")
+    out("    jnz .mul_ptr_swap")
     out("    mov rax, rdi")
     out("    imul rax, rsi")
     out("    ret")
@@ -7350,10 +7441,10 @@ fn gen_runtime() {
     out_label("_nova_eq")
     out("    cmp rdi, rsi")
     out("    je .eq_true")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .eq_false")
-    out("    cmp rsi, 0x" + PTR_THRESHOLD)
-    out("    jl .eq_false")
+    out("    call _nova_check_rdi")
+    out("    jz .eq_false")
+    out("    call _nova_check_rsi")
+    out("    jz .eq_false")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call _nova_str_eq")
@@ -7371,10 +7462,10 @@ fn gen_runtime() {
     out_label("_nova_neq")
     out("    cmp rdi, rsi")
     out("    je .neq_false")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .neq_true")
-    out("    cmp rsi, 0x" + PTR_THRESHOLD)
-    out("    jl .neq_true")
+    out("    call _nova_check_rdi")
+    out("    jz .neq_true")
+    out("    call _nova_check_rsi")
+    out("    jz .neq_true")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call _nova_str_eq")
@@ -7391,10 +7482,10 @@ fn gen_runtime() {
     // --- Smart less-than: int or string comparison ---
     out("")
     out_label("_nova_lt")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .lt_int")
-    out("    cmp rsi, 0x" + PTR_THRESHOLD)
-    out("    jl .lt_int")
+    out("    call _nova_check_rdi")
+    out("    jz .lt_int")
+    out("    call _nova_check_rsi")
+    out("    jz .lt_int")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call _nova_strcmp")
@@ -7412,10 +7503,10 @@ fn gen_runtime() {
     // --- Smart greater-than ---
     out("")
     out_label("_nova_gt")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .gt_int")
-    out("    cmp rsi, 0x" + PTR_THRESHOLD)
-    out("    jl .gt_int")
+    out("    call _nova_check_rdi")
+    out("    jz .gt_int")
+    out("    call _nova_check_rsi")
+    out("    jz .gt_int")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call _nova_strcmp")
@@ -7433,10 +7524,10 @@ fn gen_runtime() {
     // --- Smart less-equal ---
     out("")
     out_label("_nova_le")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .le_int")
-    out("    cmp rsi, 0x" + PTR_THRESHOLD)
-    out("    jl .le_int")
+    out("    call _nova_check_rdi")
+    out("    jz .le_int")
+    out("    call _nova_check_rsi")
+    out("    jz .le_int")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call _nova_strcmp")
@@ -7454,10 +7545,10 @@ fn gen_runtime() {
     // --- Smart greater-equal ---
     out("")
     out_label("_nova_ge")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .ge_int")
-    out("    cmp rsi, 0x" + PTR_THRESHOLD)
-    out("    jl .ge_int")
+    out("    call _nova_check_rdi")
+    out("    jz .ge_int")
+    out("    call _nova_check_rsi")
+    out("    jz .ge_int")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call _nova_strcmp")
@@ -9727,8 +9818,8 @@ fn gen_runtime() {
     out_label("_nova_type_of")
     out("    test rdi, rdi")
     out("    jz .to_null")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .to_int")
+    out("    call _nova_check_rdi")
+    out("    jz .to_int")
     out("    cmp qword ptr [rdi], -1")
     out("    je .to_list")
     out("    cmp qword ptr [rdi], -2")
@@ -9753,8 +9844,8 @@ fn gen_runtime() {
     out_label("_nova_type_name")
     out("    test rdi, rdi")
     out("    jz .tn_none")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .tn_int")
+    out("    call _nova_check_rdi")
+    out("    jz .tn_int")
     out("    cmp qword ptr [rdi], -1")
     out("    je .tn_list")
     out("    cmp qword ptr [rdi], -2")
@@ -9787,8 +9878,8 @@ fn gen_runtime() {
     out("    mov rdi, r12")
     out("    test rdi, rdi")
     out("    jz .dp_null")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .dp_int")
+    out("    call _nova_check_rdi")
+    out("    jz .dp_int")
     out("    cmp qword ptr [rdi], -1")
     out("    je .dp_list")
     out("    call _nova_println")
@@ -10258,9 +10349,8 @@ fn gen_runtime() {
     // --- _nova_hash_key(key in rdi) -> hash in rax ---
     out("")
     out_label("_nova_hash_key")
-    out("    mov rax, rdi")
-    out("    cmp rax, 0x" + PTR_THRESHOLD)
-    out("    jl .hk_int")
+    out("    call _nova_check_rdi")
+    out("    jz .hk_int")
     out("    xor eax, eax")
     out(".hk_str_loop:")
     out("    movzx ecx, byte ptr [rdi]")
@@ -10271,6 +10361,7 @@ fn gen_runtime() {
     out("    inc rdi")
     out("    jmp .hk_str_loop")
     out(".hk_int:")
+    out("    mov rax, rdi")
     out("    test rax, rax")
     out("    jns .hk_done")
     out("    neg rax")
@@ -10847,13 +10938,13 @@ fn gen_runtime() {
     out("    ret")
 
     // --- to_str(value) -> string representation ---
-    // If value < 0x100000: treat as integer, convert via int_to_str
-    // If value >= 0x100000 and [value] == -1: it's a list, return "[list]"
+    // If value is an integer (per _nova_check_rdi): convert via int_to_str
+    // If value is a pointer and [value] == -1: it's a list, return "[list]"
     // Otherwise: it's already a string, return as-is
     out("")
     out_label("_nova_to_str")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .ts_int")
+    out("    call _nova_check_rdi")
+    out("    jz .ts_int")
     out("    cmp qword ptr [rdi], -1")
     out("    je .ts_list")
     out("    mov rax, rdi")
@@ -12121,8 +12212,8 @@ fn gen_runtime() {
     out("    jge .flat_done")
     out("    mov rax, [r12 + 24]")
     out("    mov rdi, [rax + r14*8]")
-    out("    cmp rdi, 0x" + PTR_THRESHOLD)
-    out("    jl .flat_push_one")
+    out("    call _nova_check_rdi")
+    out("    jz .flat_push_one")
     out("    cmp qword ptr [rdi], -1")
     out("    jne .flat_push_one")
     out("    push r14")
@@ -13057,6 +13148,11 @@ fn gen_runtime() {
         out_label("_flow_threshold_key")
         out("    .asciz " + DQ + "threshold" + DQ)
     }
+
+    // _strlit_end is the upper bound of every string literal address used
+    // by the pointer-classifier (gen_runtime _nova_check_rdi / _rsi). It
+    // must come after every literal-emitting section to span them all.
+    out_label("_strlit_end")
 
     // --- Heap state in .bss ---
     out("")

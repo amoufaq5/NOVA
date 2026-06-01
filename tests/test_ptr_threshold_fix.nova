@@ -1,0 +1,96 @@
+// Regression test for the PTR_THRESHOLD root fix.
+//
+// Pre-fix: integers >= 0x100000 (1 MiB) were misclassified as pointers by
+// the smart-op runtime (`_nova_add`, `_nova_mul`, etc.), causing crashes
+// and silent data corruption in pacer nanotimes, kg_sync sequence
+// numbers, bignum limbs, JPEG DCT coefficients, etc. The recurring
+// workaround was to call `int_add` / `int_mul` / ... which bypassed the
+// heuristic.
+//
+// Post-fix: `_nova_check_rdi` / `_nova_check_rsi` use a real range check
+// (string-literal range + heap range + a 16 GiB "kernel-area" upper
+// threshold for argv/env/stack) instead of a magnitude heuristic. The
+// `int_*` builtins are kept as no-op scalar wrappers for back-compat,
+// but unmarked arithmetic on integers up to ~16 GiB now works without
+// them.
+//
+// This test exercises the cases that historically failed.
+
+import "std/io"
+
+let test_total = 0
+let test_pass  = 0
+
+fn check(label, ok) {
+    test_total = test_total + 1
+    if ok == 1 {
+        test_pass = test_pass + 1
+    } else {
+        print("FAIL: ")
+        println(label)
+    }
+}
+
+fn main() {
+    // 1. Addition: both operands above the OLD 1 MiB threshold.
+    check("0x500000 + 0x300000", 0x500000 + 0x300000 == 0x800000)
+    check("0x200000 + 0x400000", 0x200000 + 0x400000 == 0x600000)
+
+    // 2. Multiplication: result above the OLD threshold (one operand above).
+    check("0x500000 * 8", 0x500000 * 8 == 0x2800000)
+    check("0x100000 * 7", 0x100000 * 7 == 7340032)
+
+    // 3. The original repro from NOVA_BUG_THRESHOLD.md (2M * 2M).
+    check("2097152 * 2097153", 2097152 * 2097153 == 4398048608256)
+
+    // 4. 31-bit bitmask AND (the Klatt LCG case in audio_klatt.nova).
+    check("12345 & 0x7FFFFFFF", (12345 & 0x7FFFFFFF) == 12345)
+    check("0xABCDEF & 0x7FFFFFFF", (0xABCDEF & 0x7FFFFFFF) == 0xABCDEF)
+
+    // 5. 32-bit shift (the bignum-limb wrap case).
+    check("1 << 32", (1 << 32) == 4294967296)
+    check("(0xFFFFFFFF) >> 16", (0xFFFFFFFF >> 16) == 0xFFFF)
+
+    // 6. Comparison: both operands above OLD threshold.
+    let g1 = 0
+    if 5000000 > 3000000 { g1 = 1 }
+    check("5_000_000 > 3_000_000", g1)
+    let g2 = 0
+    if 3000000 < 5000000 { g2 = 1 }
+    check("3_000_000 < 5_000_000", g2)
+    let g3 = 0
+    if 5000000 >= 5000000 { g3 = 1 }
+    check("5_000_000 >= 5_000_000", g3)
+    let g4 = 0
+    if 5000000 <= 5000000 { g4 = 1 }
+    check("5_000_000 <= 5_000_000", g4)
+
+    // 7. Equality: both operands above OLD threshold.
+    check("12345678 == 12345678", 12345678 == 12345678)
+    check("12345678 != 12345679", 12345678 != 12345679)
+
+    // 8. Negative integers must remain integers (high bit set, would
+    //    otherwise compare as a huge unsigned address).
+    let neg = 0 - 999999999
+    check("neg == neg",      neg == neg)
+    check("neg + 1 < 0",     (neg + 1) < 0)
+    check("neg * (0-1)",     (neg * (0 - 1)) == 999999999)
+
+    // 9. Strings: smart-op back-compat must still work.
+    check("\"a\" + \"b\"", ("a" + "b") == "ab")
+    check("\"x\" * 3",     ("x" * 3) == "xxx")
+    check("\"hi\" == \"hi\"", "hi" == "hi")
+
+    // 10. Lists: smart-op back-compat must still work.
+    let v = [0] * 5
+    check("[0]*5 len", len(v) == 5)
+    check("[0]*5[0]",  v[0] == 0)
+
+    print("PASS ")
+    print_int(test_pass)
+    print(" / ")
+    print_int(test_total)
+    println("")
+    if test_pass != test_total { exit(1) }
+}
+main()

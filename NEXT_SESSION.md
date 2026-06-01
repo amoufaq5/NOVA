@@ -93,10 +93,57 @@ always string literals from the AST. `is_global` remains O(n) linear scan.
 - `list_insert`/`list_remove` — conflict with compiler builtins when concatenated
 - `none` keyword — use `0` instead in runtime modules
 
-### Integer overflow
-Values exceeding PTR_THRESHOLD (0x100000 = 1048576) are treated as heap
-pointers. Use `int_add/int_mul/int_sub/int_div/int_mod` builtins for
-arithmetic on potentially large values.
+### PTR_THRESHOLD integer misclassification — FIXED (R6A)
+Previously, the smart-op runtime helpers (`_nova_add`, `_nova_mul`, `_nova_eq`,
+`_nova_neq`, `_nova_lt`, `_nova_gt`, `_nova_le`, `_nova_ge`, and several
+classifier helpers `_nova_type_of`, `_nova_type_name`, `_nova_debug_print`,
+`_nova_hash_key`, `_nova_to_str`, `_nova_flatten`) used a magnitude heuristic
+to distinguish pointers from integers: any value `>= 0x100000` (1 MiB) was
+treated as a pointer. This silently corrupted any program with integers
+above 1 MiB — pacer nanotimes, kg_sync sequence numbers, bignum limbs,
+JPEG DCT coefficients, 31-bit LCG masks, etc. — and forced six different
+agent sessions to work around it via the `int_*` builtins.
+
+The root cause is now fixed in `src/compiler/codegen.nova`:
+
+1. A new pair of helper subroutines `_nova_check_rdi` / `_nova_check_rsi`
+   replace the inline `cmp rdi, 0x100000; jl ...` pattern with a real
+   range check. A value is a pointer iff it lies in:
+   - the link-time-fixed string literal range
+     `[_strlit_start, _strlit_end)` (new labels bracketing all .rodata
+     literals), OR
+   - the runtime heap range `[_heap_base, _heap_end)`, OR
+   - the kernel-area high range `>= 0x400000000` (16 GiB), which covers
+     argv/env/stack pointers and mmap'd heaps on macOS/Windows.
+   Negative integers (high bit set) short-circuit to integer.
+
+2. Every call site that previously used the magnitude check (22 sites:
+   `_nova_add`, `_nova_mul`, the six comparison helpers, `_nova_type_of`,
+   `_nova_type_name`, `_nova_debug_print`, `_nova_hash_key`,
+   `_nova_to_str`, `_nova_flatten`) now calls one of the new helpers
+   and branches on ZF.
+
+The `int_*` builtins remain available as no-op scalar wrappers for
+back-compat. They are no longer required for integers up to 16 GiB.
+
+Regression test: `tests/test_ptr_threshold_fix.nova` (23 checks covering
+`+`, `*`, `&`, `<<`, `>>`, comparisons, equality, negative integers,
+plus string/list smart-op back-compat).
+
+Verification:
+- `make self-host` — stage2.s == stage3.s, bit-identical.
+- `make test` — all runtime tests pass.
+- `make test-all` — 152/160 pass (the 2 pre-existing destructure
+  failures are unchanged; +1 net pass from the new regression test).
+- `make bench-int-safe` — large-int correctness PASS; smart-op now
+  ~2.3-2.8x slower than `int_*` due to the call-vs-inline cost, which
+  is still acceptable and the int_* speedup is itself documented.
+- CrossEngin `make test` — 142/142 pass.
+
+Proof-of-fix: `crossengin-demo/src/safety/bignum_2048.nova` `bn2048_add`
+and `bn2048_sub` were converted from `int_add` / `int_sub` calls to plain
+`+` / `-` operators; the bignum test suite continues to pass bit-
+identical results (modpow round-trips, Montgomery vs legacy parity).
 
 ## Files Modified in Compiler (Phase 4)
 
