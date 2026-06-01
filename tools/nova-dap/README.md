@@ -1,91 +1,164 @@
-# nova-dap (design note, MVP DWARF shipping)
+# nova-dap
 
-This directory is a placeholder for a future Debug Adapter Protocol
-(DAP) implementation for Nova. No DAP server is shipped here yet —
-this README documents what would be required and the current state.
+A Debug Adapter Protocol (DAP) server for the Nova programming
+language. Translates DAP JSON messages (over stdio, Content-Length
+framed) into `gdb --interpreter=mi3` machine-interface commands and
+turns gdb's async records back into DAP events.
 
-**Update — DWARF `.debug_line` MVP is now shipping.** The compiler now
-emits a working `.debug_line` section on Linux ELF; see
-`/home/user/NOVA/DWARF_AUDIT.md`. GDB can already set source-level
-breakpoints on NOVA-compiled binaries today (`make smoke-dwarf`
-verifies this). The remaining DAP work (variable inspection, DAP
-adapter binary) is still tracked here.
+This is the **MVP** of `nova-dap`: source-level breakpoints, step
+in / over / out, continue, stack traces, and a single Locals scope per
+frame. The adapter itself does **no DWARF parsing** — gdb does. The
+NOVA compiler already emits a working `.debug_line` section on Linux
+ELF (see `DWARF_AUDIT.md` in the repo root and `make smoke-dwarf`).
 
-## What DAP would need
+## What works in this MVP
 
-A useful Nova DAP adapter would need each of the following in turn:
+| DAP request               | Translation                                       |
+| ------------------------- | ------------------------------------------------- |
+| `initialize`              | Returns the capabilities table (see below).       |
+| `launch`                  | Spawns gdb, `-file-exec-and-symbols <program>`, optional `cwd` + `args`. |
+| `setBreakpoints`          | `-break-delete` then `-break-insert <src>:<line>` per breakpoint. |
+| `setExceptionBreakpoints` | Accepted, no-op (gdb has none for Nova).          |
+| `configurationDone`       | `-exec-run` first time; `-exec-continue` thereafter. |
+| `threads`                 | Single-thread stub (`id=1`, name=`main`).         |
+| `stackTrace`              | `-stack-list-frames`.                             |
+| `scopes`                  | One `Locals` scope per frame.                     |
+| `variables`               | `-stack-select-frame` then `-stack-list-variables --all-values`. |
+| `continue` / `next` / `stepIn` / `stepOut` | `-exec-continue` / `-exec-next` / `-exec-step` / `-exec-finish`. |
+| `pause`                   | `-exec-interrupt`.                                |
+| `disconnect` / `terminate`| `-gdb-exit` + reap child.                         |
 
-1. **DWARF debug info in the codegen.** The compiler currently emits
-   GAS comments noting source line numbers
-   (`# src/foo.nova:42`) but does not emit a `.debug_line` /
-   `.debug_info` section. A debugger cannot map machine-code addresses
-   back to source positions without DWARF (or an equivalent custom
-   sidecar table). This is the single biggest piece of work.
-2. **Single-step + breakpoint hooks.** The compiler must reserve a
-   well-known interrupt or `int3` slot at each source-line boundary so
-   a `SIGTRAP`-based debugger (or `ptrace(2)` consumer) can trap and
-   resume. Today the codegen aggressively inlines and reuses registers
-   across statements, which means there is no per-line boundary to
-   stop at without explicit codegen support.
-3. **Variable inspection.** Each frame needs a debug-info entry
-   mapping Nova names to stack offsets / register live ranges. This is
-   already tracked transiently in `regalloc.nova` but is not preserved
-   into the final binary.
-4. **Watchpoints.** Hardware watchpoints are best-effort on Linux
-   (`DR0..DR3` via `ptrace`), so this is mostly a host-side feature
-   once (1) and (3) land.
-5. **Adapter binary.** A DAP server (JSON over stdio, similar to the
-   LSP server in `tools/nova-lsp/`) translating DAP requests
-   (`launch`, `setBreakpoints`, `stackTrace`, `variables`, `evaluate`,
-   `continue`, `stepIn`, `stepOver`, `stepOut`) into `ptrace` / `lldb`
-   calls. The DAP protocol itself is well-specified; the hard part is
-   the underlying debug info, not the adapter.
+Capabilities advertised:
 
-## Current state
+* `supportsConfigurationDoneRequest: true`
+* `supportsStepBack: false`
+* `supportsTerminateRequest: true`
+* `supportsRestartRequest: false`
 
-- `nova` codegen: emits GAS `.file 1 ...` + `.loc 1 LINE 0` directives
-  on every statement boundary. GAS turns these into a real
-  `.debug_line` section on Linux ELF. `make smoke-dwarf` builds
-  `bin/hello_dwarf` and verifies `objdump --dwarf=decodedline` and
-  `gdb b main / r / where` both work end-to-end.
-- `.debug_info` (DWARF DIE entries for variables, parameters, types)
-  is NOT yet emitted. Source-level breakpoints work; variable
-  inspection on a stopped frame does not.
-- `nova-lsp`: ships in this same release with diagnostics + hover.
-- `nova-dap`: **DAP server still not implemented** — print-debugging
-  + gdb breakpoints are the documented path for this release.
+Events emitted:
 
-## Estimated effort to MVP DAP
+* `initialized`              — after `initialize` succeeds.
+* `stopped`                  — translated from gdb's `*stopped`
+                                async record (reason mapped to DAP
+                                vocabulary: `breakpoint`, `step`,
+                                `exception`, ...).
+* `output`                   — wraps gdb console/log/target streams.
+* `exited` + `terminated`    — translated from `*stopped reason=exited*`
+                                or `=thread-group-exited`.
 
-A minimal-but-real DAP (set a breakpoint, step over a line, print a
-local variable on a stopped frame) is roughly **1-2 calendar months**
-for one engineer:
+## What does NOT work yet
 
-| Sub-task                                                  | Estimate |
-| --------------------------------------------------------- | -------- |
-| DWARF `.debug_line` emission in `codegen.nova` (DONE)     | -        |
-| DWARF `.debug_info` (function / parameter / locals)       | 2 wk     |
-| Per-line breakpoint anchors + `int3` patching             | 1 wk     |
-| Variable-location tracking through regalloc               | 2 wk     |
-| DAP adapter binary (Python, similar shape to `nova-lsp`)  | 1 wk     |
-| End-to-end testing against VS Code's built-in DAP client  | 1 wk     |
+* **Variable values for Nova locals.** The compiler emits
+  `.debug_line` but not `.debug_info` DIE entries for locals, so
+  `variables` returns an empty list at NOVA breakpoints today.
+  (The request itself succeeds; the list just has no entries.) This
+  is a compiler-side gap tracked in `DWARF_AUDIT.md`, not a DAP one.
+* **Conditional / hit-count breakpoints.** MI supports them, the
+  adapter just doesn't expose them yet.
+* **Multi-threaded NOVA.** The DAP server reports a single thread
+  (`id=1`); coroutines are not surfaced.
+* **`stopOnEntry`.** The MVP runs straight to the first breakpoint.
+* **`evaluate` (REPL / hover).** Not wired up.
+* **Reverse debugging (`stepBack`).** Out of scope for MVP.
 
-That ordering is also the dependency order — there is no point
-writing the adapter before DWARF lands, because it would have nothing
-to translate.
+## Layout
 
-## Today: print-debugging is the path
-
-Until DAP lands, the supported workflow is:
-
-```nova
-println("foo at line 42: x=" + int_to_str(x) + ", y=" + int_to_str(y))
+```
+tools/nova-dap/
+  pyproject.toml
+  README.md                       (this file)
+  nova_dap/
+    __init__.py
+    __main__.py                   `python -m nova_dap` entry point
+    server.py                     DAP request handlers + stdio loop
+    gdb_bridge.py                 GdbBridge subprocess wrapper + MI parser
+  tests/
+    dap_smoke.py                  end-to-end smoke test
 ```
 
-The compiler's GAS line comments make it possible to read a
-disassembly and find the originating Nova line; that is the closest
-thing to a source-level debugger we have today.
+The implementation is pure stdlib — no third-party Python deps.
 
-See `INSTALL.md` (repo root) for the install paths covered by this
-release: the IDE story is **Layer 1 (syntax) + Layer 2 (LSP)**, with
-DAP tracked here as future work.
+## Running the server
+
+Install editable (optional):
+
+```sh
+pip install -e tools/nova-dap
+nova-dap                      # entry-point installed by pyproject.toml
+```
+
+Without install:
+
+```sh
+PYTHONPATH=tools/nova-dap python -m nova_dap.server
+```
+
+Environment knobs:
+
+| Env var          | Effect                                                |
+| ---------------- | ----------------------------------------------------- |
+| `NOVA_DAP_LOG`   | If set, append per-message debug logs to this file.   |
+| `NOVA_DAP_GDB`   | Override the path to the `gdb` binary (default: `which gdb`). |
+
+## Quick test
+
+After `make smoke-dwarf` (which builds `bin/hello_dwarf` with DWARF
+line info), run the end-to-end smoke test:
+
+```sh
+python tools/nova-dap/tests/dap_smoke.py
+# dap_smoke: OK
+#   binary:     /.../NOVA/bin/hello_dwarf
+#   source:     /.../NOVA/examples/hello_dwarf.nova
+#   breakpoint: line 20 (id=1)
+#   top frame:  main at line 20
+```
+
+The test sets a breakpoint at `hello_dwarf.nova:20` (the `fn main()`
+line), launches gdb under the DAP server, waits for the `stopped`
+event, requests `stackTrace` + `scopes` + `variables`, then
+continues to `terminated`. If `gdb` or `bin/hello_dwarf` is missing,
+the test prints a `SKIP` line and exits 0.
+
+## VS Code integration
+
+The `tools/vscode-nova` extension declares a `nova` debugger type
+that points at the `nova-dap` command. A minimal `launch.json`:
+
+```jsonc
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "nova",
+      "request": "launch",
+      "name": "Debug Nova program",
+      "program": "${workspaceFolder}/bin/hello_dwarf",
+      "cwd": "${workspaceFolder}",
+      "stopOnEntry": false
+    }
+  ]
+}
+```
+
+Drop that in `.vscode/launch.json`, hit F5, and set a breakpoint in
+any `.nova` source file that was compiled with `make smoke-dwarf`-
+style line info. VS Code's breakpoint gutter is enabled for the
+`nova` language id via the extension's `contributes.breakpoints`
+entry.
+
+## Architecture in one paragraph
+
+`server.py` runs the DAP message loop on stdin/stdout. Each DAP
+request is translated to one or more MI commands via
+`GdbBridge.command(...)`, which assigns a monotonically-increasing
+integer token, writes `<token>-command\n` to gdb's stdin, and blocks
+on a `Queue` until the matching `<token>^done,...` (or `^error,...`)
+record arrives on stdout. A background reader thread inside
+`GdbBridge` parses every MI record using a tiny recursive-descent
+parser for the value grammar (`cstring`, `{tuple}`, `[list]`), and
+dispatches each parsed record either to its waiting `Queue`
+(synchronous result) or to the session's event callback (async
+record: `*stopped`, `=thread-group-exited`, etc.). The DAP server
+maps the resulting `GdbAsyncRecord` objects to DAP `stopped` /
+`exited` / `terminated` events.

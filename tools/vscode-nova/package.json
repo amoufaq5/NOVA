@@ -1,0 +1,155 @@
+{
+  "name": "nova-syntax",
+  "displayName": "Nova",
+  "description": "Syntax highlighting and language support for the Nova programming language.",
+  "version": "0.1.0",
+  "publisher": "nova-lang",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers"
+  ],
+  "keywords": [
+    "nova",
+    "self-hosting",
+    "agi",
+    "moment-signal"
+  ],
+  "capabilities": {
+    "completionProvider": {
+      "triggerCharacters": [".", "("]
+    },
+    "hoverProvider": true,
+    "renameProvider": true,
+    "referencesProvider": true,
+    "diagnosticProvider": true
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "nova",
+        "aliases": [
+          "Nova",
+          "nova"
+        ],
+        "extensions": [
+          ".nova"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nova",
+        "scopeName": "source.nova",
+        "path": "./syntaxes/nova.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[nova]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "editor.detectIndentation": false
+      }
+    },
+    "configuration": {
+      "title": "Nova",
+      "properties": {
+        "nova.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the Nova language server (requires nova-lsp installed)."
+        },
+        "nova.lsp.serverCommand": {
+          "type": "string",
+          "default": "nova-lsp",
+          "description": "Command used to launch the Nova LSP server."
+        },
+        "nova.compilerPath": {
+          "type": "string",
+          "default": "nova",
+          "description": "Path to the nova compiler binary used for --check diagnostics."
+        },
+        "nova.dap.serverCommand": {
+          "type": "string",
+          "default": "nova-dap",
+          "description": "Command used to launch the Nova Debug Adapter Protocol server."
+        }
+      }
+    },
+    "breakpoints": [
+      {
+        "language": "nova"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "nova",
+        "label": "Nova Debugger",
+        "languages": [
+          "nova"
+        ],
+        "program": "nova-dap",
+        "args": [],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the compiled Nova binary (built with DWARF debug info).",
+                "default": "${workspaceFolder}/bin/${workspaceFolderBasename}"
+              },
+              "args": {
+                "type": "array",
+                "description": "Command-line arguments passed to the Nova program.",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the debugged program.",
+                "default": "${workspaceFolder}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Automatically stop on entry (currently unsupported; the MVP runs until the first breakpoint).",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "nova",
+            "request": "launch",
+            "name": "Debug Nova program",
+            "program": "${workspaceFolder}/bin/${workspaceFolderBasename}",
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Nova: Launch program",
+            "description": "Launch a Nova binary under nova-dap (requires gdb).",
+            "body": {
+              "type": "nova",
+              "request": "launch",
+              "name": "Debug Nova program",
+              "program": "^\"\\${workspaceFolder}/bin/\\${workspaceFolderBasename}\"",
+              "cwd": "^\"\\${workspaceFolder}\"",
+              "stopOnEntry": false
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
