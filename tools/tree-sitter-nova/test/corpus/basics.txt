@@ -1,0 +1,542 @@
+================================================================================
+fn declaration with no parameters
+================================================================================
+
+fn main() {
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block)))
+
+================================================================================
+hello world
+================================================================================
+
+fn main() {
+    println("Hello, World!")
+}
+
+main()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (string_literal))))))
+  (expression_statement
+    (call_expression
+      function: (identifier))))
+
+================================================================================
+let binding with integer literal
+================================================================================
+
+let x = 42
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (number)))
+
+================================================================================
+let binding with string literal
+================================================================================
+
+let name = "Nova"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (string_literal)))
+
+================================================================================
+function with parameters and binary expression
+================================================================================
+
+fn add(a, b) {
+    return a + b
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier)))
+    body: (block
+      (return_statement
+        value: (binary_expression
+          left: (identifier)
+          right: (identifier))))))
+
+================================================================================
+if/else with comparison
+================================================================================
+
+fn pick(n) {
+    if n > 0 {
+        return 1
+    } else {
+        return 0
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_statement
+        condition: (binary_expression
+          left: (identifier)
+          right: (number))
+        consequence: (block
+          (return_statement
+            value: (number)))
+        alternative: (block
+          (return_statement
+            value: (number)))))))
+
+================================================================================
+while loop
+================================================================================
+
+fn count() {
+    let i = 0
+    while i < 10 {
+        i = i + 1
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (let_decl
+        name: (identifier)
+        value: (number))
+      (while_statement
+        condition: (binary_expression
+          left: (identifier)
+          right: (number))
+        body: (block
+          (assignment_statement
+            lhs: (identifier)
+            rhs: (binary_expression
+              left: (identifier)
+              right: (number))))))))
+
+================================================================================
+function call with multiple arguments
+================================================================================
+
+fn main() {
+    println("answer:")
+    print_int(42)
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (string_literal))))
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (number)))))))
+
+================================================================================
+line comment is recognised
+================================================================================
+
+// this is a line comment
+fn main() {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (fn_decl
+    name: (identifier)
+    body: (block)))
+
+================================================================================
+block comment is recognised
+================================================================================
+
+/* a block
+   comment */
+fn main() {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (fn_decl
+    name: (identifier)
+    body: (block)))
+
+================================================================================
+asm block holds string literals
+================================================================================
+
+asm {
+    ".globl foo"
+    "foo:"
+    "    ret"
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (asm_block
+    (string_literal)
+    (string_literal)
+    (string_literal)))
+
+================================================================================
+extern fn declaration
+================================================================================
+
+extern fn fast_sum(arr, count)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (extern_fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier)))))
+
+================================================================================
+import declaration
+================================================================================
+
+import "../src/core/moment.nova"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    path: (string_literal)))
+
+================================================================================
+struct declaration
+================================================================================
+
+struct Vector {
+    x,
+    y
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_decl
+    name: (identifier)
+    (struct_field_list
+      (struct_field
+        name: (identifier))
+      (struct_field
+        name: (identifier)))))
+
+================================================================================
+list literal and indexing
+================================================================================
+
+fn main() {
+    let xs = [1, 2, 3]
+    let first = xs[0]
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (let_decl
+        name: (identifier)
+        value: (list_literal
+          (number)
+          (number)
+          (number)))
+      (let_decl
+        name: (identifier)
+        value: (index_expression
+          object: (identifier)
+          index: (number))))))
+
+================================================================================
+hex and binary literals
+================================================================================
+
+let mask = 0xFF
+let bits = 0b1010
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (number))
+  (let_decl
+    name: (identifier)
+    value: (number)))
+
+================================================================================
+float literal
+================================================================================
+
+let pi = 3.14159
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (float)))
+
+================================================================================
+nested call expression
+================================================================================
+
+fn main() {
+    print_int(fib(10))
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (number)))))))))
+
+================================================================================
+operator precedence: multiplication binds tighter than addition
+================================================================================
+
+let r = 1 + 2 * 3
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (binary_expression
+      left: (number)
+      right: (binary_expression
+        left: (number)
+        right: (number)))))
+
+================================================================================
+unary negation
+================================================================================
+
+let r = -5
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (unary_expression
+      operand: (number))))
+
+================================================================================
+boolean literals
+================================================================================
+
+let a = true
+let b = false
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (boolean))
+  (let_decl
+    name: (identifier)
+    value: (boolean)))
+
+================================================================================
+compound assignment operators
+================================================================================
+
+fn main() {
+    let x = 1
+    x += 2
+    x *= 3
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (let_decl
+        name: (identifier)
+        value: (number))
+      (assignment_statement
+        lhs: (identifier)
+        rhs: (number))
+      (assignment_statement
+        lhs: (identifier)
+        rhs: (number)))))
+
+================================================================================
+for-in loop
+================================================================================
+
+fn main() {
+    for x in xs {
+        print(x)
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (for_statement
+        binding: (identifier)
+        iterable: (identifier)
+        body: (block
+          (expression_statement
+            (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (identifier)))))))))
+
+================================================================================
+break and continue
+================================================================================
+
+fn main() {
+    while true {
+        break
+        continue
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (while_statement
+        condition: (boolean)
+        body: (block
+          (break_statement)
+          (continue_statement))))))
+
+================================================================================
+field access
+================================================================================
+
+fn main() {
+    let x = v.x
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (let_decl
+        name: (identifier)
+        value: (field_expression
+          object: (identifier)
+          field: (identifier))))))
+
+================================================================================
+lambda expression
+================================================================================
+
+let inc = fn(n) { return n + 1 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (lambda_expression
+      parameters: (parameter_list
+        (parameter
+          name: (identifier)))
+      body: (block
+        (return_statement
+          value: (binary_expression
+            left: (identifier)
+            right: (number)))))))
+
+================================================================================
+match expression
+================================================================================
+
+let label = match day {
+    1 => "Mon"
+    _ => "other"
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (number)
+        value: (string_literal))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (string_literal)))))

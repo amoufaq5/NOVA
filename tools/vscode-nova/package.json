@@ -54,6 +54,17 @@
         "path": "./syntaxes/nova.tmLanguage.json"
       }
     ],
+    "treeSitterGrammars": [
+      {
+        "language": "nova",
+        "scopeName": "source.nova",
+        "parser": "../tree-sitter-nova",
+        "queries": {
+          "highlights": "../tree-sitter-nova/queries/highlights.scm"
+        },
+        "fallbackTo": "textmate"
+      }
+    ],
     "configurationDefaults": {
       "[nova]": {
         "editor.tabSize": 4,

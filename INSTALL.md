@@ -145,3 +145,18 @@ After installing the compiler:
   `tools/nova-lsp/README.md`.
 - DAP (step-through debugging): not yet shipped — see
   `tools/nova-dap/README.md` for the design note and roadmap.
+- **tree-sitter grammar** (Neovim, Helix, Emacs, GitHub web UI):
+  the grammar lives at `tools/tree-sitter-nova/`. For Neovim, follow
+  `tools/tree-sitter-nova/INSTALL_NEOVIM.md`. For other editors:
+
+  ```bash
+  cd tools/tree-sitter-nova
+  npm install                  # one-time, installs tree-sitter-cli
+  npx tree-sitter generate     # produces src/parser.c
+  npx tree-sitter test         # confirms the corpus tests pass
+  ```
+
+  The resulting `src/parser.c` is portable C and can be compiled
+  into a shared library that any tree-sitter host can load. See
+  `tools/tree-sitter-nova/README.md` for the full layout and
+  highlight-query details.
