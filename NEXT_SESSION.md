@@ -298,6 +298,90 @@ Gap status (deferred for future R-rounds):
 - DWARF/CodeView debugging info on the winarm64 target is not
   emitted (matches the Linux ARM64 standalone path).
 
+## R9C — LSP workspace rename (`textDocument/rename` across imports)
+
+`tools/nova-lsp` rounds out the editor refactoring story. The previous
+single-buffer rename (R5/R5F) handled the open document plus its
+on-disk import closure; R9C makes it a true workspace operation: F2 on
+a top-level `fn` / `let` / `const` / `type` now rewrites every file in
+the workspace that imports the definition site, while keeping
+unrelated same-named symbols alone.
+
+Changes (`tools/nova-lsp/nova_lsp/rename_workspace.py`, new module):
+
+- `classify_symbol(name, def_path, def_line, file_cache)` — decides
+  whether a declaration is `"toplevel"` (column-0 `fn`/`let`/`const`/
+  `type`) or `"local"` (indented binding, fn parameter, anonymous
+  helper). Only top-level declarations are eligible for workspace-wide
+  rename; locals fall back to the legacy single-buffer path.
+- `file_imports_target(candidate, target, file_cache)` — walks R5F's
+  transitive import graph rooted at `candidate` and returns true when
+  `target` is reachable. Used to filter the candidate set so only
+  files that genuinely depend on the definition site are touched.
+- `find_references_in_workspace(name, def_path, file_cache, index)` —
+  enumerates every file in the workspace symbol index (plus an
+  `extra_paths` list of open-doc closures), keeps the ones that
+  import the def, and returns `{abs_path: [Range, ...]}` for each
+  `\b<name>\b` occurrence. String literals and `//` / `#` comments
+  are masked out so docs that mention the name aren't rewritten.
+- `detect_name_conflict(new_name, affected_files, file_cache)` —
+  if `new_name` is already declared at top level in any file the
+  rename would touch, returns a human-readable conflict message;
+  the orchestrator then surfaces it as a JSON-RPC `ResponseError`
+  (code `-32803` "Request failed") so VS Code renders a popup
+  without applying any edits.
+- `plan_workspace_rename(...)` — top-level orchestrator returning
+  `WorkspaceRenameRequest(references, conflict_message)`.
+- `build_workspace_edit(refs, new_name)` — converts the path-keyed
+  reference map into the LSP `{"changes": {uri: [TextEdit, ...]}}`
+  payload.
+
+Changes (`tools/nova-lsp/nova_lsp/server.py`):
+
+- `handle_rename` now dispatches: top-level fn/let/const/type goes
+  through `handle_rename_workspace`, locals fall back to the
+  legacy `_handle_rename_legacy` path.
+- `handle_rename_workspace` resolves the symbol via R5F's
+  `find_definition`, classifies its kind, ensures the workspace index
+  has seen the project root (auto-crawling parent dirs of open docs
+  when no rootPath was supplied at `initialize` time), seeds
+  `extra_paths` from open-buffer import closures, and runs
+  `plan_workspace_rename`. The conflict path is encoded as a
+  sentinel dict the dispatcher converts to a `ResponseError`.
+
+Tests (`tools/nova-lsp/tests/test_rename_workspace.py`, new):
+
+- 23 test functions / 101 assertions covering:
+  * Symbol classification: top-level fn/let are "toplevel", indented
+    `let` and fn parameters are "local".
+  * Import-graph reachability: direct + transitive imports detected,
+    non-importers excluded.
+  * Name-conflict detection: clean rename returns None, collision
+    surfaces a message mentioning the new name.
+  * Three-file cross-file fixture (`A` defines `foo`, `B` imports A
+    and uses `foo`, `C` has its own unrelated `foo`): rename touches
+    A + B but never C.
+  * Word boundaries: `foo` rename does NOT touch `foobar`, `myfoo`,
+    `foo_bar`.
+  * String + comment masking: mentions of the symbol name inside
+    `"..."` strings or `// ...` / `# ...` comments are not edited.
+  * End-to-end LSP dispatch for: three-file workspace, word
+    boundaries, conflict path returning JSON-RPC error code -32803,
+    local `let` rename staying single-file, fn parameter rename
+    staying single-file, regression test for the original
+    `rename_smoke.py` scenario.
+  * Integration: rename `moment_new` in `src/core/moment.nova`
+    against the live NOVA codebase — finds 21 occurrences across
+    6 files (the def + 5 importers in `examples/`).
+
+Verification:
+- `python tests/test_rename_workspace.py` — OK, 101 assertions.
+- All 6 prior LSP tests still pass (completion, rename, references,
+  code_action, definition_cross_file, workspace_symbols).
+- Real-codebase rename of `moment_new` produces a coherent
+  `WorkspaceEdit` covering 6 files / 21 ranges, with the
+  unrelated `unrelated.nova` file in test fixtures left alone.
+
 ## R8C — LSP workspace symbol search (`workspace/symbol`)
 
 `tools/nova-lsp` now exposes the last LSP capability gap. Editors can

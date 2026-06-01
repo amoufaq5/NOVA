@@ -17,7 +17,7 @@ for the install hook.
 | `textDocument/publishDiagnostics`   | yes (runs `nova --check`) |
 | `textDocument/hover`                | yes (function signatures from imports) |
 | `textDocument/completion`           | yes (builtins + fn/let scan, triggers on `.` and `(`) |
-| `textDocument/rename`               | yes (regex `\b<old>\b` across open docs + imports) |
+| `textDocument/rename`               | yes (workspace-wide for top-level fn/let/const/type, single-buffer for locals + params) |
 | `textDocument/references`           | yes (regex scan, open docs + transitively imported files) |
 | `textDocument/codeAction`           | yes (extract function, organize imports, sort fn declarations) |
 | `textDocument/definition`           | yes (intra-file + follows `import "..."` transitively) |
@@ -34,10 +34,24 @@ sorted with builtins first; triggered manually or by typing `.` / `(`.
 Each item carries a `detail` like `fn foo(a, b)` so VS Code shows the
 signature next to the label.
 
-Rename walks every open document plus the union of files they import
-(transitively) and emits a `WorkspaceEdit` with per-file `TextEdit[]`
-arrays for each `\b<oldname>\b` occurrence. It is a textual rename — it
-won't respect shadowing, but it handles the 80 % case.
+Rename is workspace-wide for top-level declarations. When the cursor
+is on a top-level `fn` / `let` / `const` / `type` name, the server
+resolves the symbol's canonical definition via R5F's `find_definition`,
+classifies the declaration line (top-level vs. indented), and then
+walks every file in the workspace symbol index plus open buffers,
+keeping only the files that transitively `import` the definition site.
+For each kept file the server emits LSP `TextEdit[]` ranges for every
+`\b<oldname>\b` occurrence — strings and comments are masked out so
+the rename never touches documentation that happens to mention the
+name. Unrelated files that use the same identifier locally without
+importing the definition site are left alone. If the new name already
+exists at top level in any affected file, the server returns a
+JSON-RPC `ResponseError` (code `-32803`) with a human-readable
+conflict message instead of an edit.
+
+Local renames (function parameters, indented `let`/`const`,
+anonymous helpers) stay in the legacy single-buffer-plus-open-imports
+path so the user's scope doesn't accidentally bleed across files.
 
 References uses the same regex scan and returns `Location[]` for every
 match in open documents + imported files. The scanner walks the transitive
@@ -116,14 +130,15 @@ python tools/nova-lsp/tests/references_smoke.py
 python tools/nova-lsp/tests/code_action_smoke.py
 python tools/nova-lsp/tests/definition_cross_file_smoke.py
 python tools/nova-lsp/tests/test_workspace_symbols.py
+python tools/nova-lsp/tests/test_rename_workspace.py
 ```
 
-The six `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The seven `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
-~10 ms each (the workspace-symbol integration leg also indexes
-`/home/user/NOVA/src/` so it takes a bit longer when the tree is
-present).
+~10 ms each (the workspace-symbol + workspace-rename integration legs
+also index `/home/user/NOVA/src/` so they take a bit longer when the
+tree is present).
 
 ## VS Code wiring
 
@@ -171,6 +186,7 @@ tools/nova-lsp/
     server.py               # LSP request handlers + dispatcher
     imports.py              # import-graph walker + mtime-invalidated file cache
     workspace_symbols.py    # workspace/symbol index + fuzzy matcher
+    rename_workspace.py     # workspace-wide rename engine (top-level decls)
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -179,4 +195,5 @@ tools/nova-lsp/
     references_smoke.py
     code_action_smoke.py
     test_workspace_symbols.py
+    test_rename_workspace.py
 ```

@@ -9,7 +9,8 @@ using only the Python standard library. Supports:
     * `textDocument/hover` (symbol scan of `import`-ed runtime files)
     * `textDocument/completion` (builtins + fn/let from doc + imports)
     * `textDocument/definition` (intra-file + transitively imported fns/lets)
-    * `textDocument/rename` (regex-based workspace edit)
+    * `textDocument/rename` (workspace-wide for top-level fn/let/const/
+      type via R9C's rename_workspace; single-buffer for locals + params)
     * `textDocument/references` (regex-based occurrence scan over the
       transitive import graph)
     * `textDocument/codeAction` (extract function, organize imports,
@@ -40,6 +41,11 @@ from urllib.parse import urlparse, unquote
 
 from nova_lsp import __version__
 from nova_lsp.imports import FileCache, find_definition, walk_imports
+from nova_lsp.rename_workspace import (
+    build_workspace_edit,
+    classify_symbol,
+    plan_workspace_rename,
+)
 from nova_lsp.workspace_symbols import WorkspaceSymbolIndex
 
 LOG_FILE = os.environ.get("NOVA_LSP_LOG")
@@ -645,6 +651,20 @@ def _candidate_paths(state: ServerState) -> List[str]:
 def handle_rename(
     state: ServerState, params: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
+    """Dispatch rename requests.
+
+    For a top-level `fn` / `let` / `const` / `type` we route through
+    `handle_rename_workspace` (R9C), which uses the workspace symbol
+    index + import-graph reachability to rename every file in the
+    workspace that imports the definition site. For local bindings
+    (function parameters, indented `let`s, anonymous helpers) we keep
+    the legacy in-buffer regex rename below — those don't propagate
+    across files.
+
+    Returns either:
+      * a WorkspaceEdit `{"changes": {uri: [TextEdit, ...]}}`, OR
+      * `None` when the rename is a no-op or invalid input.
+    """
     uri = params.get("textDocument", {}).get("uri", "")
     pos = params.get("position", {})
     new_name = params.get("newName") or ""
@@ -657,6 +677,124 @@ def handle_rename(
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", new_name):
         return None
 
+    # Try the workspace-wide path first (top-level symbols only).
+    workspace_result = handle_rename_workspace(
+        state, doc, old_name, new_name
+    )
+    if workspace_result is not None:
+        return workspace_result
+
+    # Fall back to the legacy single-buffer-plus-imports rename. This
+    # covers local bindings and the case where the symbol is unknown to
+    # the import graph (e.g. completely intra-buffer use).
+    return _handle_rename_legacy(state, old_name, new_name)
+
+
+def handle_rename_workspace(
+    state: ServerState,
+    doc: Document,
+    old_name: str,
+    new_name: str,
+) -> Optional[Dict[str, Any]]:
+    """Workspace-wide rename routed through R9C's `rename_workspace`.
+
+    Returns:
+      * a WorkspaceEdit dict when the rename is a top-level fn/let/
+        const/type with no name conflicts;
+      * an LSP `ResponseError` dict (caller propagates) when the new
+        name would clash with an existing top-level decl;
+      * `None` when the symbol is a local binding so the caller can
+        fall back to the legacy rename path.
+    """
+    start = uri_to_path(doc.uri)
+    if not start:
+        return None
+    overrides = _text_overrides(state)
+    hit = find_definition(
+        old_name,
+        os.path.abspath(start),
+        state.file_cache,
+        text_overrides=overrides,
+    )
+    if hit is None:
+        return None
+    def_path, (def_line, _c0, _c1) = hit
+    kind = classify_symbol(
+        old_name, def_path, def_line, state.file_cache, overrides
+    )
+    if kind != "toplevel":
+        return None
+    # Make sure the workspace index has seen the project root before we
+    # ask it for the file list — first-time queries lazy-crawl. When
+    # the client didn't pass a rootPath at initialize time (e.g.
+    # `code path/to/file.nova` opens a single file without a folder),
+    # we lazily crawl the open documents' parent directories so
+    # sibling .nova files are still discovered.
+    crawled_roots: Set[str] = set()
+    if state.root_path:
+        state.workspace_symbols.index_workspace_root(state.root_path)
+        crawled_roots.add(os.path.abspath(state.root_path))
+    # Live buffers should be indexed too so renames pick up unsaved
+    # files. Open-doc import closures are also added to the candidate
+    # list — that's the failsafe path when neither the workspace root
+    # nor a sibling crawl yields the importer file.
+    extra_paths: List[str] = []
+    seen_paths: Set[str] = set()
+    for d in state.documents.values():
+        p = uri_to_path(d.uri)
+        if not p:
+            continue
+        abs_p = os.path.abspath(p)
+        if abs_p not in seen_paths:
+            extra_paths.append(abs_p)
+            seen_paths.add(abs_p)
+        state.workspace_symbols.index_text(p, d.text)
+        # Fallback: crawl the parent dir when no workspace root was
+        # provided. This is a one-shot per-directory walk guarded by
+        # the WorkspaceSymbolIndex's `_crawled_roots` set.
+        parent_dir = os.path.dirname(abs_p)
+        if parent_dir and parent_dir not in crawled_roots:
+            state.workspace_symbols.index_workspace_root(parent_dir)
+            crawled_roots.add(parent_dir)
+        # Also seed `extra_paths` with the open doc's import closure —
+        # belt-and-suspenders for files outside any crawled root.
+        for entry in walk_imports(
+            abs_p,
+            state.file_cache,
+            text_overrides=overrides,
+        ):
+            if entry.path not in seen_paths:
+                extra_paths.append(entry.path)
+                seen_paths.add(entry.path)
+    plan = plan_workspace_rename(
+        old_name,
+        new_name,
+        def_path,
+        state.file_cache,
+        state.workspace_symbols,
+        extra_paths=extra_paths,
+        text_overrides=overrides,
+    )
+    if plan.conflict_message:
+        # Encode the conflict as a sentinel the dispatcher turns into a
+        # JSON-RPC ResponseError. We use a non-standard shape with an
+        # `_rename_conflict` key so it isn't mistaken for an empty edit.
+        return {"_rename_conflict": plan.conflict_message}
+    if not plan.references:
+        return None
+    return build_workspace_edit(plan.references, new_name)
+
+
+def _handle_rename_legacy(
+    state: ServerState, old_name: str, new_name: str
+) -> Dict[str, Any]:
+    """Legacy single-buffer (+ open-doc transitive imports) rename.
+
+    Used as the fallback for local bindings — function parameters,
+    inner `let` declarations, anonymous helpers. Renames only the
+    bindings that are visible in already-open buffers + their
+    transitive on-disk imports, NOT every file in the workspace.
+    """
     changes: Dict[str, List[Dict[str, Any]]] = {}
 
     # Open documents are renamed in-buffer (authoritative over disk).
@@ -1494,6 +1632,17 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "textDocument/rename":
         result = handle_rename(state, params)
+        if isinstance(result, dict) and "_rename_conflict" in result:
+            # R9C name-conflict path — surface as a JSON-RPC ResponseError
+            # (code -32803 = LSP "Request failed", a non-fatal client error
+            # that VS Code renders as a popup without tearing down the
+            # session). Falling through to `make_response` with `None`
+            # would silently drop the edit instead.
+            write_message(
+                out_stream,
+                make_error(req_id, -32803, result["_rename_conflict"]),
+            )
+            return True
         write_message(out_stream, make_response(req_id, result))
         return True
     if method == "textDocument/definition":

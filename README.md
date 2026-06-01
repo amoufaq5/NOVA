@@ -249,7 +249,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - Package manager: `nova pkg init`, `nova pkg install <name>`, `nova pkg build`
 - DWARF `.debug_line` + `.debug_info` on Linux ELF for source-level debugging (see `DWARF_AUDIT.md`)
 - **Debug Adapter Protocol** server (`tools/nova-dap`) — 17 capabilities: breakpoints, step in/out/over, stack traces, scopes, live locals (via R4A's `.debug_info` DIE entries), pause, continue, exception breakpoints, watchpoints, plus full multi-thread coordination (per-thread step/pause/continue, `threads` request, stop events with `threadId` + `allThreadsStopped`). gdb non-stop mode by default
-- **Language Server Protocol** server (`tools/nova-lsp`) — completion, hover, definition (cross-file), references, rename, code actions, workspace symbol search (`workspace/symbol`, Cmd+T fuzzy picker)
+- **Language Server Protocol** server (`tools/nova-lsp`) — completion, hover, definition (cross-file), references, workspace-wide rename (F2 across imports for top-level fn/let/const/type, with name-conflict detection), code actions, workspace symbol search (`workspace/symbol`, Cmd+T fuzzy picker)
 - `tree-sitter-nova` grammar (`tools/tree-sitter-nova/`) — full
   surface syntax (fn / let / if / while / for / match / struct / enum /
   extern / lambda / asm blocks, `${expr}` interpolation, optional
