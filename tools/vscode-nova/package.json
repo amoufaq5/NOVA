@@ -24,7 +24,14 @@
     "hoverProvider": true,
     "renameProvider": true,
     "referencesProvider": true,
-    "diagnosticProvider": true
+    "diagnosticProvider": true,
+    "codeActionProvider": {
+      "codeActionKinds": [
+        "refactor.extract",
+        "source.organizeImports",
+        "source.organizeFns"
+      ]
+    }
   },
   "contributes": {
     "languages": [

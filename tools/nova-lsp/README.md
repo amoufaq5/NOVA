@@ -19,6 +19,7 @@ for the install hook.
 | `textDocument/completion`           | yes (builtins + fn/let scan, triggers on `.` and `(`) |
 | `textDocument/rename`               | yes (regex `\b<old>\b` across open docs + imports) |
 | `textDocument/references`           | yes (regex scan, open docs + imports) |
+| `textDocument/codeAction`           | yes (extract function, organize imports, sort fn declarations) |
 | `textDocument/definition`           | future |
 
 Hover scans the open document and every `import "..."` it transitively
@@ -39,6 +40,25 @@ won't respect shadowing, but it handles the 80 % case.
 
 References uses the same regex scan and returns `Location[]` for every
 match in open documents + imported files.
+
+Code actions surface three refactorings via the VS Code lightbulb menu:
+
+* **Extract to function `extracted_N`** (`refactor.extract`) — only
+  shown when the selection covers a multi-statement block inside a `fn`
+  body. The server identifies free variables in the selection
+  (identifiers used but not `let`-bound inside it, minus keywords and
+  builtins), inserts a new top-level `fn extracted_N(<free_vars>)` right
+  after the last import, and replaces the selection with a call to it.
+* **Organize imports** (`source.organizeImports`) — sorts the top-of-file
+  `import "..."` block alphabetically and groups it: `std/` first,
+  then `../src/`, then `../../tests/`, others last. Blank lines
+  separate adjacent groups.
+* **Sort top-level functions** (`source.organizeFns`) — sorts every
+  top-level `fn` declaration by name, preserving each declaration's
+  leading doc-comment block.
+
+All three return `WorkspaceEdit`s in the `{"changes": {uri: TextEdit[]}}`
+shape, which VS Code applies in-place without diff reconciliation.
 
 Diagnostics are produced by writing the buffer to a tempfile and running
 `nova --check <tempfile>`. The server falls back to `nova <tempfile> -o
@@ -64,9 +84,10 @@ python -m nova_lsp --version
 python tools/nova-lsp/tests/completion_smoke.py
 python tools/nova-lsp/tests/rename_smoke.py
 python tools/nova-lsp/tests/references_smoke.py
+python tools/nova-lsp/tests/code_action_smoke.py
 ```
 
-The three `tests/*_smoke.py` scripts use the bundled `_harness.py`
+The four `tests/*_smoke.py` scripts use the bundled `_harness.py`
 helper to drive `dispatch()` in-process (no subprocess), open a tiny
 workspace, and assert on the response payloads. They run in ~10 ms each.
 
@@ -119,4 +140,5 @@ tools/nova-lsp/
     completion_smoke.py
     rename_smoke.py
     references_smoke.py
+    code_action_smoke.py
 ```

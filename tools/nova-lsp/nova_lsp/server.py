@@ -10,6 +10,8 @@ using only the Python standard library. Supports:
     * `textDocument/completion` (builtins + fn/let from doc + imports)
     * `textDocument/rename` (regex-based workspace edit)
     * `textDocument/references` (regex-based occurrence scan)
+    * `textDocument/codeAction` (extract function, organize imports,
+      sort top-level fn declarations)
 
 Run with::
 
@@ -715,6 +717,487 @@ def handle_references(
 
 
 # ---------------------------------------------------------------------------
+# Code actions — extract function, organize imports, sort fn declarations.
+# ---------------------------------------------------------------------------
+
+
+# LSP CodeActionKind strings. Using string literals (not an enum) so the
+# wire format matches VS Code expectations exactly.
+KIND_REFACTOR_EXTRACT = "refactor.extract"
+KIND_SOURCE_ORGANIZE_IMPORTS = "source.organizeImports"
+KIND_SOURCE_ORGANIZE_FNS = "source.organizeFns"
+
+
+def _full_doc_range(text: str) -> Dict[str, Any]:
+    """LSP range that covers the entire document end-to-end."""
+    lines = text.splitlines(keepends=False)
+    if not lines:
+        return {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 0},
+        }
+    last_idx = len(lines) - 1
+    return {
+        "start": {"line": 0, "character": 0},
+        "end": {"line": last_idx, "character": len(lines[last_idx])},
+    }
+
+
+def _make_workspace_edit(uri: str, new_text: str, doc_text: str) -> Dict[str, Any]:
+    """Build a WorkspaceEdit replacing the entire `uri` document with
+    `new_text`. This is the simplest reliable shape — VS Code accepts the
+    `changes` form and applies it without diff reconciliation."""
+    return {
+        "changes": {
+            uri: [
+                {
+                    "range": _full_doc_range(doc_text),
+                    "newText": new_text,
+                }
+            ]
+        }
+    }
+
+
+# --- Action 1: Extract function -------------------------------------------
+
+
+def _find_fn_definitions(text: str) -> List[Tuple[str, int, int, int]]:
+    """Locate every top-level `fn name(args) { ... }` definition.
+
+    Returns a list of `(name, start_line, body_open_line, end_line)` tuples
+    where `end_line` is the line index of the closing `}` (inclusive).
+    Brace counting is done from the opening `{` on the signature line."""
+    lines = text.splitlines()
+    out: List[Tuple[str, int, int, int]] = []
+    i = 0
+    while i < len(lines):
+        m = FN_DEF_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        name = m.group(1)
+        # Find the opening `{`. It is usually on the signature line but may
+        # be on the next line.
+        open_line = i
+        while open_line < len(lines) and "{" not in lines[open_line]:
+            open_line += 1
+        if open_line >= len(lines):
+            i += 1
+            continue
+        depth = 0
+        end_line = open_line
+        found_open = False
+        for j in range(open_line, len(lines)):
+            for ch in lines[j]:
+                if ch == "{":
+                    depth += 1
+                    found_open = True
+                elif ch == "}":
+                    depth -= 1
+                    if found_open and depth == 0:
+                        end_line = j
+                        break
+            if found_open and depth == 0:
+                end_line = j
+                break
+        out.append((name, i, open_line, end_line))
+        i = end_line + 1
+    return out
+
+
+def _enclosing_fn(
+    fns: List[Tuple[str, int, int, int]], line: int
+) -> Optional[Tuple[str, int, int, int]]:
+    """Smallest function whose body strictly contains `line`."""
+    best: Optional[Tuple[str, int, int, int]] = None
+    for fn in fns:
+        _name, start, _open, end = fn
+        if start <= line <= end:
+            if best is None or (end - start) < (best[3] - best[1]):
+                best = fn
+    return best
+
+
+_LET_BIND_RE = re.compile(r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)")
+_KEYWORDS = {
+    "fn", "let", "if", "else", "while", "for", "return", "import",
+    "true", "false", "nil", "null", "and", "or", "not", "in",
+    "break", "continue", "match", "do", "end",
+}
+
+
+def _free_variables(selection: str, available_locals: Set[str]) -> List[str]:
+    """Identifiers used in `selection` that are not bound by `let` inside
+    the selection itself, not Nova keywords, not literal numbers/strings,
+    and not builtin functions. Preserves first-seen order so call sites
+    look stable across edits."""
+    bound: Set[str] = set(_LET_BIND_RE.findall(selection))
+    seen: List[str] = []
+    seen_set: Set[str] = set()
+    # Strip strings so identifiers inside string literals do not leak in.
+    stripped = re.sub(r'"(?:\\.|[^"\\])*"', '""', selection)
+    for tok in IDENT_RE.findall(stripped):
+        if tok in _KEYWORDS:
+            continue
+        if tok in BUILTIN_FUNCTIONS:
+            continue
+        if tok in bound:
+            continue
+        if tok in seen_set:
+            continue
+        # Only treat as a free variable if it's actually visible at the
+        # call site (i.e. listed in `available_locals`). Otherwise it's
+        # a global fn name, an unknown symbol, etc — leave it alone.
+        if available_locals and tok not in available_locals:
+            continue
+        seen.append(tok)
+        seen_set.add(tok)
+    return seen
+
+
+def _locals_in_scope(fn_lines: List[str], up_to: int) -> Set[str]:
+    """Parameters + every `let`-bound name from line 0..up_to-1 of the
+    function body (inclusive of params on the signature line)."""
+    out: Set[str] = set()
+    if not fn_lines:
+        return out
+    # Parameters: first line is `fn name(a, b, c) {`.
+    sig = fn_lines[0]
+    pm = FN_DEF_RE.match(sig)
+    if pm:
+        args = pm.group(2)
+        for a in args.split(","):
+            a = a.strip()
+            if a:
+                out.add(a)
+    for i in range(min(up_to, len(fn_lines))):
+        for nm in _LET_BIND_RE.findall(fn_lines[i]):
+            out.add(nm)
+    return out
+
+
+def _last_import_line(lines: List[str]) -> int:
+    """Index of the last contiguous-from-top `import "..."` line, or -1
+    if there are none."""
+    last = -1
+    for i, line in enumerate(lines):
+        if IMPORT_RE.match(line):
+            last = i
+            continue
+        if line.strip() == "":
+            continue
+        break
+    return last
+
+
+def _next_extracted_name(text: str) -> str:
+    """`extracted_N` where N is one more than the count of existing
+    `extracted_*` identifiers (or 1 if none)."""
+    matches = re.findall(r"\bextracted_(\d+)\b", text)
+    n = max((int(m) for m in matches), default=0) + 1
+    return f"extracted_{n}"
+
+
+def _build_extract_action(
+    doc: Document, range_: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """If `range_` covers a usable multi-statement block inside a fn body,
+    return a `CodeAction` that extracts it into a top-level helper."""
+    lines = doc.text.splitlines()
+    start_line = range_.get("start", {}).get("line", 0)
+    end_line = range_.get("end", {}).get("line", 0)
+    end_char = range_.get("end", {}).get("character", 0)
+    # Trim a trailing empty line that VS Code sometimes includes when
+    # selecting full lines.
+    if end_line > start_line and end_char == 0:
+        end_line -= 1
+    if end_line < start_line:
+        return None
+    if not (0 <= start_line < len(lines) and 0 <= end_line < len(lines)):
+        return None
+
+    fns = _find_fn_definitions(doc.text)
+    enclosing = _enclosing_fn(fns, start_line)
+    if not enclosing:
+        return None
+    fn_name, fn_start, fn_open, fn_end = enclosing
+    # Selection must be inside the body (after the opening `{`, before the
+    # closing `}`).
+    if not (fn_open < start_line and end_line < fn_end):
+        return None
+
+    selected_lines = lines[start_line:end_line + 1]
+    # Require at least one non-empty selected line.
+    if not any(l.strip() for l in selected_lines):
+        return None
+
+    # Compute available locals (params + lets defined above the selection).
+    fn_body_lines = lines[fn_start:fn_end + 1]
+    rel_start = start_line - fn_start
+    available = _locals_in_scope(fn_body_lines, rel_start)
+
+    selection_text = "\n".join(selected_lines)
+    free_vars = _free_variables(selection_text, available)
+    new_name = _next_extracted_name(doc.text)
+
+    # Compute the indentation of the first non-empty selected line so the
+    # call-site replacement matches the surrounding style.
+    indent = ""
+    for l in selected_lines:
+        if l.strip():
+            indent = l[: len(l) - len(l.lstrip())]
+            break
+
+    # Build the new helper function. Indent body by 4 spaces relative to
+    # the original selection's indent so it reads as a standalone fn.
+    args = ", ".join(free_vars)
+    helper_body_lines: List[str] = []
+    # Strip common leading indentation from selection so the helper body
+    # starts at column 4.
+    common = None
+    for l in selected_lines:
+        if not l.strip():
+            continue
+        leading = len(l) - len(l.lstrip())
+        common = leading if common is None else min(common, leading)
+    if common is None:
+        common = 0
+    for l in selected_lines:
+        if l.strip():
+            helper_body_lines.append("    " + l[common:])
+        else:
+            helper_body_lines.append("")
+    helper = (
+        f"fn {new_name}({args}) {{\n"
+        + "\n".join(helper_body_lines)
+        + "\n}\n\n"
+    )
+
+    # Construct the new document text.
+    last_import = _last_import_line(lines)
+    insert_at = last_import + 1  # line index where helper is inserted
+    # Skip a single blank line directly after the imports so the helper
+    # lands in a tidy spot.
+    while insert_at < len(lines) and lines[insert_at].strip() == "":
+        insert_at += 1
+
+    new_lines = list(lines)
+    # 1. Replace selected range with a call.
+    call_line = f"{indent}{new_name}({args})"
+    new_lines[start_line:end_line + 1] = [call_line]
+    # 2. Recompute insert_at because we just shrank the list — but only if
+    # the selection was below the insertion point.
+    if start_line < insert_at:
+        removed = (end_line - start_line + 1) - 1
+        insert_at -= removed
+    # 3. Insert the helper.
+    helper_lines = helper.rstrip("\n").split("\n")
+    new_lines[insert_at:insert_at] = helper_lines + [""]
+
+    new_text = "\n".join(new_lines)
+    # Preserve a trailing newline if the original had one.
+    if doc.text.endswith("\n") and not new_text.endswith("\n"):
+        new_text += "\n"
+
+    return {
+        "title": f"Extract to function `{new_name}`",
+        "kind": KIND_REFACTOR_EXTRACT,
+        "edit": _make_workspace_edit(doc.uri, new_text, doc.text),
+    }
+
+
+# --- Action 2: Organize imports -------------------------------------------
+
+
+def _import_group(path: str) -> int:
+    """Group key used to bucket imports for sorting."""
+    if path.startswith("std/"):
+        return 0
+    if path.startswith("../src/"):
+        return 1
+    if path.startswith("../../tests/"):
+        return 2
+    return 3
+
+
+def _organize_imports_text(text: str) -> Optional[str]:
+    """Return the document with its leading import block sorted+grouped,
+    or `None` if no rewrite is needed."""
+    lines = text.splitlines()
+    # Collect the contiguous import block at the top (blank lines allowed
+    # as separators inside the block).
+    block_paths: List[str] = []
+    last_import_idx = -1
+    for i, line in enumerate(lines):
+        m = IMPORT_RE.match(line)
+        if m:
+            block_paths.append(m.group(1))
+            last_import_idx = i
+            continue
+        if line.strip() == "" and last_import_idx == -1:
+            # blank line before any import — keep scanning
+            continue
+        if line.strip() == "" and last_import_idx != -1:
+            # blank line between imports is OK
+            continue
+        # First non-blank, non-import line ends the block.
+        break
+
+    if len(block_paths) < 2 and last_import_idx == -1:
+        return None  # nothing to do
+    if len(block_paths) < 2:
+        return None  # only one import — already sorted
+
+    # Sort by (group, path).
+    sorted_paths = sorted(block_paths, key=lambda p: (_import_group(p), p))
+    # Group block: separate adjacent groups with a blank line.
+    rendered: List[str] = []
+    prev_group: Optional[int] = None
+    for p in sorted_paths:
+        g = _import_group(p)
+        if prev_group is not None and g != prev_group:
+            rendered.append("")
+        rendered.append(f'import "{p}"')
+        prev_group = g
+
+    # Splice rendered block over the original 0..last_import_idx region.
+    new_lines = rendered + lines[last_import_idx + 1:]
+    new_text = "\n".join(new_lines)
+    if text.endswith("\n") and not new_text.endswith("\n"):
+        new_text += "\n"
+    if new_text == text:
+        return None
+    return new_text
+
+
+def _build_organize_imports_action(doc: Document) -> Optional[Dict[str, Any]]:
+    new_text = _organize_imports_text(doc.text)
+    if new_text is None:
+        return None
+    return {
+        "title": "Organize imports",
+        "kind": KIND_SOURCE_ORGANIZE_IMPORTS,
+        "edit": _make_workspace_edit(doc.uri, new_text, doc.text),
+    }
+
+
+# --- Action 3: Sort fn declarations ---------------------------------------
+
+
+def _is_doc_comment(line: str) -> bool:
+    s = line.lstrip()
+    return s.startswith("//") or s.startswith("#")
+
+
+def _collect_fn_blocks(
+    text: str,
+) -> Tuple[List[Tuple[str, int, int]], List[str]]:
+    """Walk `text` and group every top-level fn (with its doc-comment
+    prelude) into `(name, block_start_line, block_end_line)` tuples.
+    Returns `(blocks, lines)`."""
+    lines = text.splitlines()
+    defs = _find_fn_definitions(text)
+    blocks: List[Tuple[str, int, int]] = []
+    for name, start, _open, end in defs:
+        # Walk backward to absorb a contiguous block of doc comments.
+        block_start = start
+        j = start - 1
+        while j >= 0 and _is_doc_comment(lines[j]):
+            block_start = j
+            j -= 1
+        blocks.append((name, block_start, end))
+    return blocks, lines
+
+
+def _sort_fns_text(text: str) -> Optional[str]:
+    blocks, lines = _collect_fn_blocks(text)
+    if len(blocks) < 2:
+        return None
+    sorted_blocks = sorted(blocks, key=lambda b: b[0])
+    if [b[0] for b in blocks] == [b[0] for b in sorted_blocks]:
+        return None  # already alphabetical
+
+    # Build the new document: everything outside fn blocks stays in place;
+    # fn-block regions are rewritten in sorted order. We walk the blocks
+    # in their original positions and replace each region with the
+    # sorted-Nth block's lines.
+    new_lines: List[str] = []
+    i = 0
+    block_idx = 0
+    blocks_by_start = sorted(blocks, key=lambda b: b[1])
+    for orig in blocks_by_start:
+        _name, b_start, b_end = orig
+        # Emit any pre-block content.
+        new_lines.extend(lines[i:b_start])
+        # Emit the next sorted block's lines.
+        s_name, s_start, s_end = sorted_blocks[block_idx]
+        new_lines.extend(lines[s_start:s_end + 1])
+        i = b_end + 1
+        block_idx += 1
+    new_lines.extend(lines[i:])
+
+    new_text = "\n".join(new_lines)
+    if text.endswith("\n") and not new_text.endswith("\n"):
+        new_text += "\n"
+    if new_text == text:
+        return None
+    return new_text
+
+
+def _build_sort_fns_action(doc: Document) -> Optional[Dict[str, Any]]:
+    new_text = _sort_fns_text(doc.text)
+    if new_text is None:
+        return None
+    return {
+        "title": "Sort top-level functions",
+        "kind": KIND_SOURCE_ORGANIZE_FNS,
+        "edit": _make_workspace_edit(doc.uri, new_text, doc.text),
+    }
+
+
+# --- Top-level dispatcher -------------------------------------------------
+
+
+def handle_code_action(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    uri = params.get("textDocument", {}).get("uri", "")
+    doc = state.documents.get(uri)
+    if not doc:
+        return []
+    rng = params.get("range") or {
+        "start": {"line": 0, "character": 0},
+        "end": {"line": 0, "character": 0},
+    }
+    context = params.get("context") or {}
+    only = context.get("only")  # list[str] | None
+
+    def _allowed(kind: str) -> bool:
+        if not only:
+            return True
+        # LSP CodeActionKind hierarchy: prefix-matches are accepted.
+        return any(kind == k or kind.startswith(k + ".") for k in only)
+
+    actions: List[Dict[str, Any]] = []
+
+    if _allowed(KIND_REFACTOR_EXTRACT):
+        extract = _build_extract_action(doc, rng)
+        if extract:
+            actions.append(extract)
+    if _allowed(KIND_SOURCE_ORGANIZE_IMPORTS):
+        oi = _build_organize_imports_action(doc)
+        if oi:
+            actions.append(oi)
+    if _allowed(KIND_SOURCE_ORGANIZE_FNS):
+        sf = _build_sort_fns_action(doc)
+        if sf:
+            actions.append(sf)
+
+    return actions
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher.
 # ---------------------------------------------------------------------------
 
@@ -745,6 +1228,13 @@ def server_capabilities() -> Dict[str, Any]:
         },
         "renameProvider": True,
         "referencesProvider": True,
+        "codeActionProvider": {
+            "codeActionKinds": [
+                KIND_REFACTOR_EXTRACT,
+                KIND_SOURCE_ORGANIZE_IMPORTS,
+                KIND_SOURCE_ORGANIZE_FNS,
+            ],
+        },
         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
     }
 
@@ -834,6 +1324,10 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "textDocument/references":
         result = handle_references(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/codeAction":
+        result = handle_code_action(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 
