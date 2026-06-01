@@ -21,6 +21,7 @@ for the install hook.
 | `textDocument/references`           | yes (regex scan, open docs + transitively imported files) |
 | `textDocument/codeAction`           | yes (extract function, organize imports, sort fn declarations) |
 | `textDocument/definition`           | yes (intra-file + follows `import "..."` transitively) |
+| `workspace/symbol`                  | yes (fuzzy name search across every indexed `.nova` file) |
 
 Hover scans the open document and every `import "..."` it transitively
 references for `fn name(args)` and `let X = ...` definitions, plus the
@@ -75,6 +76,19 @@ Code actions surface three refactorings via the VS Code lightbulb menu:
 All three return `WorkspaceEdit`s in the `{"changes": {uri: TextEdit[]}}`
 shape, which VS Code applies in-place without diff reconciliation.
 
+Workspace symbols (`workspace/symbol`) drives Cmd+T / Ctrl+T in the
+editor. The server keeps an in-memory inverted index of every top-level
+`fn`, `let`, and (in `codegen.nova` / `compiler.nova`) every
+`out_label("_nova_*")` runtime helper, refreshed on every
+`didOpen`/`didChange`/`didSave`/`didClose`. On the first query the
+server also crawls `state.root_path` for `*.nova` files so the picker
+sees the entire workspace, not just open buffers. Fuzzy matching ranks
+candidates by tier: exact > case-insensitive > prefix > substring >
+camelCase letter match > sequential character match. An empty query
+returns the first 100 symbols in name order. SymbolKind is `Function`
+for `fn`, `Constant` for ALL_CAPS `let` (e.g. `TAU`, `MAX_SIZE`), and
+`Variable` for everything else.
+
 Diagnostics are produced by writing the buffer to a tempfile and running
 `nova --check <tempfile>`. The server falls back to `nova <tempfile> -o
 /dev/null` if `--check` is not recognised by the installed compiler.
@@ -101,11 +115,15 @@ python tools/nova-lsp/tests/rename_smoke.py
 python tools/nova-lsp/tests/references_smoke.py
 python tools/nova-lsp/tests/code_action_smoke.py
 python tools/nova-lsp/tests/definition_cross_file_smoke.py
+python tools/nova-lsp/tests/test_workspace_symbols.py
 ```
 
-The five `tests/*_smoke.py` scripts use the bundled `_harness.py`
-helper to drive `dispatch()` in-process (no subprocess), open a tiny
-workspace, and assert on the response payloads. They run in ~10 ms each.
+The six `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+`_harness.py` helper to drive `dispatch()` in-process (no subprocess),
+open a tiny workspace, and assert on the response payloads. They run in
+~10 ms each (the workspace-symbol integration leg also indexes
+`/home/user/NOVA/src/` so it takes a bit longer when the tree is
+present).
 
 ## VS Code wiring
 
@@ -149,14 +167,16 @@ tools/nova-lsp/
   README.md
   nova_lsp/
     __init__.py
-    __main__.py        # python -m nova_lsp
-    server.py          # LSP request handlers + dispatcher
-    imports.py         # import-graph walker + mtime-invalidated file cache
+    __main__.py             # python -m nova_lsp
+    server.py               # LSP request handlers + dispatcher
+    imports.py              # import-graph walker + mtime-invalidated file cache
+    workspace_symbols.py    # workspace/symbol index + fuzzy matcher
   tests/
-    _harness.py        # in-process LSP client (no subprocess)
+    _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
     definition_cross_file_smoke.py
     rename_smoke.py
     references_smoke.py
     code_action_smoke.py
+    test_workspace_symbols.py
 ```

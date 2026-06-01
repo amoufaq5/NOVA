@@ -14,6 +14,9 @@ using only the Python standard library. Supports:
       transitive import graph)
     * `textDocument/codeAction` (extract function, organize imports,
       sort top-level fn declarations)
+    * `workspace/symbol` (fuzzy name search across all indexed `.nova`
+      files; index is warmed incrementally on didOpen/didChange and
+      lazily crawls the workspace root on first query)
 
 Run with::
 
@@ -37,6 +40,7 @@ from urllib.parse import urlparse, unquote
 
 from nova_lsp import __version__
 from nova_lsp.imports import FileCache, find_definition, walk_imports
+from nova_lsp.workspace_symbols import WorkspaceSymbolIndex
 
 LOG_FILE = os.environ.get("NOVA_LSP_LOG")
 
@@ -282,6 +286,11 @@ class ServerState:
     # cheap to scan but we re-walk the graph on every hover/completion
     # too, so keeping a mtime-keyed cache is a clear win.
     file_cache: "FileCache" = field(default_factory=FileCache)
+    # Workspace-wide symbol index used by `workspace/symbol`. Files are
+    # added to it on `didOpen`/`didChange` so live edits are reflected
+    # immediately; the workspace root is lazily crawled on the first
+    # `workspace/symbol` request so server startup stays fast.
+    workspace_symbols: "WorkspaceSymbolIndex" = field(default_factory=WorkspaceSymbolIndex)
 
 
 # ---------------------------------------------------------------------------
@@ -1300,6 +1309,59 @@ def handle_code_action(
 
 
 # ---------------------------------------------------------------------------
+# Workspace symbols — fuzzy search across every indexed `.nova` file.
+#
+# Strategy: incremental indexing on `didOpen` / `didChange` / `didSave`,
+# plus a one-time lazy crawl of `state.root_path` on the first
+# `workspace/symbol` request. Open-document text always overrides what
+# the crawl found on disk so unsaved edits are searchable immediately.
+# ---------------------------------------------------------------------------
+
+
+def _refresh_workspace_symbols_for_doc(state: ServerState, doc: Document) -> None:
+    """Re-index `doc` in the workspace symbol table from its live buffer.
+
+    Called on every document lifecycle event so the workspace picker
+    stays in sync with the editor."""
+    p = uri_to_path(doc.uri)
+    if not p:
+        return
+    state.workspace_symbols.index_text(p, doc.text)
+
+
+def _drop_workspace_symbols_for_uri(state: ServerState, uri: str) -> None:
+    """Remove `uri`'s symbols from the workspace index — but only if the
+    document is being closed *and* the file is no longer on disk. If the
+    file still exists we re-read it so closed-but-saved files stay
+    searchable from the workspace picker."""
+    p = uri_to_path(uri)
+    if not p:
+        return
+    if os.path.isfile(p):
+        state.workspace_symbols.index_file(p)
+    else:
+        state.workspace_symbols.invalidate_file(p)
+
+
+def handle_workspace_symbol(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return the top fuzzy matches for `params.query` across the
+    workspace. The first call lazily crawls `state.root_path` if it
+    hasn't been indexed yet; subsequent calls reuse the warm index."""
+    query = (params.get("query") or "").strip()
+    if state.root_path:
+        state.workspace_symbols.index_workspace_root(state.root_path)
+    # Make sure live buffers are present in the index — they are kept
+    # current by didOpen/didChange handlers, but double-tap here so the
+    # first query after `initialize` doesn't miss them.
+    for doc in state.documents.values():
+        _refresh_workspace_symbols_for_doc(state, doc)
+    entries = state.workspace_symbols.fuzzy_match(query, limit=100)
+    return [e.to_symbol_information() for e in entries]
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher.
 # ---------------------------------------------------------------------------
 
@@ -1338,6 +1400,7 @@ def server_capabilities() -> Dict[str, Any]:
                 KIND_SOURCE_ORGANIZE_FNS,
             ],
         },
+        "workspaceSymbolProvider": {"resolveProvider": False},
         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
     }
 
@@ -1382,6 +1445,7 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         doc = Document(uri=td.get("uri", ""), text=td.get("text", ""), version=td.get("version", 0))
         state.documents[doc.uri] = doc
         _invalidate_for(state, doc.uri)
+        _refresh_workspace_symbols_for_doc(state, doc)
         publish_diagnostics(state, doc, out_stream)
         return True
     if method == "textDocument/didChange":
@@ -1392,6 +1456,7 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
             doc.text = changes[-1].get("text", doc.text)
             doc.version = params.get("textDocument", {}).get("version", doc.version + 1)
             _invalidate_for(state, uri)
+            _refresh_workspace_symbols_for_doc(state, doc)
             publish_diagnostics(state, doc, out_stream)
         return True
     if method == "textDocument/didSave":
@@ -1402,12 +1467,14 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
             if isinstance(new_text, str):
                 doc.text = new_text
             _invalidate_for(state, uri)
+            _refresh_workspace_symbols_for_doc(state, doc)
             publish_diagnostics(state, doc, out_stream)
         return True
     if method == "textDocument/didClose":
         uri = params.get("textDocument", {}).get("uri", "")
         state.documents.pop(uri, None)
         _invalidate_for(state, uri)
+        _drop_workspace_symbols_for_uri(state, uri)
         write_message(
             out_stream,
             {
@@ -1439,6 +1506,10 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "textDocument/codeAction":
         result = handle_code_action(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "workspace/symbol":
+        result = handle_workspace_symbol(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 

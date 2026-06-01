@@ -297,3 +297,63 @@ Gap status (deferred for future R-rounds):
   emitter) is the next milestone.
 - DWARF/CodeView debugging info on the winarm64 target is not
   emitted (matches the Linux ARM64 standalone path).
+
+## R8C — LSP workspace symbol search (`workspace/symbol`)
+
+`tools/nova-lsp` now exposes the last LSP capability gap. Editors can
+hit Cmd+T / Ctrl+T and fuzzy-search every top-level NOVA symbol across
+the workspace.
+
+Changes (`tools/nova-lsp/nova_lsp/workspace_symbols.py`, new module):
+
+- `WorkspaceSymbolIndex` — inverted index `name -> [SymbolEntry, ...]`
+  with a reverse map `path -> set[name]` for O(symbols_per_file)
+  invalidation.
+- `index_text(path, text)` — re-scans a file from in-memory text, used
+  on `didOpen`/`didChange` so unsaved edits are searchable instantly.
+- `index_file(path)` — re-scans from disk, used on `didClose` of a
+  still-existing file and during the lazy root crawl.
+- `index_workspace_root(root)` — one-time recursive `*.nova` crawl,
+  pruning `.git`, `node_modules`, `__pycache__`, `bin`, `build`.
+- `fuzzy_match(query, limit=100)` — tiered scoring: exact (0) >
+  case-insensitive (1) > prefix (2) > substring (3) > camelCase letter
+  match (4) > sequential character match (5). Empty query returns the
+  first N symbols in alphabetical order.
+- Recognised declarations: `fn name(...)` → `SymbolKind.Function (12)`;
+  ALL_CAPS `let NAME = ...` → `SymbolKind.Constant (14)`; other `let`
+  → `SymbolKind.Variable (13)`; `out_label("_nova_*")` inside
+  `codegen.nova` / `compiler.nova` → `SymbolKind.Function` with
+  `containerName="<runtime>"` so the R6A helpers like
+  `_nova_check_rdi` / `_nova_check_rsi` are discoverable.
+
+Changes (`tools/nova-lsp/nova_lsp/server.py`):
+
+- `workspaceSymbolProvider: {resolveProvider: false}` registered in
+  the `initialize` response.
+- `handle_workspace_symbol` lazily crawls `state.root_path` on the
+  first query, double-taps the live-buffer refresh for every open doc,
+  and returns the top 100 `SymbolInformation` records.
+- `didOpen` / `didChange` / `didSave` call
+  `_refresh_workspace_symbols_for_doc` so live edits are reflected
+  immediately; `didClose` re-reads the file from disk (or invalidates
+  if the file is gone). The R5F `FileCache` lifecycle is untouched.
+
+Tests (`tools/nova-lsp/tests/test_workspace_symbols.py`, new):
+
+- 11 test functions / 52 assertions covering: empty workspace, single
+  file with 5 fns, three-file cross-file workspace, fuzzy ranking
+  (`foB` → `fooBar` before `foo_bar`), tier breakdown for the score,
+  empty-query alphabetical first-N, SymbolKind classification (fn
+  vs ALL_CAPS let vs lower-case let), file invalidation, didChange
+  reindexing, end-to-end LSP wire test through `dispatch`, and an
+  integration test that indexes `/home/user/NOVA/src/` (~3665
+  symbols) and locates `_nova_check_rdi` at codegen.nova:8569
+  alongside its sibling `_nova_check_rsi`.
+
+Verification:
+- `python tests/test_workspace_symbols.py` — OK, 52 assertions.
+- All 5 prior LSP tests still pass (completion, rename, references,
+  code_action, definition_cross_file).
+- Indexed 3665 symbols across NOVA's `src/` tree (2097 top-level
+  `fn` + 1182 top-level `let` + 386 `out_label("_nova_*")` runtime
+  labels).
