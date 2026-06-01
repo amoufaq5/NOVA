@@ -17,7 +17,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 139 tests (133 pass, 6 skip) |
+| **Tests** | 160 tests (154 pass, 6 skip) |
 | **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64-Linux, Windows ARM64 (PE32+ AArch64) |
 
 ---
@@ -72,7 +72,7 @@ make
 # Compile and run a program
 make run FILE=examples/hello.nova
 
-# Run all 139 tests
+# Run all 160 tests (154 pass, 6 skip — see tests/run_tests.sh)
 make test-all
 
 # Verify self-hosting (stage2.s == stage3.s)
@@ -682,7 +682,7 @@ src/agent/                 Agent systems                             2,151 lines
   preprocess.nova            Corpus ingestion and canonicalization (v4.1)
 src/pkg/pkg.nova           Package manager                            487 lines
 examples/                  31 example programs                       3,125 lines
-tests/                     135 test programs                        10,416 lines
+tests/                     160 test programs                        10,416 lines
 ```
 
 **Total: ~68,000 lines of Nova + 106,045 lines of bootstrap assembly.**
@@ -741,7 +741,7 @@ That's it. No C compiler. No package manager. No downloads.
 ```bash
 make                # Build bin/nova
 make self-host      # Verify self-hosting (stage2.s == stage3.s)
-make test-all       # Run all 135 tests
+make test-all       # Run all 160 tests (154 pass, 6 skip)
 make run FILE=path  # Compile and run a .nova file
 make examples       # Build and run all 29 examples
 make agent          # Run the cognitive agent
@@ -944,7 +944,7 @@ To get started:
 1. Read the code -- start with `src/compiler/compiler.nova` (entry point, 547 lines) and work outward
 2. Make your changes
 3. Run `make self-host` to verify the compiler can still compile itself
-4. Run `make test-all` to check for regressions (129 of 135 tests should pass)
+4. Run `make test-all` to check for regressions (154 of 160 tests should pass, 6 skip)
 
 The cognitive architecture lives in `src/core/` (types, soul, system) and `src/mind/` (systems). The runtime is in `src/runtime/`. The agent systems (cognitive LLM, RAG) are in `src/agent/`. The 31 examples in `examples/` demonstrate most language features.
 

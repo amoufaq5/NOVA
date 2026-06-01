@@ -5,7 +5,7 @@
 ### N12–N29 Modules (18 modules)
 All fully implemented with:
 - Implementation files under `src/cognitive/`, `src/runtime/`, `src/tooling/`
-- Unit tests in `tests/` (all passing: 151/157, 0 failures, 6 skipped)
+- Unit tests in `tests/` (all passing: 154/160, 0 failures, 6 skipped)
 - Example programs in `examples/` (18 new `*_demo.nova` files)
 - Documentation in `docs/STDLIB.md`
 - Self-hosting verified (`stage2.s == stage3.s`)
@@ -79,12 +79,26 @@ padding ensures 16-byte stack alignment before `call`. Test:
 Note: `causal_library.nova` still uses the old 6-param workaround but new
 code can freely use 7+ parameters.
 
-### is_global hash table incompatibility
-The hash table optimization for `is_global` causes segfaults when compiling
-destructuring patterns (`let [a, b] = ...`). Root cause: values passed to
-`is_global` during `collect_locals` may not always be valid string pointers.
-The hash table works for `is_known_function` because function names are
-always string literals from the AST. `is_global` remains O(n) linear scan.
+### is_global hash table incompatibility — ROOT CAUSE FOUND (R9D)
+Earlier rounds reported that `is_global` could not be migrated to the hash
+table because destructuring patterns (`let [a, b] = ...`) made it
+segfault. The actual root cause was different: `parse_stmt` appends a
+source-line number as the last element of every statement, and the
+`AST_DESTRUCTURE` handlers in `collect_locals` / `gen_stmt` used
+`len(nd) > 3` to detect the optional rest-pattern name (`let [a, ...rest]
+= xs` stores the rest name at `nd[3]`). After line numbering, a non-rest
+node ALSO has `len(nd) == 4`, so the line int was being treated as a
+variable name — pushed into `cg_locals`, eventually fed to
+`cg_dwarf_sanitize` which calls `len()` on it and crashes.
+
+Fixed in `src/compiler/codegen.nova` by changing both checks to
+`len(nd) > 4` (rest node is length 5 after line numbering, non-rest is
+length 4). `is_global` could now safely move to the hash table — left
+linear for this round so the diff stays focused.
+
+Tests `test_destructure.nova`, `test_rest_pattern.nova`, and
+`test_ptr_threshold_fix.nova` (which also hit a separate bootstrap-
+runtime issue described below) now pass: 154p / 0f / 6s.
 
 ### Forbidden patterns
 - `char_at(s, i)` — broken, use `substr(s, i, 1)`
@@ -133,17 +147,34 @@ plus string/list smart-op back-compat).
 Verification:
 - `make self-host` — stage2.s == stage3.s, bit-identical.
 - `make test` — all runtime tests pass.
-- `make test-all` — 152/160 pass (the 2 pre-existing destructure
-  failures are unchanged; +1 net pass from the new regression test).
+- `make test-all` — 154/160 pass (after R9D fixed the destructure /
+  rest-pattern bug; the 6 skipped tests need special setup —
+  `test_import*`, `test_fileio`, `test_io_random`, `test_ffi*`).
 - `make bench-int-safe` — large-int correctness PASS; smart-op now
   ~2.3-2.8x slower than `int_*` due to the call-vs-inline cost, which
   is still acceptable and the int_* speedup is itself documented.
-- CrossEngin `make test` — 142/142 pass.
+- CrossEngin `make test` — 150/150 pass; `make integration` — pass.
 
 Proof-of-fix: `crossengin-demo/src/safety/bignum_2048.nova` `bn2048_add`
 and `bn2048_sub` were converted from `int_add` / `int_sub` calls to plain
 `+` / `-` operators; the bignum test suite continues to pass bit-
 identical results (modpow round-trips, Montgomery vs legacy parity).
+
+### bin/nova two-stage build — added (R9D)
+`test_ptr_threshold_fix.nova` lexes a 0x500000 literal. The lexer does
+`val * 16` (via `_nova_mul`), so the COMPILER's internal smart-op
+runtime is exercised. The `boot/nova_boot.s` bootstrap is older than
+R6A's PTR_THRESHOLD fix and appends its own pre-fix runtime (`cmp rdi,
+0x100000; jge .mul_ptr`) at the bottom of every binary it produces.
+Stage-1 (output of boot) thus has the OLD runtime baked in even though
+the SOURCE has the new helpers — and trying to lex a 5 MiB hex literal
+in stage-1 crashes inside `mul_ptr`.
+
+Fixed by extending the `bin/nova` Makefile rule to do a two-stage build
+(boot → stage1 → stage2, then `ld -o bin/nova /tmp/nova_stage2.o`).
+Stage-2 is compiled BY stage-1 from the same source, so its runtime is
+the new range-check version. Self-host (`make self-host`) still produces
+stage2.s == stage3.s bit-identical.
 
 ## Files Modified in Compiler (Phase 4)
 

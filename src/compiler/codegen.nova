@@ -767,7 +767,14 @@ fn collect_locals(nd) {
             }
             di = di + 1
         }
-        if len(nd) > 3 {
+        // Rest pattern (e.g. let [a, ...rest] = list) places the rest
+        // name at nd[3]. parse_stmt appends a source-line number as the
+        // last element of every statement, so the non-rest node has
+        // length 4 (tag, dnames, dvalue, line) and the rest node has
+        // length 5 (tag, dnames, dvalue, rest_name, line). Use > 4 to
+        // distinguish them, or we'd treat the line number as a variable
+        // name and segfault in DWARF emission (len() on an int).
+        if len(nd) > 4 {
             let drname = nd[3]
             if is_global(drname) == 0 {
                 push(cg_locals, drname)
@@ -3267,7 +3274,9 @@ fn gen_stmt(nd) {
             }
             di = di + 1
         }
-        if len(nd) > 3 {
+        // See collect_locals comment: rest node has length 5 (tag,
+        // dnames, dvalue, rest_name, line), non-rest has length 4.
+        if len(nd) > 4 {
             let drname = nd[3]
             out("    mov rdi, [rsp]")
             out("    call _nova_len")

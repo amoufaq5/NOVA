@@ -28,13 +28,25 @@ $(BOOT): boot/nova_boot.s
 	$(AS) -o boot/nova_boot.o boot/nova_boot.s
 	$(LD) -o $(BOOT) boot/nova_boot.o
 
-# Step 2: Use bootstrap to compile Nova compiler (stage 1)
+# Step 2: Use bootstrap to compile Nova compiler.
+#
+# We rebuild twice: once via the bootstrap (stage 1, OLD runtime
+# appended by boot/nova_boot.s) and a second time via that stage-1 binary
+# (stage 2, NEW runtime emitted by the current src/compiler/codegen.nova
+# gen_runtime). bin/nova IS the stage-2 binary so its INTERNAL smart-op
+# helpers (_nova_check_rdi/_rsi etc.) reflect the current source — this
+# matters for compiling tests that lex large hex literals like
+# test_ptr_threshold_fix.nova, which would crash inside the bootstrap's
+# old `cmp rdi, 0x100000; jge .mul_ptr` heuristic.
 bin/nova: $(BOOT) $(COMPILER_SRC)
 	@mkdir -p bin
 	cat $(COMPILER_SRC) > /tmp/nova_combined.nova
 	$(BOOT) /tmp/nova_combined.nova /tmp/nova_combined.nova -o /tmp/nova_stage1.s
 	$(AS) -o /tmp/nova_stage1.o /tmp/nova_stage1.s
-	$(LD) -o bin/nova /tmp/nova_stage1.o
+	$(LD) -o /tmp/nova_stage1 /tmp/nova_stage1.o
+	/tmp/nova_stage1 /tmp/nova_combined.nova -o /tmp/nova_stage2.s
+	$(AS) -o /tmp/nova_stage2.o /tmp/nova_stage2.s
+	$(LD) -o bin/nova /tmp/nova_stage2.o
 
 # Step 3: Verify self-hosting (stage2 output == stage3 output)
 self-host: bin/nova
