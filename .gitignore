@@ -31,6 +31,8 @@ bin/secure_random_macos
 bin/hello_secure_random.wasm
 bin/hello_winarm64.exe
 bin/secure_random_winarm64.exe
+bin/wasi_file_roundtrip.wat
+bin/wasi_file_roundtrip.wasm
 
 # release-dry-run.sh output (matches GH Actions release artifact layout)
 dist/

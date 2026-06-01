@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-gpu smoke-dwarf bench-simd bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf bench-simd bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux
 
 all: bin/nova
 
@@ -341,6 +341,36 @@ smoke-wasm-file: bin/nova examples/file_wasm.nova
 		[ -f /tmp/out.txt ] && cat /tmp/out.txt; \
 		exit 1; \
 	fi
+
+# WASI preopens / filesystem smoke test (R8A).
+#
+# Closes the WASM serverless deployment gap by validating that a NOVA
+# program can drive the full wasi_snapshot_preview1 filesystem surface
+# (path_open, fd_read, fd_write, fd_close, fd_seek, path_filestat_get
+# plus args_*/environ_*) end-to-end under wasmtime --dir=/tmp.
+#
+# Two layers under test:
+#   1. examples/file_wasm.nova  -- high-level read_file/write_file
+#      (covered by smoke-wasm-file above). Unchanged contract.
+#   2. examples/wasi_file_roundtrip.nova -- low-level wasi_open,
+#      wasi_read, wasi_write, wasi_seek, wasi_close, wasi_filestat
+#      (R8A new builtins). This target exercises that layer.
+#
+# Pipeline:
+#   * NOVA --target=wasm emits a .wat with 12 wasi_snapshot_preview1
+#     imports (fd_write, fd_read, fd_close, fd_seek, path_open,
+#     path_filestat_get, args_*, environ_*, random_get, proc_exit).
+#   * wat2wasm finalizes to .wasm.
+#   * wasmtime --dir=/tmp runs it with the host /tmp mounted as the
+#     sandbox's first preopen (dirfd 3). The program creates
+#     /tmp/wasi_rt.txt, writes "hello wasi", stats it, re-opens,
+#     reads it back, and verifies byte-for-byte.
+#   * wasm-objdump confirms every expected import is present.
+#
+# Skips cleanly with a clear message if wat2wasm or wasmtime is
+# missing. See tests/test_wasi_preopens.sh for the full script.
+smoke-wasi-preopens: bin/nova examples/wasi_file_roundtrip.nova
+	@bash tests/test_wasi_preopens.sh
 
 # Build the DWARF .debug_line smoke test.
 # Compiles examples/hello_dwarf.nova to bin/hello_dwarf (Linux ELF), then

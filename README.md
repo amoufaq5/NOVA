@@ -790,12 +790,22 @@ make smoke-winarm64
 
 # WebAssembly (WASI)
 make wasm FILE=examples/hello.nova
+
+# WASI preopens / filesystem (serverless / CDN-edge):
+make smoke-wasi-preopens
+# emits wasi_snapshot_preview1.{fd_read, fd_write, path_open,
+# path_filestat_get, fd_close, fd_seek, args_get, args_sizes_get,
+# environ_get, environ_sizes_get, random_get, proc_exit} imports;
+# runs wasmtime --dir=/tmp on the compiled module.
 ```
 
 ## Built-in Functions (270+)
 
 ### I/O
 `print` `println` `print_int` `read_line` `read_file` `write_file`
+
+### WASI low-level (serverless / CDN-edge)
+`wasi_open` `wasi_read` `wasi_write` `wasi_close` `wasi_seek` `wasi_filestat` `wasi_args_get` `wasi_environ_get`
 
 ### Strings
 `len` `concat` `substr` `char_at` `chr` `int_to_str` `str_to_int` `starts_with` `ends_with` `str_find` `split` `join` `hex`

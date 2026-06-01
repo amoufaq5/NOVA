@@ -1360,6 +1360,24 @@ fn is_builtin_fn(name) {
     if name == "load8" { return 1 }
     if name == "memcpy_raw" { return 1 }
     if name == "__intrinsic_dot_i32" { return 1 }
+    // WASI low-level builtins (R8A): expose raw WASI snapshot_preview1
+    // primitives so NOVA programs targeting serverless / CDN-edge can
+    // drive the runtime directly. On the WASM target they wrap the
+    // imported wasi_snapshot_preview1.{path_open,fd_read,fd_write,
+    // fd_close,fd_seek,path_filestat_get,args_*,environ_*}. On native
+    // x86-64 Linux they map to POSIX equivalents (open/read/write/
+    // close/lseek/stat/argv/environ) so round-trip tests can run
+    // without WASM. Stubbed (-> -1 / empty list) on the other native
+    // targets (Windows, macOS, ARM64, winARM64) until those grow real
+    // POSIX-compat shims.
+    if name == "wasi_open" { return 1 }
+    if name == "wasi_read" { return 1 }
+    if name == "wasi_write" { return 1 }
+    if name == "wasi_close" { return 1 }
+    if name == "wasi_seek" { return 1 }
+    if name == "wasi_filestat" { return 1 }
+    if name == "wasi_args_get" { return 1 }
+    if name == "wasi_environ_get" { return 1 }
     return 0
 }
 
@@ -3832,6 +3850,41 @@ fn arm_gen_call(nd) {
         arm_out("    svc #0")
         return 0
     }
+    // R8A: wasi_* low-level builtins. On ARM64 Linux we stub these to
+    // -1 / empty-list -- the primary contract is the WASM target, and
+    // ARM64 has its own native POSIX (read/write/etc.) once needed.
+    if name == "wasi_open" {
+        arm_out("    mov x0, #-1")
+        return 0
+    }
+    if name == "wasi_read" {
+        arm_out("    mov x0, #-1")
+        return 0
+    }
+    if name == "wasi_write" {
+        arm_out("    mov x0, #-1")
+        return 0
+    }
+    if name == "wasi_close" {
+        arm_out("    mov x0, #-1")
+        return 0
+    }
+    if name == "wasi_seek" {
+        arm_out("    mov x0, #-1")
+        return 0
+    }
+    if name == "wasi_filestat" {
+        arm_out("    mov x0, #0")
+        return 0
+    }
+    if name == "wasi_args_get" {
+        arm_out("    bl _nova_arm_stub_list_new")
+        return 0
+    }
+    if name == "wasi_environ_get" {
+        arm_out("    bl _nova_arm_stub_list_new")
+        return 0
+    }
 
     // Generic user-function call.
     let argc = len(args)
@@ -4577,6 +4630,40 @@ fn warm_gen_call(nd) {
     }
     if name == "write_file" {
         warm_out("    bl _nova_warm_stub_write_file")
+        return 0
+    }
+    // R8A: low-level WASI primitives -- stubbed on winARM64. Returns
+    // -1 / empty list. The WASM target is the real surface.
+    if name == "wasi_open" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    if name == "wasi_read" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    if name == "wasi_write" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    if name == "wasi_close" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    if name == "wasi_seek" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    if name == "wasi_filestat" {
+        warm_out("    mov x0, #0")
+        return 0
+    }
+    if name == "wasi_args_get" {
+        warm_out("    bl _nova_warm_stub_list_new")
+        return 0
+    }
+    if name == "wasi_environ_get" {
+        warm_out("    bl _nova_warm_stub_list_new")
         return 0
     }
 
@@ -7834,6 +7921,485 @@ fn wasm_gen_rt_extra() {
     wasm_indent = wasm_indent - 1
     wi(")")
     wi("")
+
+    // ============================================================
+    // Low-level WASI builtins (R8A: serverless preopens surface)
+    // ============================================================
+    //
+    // These thin wrappers expose wasi_snapshot_preview1 primitives to
+    // NOVA programs so a serverless / CDN-edge deployment can read,
+    // write, seek, stat and inspect argv/envp directly without going
+    // through read_file/write_file (which are convenience builtins
+    // that allocate a 512KiB buffer and assume small files).
+    //
+    // Filesystem ops route through dirfd=3 — the first preopened
+    // directory in WASI's fd table (stdin=0, stdout=1, stderr=2,
+    // preopen[0]=3). For wasmtime/wasmer/node-WASI hosts:
+    //
+    //   wasmtime --dir=/tmp my.wasm    -> /tmp is dirfd 3
+    //   wasmtime --mapdir=/in::/host/x -> /in is dirfd 3 mapped to /host/x
+    //
+    // _nova_wasi_path_offset (above) strips the leading dir prefix
+    // ("/tmp/" -> "") so paths sent to path_open are relative to the
+    // preopen root, matching the WASI semantic that you cannot escape
+    // a preopen with absolute paths.
+    //
+    // The scratch layout (offsets 16..63 in linear memory) is shared
+    // with read_file/write_file; the layout comment above is
+    // authoritative. Where wasi_filestat needs a 64-byte filestat
+    // buffer, it reserves offsets 64..127 (also unused by print/file
+    // I/O).
+
+    // wasi_open(path: str, flags: int) -> fd | -1
+    //
+    // flags is a bitmask layered over WASI's oflags:
+    //   bit 0 -> O_CREAT      (0x01)
+    //   bit 1 -> O_DIRECTORY  (0x02)
+    //   bit 2 -> O_EXCL       (0x04)
+    //   bit 3 -> O_TRUNC      (0x08)
+    // and on the rights side we always pass ALL_RIGHTS so the returned
+    // fd can read, write, seek, etc. -- the host enforces the actual
+    // capability set against the preopen's rights.
+    wi("(func $wasi_open (param $path i64) (param $flags i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $p i32)")
+    wi("(local $rel i32)")
+    wi("(local $plen i32)")
+    wi("(local $rc i32)")
+    wi("local.get $path")
+    wi("i32.wrap_i64")
+    wi("local.set $p")
+    wi("local.get $p")
+    wi("call $_nova_wasi_path_offset")
+    wi("local.set $rel")
+    wi("local.get $p")
+    wi("local.get $rel")
+    wi("i32.add")
+    wi("local.set $rel")
+    wi("local.get $rel")
+    wi("call $rt_strlen")
+    wi("local.set $plen")
+    wi("i32.const 16")
+    wi("i32.const 0")
+    wi("i32.store")
+    // path_open(dirfd=3, dirflags=0, path_ptr, path_len, oflags=$flags,
+    //           rights_base=ALL_RIGHTS, rights_inherit=ALL_RIGHTS,
+    //           fdflags=0, fd_out=16).
+    wi("i32.const 3")
+    wi("i32.const 0")
+    wi("local.get $rel")
+    wi("local.get $plen")
+    wi("local.get $flags")
+    wi("i32.wrap_i64")
+    wi("i64.const 81788927")
+    wi("i64.const 81788927")
+    wi("i32.const 0")
+    wi("i32.const 16")
+    wi("call $path_open")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if (result i64)")
+    wi("  i64.const -1")
+    wi("else")
+    wi("  i32.const 16")
+    wi("  i32.load")
+    wi("  i64.extend_i32_u")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // wasi_read(fd: int, buf: int, len: int) -> bytes_read | -1
+    //
+    // Builds a 1-iovec at scratch[32..39] pointing to (buf, len), calls
+    // fd_read, and returns the nread written by WASI into scratch[48].
+    wi("(func $wasi_read (param $fd i64) (param $buf i64) (param $len i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $rc i32)")
+    wi("i32.const 32")
+    wi("local.get $buf")
+    wi("i32.wrap_i64")
+    wi("i32.store")
+    wi("i32.const 36")
+    wi("local.get $len")
+    wi("i32.wrap_i64")
+    wi("i32.store")
+    wi("i32.const 48")
+    wi("i32.const 0")
+    wi("i32.store")
+    wi("local.get $fd")
+    wi("i32.wrap_i64")
+    wi("i32.const 32")
+    wi("i32.const 1")
+    wi("i32.const 48")
+    wi("call $fd_read")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if (result i64)")
+    wi("  i64.const -1")
+    wi("else")
+    wi("  i32.const 48")
+    wi("  i32.load")
+    wi("  i64.extend_i32_u")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // wasi_write(fd: int, buf: int, len: int) -> bytes_written | -1
+    wi("(func $wasi_write (param $fd i64) (param $buf i64) (param $len i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $rc i32)")
+    wi("i32.const 32")
+    wi("local.get $buf")
+    wi("i32.wrap_i64")
+    wi("i32.store")
+    wi("i32.const 36")
+    wi("local.get $len")
+    wi("i32.wrap_i64")
+    wi("i32.store")
+    wi("i32.const 48")
+    wi("i32.const 0")
+    wi("i32.store")
+    wi("local.get $fd")
+    wi("i32.wrap_i64")
+    wi("i32.const 32")
+    wi("i32.const 1")
+    wi("i32.const 48")
+    wi("call $fd_write")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if (result i64)")
+    wi("  i64.const -1")
+    wi("else")
+    wi("  i32.const 48")
+    wi("  i32.load")
+    wi("  i64.extend_i32_u")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // wasi_close(fd: int) -> 0 | -1
+    wi("(func $wasi_close (param $fd i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $rc i32)")
+    wi("local.get $fd")
+    wi("i32.wrap_i64")
+    wi("call $fd_close")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.eq")
+    wi("if (result i64)")
+    wi("  i64.const 0")
+    wi("else")
+    wi("  i64.const -1")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // wasi_seek(fd: int, offset: int, whence: int) -> new_offset | -1
+    //
+    // whence: 0=SET, 1=CUR, 2=END (WASI matches POSIX). new_offset
+    // is written by WASI into scratch[48..55] as i64.
+    wi("(func $wasi_seek (param $fd i64) (param $off i64) (param $whence i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $rc i32)")
+    wi("i32.const 48")
+    wi("i64.const 0")
+    wi("i64.store")
+    wi("local.get $fd")
+    wi("i32.wrap_i64")
+    wi("local.get $off")
+    wi("local.get $whence")
+    wi("i32.wrap_i64")
+    wi("i32.const 48")
+    wi("call $fd_seek")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if (result i64)")
+    wi("  i64.const -1")
+    wi("else")
+    wi("  i32.const 48")
+    wi("  i64.load")
+    wi("end")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // wasi_filestat(path: str) -> list [size, mtime_ns, kind] | 0
+    //
+    // path_filestat_get writes a 64-byte filestat struct to its buf:
+    //   off  0  device   u64
+    //   off  8  inode    u64
+    //   off 16  filetype u8       (kind: 3=regular, 2=char, 4=directory, ...)
+    //   off 24  nlink    u64
+    //   off 32  size     u64
+    //   off 40  atime    u64 (ns)
+    //   off 48  mtime    u64 (ns)
+    //   off 56  ctime    u64 (ns)
+    // We park the struct at scratch[64..127] (outside the iovec area
+    // used by wasi_read/write/seek) and surface [size, mtime, kind]
+    // as a NOVA list -- the three fields a serverless caller actually
+    // cares about. Returns 0 on lookup failure (errno != 0).
+    wi("(func $wasi_filestat (param $path i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $p i32)")
+    wi("(local $rel i32)")
+    wi("(local $plen i32)")
+    wi("(local $rc i32)")
+    wi("(local $list i64)")
+    wi("local.get $path")
+    wi("i32.wrap_i64")
+    wi("local.set $p")
+    wi("local.get $p")
+    wi("call $_nova_wasi_path_offset")
+    wi("local.set $rel")
+    wi("local.get $p")
+    wi("local.get $rel")
+    wi("i32.add")
+    wi("local.set $rel")
+    wi("local.get $rel")
+    wi("call $rt_strlen")
+    wi("local.set $plen")
+    // path_filestat_get(fd=3, flags=1 (FOLLOW_SYMLINKS), path_ptr, path_len, buf_out=64)
+    wi("i32.const 3")
+    wi("i32.const 1")
+    wi("local.get $rel")
+    wi("local.get $plen")
+    wi("i32.const 64")
+    wi("call $path_filestat_get")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if")
+    wi("  i64.const 0")
+    wi("  return")
+    wi("end")
+    // Allocate a NOVA list [size, mtime_ns, kind] via list_new + push.
+    wi("call $list_new")
+    wi("local.set $list")
+    wi("local.get $list")
+    wi("i32.const 96")
+    wi("i64.load")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $list")
+    wi("i32.const 112")
+    wi("i64.load")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $list")
+    wi("i32.const 80")
+    wi("i32.load8_u")
+    wi("i64.extend_i32_u")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $list")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // wasi_args_get() -> list of argv strings
+    //
+    // Standard WASI sequence:
+    //   args_sizes_get(&argc_out, &buf_size_out)
+    //   allocate buf_size bytes for the concatenated argv data
+    //   allocate argc * 4 bytes for the argv pointer array
+    //   args_get(argv_ptr_table, argv_buf)
+    //   walk argc entries; each is a (NUL-terminated) pointer into argv_buf.
+    //
+    // Scratch: argc at [128], buf_size at [132].
+    wi("(func $wasi_args_get (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $argc i32)")
+    wi("(local $bufsz i32)")
+    wi("(local $argv_table i32)")
+    wi("(local $argv_buf i32)")
+    wi("(local $list i64)")
+    wi("(local $i i32)")
+    wi("(local $rc i32)")
+    wi("i32.const 128")
+    wi("i32.const 132")
+    wi("call $args_sizes_get")
+    wi("local.set $rc")
+    wi("call $list_new")
+    wi("local.set $list")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if")
+    wi("  local.get $list")
+    wi("  return")
+    wi("end")
+    wi("i32.const 128")
+    wi("i32.load")
+    wi("local.set $argc")
+    wi("i32.const 132")
+    wi("i32.load")
+    wi("local.set $bufsz")
+    // WASI args_get writes 4-byte i32 pointers into argv_table, so the
+    // table must be 4-byte aligned. The bump allocator returns raw
+    // heap_ptr; we round it up to the next multiple of 4 before
+    // allocating to satisfy wasmtime's strict align check.
+    wi("global.get $heap_ptr")
+    wi("i64.const 3")
+    wi("i64.add")
+    wi("i64.const -4")
+    wi("i64.and")
+    wi("global.set $heap_ptr")
+    wi("local.get $argc")
+    wi("i32.const 4")
+    wi("i32.mul")
+    wi("i64.extend_i32_u")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $argv_table")
+    wi("local.get $bufsz")
+    wi("i64.extend_i32_u")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $argv_buf")
+    wi("local.get $argv_table")
+    wi("local.get $argv_buf")
+    wi("call $args_get")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if")
+    wi("  local.get $list")
+    wi("  return")
+    wi("end")
+    wi("block $done")
+    wi("loop $walk")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $argc")
+    wi("i32.ge_u")
+    wi("br_if $done")
+    wi("local.get $list")
+    wi("local.get $argv_table")
+    wi("local.get $i")
+    wi("i32.const 4")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("i32.load")
+    wi("i64.extend_i32_u")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $walk")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("local.get $list")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // wasi_environ_get() -> list of "KEY=VALUE" strings (same layout)
+    wi("(func $wasi_environ_get (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $envc i32)")
+    wi("(local $bufsz i32)")
+    wi("(local $env_table i32)")
+    wi("(local $env_buf i32)")
+    wi("(local $list i64)")
+    wi("(local $i i32)")
+    wi("(local $rc i32)")
+    wi("i32.const 128")
+    wi("i32.const 132")
+    wi("call $environ_sizes_get")
+    wi("local.set $rc")
+    wi("call $list_new")
+    wi("local.set $list")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if")
+    wi("  local.get $list")
+    wi("  return")
+    wi("end")
+    wi("i32.const 128")
+    wi("i32.load")
+    wi("local.set $envc")
+    wi("i32.const 132")
+    wi("i32.load")
+    wi("local.set $bufsz")
+    // 4-byte alignment for the pointer table -- see wasi_args_get above.
+    wi("global.get $heap_ptr")
+    wi("i64.const 3")
+    wi("i64.add")
+    wi("i64.const -4")
+    wi("i64.and")
+    wi("global.set $heap_ptr")
+    wi("local.get $envc")
+    wi("i32.const 4")
+    wi("i32.mul")
+    wi("i64.extend_i32_u")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $env_table")
+    wi("local.get $bufsz")
+    wi("i64.extend_i32_u")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $env_buf")
+    wi("local.get $env_table")
+    wi("local.get $env_buf")
+    wi("call $environ_get")
+    wi("local.set $rc")
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if")
+    wi("  local.get $list")
+    wi("  return")
+    wi("end")
+    wi("block $done")
+    wi("loop $walk")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $envc")
+    wi("i32.ge_u")
+    wi("br_if $done")
+    wi("local.get $list")
+    wi("local.get $env_table")
+    wi("local.get $i")
+    wi("i32.const 4")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("i32.load")
+    wi("i64.extend_i32_u")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $walk")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("local.get $list")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
 }
 
 fn wasm_gen_program(program) {
@@ -7870,17 +8436,42 @@ fn wasm_gen_program(program) {
 
     let Q = chr(34)
 
-    // Module header
+    // Module header.
+    //
+    // WASI snapshot_preview1 import surface (R8A: serverless preopens).
+    // The full set lets a NOVA program touch the host filesystem under
+    // wasmtime/wasmer/Cloudflare-Workers-style runtimes that grant the
+    // sandbox `--dir=` or `--mapdir=` preopens. Earlier rounds wired up
+    // {fd_write, fd_read, fd_close, fd_seek, path_open, random_get,
+    //  proc_exit}; R8A adds {path_filestat_get, args_get, args_sizes_get,
+    // environ_get, environ_sizes_get} so file metadata + argv + envp
+    // become callable from NOVA. All imports are always emitted (vs.
+    // conditional) -- WASI hosts don't penalise unused imports, and a
+    // fixed import surface keeps the module header bit-stable so the
+    // self-host diff stays clean.
     out("(module")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_write" + Q + " (func $fd_write (param i32 i32 i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_read" + Q + " (func $fd_read (param i32 i32 i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_close" + Q + " (func $fd_close (param i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "fd_seek" + Q + " (func $fd_seek (param i32 i64 i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "path_open" + Q + " (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "path_filestat_get" + Q + " (func $path_filestat_get (param i32 i32 i32 i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "args_sizes_get" + Q + " (func $args_sizes_get (param i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "args_get" + Q + " (func $args_get (param i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "environ_sizes_get" + Q + " (func $environ_sizes_get (param i32 i32) (result i32)))")
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "environ_get" + Q + " (func $environ_get (param i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "random_get" + Q + " (func $random_get (param i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "proc_exit" + Q + " (func $proc_exit (param i32)))")
     out("  (memory (export " + Q + "memory" + Q + ") 256)")
-    out("  (global $heap_ptr (mut i64) (i64.const 65536))")
+    // Heap base lives above 1 MiB so heap-allocated objects pass the
+    // pointer/int classifier in rt_eq / len / type_of (which use the
+    // < 1048576 magnitude heuristic inherited from the native target).
+    // R8A: required for wasi_args_get / wasi_environ_get to return a
+    // working NOVA list. String literals at 8192..1MB are still
+    // misclassified by len() / rt_eq() -- a separate WASM rt limitation
+    // tracked in WASM_AUDIT.md; existing wasm tests work around it by
+    // not calling len() on strings.
+    out("  (global $heap_ptr (mut i64) (i64.const 1114112))")
     out("  (global $g__wasm_list_tmp (mut i64) (i64.const 0))")
     i = 0
     while i < cg_global_count {
@@ -11117,6 +11708,286 @@ fn gen_runtime() {
         }
     }
 
+    // ====================================================================
+    // Low-level WASI builtins on native targets (R8A)
+    // ====================================================================
+    //
+    // The wasm target wires these to wasi_snapshot_preview1.{path_open,
+    // fd_read, fd_write, fd_close, fd_seek, path_filestat_get,
+    // args_*, environ_*}. On native Linux x86-64 (cg_target == 0) we
+    // translate to the POSIX-equivalent syscalls (open, read, write,
+    // close, lseek, stat) so the same NOVA source compiles and tests
+    // both directions. On non-Linux native targets (macOS, Windows)
+    // we emit "-1 / empty-list" stubs so the labels resolve and the
+    // build doesn't break; the primary contract is the WASM path.
+    //
+    // WASI -> POSIX flag mapping for wasi_open:
+    //   WASI oflag bit 0 (CREAT, 0x01) -> Linux O_CREAT  (0x40)
+    //   WASI oflag bit 3 (TRUNC, 0x08) -> Linux O_TRUNC  (0x200)
+    // We always open O_RDWR (=2) so the returned fd supports both
+    // wasi_read and wasi_write, matching the ALL_RIGHTS we hand to
+    // path_open on the WASM side. Mode is 0644 (=420) for CREAT.
+    if cg_target == 0 {
+        // --- wasi_open(path, flags) -> fd | -1 ---
+        out("")
+        out_label("_nova_wasi_open")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov rdx, 420")              // mode 0644 (only used when O_CREAT)
+        out("    mov rax, 2")                // base flags: O_RDWR
+        out("    mov rcx, rsi")              // wasi flags
+        out("    test rcx, 1")               // bit 0 == WASI CREAT
+        out("    jz .wo_no_creat")
+        out("    or rax, 64")                // | O_CREAT
+        out(".wo_no_creat:")
+        out("    test rcx, 8")               // bit 3 == WASI TRUNC
+        out("    jz .wo_no_trunc")
+        out("    or rax, 512")               // | O_TRUNC
+        out(".wo_no_trunc:")
+        out("    mov rsi, rax")              // syscall arg2 = flags
+        // rdi already holds path
+        emit_syscall(2)                       // open(path, flags, mode)
+        out("    test rax, rax")
+        out("    jns .wo_done")
+        out("    mov rax, -1")
+        out(".wo_done:")
+        out("    pop rbp")
+        out("    ret")
+
+        // --- wasi_read(fd, buf, len) -> bytes_read | -1 ---
+        out("")
+        out_label("_nova_wasi_read")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        // rdi=fd, rsi=buf, rdx=len (passed by NOVA argv convention)
+        emit_syscall(0)                       // read
+        out("    test rax, rax")
+        out("    jns .wr_done")
+        out("    mov rax, -1")
+        out(".wr_done:")
+        out("    pop rbp")
+        out("    ret")
+
+        // --- wasi_write(fd, buf, len) -> bytes_written | -1 ---
+        out("")
+        out_label("_nova_wasi_write")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        emit_syscall(1)                       // write
+        out("    test rax, rax")
+        out("    jns .ww_done")
+        out("    mov rax, -1")
+        out(".ww_done:")
+        out("    pop rbp")
+        out("    ret")
+
+        // --- wasi_close(fd) -> 0 | -1 ---
+        out("")
+        out_label("_nova_wasi_close")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        emit_syscall(3)                       // close
+        out("    test rax, rax")
+        out("    jns .wc_done")
+        out("    mov rax, -1")
+        out(".wc_done:")
+        out("    pop rbp")
+        out("    ret")
+
+        // --- wasi_seek(fd, off, whence) -> new_offset | -1 ---
+        out("")
+        out_label("_nova_wasi_seek")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        // rdi=fd, rsi=off, rdx=whence
+        out("    mov rax, 8")                 // lseek (Linux only here)
+        out("    syscall")
+        out("    test rax, rax")
+        out("    jns .ws_done")
+        out("    mov rax, -1")
+        out(".ws_done:")
+        out("    pop rbp")
+        out("    ret")
+
+        // --- wasi_filestat(path) -> list [size, mtime, kind] | 0 ---
+        //
+        // Linux x86-64 stat(2) buffer layout (144 bytes):
+        //   off 48  st_size  (i64)
+        //   off 88  st_mtime (i64 seconds since epoch)
+        //   off 24  st_mode  (i32) -- masked with S_IFMT (0xF000) to pick kind
+        //
+        // Kind mapping (we report the WASI filetype codes so callers see
+        // the same value across native and WASM):
+        //   S_IFREG (0x8000)  -> 4 (regular_file)
+        //   S_IFDIR (0x4000)  -> 3 (directory)
+        //   S_IFLNK (0xA000)  -> 7 (symbolic_link)
+        //   S_IFCHR (0x2000)  -> 2 (character_device)
+        //   default           -> 0 (unknown)
+        out("")
+        out_label("_nova_wasi_filestat")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    push rbx")
+        out("    push r12")
+        out("    push r13")
+        out("    push r14")
+        out("    sub rsp, 160")               // 144-byte stat buf, rounded up
+        out("    mov rsi, rsp")
+        // rdi already holds path
+        out("    mov rax, 4")                 // Linux stat
+        out("    syscall")
+        out("    test rax, rax")
+        out("    jns .wfs_ok")
+        out("    add rsp, 160")
+        out("    xor eax, eax")
+        out("    pop r14")
+        out("    pop r13")
+        out("    pop r12")
+        out("    pop rbx")
+        out("    pop rbp")
+        out("    ret")
+        out(".wfs_ok:")
+        // r12 = size, r13 = mtime (sec), r14 = kind
+        out("    mov r12, [rsp + 48]")        // st_size
+        out("    mov r13, [rsp + 88]")        // st_mtime
+        out("    mov eax, dword ptr [rsp + 24]")  // st_mode
+        out("    and eax, 61440")             // 0xF000
+        out("    mov r14d, 0")
+        out("    cmp eax, 32768")             // S_IFREG 0x8000
+        out("    jne .wfs_not_reg")
+        out("    mov r14d, 4")
+        out("    jmp .wfs_kind_done")
+        out(".wfs_not_reg:")
+        out("    cmp eax, 16384")             // S_IFDIR 0x4000
+        out("    jne .wfs_not_dir")
+        out("    mov r14d, 3")
+        out("    jmp .wfs_kind_done")
+        out(".wfs_not_dir:")
+        out("    cmp eax, 40960")             // S_IFLNK 0xA000
+        out("    jne .wfs_not_lnk")
+        out("    mov r14d, 7")
+        out("    jmp .wfs_kind_done")
+        out(".wfs_not_lnk:")
+        out("    cmp eax, 8192")              // S_IFCHR 0x2000
+        out("    jne .wfs_kind_done")
+        out("    mov r14d, 2")
+        out(".wfs_kind_done:")
+        out("    add rsp, 160")
+        // Build a NOVA list and push three entries.
+        out("    call _nova_list_new")
+        out("    mov rbx, rax")
+        out("    mov rdi, rbx")
+        out("    mov rsi, r12")
+        out("    call _nova_push")
+        out("    mov rdi, rbx")
+        out("    mov rsi, r13")
+        out("    call _nova_push")
+        out("    mov rdi, rbx")
+        out("    mov rsi, r14")
+        out("    call _nova_push")
+        out("    mov rax, rbx")
+        out("    pop r14")
+        out("    pop r13")
+        out("    pop r12")
+        out("    pop rbx")
+        out("    pop rbp")
+        out("    ret")
+
+        // --- wasi_args_get() -> list of argv strings ---
+        //
+        // On native we surface NOVA's already-parsed argv via the existing
+        // _nova___arg(idx) machinery, walking from idx=0 until __arg returns
+        // 0 (NULL ptr). This keeps the native + WASM call surface identical
+        // so a NOVA program written against wasi_args_get works in both.
+        out("")
+        out_label("_nova_wasi_args_get")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    push rbx")
+        out("    push r12")
+        out("    sub rsp, 8")                 // align
+        out("    call _nova_list_new")
+        out("    mov rbx, rax")
+        out("    xor r12, r12")
+        out(".wag_loop:")
+        out("    mov rdi, r12")
+        out("    call _nova___arg")
+        out("    test rax, rax")
+        out("    jz .wag_done")
+        out("    mov rdi, rbx")
+        out("    mov rsi, rax")
+        out("    call _nova_push")
+        out("    inc r12")
+        out("    jmp .wag_loop")
+        out(".wag_done:")
+        out("    mov rax, rbx")
+        out("    add rsp, 8")
+        out("    pop r12")
+        out("    pop rbx")
+        out("    pop rbp")
+        out("    ret")
+
+        // --- wasi_environ_get() -> list of "KEY=VALUE" strings ---
+        //
+        // The WASM target serves the real envp via environ_get +
+        // environ_sizes_get. On native we surface an empty list -- the
+        // mapping to libc environ would require pulling envp from the
+        // System V startup frame, which lives outside NOVA's _start
+        // boilerplate. NOVA's existing `getenv` builtin already covers
+        // the per-key lookup case for native consumers.
+        out("")
+        out_label("_nova_wasi_environ_get")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    call _nova_list_new")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        // Non-Linux native targets (macOS, Windows) -- emit minimal
+        // stubs. wasi_open/read/write/seek/close/filestat all return
+        // -1 (failure); args_get/environ_get return empty NOVA list.
+        // Real impls for those targets are deferred (the wasm path
+        // is where the WASI surface actually pays off).
+        out("")
+        out_label("_nova_wasi_open")
+        out("    mov rax, -1")
+        out("    ret")
+        out("")
+        out_label("_nova_wasi_read")
+        out("    mov rax, -1")
+        out("    ret")
+        out("")
+        out_label("_nova_wasi_write")
+        out("    mov rax, -1")
+        out("    ret")
+        out("")
+        out_label("_nova_wasi_close")
+        out("    mov rax, -1")
+        out("    ret")
+        out("")
+        out_label("_nova_wasi_seek")
+        out("    mov rax, -1")
+        out("    ret")
+        out("")
+        out_label("_nova_wasi_filestat")
+        out("    xor eax, eax")
+        out("    ret")
+        out("")
+        out_label("_nova_wasi_args_get")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    call _nova_list_new")
+        out("    pop rbp")
+        out("    ret")
+        out("")
+        out_label("_nova_wasi_environ_get")
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    call _nova_list_new")
+        out("    pop rbp")
+        out("    ret")
+    }
+
     // --- map_new() -> map pointer ---
     // Map layout: [magic=-2, count, capacity, entries_ptr] (32 bytes)
     // Entry layout: [key, value, occupied] = 24 bytes per entry
@@ -13286,6 +14157,27 @@ fn gen_runtime() {
     out("    jmp _nova_random_seed")
     out_label("secure_random")
     out("    jmp _nova_secure_random")
+    // R8A: low-level WASI primitives. Native (Linux x86-64) maps to
+    // POSIX syscalls; WASM target wraps wasi_snapshot_preview1 imports.
+    // Non-Linux native targets reach these labels too -- the runtime
+    // emitters above only emit real bodies for Linux/macOS (cg_target
+    // 0 / 1); on Windows the labels become tiny stubs that return -1.
+    out_label("wasi_open")
+    out("    jmp _nova_wasi_open")
+    out_label("wasi_read")
+    out("    jmp _nova_wasi_read")
+    out_label("wasi_write")
+    out("    jmp _nova_wasi_write")
+    out_label("wasi_close")
+    out("    jmp _nova_wasi_close")
+    out_label("wasi_seek")
+    out("    jmp _nova_wasi_seek")
+    out_label("wasi_filestat")
+    out("    jmp _nova_wasi_filestat")
+    out_label("wasi_args_get")
+    out("    jmp _nova_wasi_args_get")
+    out_label("wasi_environ_get")
+    out("    jmp _nova_wasi_environ_get")
     out_label("map_new")
     out("    jmp _nova_map_new")
     out_label("map_set")

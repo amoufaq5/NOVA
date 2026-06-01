@@ -357,3 +357,77 @@ Verification:
 - Indexed 3665 symbols across NOVA's `src/` tree (2097 top-level
   `fn` + 1182 top-level `let` + 386 `out_label("_nova_*")` runtime
   labels).
+
+## R8A — WASI preopens / filesystem (serverless deployment surface)
+
+Closes the WASM serverless deployment gap. Pre-R8A the WASM target
+shipped `fd_write`/`fd_read`/`fd_close`/`fd_seek`/`path_open`/
+`random_get`/`proc_exit` imports and `read_file`/`write_file`
+convenience builtins. R8A extends the surface so a NOVA program can
+drive WASI primitives directly -- the building blocks for streaming
+I/O on Cloudflare Workers, wasmtime serve, Fastly Compute@Edge, etc.
+
+Changes (`src/compiler/codegen.nova`):
+
+- WASM module header now emits 12 `wasi_snapshot_preview1` imports:
+  `fd_write`, `fd_read`, `fd_close`, `fd_seek`, `path_open`,
+  `path_filestat_get` (new), `args_sizes_get` (new), `args_get`
+  (new), `environ_sizes_get` (new), `environ_get` (new), `random_get`,
+  `proc_exit`. All imports are always emitted (vs. on-demand) so the
+  module header stays bit-stable for self-host parity.
+- Eight new NOVA-callable builtins registered in `is_builtin_fn`:
+  `wasi_open(path, flags) -> fd | -1`
+  `wasi_read(fd, buf, len) -> bytes_read | -1`
+  `wasi_write(fd, buf, len) -> bytes_written | -1`
+  `wasi_close(fd) -> 0 | -1`
+  `wasi_seek(fd, offset, whence) -> new_offset | -1`
+  `wasi_filestat(path) -> [size, mtime_ns, kind] | 0`
+  `wasi_args_get() -> list of argv strings`
+  `wasi_environ_get() -> list of "KEY=VALUE" strings`
+- WASM runtime (`wasm_gen_rt_io`) adds bodies for the eight builtins.
+  They wrap the new imports against the existing scratch layout
+  (offsets 16..63 for path_open/fd_read/fd_write/fd_seek; offsets
+  64..127 for the 64-byte path_filestat_get result; offsets 128..135
+  for args/environ size out-pointers). dirfd=3 routes through the
+  first preopen — `wasmtime --dir=/tmp` or `wasmer run --mapdir`.
+- Linux x86-64 native runtime adds POSIX-equivalent bodies for the
+  same builtins so the WASI surface compiles and runs natively too:
+  `_nova_wasi_open` -> open(2) with WASI->POSIX flag translation,
+  `_nova_wasi_read` -> read(2), `_nova_wasi_write` -> write(2),
+  `_nova_wasi_close` -> close(2), `_nova_wasi_seek` -> lseek(2),
+  `_nova_wasi_filestat` -> stat(2) with WASI filetype mapping,
+  `_nova_wasi_args_get` walks `_nova___arg`, `_nova_wasi_environ_get`
+  returns empty list (the WASM path serves the real envp).
+- Non-Linux native targets (macOS, Windows, ARM64, winARM64) emit
+  stubs that return -1 / empty list. The primary contract is the
+  WASM path; native paths exist so the same source compiles
+  everywhere.
+
+Changes (`Makefile`):
+
+- New `smoke-wasi-preopens` target. Compiles
+  `examples/wasi_file_roundtrip.nova` to WASM, runs under wasmtime
+  with `--dir=/tmp`, verifies the 12 wasi_snapshot_preview1 imports
+  are present via `wasm-objdump`, and checks the round-tripped file
+  contents. Skips cleanly if wat2wasm or wasmtime is missing.
+
+New files:
+
+- `examples/wasi_file_roundtrip.nova` — eight-step program exercising
+  every R8A builtin (open(CREAT|TRUNC) -> write -> close -> filestat
+  size+kind -> reopen -> read -> close -> bracketed byte verify).
+- `tests/test_wasi_preopens.sh` — driver script for the smoke target.
+
+Verification:
+- `make smoke-wasi-preopens` -> PASS under wasmtime 45.0.0.
+- `wasm-objdump -x bin/wasi_file_roundtrip.wasm | grep wasi_` lists
+  all 12 wasi_snapshot_preview1 imports (sig 0..6).
+- `make hello-wasm`, `make smoke-wasm`, `make smoke-wasm-file` —
+  still PASS; existing behaviour preserved.
+- `make test` — runtime tests PASS unchanged.
+- `make self-host` — stage2.s == stage3.s bit-identical.
+- `make cross-windows`, `make cross-macos`, `make cross-winarm64` —
+  all PASS (non-Linux wasi_* stubs are size-stable -1 / empty list).
+- Native Linux x86-64 also runs `examples/wasi_file_roundtrip.nova`
+  via the syscall-backed `_nova_wasi_*` runtime; the same source
+  cross-compiles + executes correctly on both targets.
