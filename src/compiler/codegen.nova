@@ -55,6 +55,14 @@ let cg_float_vars = 0
 let cg_float_var_count = 0
 let cg_fns_ht = 0
 let cg_fn_modules = 0
+// DWARF .debug_info per-function metadata. Each entry in cg_dbg_fns is a
+// list shaped [name, start_label, end_label, src_line, locals_names,
+// locals_offsets, locals_param_flags]. Filled in by gen_function; consumed
+// after all functions are emitted by cg_emit_debug_info_section. Only
+// populated on the Linux ELF target with cg_debug == 1.
+let cg_dbg_fns = 0
+let cg_dbg_count = 0
+let cg_dbg_fn_seq = 0
 let CG_HT_SIZE = 8
 
 fn _cg_ht_new() {
@@ -152,6 +160,9 @@ fn cg_init() {
     cg_float_var_count = 0
     cg_fns_ht = _cg_ht_new()
     cg_fn_modules = _cg_ht_new()
+    cg_dbg_fns = list_new()
+    cg_dbg_count = 0
+    cg_dbg_fn_seq = 0
 }
 
 fn out(s) {
@@ -213,6 +224,295 @@ fn cg_emit_loc(nd) {
             }
         }
     }
+}
+
+// DWARF .debug_info / .debug_abbrev emission.
+//
+// We layer real DIE entries on top of the .debug_line MVP so that gdb can
+// answer `info locals`, `p localvar`, and the DAP adapter's `variables`
+// request at NOVA breakpoints. Scope of this MVP:
+//
+//   * Compile unit (DW_TAG_compile_unit) with name/producer/language/
+//     low_pc/high_pc/stmt_list.
+//   * Per NOVA function: DW_TAG_subprogram with name + low_pc/high_pc +
+//     frame_base (rbp). Parameters and locals appear as child DIEs
+//     (DW_TAG_formal_parameter / DW_TAG_variable) with name + type + a
+//     DW_OP_fbreg location expression keyed off rbp.
+//   * Four base types: int (8-byte signed), str (8-byte address), list
+//     (8-byte address), bool (1-byte). Every variable points at one of
+//     these via DW_AT_type (DW_FORM_ref4 within the CU).
+//
+// Encoding: DWARF 4. We use DW_FORM_string for names (zero-terminated,
+// emitted via `.asciz`) to keep things simple — no separate .debug_str.
+// CU length is computed at link/assemble time via the
+// `.Lnova_cu_end - .Lnova_cu_start` expression GAS supports. Per-DIE type
+// refs use named labels for ref4 offsets so the assembler resolves them.
+//
+// Only emitted on Linux ELF (cg_target == 0). Mach-O / PE DWARF wiring is
+// deferred (DWARF_AUDIT.md).
+
+// Encode a single DWARF abbreviation declaration as a sequence of GAS
+// directives. `code` is the abbrev number (>0), `tag` is the DW_TAG_*
+// constant, `children` is 1 if the DIE has children else 0. The caller is
+// expected to follow up with cg_dwarf_abbrev_attr() per attribute and then
+// cg_dwarf_abbrev_end() to write the (0,0) terminator pair.
+fn cg_dwarf_abbrev_decl(code, tag, children) {
+    out("    .uleb128 " + int_to_str(code))
+    out("    .uleb128 " + int_to_str(tag))
+    out("    .byte " + int_to_str(children))
+}
+
+fn cg_dwarf_abbrev_attr(attr, form) {
+    out("    .uleb128 " + int_to_str(attr))
+    out("    .uleb128 " + int_to_str(form))
+}
+
+fn cg_dwarf_abbrev_end() {
+    out("    .uleb128 0")
+    out("    .uleb128 0")
+}
+
+// Emit a DW_FORM_exprloc value: a .uleb128 length followed by length bytes
+// of DWARF expression. The expression is a sequence of (op, operand) pairs.
+// For our needs we only need DW_OP_fbreg (0x91) + sleb128 offset, and
+// DW_OP_reg6 (0x56) for frame_base = rbp.
+
+// Emit a DW_TAG_base_type DIE. The abbrev (code 4) is: name (string),
+// byte_size (data1), encoding (data1). Anchored at a label so other DIEs
+// can DW_AT_type-reference it.
+fn cg_dwarf_base_type(label, name, byte_size, encoding) {
+    out(label + ":")
+    out("    .uleb128 4")        // abbrev code: base_type
+    out("    .asciz " + DQ + name + DQ)
+    out("    .byte " + int_to_str(byte_size))
+    out("    .byte " + int_to_str(encoding))
+}
+
+// Emit one variable DIE (either DW_TAG_variable or DW_TAG_formal_parameter).
+// `abbrev_code` selects which abbrev to use. `rbp_offset` is the positive
+// offset such that the variable lives at [rbp - rbp_offset]; we encode it
+// as a negative SLEB128 in a DW_OP_fbreg expression. `type_label` is the
+// .debug_info label of the type DIE this variable refers to.
+//
+// NOTE: kept for completeness; the per-function emission inside
+// cg_dwarf_subprogram inlines this with per-function-scoped labels so the
+// same local name in two functions cannot collide.
+fn cg_dwarf_variable(abbrev_code, name, type_label, rbp_offset) {
+    out("    .uleb128 " + int_to_str(abbrev_code))
+    out("    .asciz " + DQ + name + DQ)
+    out("    .long " + type_label + " - .Lnova_cu_header_start")
+    out("    .uleb128 .Lnova_loc_end_" + name + "_" + int_to_str(rbp_offset) + " - .Lnova_loc_start_" + name + "_" + int_to_str(rbp_offset))
+    out(".Lnova_loc_start_" + name + "_" + int_to_str(rbp_offset) + ":")
+    out("    .byte 0x91")         // DW_OP_fbreg
+    out("    .sleb128 " + int_to_str(0 - rbp_offset))
+    out(".Lnova_loc_end_" + name + "_" + int_to_str(rbp_offset) + ":")
+}
+
+// Emit a DW_TAG_subprogram DIE plus its child variable DIEs, then the
+// children terminator (a single zero byte).
+fn cg_dwarf_subprogram(fn_entry) {
+    let fn_name = fn_entry[0]
+    let start_lbl = fn_entry[1]
+    let end_lbl = fn_entry[2]
+    let names = fn_entry[4]
+    let offs = fn_entry[5]
+    let pflags = fn_entry[6]
+
+    out("    .uleb128 2")           // abbrev code: subprogram
+    out("    .asciz " + DQ + fn_name + DQ)
+    out("    .quad " + start_lbl)   // low_pc
+    out("    .quad " + end_lbl)     // high_pc (DW_FORM_addr — absolute)
+    // frame_base = DW_OP_reg6 (rbp). exprloc length is 1 byte.
+    out("    .uleb128 1")
+    out("    .byte 0x56")           // DW_OP_reg6
+    // Now emit children: formal_parameter DIEs first, then variable DIEs.
+    // We disambiguate per-variable location labels by appending the
+    // function name AND the variable's slot index. Two reasons:
+    //   * Two functions both using a local `i` would otherwise collide
+    //     (different functions, same name).
+    //   * Inside a single function, `let nxt =` declared in two sibling
+    //     while bodies ends up listed twice in cg_locals (collect_locals
+    //     walks each block). We dedup by name here — only the *first*
+    //     occurrence becomes a DIE, since the codegen's local_offset()
+    //     also returns the first slot's offset. This keeps `info locals`
+    //     output clean (one entry per source name).
+    let seen = list_new()
+    let vi = 0
+    while vi < len(names) {
+        let vname = names[vi]
+        let voff = offs[vi]
+        let isp = pflags[vi]
+        // Skip duplicate names within the same function.
+        let dup = 0
+        let sii = 0
+        while sii < len(seen) {
+            if seen[sii] == vname { dup = 1 }
+            sii = sii + 1
+        }
+        if dup == 0 {
+            push(seen, vname)
+            let abbr = 3                 // variable
+            if isp == 1 { abbr = 5 }     // formal_parameter
+            // Sanitize vname for label use (NOVA idents are already
+            // alnum/_; the sanitizer is a guard).
+            let safe = cg_dwarf_sanitize(vname)
+            let safe_fn = cg_dwarf_sanitize(fn_name)
+            let suffix = safe_fn + "_" + safe + "_" + int_to_str(vi)
+            out("    .uleb128 " + int_to_str(abbr))
+            out("    .asciz " + DQ + vname + DQ)
+            out("    .long .Lnova_dt_int - .Lnova_cu_header_start")
+            out("    .uleb128 .Lnova_loc_e_" + suffix + " - .Lnova_loc_s_" + suffix)
+            out(".Lnova_loc_s_" + suffix + ":")
+            out("    .byte 0x91")        // DW_OP_fbreg
+            out("    .sleb128 " + int_to_str(0 - voff))
+            out(".Lnova_loc_e_" + suffix + ":")
+        }
+        vi = vi + 1
+    }
+    // End-of-children marker for this subprogram.
+    out("    .byte 0")
+}
+
+// Sanitize an identifier so it is safe to splice into a GAS local label.
+// NOVA identifiers are [A-Za-z_][A-Za-z0-9_]*, so this is mostly a guard
+// against any future relaxation of the grammar.
+fn cg_dwarf_sanitize(name) {
+    let out_s = ""
+    let i = 0
+    while i < len(name) {
+        let c = char_at(name, i)
+        let ok = 0
+        if c >= 48 { if c <= 57 { ok = 1 } }            // 0-9
+        if c >= 65 { if c <= 90 { ok = 1 } }            // A-Z
+        if c >= 97 { if c <= 122 { ok = 1 } }           // a-z
+        if c == 95 { ok = 1 }                            // _
+        if ok == 1 {
+            out_s = out_s + chr(c)
+        } else {
+            out_s = out_s + "_"
+        }
+        i = i + 1
+    }
+    return out_s
+}
+
+// Emit the .debug_abbrev section. Five abbrev entries:
+//   1: compile_unit (children=YES)        2: subprogram (children=YES)
+//   3: variable (children=NO)             4: base_type (children=NO)
+//   5: formal_parameter (children=NO)
+// DWARF 4 tag/attr/form constants used:
+//   tags: 0x11 compile_unit, 0x2e subprogram, 0x34 variable,
+//         0x24 base_type, 0x05 formal_parameter
+//   attrs: 0x03 name, 0x0b byte_size, 0x3e encoding, 0x49 type,
+//          0x02 location, 0x11 low_pc, 0x12 high_pc, 0x40 frame_base,
+//          0x25 producer, 0x13 language, 0x10 stmt_list
+//   forms: 0x01 addr, 0x06 data4, 0x0b data1, 0x05 data2, 0x08 string,
+//          0x13 ref4, 0x17 sec_offset, 0x18 exprloc
+fn cg_emit_debug_abbrev_section() {
+    out("")
+    out(".section .debug_abbrev,\"\",@progbits")
+    // Abbrev 1: compile_unit, children=YES
+    cg_dwarf_abbrev_decl(1, 17, 1)
+    cg_dwarf_abbrev_attr(37, 8)    // DW_AT_producer DW_FORM_string
+    cg_dwarf_abbrev_attr(19, 5)    // DW_AT_language DW_FORM_data2
+    cg_dwarf_abbrev_attr(3, 8)     // DW_AT_name DW_FORM_string
+    cg_dwarf_abbrev_attr(17, 1)    // DW_AT_low_pc DW_FORM_addr
+    cg_dwarf_abbrev_attr(18, 1)    // DW_AT_high_pc DW_FORM_addr
+    cg_dwarf_abbrev_attr(16, 23)   // DW_AT_stmt_list DW_FORM_sec_offset
+    cg_dwarf_abbrev_end()
+    // Abbrev 2: subprogram, children=YES
+    cg_dwarf_abbrev_decl(2, 46, 1)
+    cg_dwarf_abbrev_attr(3, 8)     // DW_AT_name DW_FORM_string
+    cg_dwarf_abbrev_attr(17, 1)    // DW_AT_low_pc DW_FORM_addr
+    cg_dwarf_abbrev_attr(18, 1)    // DW_AT_high_pc DW_FORM_addr
+    cg_dwarf_abbrev_attr(64, 24)   // DW_AT_frame_base DW_FORM_exprloc
+    cg_dwarf_abbrev_end()
+    // Abbrev 3: variable, children=NO
+    cg_dwarf_abbrev_decl(3, 52, 0)
+    cg_dwarf_abbrev_attr(3, 8)     // DW_AT_name DW_FORM_string
+    cg_dwarf_abbrev_attr(73, 19)   // DW_AT_type DW_FORM_ref4
+    cg_dwarf_abbrev_attr(2, 24)    // DW_AT_location DW_FORM_exprloc
+    cg_dwarf_abbrev_end()
+    // Abbrev 4: base_type, children=NO
+    cg_dwarf_abbrev_decl(4, 36, 0)
+    cg_dwarf_abbrev_attr(3, 8)     // DW_AT_name DW_FORM_string
+    cg_dwarf_abbrev_attr(11, 11)   // DW_AT_byte_size DW_FORM_data1
+    cg_dwarf_abbrev_attr(62, 11)   // DW_AT_encoding DW_FORM_data1
+    cg_dwarf_abbrev_end()
+    // Abbrev 5: formal_parameter, children=NO
+    cg_dwarf_abbrev_decl(5, 5, 0)
+    cg_dwarf_abbrev_attr(3, 8)     // DW_AT_name DW_FORM_string
+    cg_dwarf_abbrev_attr(73, 19)   // DW_AT_type DW_FORM_ref4
+    cg_dwarf_abbrev_attr(2, 24)    // DW_AT_location DW_FORM_exprloc
+    cg_dwarf_abbrev_end()
+    // Abbrev list terminator (single zero ULEB128).
+    out("    .uleb128 0")
+}
+
+// Emit the .debug_info section: one CU header, one CU DIE with five base
+// type DIEs as children, then one subprogram DIE per NOVA function. Each
+// subprogram has formal_parameter + variable DIEs as children.
+//
+// CU length is encoded as `.long end - start - 4` per DWARF (the length
+// field itself is excluded). end - start - 4 is computed via the label
+// pair (.Lnova_cu_end, .Lnova_cu_after_len).
+fn cg_emit_debug_info_section() {
+    out("")
+    out(".section .debug_info,\"\",@progbits")
+    // CU header: unit_length (4 bytes), version (2), debug_abbrev_offset
+    // (4 = sec_offset), address_size (1). Then the CU DIE. The
+    // .Lnova_cu_header_start label is the *base* for DW_FORM_ref4 offsets
+    // — the DWARF 4 spec defines ref4 as "an offset from the first byte
+    // of the compilation header for the compilation unit containing the
+    // reference" (DWARF 4 §7.5.4). That is the unit_length field, not
+    // the start of the DIE area.
+    out(".Lnova_cu_header_start:")
+    out("    .long .Lnova_cu_end - .Lnova_cu_after_len")
+    out(".Lnova_cu_after_len:")
+    out("    .short 4")                          // DWARF version 4
+    out("    .long 0")                            // .debug_abbrev offset 0
+    out("    .byte 8")                            // address size (x86-64)
+    out(".Lnova_cu_start:")
+    // CU DIE — abbrev 1.
+    out("    .uleb128 1")
+    out("    .asciz " + DQ + "NOVA self-hosted compiler" + DQ)   // producer
+    out("    .short 12")                          // DW_LANG_Python (close enough; gdb-friendly)
+    out("    .asciz " + DQ + cg_source_file + DQ)               // name
+    // low_pc = address of first function (or 0 if none). high_pc = address
+    // past the last function. We use the labels emitted around the
+    // outermost function span. Fall back to a 0/0 range if no functions
+    // were emitted (top-level only).
+    if cg_dbg_count > 0 {
+        let first = cg_dbg_fns[0]
+        let last = cg_dbg_fns[cg_dbg_count - 1]
+        out("    .quad " + first[1])              // low_pc = first start
+        out("    .quad " + last[2])               // high_pc = last end
+    } else {
+        out("    .quad 0")
+        out("    .quad 0")
+    }
+    out("    .long 0")                            // stmt_list = start of .debug_line
+
+    // Base type DIEs (children of the CU). Encodings: 5 = signed,
+    // 1 = address, 2 = boolean. NOVA's runtime treats list and str as
+    // 8-byte pointers; emit those as DW_ATE_address for gdb so `p` prints
+    // them as addresses by default. `int` is a 64-bit signed scalar; gdb
+    // will print decimal. `bool` is the standard 1-byte boolean.
+    cg_dwarf_base_type(".Lnova_dt_int", "int", 8, 5)
+    cg_dwarf_base_type(".Lnova_dt_str", "str", 8, 1)
+    cg_dwarf_base_type(".Lnova_dt_list", "list", 8, 1)
+    cg_dwarf_base_type(".Lnova_dt_bool", "bool", 1, 2)
+
+    // Subprogram DIEs (also children of the CU).
+    let si = 0
+    while si < cg_dbg_count {
+        cg_dwarf_subprogram(cg_dbg_fns[si])
+        si = si + 1
+    }
+
+    // End-of-CU-children terminator (single zero byte).
+    out("    .byte 0")
+    out(".Lnova_cu_end:")
 }
 
 fn syscall_num(linux_num) {
@@ -3163,6 +3463,17 @@ fn gen_function(nd) {
     out_globl(emit_name)
     cg_emit_loc(nd)
     out_label(emit_name)
+    // DWARF .debug_info: emit a per-function start label that the
+    // subprogram DIE's low_pc points to. (high_pc points to the end label
+    // emitted after `ret`.) Only on Linux ELF; Mach-O/PE DWARF is deferred.
+    let dbg_fn_idx = 0 - 1
+    if cg_target == 0 {
+        if cg_debug == 1 {
+            dbg_fn_idx = cg_dbg_fn_seq
+            cg_dbg_fn_seq = cg_dbg_fn_seq + 1
+            out(".Lnova_fn_" + int_to_str(dbg_fn_idx) + "_start:")
+        }
+    }
     out("    push rbp")
     out("    mov rbp, rsp")
     let frame_size = cg_local_count * 8
@@ -3217,6 +3528,44 @@ fn gen_function(nd) {
     out("    mov rsp, rbp")
     out("    pop rbp")
     out("    ret")
+
+    // DWARF .debug_info: snapshot the function's locals + parameters now
+    // that all stack assignments are finalized. cg_locals already contains
+    // [params..., body_locals...] with offsets `(i+1)*8` from rbp. Capture
+    // *names* + a parallel param-flag list; the DIE emitter walks these
+    // later to lay out subprogram + variable DIEs.
+    if dbg_fn_idx >= 0 {
+        out(".Lnova_fn_" + int_to_str(dbg_fn_idx) + "_end:")
+        let dbg_entry = list_new()
+        push(dbg_entry, name)
+        push(dbg_entry, ".Lnova_fn_" + int_to_str(dbg_fn_idx) + "_start")
+        push(dbg_entry, ".Lnova_fn_" + int_to_str(dbg_fn_idx) + "_end")
+        let dbg_line = 0
+        let nd_len = len(nd)
+        if nd_len > 2 {
+            dbg_line = nd[nd_len - 1]
+        }
+        push(dbg_entry, dbg_line)
+        // Snapshot locals list (names + offsets + is_param flag). We copy
+        // the names defensively in case later codegen mutates cg_locals.
+        let dbg_names = list_new()
+        let dbg_offs = list_new()
+        let dbg_isparam = list_new()
+        let dli = 0
+        while dli < cg_local_count {
+            push(dbg_names, cg_locals[dli])
+            push(dbg_offs, (dli + 1) * 8)
+            let pflag = 0
+            if dli < cg_param_count { pflag = 1 }
+            push(dbg_isparam, pflag)
+            dli = dli + 1
+        }
+        push(dbg_entry, dbg_names)
+        push(dbg_entry, dbg_offs)
+        push(dbg_entry, dbg_isparam)
+        push(cg_dbg_fns, dbg_entry)
+        cg_dbg_count = cg_dbg_count + 1
+    }
 }
 
 // =====================================================================
@@ -4731,6 +5080,21 @@ fn gen_program(program) {
     out_section("text")
     gen_runtime()
 
+    // Emit DWARF .debug_abbrev + .debug_info sections (Linux ELF only).
+    // Must come AFTER all code emission so the per-function start/end
+    // labels are defined in .text — the DIEs reference them as low_pc /
+    // high_pc absolute addresses. Section order is .debug_abbrev BEFORE
+    // .debug_info: the info section's CU header references abbrev table
+    // offset 0, and putting abbrev first keeps that offset valid even if a
+    // tool concatenates objects later.
+    if cg_target == 0 {
+        if cg_debug == 1 {
+            if len(cg_source_file) > 0 {
+                cg_emit_debug_abbrev_section()
+                cg_emit_debug_info_section()
+            }
+        }
+    }
 
     peephole_optimize()
 

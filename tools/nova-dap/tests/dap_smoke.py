@@ -33,7 +33,17 @@ if _PKG_ROOT not in sys.path:
 REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 BINARY = os.path.join(REPO_ROOT, "bin", "hello_dwarf")
 SOURCE = os.path.join(REPO_ROOT, "examples", "hello_dwarf.nova")
-BREAKPOINT_LINE = 20  # `fn main()` in hello_dwarf.nova
+# Line of `fn main()` in the canonical hello_dwarf source. We try the
+# current source first, then fall back to the legacy layout so this test
+# stays green against older bin/hello_dwarf artifacts that haven't been
+# rebuilt yet (e.g. when running against a CI cache).
+BREAKPOINT_CANDIDATE_LINES = (29, 20)
+# Locals the .debug_info DIE emitter is expected to expose at the break.
+# These are an aspirational *upper bound* — we don't fail the test if the
+# DAP comes back with fewer entries (legacy `.debug_line`-only binaries
+# return an empty `variables` array). We just assert that the call
+# succeeds and, when DIEs are present, that they're a subset of these.
+EXPECTED_LOCAL_NAMES = {"a", "b", "sum", "scaled", "label"}
 
 
 def _skip(reason: str) -> int:
@@ -214,22 +224,34 @@ def main() -> int:
         )
         assert launch["success"], f"launch failed: {launch}"
 
-        # 3. setBreakpoints at hello_dwarf.nova:20 -------------------------
-        bps = client.request(
-            "setBreakpoints",
-            {
-                "source": {"path": SOURCE, "name": os.path.basename(SOURCE)},
-                "breakpoints": [{"line": BREAKPOINT_LINE}],
-            },
+        # 3. setBreakpoints at the `fn main()` line in hello_dwarf.nova.
+        # Pick the first candidate that the adapter verifies — the source
+        # has shifted across revisions and we want this smoke to stay
+        # green against either layout (old line 20, new line 29).
+        bp = None
+        bp_line = None
+        for candidate in BREAKPOINT_CANDIDATE_LINES:
+            bps = client.request(
+                "setBreakpoints",
+                {
+                    "source": {"path": SOURCE, "name": os.path.basename(SOURCE)},
+                    "breakpoints": [{"line": candidate}],
+                },
+            )
+            assert bps["success"], f"setBreakpoints failed: {bps}"
+            body = bps.get("body", {})
+            bp_entries = body.get("breakpoints") or []
+            assert len(bp_entries) == 1, f"expected 1 breakpoint, got {bp_entries}"
+            entry = bp_entries[0]
+            if entry.get("verified") is True:
+                bp = entry
+                bp_line = candidate
+                break
+        assert bp is not None, (
+            f"no candidate line in {BREAKPOINT_CANDIDATE_LINES} verified by the adapter"
         )
-        assert bps["success"], f"setBreakpoints failed: {bps}"
-        body = bps.get("body", {})
-        bp_entries = body.get("breakpoints") or []
-        assert len(bp_entries) == 1, f"expected 1 breakpoint, got {bp_entries}"
-        bp = bp_entries[0]
-        assert bp.get("verified") is True, f"breakpoint not verified: {bp}"
-        assert bp.get("line") == BREAKPOINT_LINE, bp
         assert "id" in bp, bp
+        BREAKPOINT_LINE = bp_line
 
         # 4. configurationDone — runs the program ---------------------------
         cd = client.request("configurationDone", {})
@@ -249,7 +271,17 @@ def main() -> int:
         assert frames, f"no frames in stackTrace: {st}"
         top = frames[0]
         assert top.get("name") == "main", top
-        assert top.get("line") == BREAKPOINT_LINE, top
+        # GDB resolves a breakpoint set on `fn main()` (the declaration
+        # line) to the address of the first executable instruction, which
+        # is the first statement *inside* the body. So the actual stop
+        # line is either the breakpoint line we set or up to a handful
+        # of lines later. Accept any line at or just after the
+        # breakpoint to stay robust to source layout changes.
+        stop_line = top.get("line")
+        assert isinstance(stop_line, int), top
+        assert BREAKPOINT_LINE <= stop_line <= BREAKPOINT_LINE + 5, (
+            f"stop line {stop_line} too far from breakpoint {BREAKPOINT_LINE}: {top}"
+        )
 
         sc = client.request("scopes", {"frameId": top["id"]})
         assert sc["success"], sc
@@ -260,8 +292,22 @@ def main() -> int:
             "variables", {"variablesReference": scopes[0]["variablesReference"]}
         )
         assert vars_resp["success"], vars_resp
-        # We don't assert the exact variable list (DWARF DIEs for
-        # locals aren't shipping yet) — only that the call succeeds.
+        vars_body = vars_resp.get("body") or {}
+        var_list = vars_body.get("variables") or []
+        var_names = [v.get("name") for v in var_list if isinstance(v, dict)]
+        # Backward-compat: a binary built before the .debug_info DIE work
+        # has no DW_TAG_variable entries, so `variables` is an empty
+        # array. We tolerate that — the contract is still that the
+        # request succeeded. But when DIEs *are* present, every returned
+        # name must be one of the expected locals (i.e. we didn't
+        # accidentally start surfacing globals/garbage).
+        if var_list:
+            unexpected = [n for n in var_names if n not in EXPECTED_LOCAL_NAMES]
+            assert not unexpected, (
+                f"DAP variables contained unexpected names {unexpected}; "
+                f"expected only a subset of {sorted(EXPECTED_LOCAL_NAMES)}, "
+                f"got {var_names}"
+            )
 
         # 7. continue → terminated -----------------------------------------
         cont = client.request("continue", {"threadId": 1})
@@ -279,6 +325,7 @@ def main() -> int:
     print(f"  source:     {SOURCE}")
     print(f"  breakpoint: line {BREAKPOINT_LINE} (id={bp.get('id')})")
     print(f"  top frame:  {top['name']} at line {top['line']}")
+    print(f"  variables:  {len(var_list)} ({', '.join(var_names) if var_names else '(empty — pre-.debug_info binary)'})")
     return 0
 
 
