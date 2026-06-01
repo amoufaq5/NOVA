@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf bench-simd bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf bench-simd bench-simd-sad bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all
 
 all: bin/nova
 
@@ -443,6 +443,12 @@ bench-simd: bin/nova examples/bench_dot_i32.nova
 	@$(AS) -o /tmp/bench_dot_i32.o /tmp/bench_dot_i32.s
 	@$(LD) -o /tmp/bench_dot_i32 /tmp/bench_dot_i32.o
 	@/tmp/bench_dot_i32
+
+# R11D: SAD-on-1024 microbench using simd_sum_abs_diff.
+# Compares pure-NOVA scalar SAD against the AVX2 (or NEON / scalar
+# fallback) intrinsic. Prints scalar/SIMD averages over 200 trials.
+bench-simd-sad: bin/nova
+	@bash tests/bench_simd.sh
 
 # Build + run the int_* scalar-builtin microbench.
 # Compares NOVA's smart `+` / `*` (which dispatch through PTR_THRESHOLD)

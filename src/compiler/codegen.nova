@@ -1367,6 +1367,19 @@ fn is_builtin_fn(name) {
     if name == "load8" { return 1 }
     if name == "memcpy_raw" { return 1 }
     if name == "__intrinsic_dot_i32" { return 1 }
+    // R11D: SIMD intrinsics on 8x i32 lanes. Pointer-based ABI: every
+    // builtin takes raw int32 buffer pointers (32 bytes = 8 lanes).
+    // On Linux x86-64 (cg_target == 0) these lower to AVX2 (vpaddd /
+    // vpsubd / vmovdqu / vpsadbw). On ARM64 native (cg_target == 4) /
+    // ARM64 Windows (cg_target == 5) they emit NEON (2x 128-bit ops).
+    // On macOS / Windows x86-64 / WASM they fall back to scalar loops
+    // so the same NOVA source compiles everywhere. Documented in
+    // SIMD_AUDIT.md / NEXT_SESSION.md.
+    if name == "simd_add_i32x8" { return 1 }
+    if name == "simd_sub_i32x8" { return 1 }
+    if name == "simd_load_i32x8" { return 1 }
+    if name == "simd_store_i32x8" { return 1 }
+    if name == "simd_sum_abs_diff" { return 1 }
     // WASI low-level builtins (R8A): expose raw WASI snapshot_preview1
     // primitives so NOVA programs targeting serverless / CDN-edge can
     // drive the runtime directly. On the WASM target they wrap the
@@ -3894,6 +3907,89 @@ fn arm_gen_call(nd) {
         arm_out("    bl _nova_arm_stub_list_new")
         return 0
     }
+    // R11D SIMD intrinsics on ARM64 NEON. The NEON quad-word width is
+    // 128 bits == 4x i32, so an 8-lane op is exactly 2 NEON ops.
+    // Helpers `_nova_arm_simd_*` emitted in arm_emit_runtime().
+    if name == "simd_add_i32x8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            arm_gen_expr(args[s_i])
+            arm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            arm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        arm_out("    bl _nova_arm_simd_add_i32x8")
+        return 0
+    }
+    if name == "simd_sub_i32x8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            arm_gen_expr(args[s_i])
+            arm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            arm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        arm_out("    bl _nova_arm_simd_sub_i32x8")
+        return 0
+    }
+    if name == "simd_load_i32x8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            arm_gen_expr(args[s_i])
+            arm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            arm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        arm_out("    bl _nova_arm_simd_load_i32x8")
+        return 0
+    }
+    if name == "simd_store_i32x8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            arm_gen_expr(args[s_i])
+            arm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            arm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        arm_out("    bl _nova_arm_simd_store_i32x8")
+        return 0
+    }
+    if name == "simd_sum_abs_diff" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            arm_gen_expr(args[s_i])
+            arm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            arm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        arm_out("    bl _nova_arm_simd_sum_abs_diff")
+        return 0
+    }
 
     // Generic user-function call.
     let argc = len(args)
@@ -4224,6 +4320,101 @@ fn arm_emit_runtime() {
     arm_emit_stub("_nova_arm_stub_len", "ARM64: len not yet supported")
     arm_emit_stub("_nova_arm_stub_read_file", "ARM64: read_file not yet supported")
     arm_emit_stub("_nova_arm_stub_write_file", "ARM64: write_file not yet supported")
+
+    // R11D NEON SIMD i32x8 intrinsics (ARM64 Linux).
+    //
+    // ABI mirror of the x86-64 helpers: x0=a_ptr, x1=b_ptr, x2=dst_ptr.
+    // 8 lanes of int32 == 32 bytes, the NEON quad register width is 128
+    // bits (4 lanes), so each builtin is two NEON ops.
+
+    // ---- _nova_arm_simd_add_i32x8: dst = a + b ----
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_simd_add_i32x8")
+    arm_out("    ldr q0, [x0]")
+    arm_out("    ldr q1, [x1]")
+    arm_out("    add v0.4s, v0.4s, v1.4s")
+    arm_out("    str q0, [x2]")
+    arm_out("    ldr q0, [x0, #16]")
+    arm_out("    ldr q1, [x1, #16]")
+    arm_out("    add v0.4s, v0.4s, v1.4s")
+    arm_out("    str q0, [x2, #16]")
+    arm_out("    mov x0, x2")
+    arm_out("    ret")
+
+    // ---- _nova_arm_simd_sub_i32x8: dst = a - b ----
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_simd_sub_i32x8")
+    arm_out("    ldr q0, [x0]")
+    arm_out("    ldr q1, [x1]")
+    arm_out("    sub v0.4s, v0.4s, v1.4s")
+    arm_out("    str q0, [x2]")
+    arm_out("    ldr q0, [x0, #16]")
+    arm_out("    ldr q1, [x1, #16]")
+    arm_out("    sub v0.4s, v0.4s, v1.4s")
+    arm_out("    str q0, [x2, #16]")
+    arm_out("    mov x0, x2")
+    arm_out("    ret")
+
+    // ---- _nova_arm_simd_load_i32x8: dst = src (32-byte copy) ----
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_simd_load_i32x8")
+    arm_out("    ldr q0, [x0]")
+    arm_out("    ldr q1, [x0, #16]")
+    arm_out("    str q0, [x1]")
+    arm_out("    str q1, [x1, #16]")
+    arm_out("    mov x0, x1")
+    arm_out("    ret")
+
+    // ---- _nova_arm_simd_store_i32x8: dst = src (arg-swap of load) ----
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_simd_store_i32x8")
+    arm_out("    ldr q0, [x1]")
+    arm_out("    ldr q1, [x1, #16]")
+    arm_out("    str q0, [x0]")
+    arm_out("    str q1, [x0, #16]")
+    arm_out("    ret")
+
+    // ---- _nova_arm_simd_sum_abs_diff: rax = sum(abs(a[i]-b[i]), i in [0,n)) ----
+    // x0=a_ptr, x1=b_ptr, x2=n. 4 int32 lanes per loop iter; tail is scalar.
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_simd_sum_abs_diff")
+    arm_out("    mov x3, x0")                  // a iter
+    arm_out("    mov x4, x1")                  // b iter
+    arm_out("    mov x5, x2")                  // remaining n
+    arm_out("    movi v2.4s, #0")              // accumulator
+    arm_out("    lsr x6, x5, #2")              // x6 = n / 4
+    arm_out("    cbz x6, .arm_sad_tail")
+    arm_label(".arm_sad_loop")
+    arm_out("    ldr q0, [x3], #16")
+    arm_out("    ldr q1, [x4], #16")
+    arm_out("    sub v3.4s, v0.4s, v1.4s")
+    arm_out("    abs v3.4s, v3.4s")
+    arm_out("    add v2.4s, v2.4s, v3.4s")
+    arm_out("    subs x6, x6, #1")
+    arm_out("    b.ne .arm_sad_loop")
+    arm_label(".arm_sad_tail")
+    arm_out("    and x5, x5, #3")              // tail count = n & 3
+    arm_out("    addv s2, v2.4s")              // horizontal add 4 i32 lanes
+    arm_out("    fmov w0, s2")                 // scalar acc in w0
+    arm_out("    sxtw x0, w0")
+    arm_out("    cbz x5, .arm_sad_done")
+    arm_label(".arm_sad_tail_loop")
+    arm_out("    ldr w7, [x3], #4")
+    arm_out("    ldr w8, [x4], #4")
+    arm_out("    sub w7, w7, w8")
+    arm_out("    cmp w7, #0")
+    arm_out("    cneg w7, w7, lt")             // w7 = abs(w7)
+    arm_out("    sxtw x7, w7")
+    arm_out("    add x0, x0, x7")
+    arm_out("    subs x5, x5, #1")
+    arm_out("    b.ne .arm_sad_tail_loop")
+    arm_label(".arm_sad_done")
+    arm_out("    ret")
 }
 
 fn arm64_gen_program(program) {
@@ -4675,6 +4866,88 @@ fn warm_gen_call(nd) {
         warm_out("    bl _nova_warm_stub_list_new")
         return 0
     }
+    // R11D SIMD intrinsics on ARM64 Windows (NEON). Helpers emitted in
+    // warm_emit_runtime(); same NEON sequences as Linux ARM64 above.
+    if name == "simd_add_i32x8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            warm_gen_expr(args[s_i])
+            warm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            warm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        warm_out("    bl _nova_warm_simd_add_i32x8")
+        return 0
+    }
+    if name == "simd_sub_i32x8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            warm_gen_expr(args[s_i])
+            warm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            warm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        warm_out("    bl _nova_warm_simd_sub_i32x8")
+        return 0
+    }
+    if name == "simd_load_i32x8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            warm_gen_expr(args[s_i])
+            warm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            warm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        warm_out("    bl _nova_warm_simd_load_i32x8")
+        return 0
+    }
+    if name == "simd_store_i32x8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            warm_gen_expr(args[s_i])
+            warm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            warm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        warm_out("    bl _nova_warm_simd_store_i32x8")
+        return 0
+    }
+    if name == "simd_sum_abs_diff" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            warm_gen_expr(args[s_i])
+            warm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            warm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        warm_out("    bl _nova_warm_simd_sum_abs_diff")
+        return 0
+    }
 
     // Generic user-function call.
     let argc = len(args)
@@ -5037,6 +5310,100 @@ fn warm_emit_runtime() {
     warm_emit_stub("_nova_warm_stub_len", "winarm64: len not yet supported")
     warm_emit_stub("_nova_warm_stub_read_file", "winarm64: read_file not yet supported")
     warm_emit_stub("_nova_warm_stub_write_file", "winarm64: write_file not yet supported")
+
+    // R11D NEON SIMD i32x8 intrinsics (ARM64 Windows).
+    //
+    // ABI mirror of the Linux ARM64 helpers: x0=a_ptr, x1=b_ptr,
+    // x2=dst_ptr. The NEON quad register width is 128 bits == 4 i32
+    // lanes, so each 8-lane builtin is two NEON ops.
+
+    // ---- _nova_warm_simd_add_i32x8: dst = a + b ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_simd_add_i32x8")
+    warm_out("    ldr q0, [x0]")
+    warm_out("    ldr q1, [x1]")
+    warm_out("    add v0.4s, v0.4s, v1.4s")
+    warm_out("    str q0, [x2]")
+    warm_out("    ldr q0, [x0, #16]")
+    warm_out("    ldr q1, [x1, #16]")
+    warm_out("    add v0.4s, v0.4s, v1.4s")
+    warm_out("    str q0, [x2, #16]")
+    warm_out("    mov x0, x2")
+    warm_out("    ret")
+
+    // ---- _nova_warm_simd_sub_i32x8: dst = a - b ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_simd_sub_i32x8")
+    warm_out("    ldr q0, [x0]")
+    warm_out("    ldr q1, [x1]")
+    warm_out("    sub v0.4s, v0.4s, v1.4s")
+    warm_out("    str q0, [x2]")
+    warm_out("    ldr q0, [x0, #16]")
+    warm_out("    ldr q1, [x1, #16]")
+    warm_out("    sub v0.4s, v0.4s, v1.4s")
+    warm_out("    str q0, [x2, #16]")
+    warm_out("    mov x0, x2")
+    warm_out("    ret")
+
+    // ---- _nova_warm_simd_load_i32x8: dst = src (32-byte copy) ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_simd_load_i32x8")
+    warm_out("    ldr q0, [x0]")
+    warm_out("    ldr q1, [x0, #16]")
+    warm_out("    str q0, [x1]")
+    warm_out("    str q1, [x1, #16]")
+    warm_out("    mov x0, x1")
+    warm_out("    ret")
+
+    // ---- _nova_warm_simd_store_i32x8: dst = src (arg-swap of load) ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_simd_store_i32x8")
+    warm_out("    ldr q0, [x1]")
+    warm_out("    ldr q1, [x1, #16]")
+    warm_out("    str q0, [x0]")
+    warm_out("    str q1, [x0, #16]")
+    warm_out("    ret")
+
+    // ---- _nova_warm_simd_sum_abs_diff: returns sum(abs(a[i]-b[i])) for i in [0,n) ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_simd_sum_abs_diff")
+    warm_out("    mov x3, x0")                  // a iter
+    warm_out("    mov x4, x1")                  // b iter
+    warm_out("    mov x5, x2")                  // remaining n
+    warm_out("    movi v2.4s, #0")
+    warm_out("    lsr x6, x5, #2")              // x6 = n / 4
+    warm_out("    cbz x6, .Lwarm_sad_tail")
+    warm_label(".Lwarm_sad_loop")
+    warm_out("    ldr q0, [x3], #16")
+    warm_out("    ldr q1, [x4], #16")
+    warm_out("    sub v3.4s, v0.4s, v1.4s")
+    warm_out("    abs v3.4s, v3.4s")
+    warm_out("    add v2.4s, v2.4s, v3.4s")
+    warm_out("    subs x6, x6, #1")
+    warm_out("    b.ne .Lwarm_sad_loop")
+    warm_label(".Lwarm_sad_tail")
+    warm_out("    and x5, x5, #3")
+    warm_out("    addv s2, v2.4s")
+    warm_out("    fmov w0, s2")
+    warm_out("    sxtw x0, w0")
+    warm_out("    cbz x5, .Lwarm_sad_done")
+    warm_label(".Lwarm_sad_tail_loop")
+    warm_out("    ldr w7, [x3], #4")
+    warm_out("    ldr w8, [x4], #4")
+    warm_out("    sub w7, w7, w8")
+    warm_out("    cmp w7, #0")
+    warm_out("    cneg w7, w7, lt")
+    warm_out("    sxtw x7, w7")
+    warm_out("    add x0, x0, x7")
+    warm_out("    subs x5, x5, #1")
+    warm_out("    b.ne .Lwarm_sad_tail_loop")
+    warm_label(".Lwarm_sad_done")
+    warm_out("    ret")
 }
 
 fn winarm64_gen_program(program) {
@@ -14461,6 +14828,225 @@ fn gen_runtime() {
         out("    dec rdx")
         out("    jnz .dot_i32s_loop")
         out(".dot_i32s_done:")
+        out("    pop rbp")
+        out("    ret")
+    }
+
+    // === R11D SIMD i32x8 intrinsics ============================================
+    //
+    // ABI for every simd_* builtin: callers pass raw int32 buffer pointers.
+    // A "SIMD value" is 32 bytes = 8 lanes of int32, allocated by the caller
+    // via `alloc(32)`. The builtins are explicit -- NOVA's `+`/`*` operators
+    // still dispatch to the smart-op classifier, so SIMD inputs never reach
+    // those paths (they are just pointers to the classifier; users invoke
+    // these builtins by name).
+    //
+    // Lowering:
+    //   * cg_target == 0  (Linux x86-64)   : AVX2 (vpaddd/vpsubd/vpabsd)
+    //   * cg_target == 1  (macOS x86-64)   : scalar loop fallback (no AVX2
+    //                                        runtime guarantee on Apple silicon
+    //                                        Rosetta / older Intel Macs)
+    //   * cg_target == 3  (Windows x86-64) : scalar loop fallback
+    //   * cg_target == 2  (WASM)           : scalar loop fallback (v128
+    //                                        SIMD imports deferred -- see
+    //                                        NEXT_SESSION.md)
+    // ARM64 (cg_target == 4 / 5) emits its own NEON sequences in the arm_*
+    // and warm_* call paths above; the labels below are x86-64 ELF/PE/Mach-O
+    // only.
+
+    // --- simd_add_i32x8(a_ptr, b_ptr, dst_ptr) -> dst_ptr ---
+    // dst[0..8) = a[0..8) + b[0..8) lanewise.
+    out_label("simd_add_i32x8")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu ymm1, [rsi]")
+        out("    vpaddd ymm0, ymm0, ymm1")
+        out("    vmovdqu [rdx], ymm0")
+        out("    mov rax, rdx")
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        // Scalar fallback: 8 int32 adds.
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov r8, 0")
+        out(".simd_addf_loop:")
+        out("    mov eax, [rdi + r8 * 4]")
+        out("    add eax, [rsi + r8 * 4]")
+        out("    mov [rdx + r8 * 4], eax")
+        out("    inc r8")
+        out("    cmp r8, 8")
+        out("    jl .simd_addf_loop")
+        out("    mov rax, rdx")
+        out("    pop rbp")
+        out("    ret")
+    }
+
+    // --- simd_sub_i32x8(a_ptr, b_ptr, dst_ptr) -> dst_ptr ---
+    // dst[0..8) = a[0..8) - b[0..8) lanewise.
+    out_label("simd_sub_i32x8")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu ymm1, [rsi]")
+        out("    vpsubd ymm0, ymm0, ymm1")
+        out("    vmovdqu [rdx], ymm0")
+        out("    mov rax, rdx")
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov r8, 0")
+        out(".simd_subf_loop:")
+        out("    mov eax, [rdi + r8 * 4]")
+        out("    sub eax, [rsi + r8 * 4]")
+        out("    mov [rdx + r8 * 4], eax")
+        out("    inc r8")
+        out("    cmp r8, 8")
+        out("    jl .simd_subf_loop")
+        out("    mov rax, rdx")
+        out("    pop rbp")
+        out("    ret")
+    }
+
+    // --- simd_load_i32x8(src_ptr, dst_ptr) -> dst_ptr ---
+    // 32-byte aligned-or-unaligned copy via YMM (or scalar movs).
+    out_label("simd_load_i32x8")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu [rsi], ymm0")
+        out("    mov rax, rsi")
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov r8, 0")
+        out(".simd_loadf_loop:")
+        out("    mov eax, [rdi + r8 * 4]")
+        out("    mov [rsi + r8 * 4], eax")
+        out("    inc r8")
+        out("    cmp r8, 8")
+        out("    jl .simd_loadf_loop")
+        out("    mov rax, rsi")
+        out("    pop rbp")
+        out("    ret")
+    }
+
+    // --- simd_store_i32x8(dst_ptr, src_ptr) -> dst_ptr ---
+    // 32-byte store from a YMM register -- arg-order mirror of simd_load.
+    out_label("simd_store_i32x8")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    vmovdqu ymm0, [rsi]")
+        out("    vmovdqu [rdi], ymm0")
+        out("    mov rax, rdi")
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    mov r8, 0")
+        out(".simd_storef_loop:")
+        out("    mov eax, [rsi + r8 * 4]")
+        out("    mov [rdi + r8 * 4], eax")
+        out("    inc r8")
+        out("    cmp r8, 8")
+        out("    jl .simd_storef_loop")
+        out("    mov rax, rdi")
+        out("    pop rbp")
+        out("    ret")
+    }
+
+    // --- simd_sum_abs_diff(a_ptr, b_ptr, n) -> int ---
+    // Sum of absolute differences over n int32 elements; the SAD building
+    // block used by stereo block matching, optical flow, video coding etc.
+    //
+    // Calling convention: rdi=a_ptr, rsi=b_ptr, rdx=n. Returns int64 in
+    // rax. Processes 8 int32s per iteration; tail is scalar.
+    out_label("simd_sum_abs_diff")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    vpxor ymm2, ymm2, ymm2")            // accumulator (8 i32 lanes)
+        out("    mov rcx, rdx")
+        out("    shr rcx, 3")                        // rcx = n / 8
+        out("    test rcx, rcx")
+        out("    jz .sad_tail")
+        out(".sad_loop:")
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu ymm1, [rsi]")
+        // diff = a - b
+        out("    vpsubd ymm3, ymm0, ymm1")
+        // abs(diff): max(diff, -diff). For ymm SIMD on AVX2, use vpabsd.
+        out("    vpabsd ymm3, ymm3")
+        out("    vpaddd ymm2, ymm2, ymm3")
+        out("    add rdi, 32")
+        out("    add rsi, 32")
+        out("    dec rcx")
+        out("    jnz .sad_loop")
+        // Horizontal reduce ymm2 (8 i32) -> rax.
+        out("    vextracti128 xmm0, ymm2, 1")
+        out("    vpaddd xmm2, xmm2, xmm0")           // 4 sums in xmm2
+        out("    vphaddd xmm2, xmm2, xmm2")          // 2 sums
+        out("    vphaddd xmm2, xmm2, xmm2")          // 1 sum
+        out("    vmovd eax, xmm2")
+        out("    movsxd rax, eax")
+        out(".sad_tail:")
+        out("    and rdx, 7")
+        out("    test rdx, rdx")
+        out("    jz .sad_done")
+        out(".sad_tail_loop:")
+        out("    mov r8d, [rdi]")
+        out("    sub r8d, [rsi]")
+        // abs(r8d): r9 = sign-extension mask; r8d ^= r9; r8d -= r9 (which is 0 or -1).
+        out("    mov r9d, r8d")
+        out("    sar r9d, 31")
+        out("    xor r8d, r9d")
+        out("    sub r8d, r9d")
+        out("    movsxd r10, r8d")
+        out("    add rax, r10")
+        out("    add rdi, 4")
+        out("    add rsi, 4")
+        out("    dec rdx")
+        out("    jnz .sad_tail_loop")
+        out(".sad_done:")
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        // Scalar fallback for macOS / Windows / WASM x86-64.
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    test rdx, rdx")
+        out("    jz .sads_done")
+        out(".sads_loop:")
+        out("    mov r8d, [rdi]")
+        out("    sub r8d, [rsi]")
+        out("    mov r9d, r8d")
+        out("    sar r9d, 31")
+        out("    xor r8d, r9d")
+        out("    sub r8d, r9d")
+        out("    movsxd r10, r8d")
+        out("    add rax, r10")
+        out("    add rdi, 4")
+        out("    add rsi, 4")
+        out("    dec rdx")
+        out("    jnz .sads_loop")
+        out(".sads_done:")
         out("    pop rbp")
         out("    ret")
     }

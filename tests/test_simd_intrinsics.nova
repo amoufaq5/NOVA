@@ -1,0 +1,210 @@
+// R11D — SIMD i32x8 intrinsics correctness test.
+//
+// Exercises the five SIMD builtins introduced in R11D:
+//   simd_add_i32x8, simd_sub_i32x8, simd_load_i32x8, simd_store_i32x8,
+//   simd_sum_abs_diff.
+//
+// All SIMD values are raw 32-byte buffers (8 lanes of int32 little-endian).
+// The buffers are caller-allocated via `alloc(32)`; the builtins take three
+// pointer args (a_ptr, b_ptr, dst_ptr) and write the lanewise result into
+// dst.  `simd_sum_abs_diff(a, b, n)` is the reduction sibling and returns
+// a scalar int.
+//
+// Lowering verified by this test:
+//   Linux x86-64 (cg_target == 0)  : AVX2 (vpaddd / vpsubd / vpabsd /
+//                                    vmovdqu / vextracti128 / vphaddd).
+//   macOS / Windows x86-64         : scalar 8-iter loop fallback.
+//   Linux ARM64 + Windows ARM64    : NEON (2x 128-bit add/sub/abs).
+//   WASM                           : intrinsic not emitted -- documented
+//                                    in NEXT_SESSION.md.
+
+import "std/io"
+
+// ---------- int32 LE buffer helpers ------------------------------------------
+
+fn store_i32(buf, idx, v) {
+    let off = int_mul(idx, 4)
+    // Accept signed input.  Negatives stored as two's complement.
+    let u = v
+    if v < 0 { u = 4294967296 - (0 - v) }
+    store8(int_add(buf, off),                  u % 256)
+    store8(int_add(buf, int_add(off, 1)),      int_div(u, 256) % 256)
+    store8(int_add(buf, int_add(off, 2)),      int_div(u, 65536) % 256)
+    store8(int_add(buf, int_add(off, 3)),      int_div(u, 16777216) % 256)
+}
+
+fn load_i32(buf, idx) {
+    let off = int_mul(idx, 4)
+    let b0 = load8(int_add(buf, off))
+    let b1 = load8(int_add(buf, int_add(off, 1)))
+    let b2 = load8(int_add(buf, int_add(off, 2)))
+    let b3 = load8(int_add(buf, int_add(off, 3)))
+    let u = b0 + int_mul(b1, 256) + int_mul(b2, 65536) + int_mul(b3, 16777216)
+    // sign-extend to NOVA int
+    if u >= 2147483648 { return u - 4294967296 }
+    return u
+}
+
+fn fill_buf(buf, v0, v1, v2, v3, v4, v5, v6, v7) {
+    store_i32(buf, 0, v0)
+    store_i32(buf, 1, v1)
+    store_i32(buf, 2, v2)
+    store_i32(buf, 3, v3)
+    store_i32(buf, 4, v4)
+    store_i32(buf, 5, v5)
+    store_i32(buf, 6, v6)
+    store_i32(buf, 7, v7)
+}
+
+// ---------- minimal test framework ------------------------------------------
+
+let passes = 0
+let fails = 0
+
+fn check(label, got, want) {
+    if got == want {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("  FAIL ")
+        print(label)
+        print(": got ")
+        print_int(got)
+        print(", want ")
+        print_int(want)
+        println("")
+    }
+}
+
+// ---------- tests -----------------------------------------------------------
+
+fn test_add() {
+    let a = alloc(32)
+    let b = alloc(32)
+    let dst = alloc(32)
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 10, 20, 30, 40, 50, 60, 70, 80)
+    simd_add_i32x8(a, b, dst)
+    // Lanewise add: [11, 22, 33, 44, 55, 66, 77, 88].
+    check("add lane 0", load_i32(dst, 0), 11)
+    check("add lane 1", load_i32(dst, 1), 22)
+    check("add lane 2", load_i32(dst, 2), 33)
+    check("add lane 3", load_i32(dst, 3), 44)
+    check("add lane 4", load_i32(dst, 4), 55)
+    check("add lane 5", load_i32(dst, 5), 66)
+    check("add lane 6", load_i32(dst, 6), 77)
+    check("add lane 7", load_i32(dst, 7), 88)
+}
+
+fn test_sub() {
+    let a = alloc(32)
+    let b = alloc(32)
+    let dst = alloc(32)
+    fill_buf(a, 100, 200, 300, 400, 500, 600, 700, 800)
+    fill_buf(b, 1, 2, 3, 4, 5, 6, 7, 8)
+    simd_sub_i32x8(a, b, dst)
+    // Lanewise sub: [99, 198, 297, 396, 495, 594, 693, 792].
+    check("sub lane 0", load_i32(dst, 0), 99)
+    check("sub lane 1", load_i32(dst, 1), 198)
+    check("sub lane 2", load_i32(dst, 2), 297)
+    check("sub lane 3", load_i32(dst, 3), 396)
+    check("sub lane 4", load_i32(dst, 4), 495)
+    check("sub lane 5", load_i32(dst, 5), 594)
+    check("sub lane 6", load_i32(dst, 6), 693)
+    check("sub lane 7", load_i32(dst, 7), 792)
+}
+
+fn test_load_store() {
+    let src = alloc(32)
+    let dst = alloc(32)
+    let dst2 = alloc(32)
+    fill_buf(src, 7, 14, 21, 28, 35, 42, 49, 56)
+    // simd_load_i32x8(src, dst): copy src -> dst via a YMM register.
+    simd_load_i32x8(src, dst)
+    check("load roundtrip lane 0", load_i32(dst, 0), 7)
+    check("load roundtrip lane 7", load_i32(dst, 7), 56)
+    // simd_store_i32x8(dst2, src): symmetric variant.
+    simd_store_i32x8(dst2, src)
+    check("store roundtrip lane 0", load_i32(dst2, 0), 7)
+    check("store roundtrip lane 7", load_i32(dst2, 7), 56)
+}
+
+fn test_sum_abs_diff() {
+    // The headline-spec assertion from R11D:
+    //
+    //   simd_sum_abs_diff([1,2,3,4,5,6,7,8], [10,12,14,16,18,20,22,24])
+    //     == 9+10+11+12+13+14+15+16 == 100.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 10, 12, 14, 16, 18, 20, 22, 24)
+    let s = simd_sum_abs_diff(a, b, 8)
+    check("sad headline", s, 100)
+    // Same buffers, all-zero case.
+    fill_buf(a, 0, 0, 0, 0, 0, 0, 0, 0)
+    fill_buf(b, 0, 0, 0, 0, 0, 0, 0, 0)
+    check("sad zero", simd_sum_abs_diff(a, b, 8), 0)
+    // Negative-difference case: SAD must yield absolute values.
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 8, 7, 6, 5, 4, 3, 2, 1)
+    // |1-8|+|2-7|+|3-6|+|4-5|+|5-4|+|6-3|+|7-2|+|8-1| = 7+5+3+1+1+3+5+7 = 32.
+    check("sad mixed signs", simd_sum_abs_diff(a, b, 8), 32)
+    // 16-element (two vector iterations) path.
+    let a16 = alloc(64)
+    let b16 = alloc(64)
+    let i = 0
+    while i < 16 {
+        store_i32(a16, i, int_mul(i, 5))      // 0, 5, 10, ..., 75
+        store_i32(b16, i, int_mul(i, 3))      // 0, 3, 6, ..., 45
+        i = i + 1
+    }
+    // |5k-3k| summed for k in [0,16) = 2*sum(k, 0..16) = 2 * 120 = 240.
+    check("sad 16-element", simd_sum_abs_diff(a16, b16, 16), 240)
+    // Tail-only path (n < 8): exercises the scalar tail loop on AVX2.
+    let a3 = alloc(16)
+    let b3 = alloc(16)
+    store_i32(a3, 0, 10)
+    store_i32(a3, 1, 20)
+    store_i32(a3, 2, 30)
+    store_i32(b3, 0, 1)
+    store_i32(b3, 1, 4)
+    store_i32(b3, 2, 9)
+    // 9 + 16 + 21 == 46.
+    check("sad tail-only n=3", simd_sum_abs_diff(a3, b3, 3), 46)
+}
+
+fn test_chained_ops() {
+    // Compose two intrinsics in a chain: dst1 = a + b, then dst2 = dst1 - a.
+    // dst2 should equal b lanewise.
+    let a = alloc(32)
+    let b = alloc(32)
+    let dst1 = alloc(32)
+    let dst2 = alloc(32)
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 100, 200, 300, 400, 500, 600, 700, 800)
+    simd_add_i32x8(a, b, dst1)
+    simd_sub_i32x8(dst1, a, dst2)
+    check("chained add/sub lane 0", load_i32(dst2, 0), 100)
+    check("chained add/sub lane 7", load_i32(dst2, 7), 800)
+}
+
+fn main() {
+    println("=== R11D SIMD i32x8 intrinsics ===")
+    test_add()
+    test_sub()
+    test_load_store()
+    test_sum_abs_diff()
+    test_chained_ops()
+    print("  passed: ")
+    print_int(passes)
+    print("/")
+    print_int(passes + fails)
+    println("")
+    if fails > 0 {
+        println("FAIL: SIMD intrinsics produced wrong results")
+        exit(1)
+    }
+    println("ALL SIMD INTRINSIC TESTS PASSED")
+}
+
+main()
