@@ -1,0 +1,21 @@
+#!/bin/bash
+# /usr/local/bin/nova permission fix-up + man-page rebuild.
+#
+# Invoked by macOS Installer.app after the payload has been copied to
+# its final location. $1 = component package path, $2 = component
+# install root, $3 = mount point of the installation volume.
+set -euo pipefail
+
+# Ensure the binary is executable (the .pkg payload preserves modes,
+# but defence-in-depth never hurts).
+if [ -f /usr/local/bin/nova ]; then
+    chmod 0755 /usr/local/bin/nova
+fi
+
+# Rebuild apropos / makewhatis database so `man nova` resolves
+# immediately. macOS has /usr/libexec/makewhatis; ignore errors.
+if [ -x /usr/libexec/makewhatis ]; then
+    /usr/libexec/makewhatis /usr/local/share/man 2>/dev/null || true
+fi
+
+exit 0

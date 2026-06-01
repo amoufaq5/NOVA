@@ -4,7 +4,7 @@ Nova is a self-hosting language: every install path eventually gives
 you a single binary (`nova` on Linux/macOS, `nova.exe` on Windows)
 that compiles `.nova` source files to native assembly.
 
-There are **four supported install paths**:
+There are **seven supported install paths**:
 
 1. [Build from source](#1-build-from-source) — works today, no
    prebuilt binary required.
@@ -16,6 +16,14 @@ There are **four supported install paths**:
    formula repo.
 4. [Manual download](#4-manual-download) — grab the platform tarball
    from the GitHub Releases page and unpack it yourself.
+5. [Debian / Ubuntu (.deb)](#5-debian--ubuntu-deb) — `sudo apt install
+   ./nova_*.deb` for system-wide install with PATH + man page set up
+   automatically.
+6. [macOS Installer (.pkg)](#6-macos-installer-pkg) — double-click the
+   .pkg from a release.
+7. [Windows Installer (.msi)](#7-windows-installer-msi) — `msiexec /i
+   nova-*.msi` for system-wide install with Start menu shortcut +
+   PATH entry.
 
 Today the only path that requires zero pre-publication infrastructure
 is **(1) Build from source**. (2)-(4) are wired up and ready to fire
@@ -86,6 +94,135 @@ Direct downloads are available on the
 | macOS x86-64    | `nova-macos-x86_64.tar.gz`         | Ships as `nova_macos.o`; link locally with `clang -o nova nova_macos.o`. |
 
 Each tarball is accompanied by `*.sha256` for integrity checking.
+
+## 5. Debian / Ubuntu (.deb)
+
+A native `.deb` is built by the `release.yml` workflow for every
+tagged release and attached to the GitHub Release page.
+
+```bash
+# Download nova_X.Y.Z_amd64.deb from the release page, then:
+sudo apt install ./nova_0.1.0_amd64.deb
+
+# Or via dpkg directly:
+sudo dpkg -i nova_0.1.0_amd64.deb
+sudo apt-get install -f          # pull in binutils/libc6 deps if missing
+
+nova --version                   # confirms /usr/local/bin/nova is on PATH
+man nova                         # confirms the man page is registered
+```
+
+Layout installed by the .deb:
+
+| Path                                  | Purpose                |
+| ------------------------------------- | ---------------------- |
+| `/usr/local/bin/nova`                 | The compiler binary    |
+| `/usr/share/man/man1/nova.1.gz`       | Manual page            |
+| `/usr/share/doc/nova/README.md`       | Project README         |
+| `/usr/share/doc/nova/INSTALL.md`      | This file              |
+| `/usr/share/doc/nova/examples/*.nova` | Curated example programs |
+| `/usr/share/doc/nova/copyright`       | MIT license text       |
+| `/usr/share/doc/nova/changelog.Debian.gz` | Per-release notes  |
+
+To uninstall: `sudo apt remove nova` (or `sudo dpkg -r nova`).
+
+The `.deb` is built locally with:
+
+```bash
+make package-deb         # produces dist/nova_X.Y.Z_amd64.deb
+dpkg-deb --info dist/nova_*_amd64.deb   # verify metadata
+```
+
+The build script (`scripts/build-deb.sh`) uses plain `dpkg-deb --build`
+so it works on any host that has `dpkg-deb` installed — no `debuild`
+or `dh_make` required.
+
+## 6. macOS Installer (.pkg)
+
+A signed `.pkg` is built by the `release.yml` workflow on `macos-latest`
+and attached to the GitHub Release page.
+
+```bash
+# Download nova-X.Y.Z.pkg from the release page, then:
+sudo installer -pkg nova-0.1.0.pkg -target /
+
+nova --version                   # confirms /usr/local/bin/nova
+man nova                         # confirms the man page is registered
+```
+
+GUI install: double-click the `.pkg` to launch the macOS Installer,
+follow the prompts. Defaults install to `/usr/local/` (system-wide).
+
+Layout installed by the .pkg:
+
+| Path                                       | Purpose             |
+| ------------------------------------------ | ------------------- |
+| `/usr/local/bin/nova`                      | The compiler binary |
+| `/usr/local/share/man/man1/nova.1`         | Manual page         |
+| `/usr/local/share/doc/nova/`               | README + examples   |
+
+To uninstall:
+
+```bash
+sudo rm -f /usr/local/bin/nova
+sudo rm -rf /usr/local/share/doc/nova
+sudo rm -f /usr/local/share/man/man1/nova.1
+```
+
+Note: real codesigning of the `.pkg` requires a paid Apple Developer ID
+Installer certificate — see `scripts/build-pkg.sh` for the
+`SIGN_IDENTITY` env var and `scripts/sign.sh` for the notarytool flow.
+Until the cert is configured, the `.pkg` is unsigned and Gatekeeper
+will require **right-click → Open** on first launch.
+
+The `.pkg` is built on a macOS host with:
+
+```bash
+make package-pkg         # produces dist/nova-X.Y.Z.pkg
+```
+
+## 7. Windows Installer (.msi)
+
+A `.msi` is built by the `release.yml` workflow on `windows-latest`
+and attached to the GitHub Release page.
+
+```bat
+:: From an elevated cmd.exe:
+msiexec /i nova-0.1.0.msi /quiet /lv install.log
+
+:: Confirm:
+nova --version
+```
+
+GUI install: double-click the `.msi` to launch the Windows Installer,
+click through the EULA + destination prompts. The installer:
+
+- Copies `nova.exe` to `C:\Program Files\Nova\bin\`
+- Adds `C:\Program Files\Nova\bin` to the system `PATH`
+- Creates a Start menu shortcut under **Nova → Nova Compiler**
+- Registers the uninstaller under **Settings → Apps → Nova**
+
+Layout installed by the .msi:
+
+| Path                                   | Purpose              |
+| -------------------------------------- | -------------------- |
+| `C:\Program Files\Nova\bin\nova.exe`   | The compiler binary  |
+| `C:\Program Files\Nova\doc\README.md`  | Project README       |
+| `C:\Program Files\Nova\doc\INSTALL.md` | This file            |
+
+To uninstall: **Settings → Apps → Nova → Uninstall** or
+`msiexec /x nova-0.1.0.msi`.
+
+The `.msi` is built on a Windows host (or Linux + WiX-under-wine) with:
+
+```bash
+make package-msi         # produces dist/nova-X.Y.Z.msi
+```
+
+The build uses the WiX 3.x toolset (`candle` + `light`). The source
+file `packaging/windows/nova.wxs` is portable XML and can be audited
+from any host. Signing the `.msi` requires a Windows code-signing
+certificate — see `scripts/sign.sh` for the `signtool` flow.
 
 ---
 

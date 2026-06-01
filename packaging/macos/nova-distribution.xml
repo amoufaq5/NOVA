@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <!-- macOS productbuild distribution definition for the nova .pkg. -->
+    <title>Nova Programming Language</title>
+    <organization>org.nova-lang</organization>
+    <domains enable_localSystem="true"/>
+    <options customize="never" require-scripts="false" rootVolumeOnly="true"
+             hostArchitectures="x86_64,arm64"/>
+
+    <!-- Minimum supported macOS: 10.13 High Sierra (matches the Mach-O
+         platform_version emitted by `make cross-macos`). -->
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="10.13"/>
+        </allowed-os-versions>
+    </volume-check>
+
+    <!-- Welcome / readme / license panes look for these files inside
+         the resources directory passed to productbuild. -->
+    <welcome    file="welcome.txt"    mime-type="text/plain"/>
+    <license    file="license.txt"    mime-type="text/plain"/>
+    <conclusion file="conclusion.txt" mime-type="text/plain"/>
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="org.nova-lang.nova"/>
+        </line>
+    </choices-outline>
+
+    <choice id="default"/>
+    <choice id="org.nova-lang.nova" visible="false">
+        <pkg-ref id="org.nova-lang.nova"/>
+    </choice>
+
+    <!-- The component package built by pkgbuild lands here. The
+         filename is substituted at build time by build-pkg.sh. -->
+    <pkg-ref id="org.nova-lang.nova" version="0.1.0"
+             auth="Root">nova-component.pkg</pkg-ref>
+</installer-gui-script>

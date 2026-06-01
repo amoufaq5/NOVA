@@ -15,6 +15,9 @@ permissions:
   contents: write
 
 jobs:
+  # Original tarball-only matrix: cross-compiles every target from
+  # ubuntu-latest. Kept untouched so existing release consumers (the
+  # `install.sh` one-liner, the Homebrew formula) keep working.
   build:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -89,11 +92,140 @@ jobs:
             ${{ matrix.tar_name }}
             ${{ matrix.tar_name }}.sha256
 
+  # Native-OS packaging matrix: builds .deb / .pkg / .msi on the OS
+  # they target. Runs in parallel with the cross-build matrix above
+  # and never blocks the tarball release (each native runner is a
+  # best-effort soft-dependency).
+  package:
+    name: Package ${{ matrix.os }} (${{ matrix.format }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu
+            runner: ubuntu-latest
+            format: deb
+          - os: macos
+            runner: macos-latest
+            format: pkg
+          - os: windows
+            runner: windows-latest
+            format: msi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------- Ubuntu .deb
+      - name: Install Linux toolchain
+        if: matrix.os == 'ubuntu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils build-essential dpkg-dev
+
+      - name: Bootstrap nova (Linux host)
+        if: matrix.os == 'ubuntu'
+        run: |
+          make bootstrap
+          make bin/nova
+          bin/nova --version
+
+      - name: Build .deb
+        if: matrix.os == 'ubuntu'
+        run: |
+          bash scripts/build-deb.sh
+          ls -la dist/*.deb
+          dpkg-deb --info dist/nova_*_amd64.deb
+          dpkg-deb --contents dist/nova_*_amd64.deb
+
+      # ----------------------------------------------------------- macOS .pkg
+      - name: Bootstrap nova (macOS host)
+        if: matrix.os == 'macos'
+        run: |
+          # macOS ships `as`/`ld`/`clang` in Xcode CLT. The Makefile's
+          # bootstrap target uses `as`+`ld` which work natively here.
+          make bootstrap
+          make bin/nova
+          bin/nova --version
+
+      - name: Build .pkg
+        if: matrix.os == 'macos'
+        env:
+          # Productsign + notarization credentials. Both blocks are
+          # no-ops if the secrets aren't configured -- the build-pkg.sh
+          # script falls through to producing an unsigned .pkg in that
+          # case, which is still useful for testing.
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOVA_APPLE_ID: ${{ secrets.NOVA_APPLE_ID }}
+          NOVA_TEAM_ID: ${{ secrets.NOVA_TEAM_ID }}
+          NOVA_APPLE_PWD: ${{ secrets.NOVA_APPLE_PWD }}
+        run: |
+          bash scripts/build-pkg.sh
+          ls -la dist/*.pkg || true
+
+      # ----------------------------------------------------------- Windows .msi
+      - name: Set up Windows toolchain
+        if: matrix.os == 'windows'
+        run: |
+          choco install make --no-progress -y
+          choco install wixtoolset --no-progress -y
+          choco install mingw      --no-progress -y
+        shell: pwsh
+
+      - name: Bootstrap nova (Windows cross-build via WSL/git-bash)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          # The windows-latest runner ships a bash + binutils via
+          # git-bash; that's enough to run the existing two-stage build
+          # under the mingw-w64 toolchain installed above.
+          export PATH="/c/Program Files/Git/usr/bin:$PATH"
+          make bootstrap
+          make bin/nova
+          make cross-windows
+          ls -la bin/nova.exe
+
+      - name: Build .msi
+        if: matrix.os == 'windows'
+        shell: cmd
+        run: |
+          packaging\windows\build-msi.bat
+          dir dist\*.msi
+
+      # ----------------------------------------------------------- upload
+      - name: Upload .deb
+        if: matrix.os == 'ubuntu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-deb
+          path: dist/*.deb
+
+      - name: Upload .pkg
+        if: matrix.os == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-pkg
+          path: |
+            dist/*.pkg
+            dist/*.pkg.txt
+
+      - name: Upload .msi
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-msi
+          path: dist/*.msi
+
+  # Publish: gathers every artifact from `build` AND `package` into one
+  # GitHub Release. Soft-depends on `package` -- if a native runner
+  # fails, the tarballs still ship.
   release:
     name: Publish release
-    needs: build
+    needs: [build, package]
+    if: |
+      always() && needs.build.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -103,7 +235,9 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) \
+          find release-artifacts -type f \
+            \( -name "*.tar.gz" -o -name "*.sha256" \
+               -o -name "*.deb"  -o -name "*.pkg"  -o -name "*.msi" \) \
             -exec cp {} release/ \;
           ls -la release/
 
@@ -125,3 +259,6 @@ jobs:
           files: |
             release/*.tar.gz
             release/*.sha256
+            release/*.deb
+            release/*.pkg
+            release/*.msi

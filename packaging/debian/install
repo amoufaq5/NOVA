@@ -1,0 +1,8 @@
+bin/nova                                       usr/local/bin
+packaging/man/nova.1                           usr/share/man/man1
+README.md                                      usr/share/doc/nova
+INSTALL.md                                     usr/share/doc/nova
+examples/hello.nova                            usr/share/doc/nova/examples
+examples/hello_macos.nova                      usr/share/doc/nova/examples
+examples/hello_wasm.nova                       usr/share/doc/nova/examples
+examples/basic_mind.nova                       usr/share/doc/nova/examples

@@ -1,0 +1,20 @@
+Welcome to the Nova installer.
+
+This package will install the Nova compiler (nova) and its manual
+page (nova(1)) into the standard system locations:
+
+  /usr/local/bin/nova
+  /usr/local/share/man/man1/nova.1
+  /usr/local/share/doc/nova/
+
+After installation, open Terminal and run:
+
+  nova --version
+
+You should see "nova 0.1.0".
+
+Nova is a self-hosting compiled language with zero runtime
+dependencies. It emits GAS-syntax x86-64 (and ARM64) assembly that
+the system toolchain assembles and links into native Mach-O binaries.
+
+Homepage: https://github.com/nova-lang/nova

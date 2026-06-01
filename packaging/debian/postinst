@@ -1,0 +1,23 @@
+#!/bin/sh
+# postinst — runs after `dpkg -i nova_*.deb` succeeds.
+set -e
+
+case "$1" in
+    configure)
+        # Rebuild the man-page database so `man nova` works immediately.
+        if command -v mandb >/dev/null 2>&1; then
+            mandb -q || true
+        fi
+
+        # Friendly post-install hint. Suppressed under DEBIAN_FRONTEND=noninteractive.
+        if [ "${DEBIAN_FRONTEND:-}" != "noninteractive" ]; then
+            echo "nova: installed to /usr/local/bin/nova"
+            echo "nova: try -> nova --version"
+            echo "nova: examples in /usr/share/doc/nova/examples/"
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+exit 0

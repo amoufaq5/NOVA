@@ -85,6 +85,29 @@ bin/nova myprogram.nova --check
 make stats
 ```
 
+### Installing a release build
+
+Pre-built packages are attached to every tagged release on GitHub:
+
+```bash
+# Linux one-liner (any distro)
+curl -sSL https://raw.githubusercontent.com/nova-lang/nova/main/tools/install.sh | sh
+
+# Debian / Ubuntu
+sudo apt install ./nova_0.1.0_amd64.deb
+
+# macOS
+sudo installer -pkg nova-0.1.0.pkg -target /
+# or
+brew tap nova-lang/nova && brew install nova
+
+# Windows
+msiexec /i nova-0.1.0.msi /quiet
+```
+
+See `INSTALL.md` for the full per-platform breakdown, including
+manual tarball install and the system-wide layout each package uses.
+
 ## Hello World
 
 ```nova

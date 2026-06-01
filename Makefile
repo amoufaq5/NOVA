@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf bench-simd bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf bench-simd bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all
 
 all: bin/nova
 
@@ -606,5 +606,57 @@ stats:
 	@echo -n "Examples:           "; cat examples/*.nova 2>/dev/null | wc -l | awk '{print $$0 " lines"}'
 	@echo -n "Total Nova:         "; find . -name "*.nova" | xargs cat | wc -l | awk '{print $$0 " lines"}'
 
+# Install nova into a system prefix. Mirrors the layout that the .deb
+# and .pkg packagers use, so all three paths are interchangeable.
+#
+# Defaults install to /usr/local; override PREFIX=$HOME/.local for a
+# user-local install. DESTDIR is honoured for staged installs (used by
+# the .deb rules file).
+#
+# Files installed:
+#   $(DESTDIR)$(PREFIX)/bin/nova
+#   $(DESTDIR)$(PREFIX)/share/man/man1/nova.1
+#   $(DESTDIR)$(PREFIX)/share/doc/nova/{README.md,INSTALL.md,examples/}
+PREFIX ?= /usr/local
+DESTDIR ?=
+install: bin/nova
+	install -D -m 0755 bin/nova $(DESTDIR)$(PREFIX)/bin/nova
+	install -D -m 0644 packaging/man/nova.1 \
+	    $(DESTDIR)$(PREFIX)/share/man/man1/nova.1
+	install -D -m 0644 README.md  $(DESTDIR)$(PREFIX)/share/doc/nova/README.md
+	install -D -m 0644 INSTALL.md $(DESTDIR)$(PREFIX)/share/doc/nova/INSTALL.md
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/doc/nova/examples
+	@for f in examples/hello.nova examples/hello_macos.nova \
+	          examples/hello_wasm.nova examples/basic_mind.nova; do \
+	    [ -f $$f ] && install -m 0644 $$f \
+	        $(DESTDIR)$(PREFIX)/share/doc/nova/examples/$$(basename $$f); \
+	done
+	@echo "nova installed -> $(DESTDIR)$(PREFIX)/bin/nova"
+
+# Build a Debian/Ubuntu .deb. Wrapper around scripts/build-deb.sh which
+# does the actual dpkg-deb work; the script falls through to writing a
+# recipe file if dpkg-deb is missing.
+package-deb: bin/nova
+	@bash scripts/build-deb.sh
+
+# Build a macOS .pkg. Requires pkgbuild + productbuild (only available
+# on macOS proper). On Linux the script writes a recipe file under dist/
+# instead of failing.
+package-pkg: bin/nova
+	@bash scripts/build-pkg.sh
+
+# Build a Windows .msi using the WiX toolset. Requires candle + light
+# (WiX 3.x) or `wix` (WiX 4+). Falls through to a recipe file if the
+# toolset is missing.
+package-msi: bin/nova
+	@bash scripts/build-msi.sh
+
+# Build every package format that can run on this host. Each individual
+# script is idempotent and decides for itself whether to build or stub.
+package-all: package-deb package-pkg package-msi
+	@echo "package-all: see dist/ for build outputs"
+	@ls -la dist/ 2>/dev/null || true
+
 clean:
 	rm -rf bin/ /tmp/nova_*.s /tmp/nova_*.o /tmp/t /tmp/t.s /tmp/t.o /tmp/ex_*
+	rm -rf dist/deb-stage dist/pkg-stage

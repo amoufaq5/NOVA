@@ -1,5 +1,54 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R10A: Cross-platform packaging (.deb + .pkg + .msi + Homebrew)
+
+Extended R5's `install.sh` + Homebrew formula to native OS packaging.
+
+- `packaging/debian/` — Debian package metadata (control, changelog,
+  copyright, rules, install, postinst, source/format)
+- `packaging/macos/` — macOS productbuild distribution.xml +
+  welcome/license/conclusion resources + postinstall script
+- `packaging/windows/nova.wxs` — WiX 3.x source for the .msi
+  installer (ProgramFiles64 layout, PATH env entry, Start menu
+  shortcut, MajorUpgrade)
+- `packaging/windows/build-msi.bat` — Windows-native cmd.exe builder
+- `packaging/man/nova.1` — troff(1) manual page (shipped by .deb + .pkg)
+- `packaging/homebrew/` — bump-formula.sh + README documenting the
+  tap-update flow
+- `scripts/build-deb.sh` — dpkg-deb based builder (sandbox-runnable)
+- `scripts/build-pkg.sh` — pkgbuild + productbuild builder (macOS-only;
+  emits recipe file on Linux)
+- `scripts/build-msi.sh` — WiX 3/4 builder (recipe-fallback on Linux)
+- `scripts/sign.sh` — unified signing wrapper for gpg / productsign /
+  signtool
+- `tools/Formula/nova.rb` — refreshed Homebrew formula with proper
+  macOS .o linking, on_intel/on_arm scaffolding, doc + man install,
+  full smoke test
+- `.github/workflows/release.yml` — extended to a 3-job pipeline:
+  build (cross from Ubuntu), package (native runners ubuntu/macos/
+  windows), release (publishes everything)
+- `Makefile` — new `install`, `package-deb`, `package-pkg`,
+  `package-msi`, `package-all` targets (DESTDIR + PREFIX honoured)
+- `INSTALL.md` — extended to 7 install paths with per-format layout
+  tables
+
+Verification:
+- `dpkg-deb --build` produces a valid 137 KB nova_0.1.0_amd64.deb
+  (`dpkg-deb --info` clean, `dpkg-deb --contents` clean)
+- `bash -n` clean on all four scripts
+- `xmllint --noout` clean on nova.wxs
+- `ruby -c` clean on tools/Formula/nova.rb
+- `yamllint` clean on release.yml
+- `actionlint v1.7.7` clean on release.yml
+- `make install DESTDIR=...` works end-to-end
+
+Sandbox limits:
+- `pkgbuild`/`productbuild` only on macOS — Linux falls through to
+  writing `dist/nova-0.1.0.pkg.txt` recipe file
+- WiX `candle`/`light` only on Windows / wine — Linux falls through to
+  writing `dist/nova-0.1.0.msi.txt` recipe file
+- `brew audit` skipped (brew not installed); formula is `ruby -c` clean
+
 ## Completed
 
 ### N12–N29 Modules (18 modules)
