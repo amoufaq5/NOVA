@@ -4273,12 +4273,810 @@ fn arm64_gen_program(program) {
     return join(arm_output, chr(10))
 }
 
+// =====================================================================
+// Windows ARM64 (PE32+ AArch64) backend - standalone AST-walking codegen
+//
+// Emits GNU-as / clang-MC compatible ARM64 assembly using PE/COFF section
+// conventions and Win32 API calls (no syscalls — PE is API-only). The
+// resulting .s assembles with `clang -target aarch64-windows-gnu -c` and
+// links with `lld-link /machine:arm64` against ARM64 import libs that the
+// Makefile fabricates from .def files via `llvm-dlltool -m arm64`.
+//
+// Calling convention (Windows AArch64, identical to AAPCS64 for our use):
+//   x0-x7  : integer args / return
+//   x8     : indirect result location (we don't use it)
+//   x9-x15 : caller-saved temporaries
+//   x18    : platform reserved (TEB on Windows) — must NOT be clobbered
+//   x19-x28: callee-saved
+//   x29    : frame pointer
+//   x30    : link register
+//   sp     : 16-byte aligned at call boundaries (Windows ABI enforces this)
+//
+// Imports: PE indirect-via-IAT. Each imported API has an `__imp_<name>`
+// 64-bit pointer in the .idata IAT that the loader populates with the
+// resolved address. To call an import we load that pointer into a temp
+// register and BLR through it:
+//   adrp x16, __imp_ExitProcess
+//   ldr  x16, [x16, :lo12:__imp_ExitProcess]
+//   blr  x16
+//
+// Imports used:
+//   KERNEL32.DLL: GetStdHandle, WriteFile, ExitProcess
+//   BCRYPT.DLL  : BCryptGenRandom
+//
+// Entry point: `mainCRTStartup` (matches lld-link's default entry for
+// console subsystems when no CRT is present). The entry sets up a stack
+// frame, runs top-level statements, then calls ExitProcess(0).
+//
+// Supported subset (intentionally the SAME surface as the Linux ARM64
+// standalone path): fn declarations + return; let bindings; if/while;
+// integer +/-/*/// and comparisons; function calls; println/print of a
+// string; secure_random(buf, n) via BCryptGenRandom. Builtins outside
+// this set are stubbed to a printable error + ExitProcess(1).
+//
+// This is a SEPARATE generator from the x86-64 Windows path (cg_target ==
+// 3) because the latter is the full IR-based GAS pipeline; the ARM64
+// path is the standalone AST-walking pipeline mirroring cg_target == 4
+// (ARM64 Linux). Both ARM64 paths share the same instruction encoding
+// helpers below.
+// =====================================================================
+
+let warm_locals = 0
+let warm_local_count = 0
+let warm_params = 0
+let warm_param_count = 0
+let warm_strings = 0
+let warm_str_count = 0
+let warm_label_count = 0
+let warm_fns = 0
+let warm_output = 0
+let warm_break_label = ""
+let warm_continue_label = ""
+let warm_current_fn_name = ""
+
+fn warm_out(s) {
+    push(warm_output, s)
+}
+
+fn warm_label(name) {
+    push(warm_output, name + ":")
+}
+
+fn warm_new_label() {
+    warm_label_count = warm_label_count + 1
+    return ".LW" + int_to_str(warm_label_count)
+}
+
+fn warm_add_string(s) {
+    let i = 0
+    while i < warm_str_count {
+        if warm_strings[i] == s { return i }
+        i = i + 1
+    }
+    let idx = warm_str_count
+    push(warm_strings, s)
+    warm_str_count = warm_str_count + 1
+    return idx
+}
+
+fn warm_has_local(name) {
+    let i = 0
+    while i < warm_local_count {
+        if warm_locals[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn warm_local_off(name) {
+    let i = 0
+    while i < warm_local_count {
+        if warm_locals[i] == name {
+            return (i + 1) * 8
+        }
+        i = i + 1
+    }
+    push(warm_locals, name)
+    warm_local_count = warm_local_count + 1
+    return warm_local_count * 8
+}
+
+fn warm_current_fn() { return warm_current_fn_name }
+
+// Collect locals introduced by `let` inside an arbitrary AST subtree so
+// the function prologue can reserve a fixed-size stack frame. Same shape
+// as arm_collect_locals — the AST is target-independent.
+fn warm_collect_locals(nd) {
+    if nd == 0 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_LET_STMT {
+        let nm = nd[1]
+        if warm_has_local(nm) == 0 {
+            push(warm_locals, nm)
+            warm_local_count = warm_local_count + 1
+        }
+        warm_collect_locals(nd[2])
+        return 0
+    }
+    if t == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            warm_collect_locals(stmts[i])
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_IF_STMT {
+        warm_collect_locals(nd[1])
+        warm_collect_locals(nd[2])
+        warm_collect_locals(nd[3])
+        return 0
+    }
+    if t == AST_WHILE_STMT {
+        warm_collect_locals(nd[1])
+        warm_collect_locals(nd[2])
+        return 0
+    }
+    if t == AST_RETURN_STMT { warm_collect_locals(nd[1]); return 0 }
+    if t == AST_EXPR_STMT { warm_collect_locals(nd[1]); return 0 }
+    if t == AST_ASSIGN_STMT { warm_collect_locals(nd[2]); return 0 }
+    if t == AST_BIN_OP { warm_collect_locals(nd[2]); warm_collect_locals(nd[3]); return 0 }
+    if t == AST_UNARY_OP { warm_collect_locals(nd[2]); return 0 }
+    if t == AST_AND_EXPR { warm_collect_locals(nd[1]); warm_collect_locals(nd[2]); return 0 }
+    if t == AST_OR_EXPR { warm_collect_locals(nd[1]); warm_collect_locals(nd[2]); return 0 }
+    if t == AST_CALL {
+        let args = nd[2]
+        let i = 0
+        while i < len(args) {
+            warm_collect_locals(args[i])
+            i = i + 1
+        }
+        return 0
+    }
+    return 0
+}
+
+// Materialise a 64-bit signed integer into the given xN register, using
+// the AArch64 movz/movk sequence (movn for negatives). Identical to the
+// Linux ARM64 path's arm_emit_load_imm — kept separate so the two output
+// list pointers don't collide.
+fn warm_emit_load_imm(reg, val) {
+    if val == 0 {
+        warm_out("    mov " + reg + ", #0")
+        return 0
+    }
+    if val > 0 {
+        if val < 65536 {
+            warm_out("    mov " + reg + ", #" + int_to_str(val))
+            return 0
+        }
+        warm_out("    movz " + reg + ", #" + int_to_str(val % 65536))
+        let shift = val / 65536
+        if shift > 0 {
+            warm_out("    movk " + reg + ", #" + int_to_str(shift % 65536) + ", lsl #16")
+            shift = shift / 65536
+            if shift > 0 {
+                warm_out("    movk " + reg + ", #" + int_to_str(shift % 65536) + ", lsl #32")
+                shift = shift / 65536
+                if shift > 0 {
+                    warm_out("    movk " + reg + ", #" + int_to_str(shift % 65536) + ", lsl #48")
+                }
+            }
+        }
+        return 0
+    }
+    let inv = 0 - val - 1
+    warm_out("    movn " + reg + ", #" + int_to_str(inv % 65536))
+    let upper = inv / 65536
+    if upper > 0 {
+        warm_out("    movk " + reg + ", #" + int_to_str(upper % 65536) + ", lsl #16")
+    }
+    return 0
+}
+
+fn warm_push_x0() {
+    warm_out("    str x0, [sp, #-16]!")
+}
+
+fn warm_pop_to(reg) {
+    warm_out("    ldr " + reg + ", [sp], #16")
+}
+
+// Call a PE-imported function via the IAT. The Windows loader rewrites
+// __imp_<name> at load time with the resolved API address; we just need
+// to load that pointer and BLR through it. x16 is a safe scratch
+// (caller-saved, not used as an arg).
+fn warm_call_import(impname) {
+    warm_out("    adrp x16, " + impname)
+    warm_out("    ldr  x16, [x16, :lo12:" + impname + "]")
+    warm_out("    blr  x16")
+}
+
+fn warm_gen_call(nd) {
+    let callee = nd[1]
+    let args = nd[2]
+    let name = ""
+    if ast_tag(callee) == AST_IDENT { name = callee[1] }
+
+    if name == "println" {
+        if len(args) >= 1 {
+            warm_gen_expr(args[0])
+        } else {
+            warm_out("    mov x0, #0")
+        }
+        warm_out("    bl _nova_warm_println")
+        return 0
+    }
+    if name == "print" {
+        if len(args) >= 1 {
+            warm_gen_expr(args[0])
+        } else {
+            warm_out("    mov x0, #0")
+        }
+        warm_out("    bl _nova_warm_print")
+        return 0
+    }
+    if name == "exit" {
+        if len(args) >= 1 { warm_gen_expr(args[0]) } else { warm_out("    mov x0, #0") }
+        // ExitProcess(uExitCode) — x0 already holds the code, but Win32
+        // wants a 32-bit UINT in w0. The truncation is implicit when
+        // the import reads w0.
+        warm_call_import("__imp_ExitProcess")
+        return 0
+    }
+    if name == "secure_random" {
+        // secure_random(buf, n) -> bytes_written, or -1 on error.
+        // Windows: BCryptGenRandom(NULL, buf, n,
+        //   BCRYPT_USE_SYSTEM_PREFERRED_RNG=2). Returns NTSTATUS; 0 == OK.
+        let argc_sr = len(args)
+        if argc_sr >= 2 {
+            warm_gen_expr(args[0])
+            warm_push_x0()
+            warm_gen_expr(args[1])
+            // Move n into x2 (cbBuffer), buf into x1 (pbBuffer).
+            warm_out("    mov x2, x0")
+            warm_pop_to("x1")
+        } else {
+            warm_out("    mov x1, #0")
+            warm_out("    mov x2, #0")
+        }
+        warm_out("    mov x0, #0")              // hAlgorithm = NULL
+        warm_out("    mov w3, #2")              // BCRYPT_USE_SYSTEM_PREFERRED_RNG
+        // Save n_bytes so we can return it on success.
+        warm_out("    str x2, [sp, #-16]!")
+        warm_call_import("__imp_BCryptGenRandom")
+        warm_out("    ldr x2, [sp], #16")        // restore n_bytes
+        // NTSTATUS in w0; 0 == STATUS_SUCCESS.
+        warm_out("    cmp w0, #0")
+        let okl = warm_new_label()
+        let endl = warm_new_label()
+        warm_out("    b.eq " + okl)
+        warm_emit_load_imm("x0", 0 - 1)         // failure: -1
+        warm_out("    b " + endl)
+        warm_label(okl)
+        warm_out("    mov x0, x2")              // success: return n_bytes
+        warm_label(endl)
+        return 0
+    }
+    if name == "list_new" {
+        warm_out("    bl _nova_warm_stub_list_new")
+        return 0
+    }
+    if name == "push" {
+        warm_out("    bl _nova_warm_stub_push")
+        return 0
+    }
+    if name == "len" {
+        warm_out("    bl _nova_warm_stub_len")
+        return 0
+    }
+    if name == "read_file" {
+        warm_out("    bl _nova_warm_stub_read_file")
+        return 0
+    }
+    if name == "write_file" {
+        warm_out("    bl _nova_warm_stub_write_file")
+        return 0
+    }
+
+    // Generic user-function call.
+    let argc = len(args)
+    if argc > 8 {
+        warm_out("    // ERROR: winarm64 codegen supports at most 8 args")
+        argc = 8
+    }
+    let i = 0
+    while i < argc {
+        warm_gen_expr(args[i])
+        warm_push_x0()
+        i = i + 1
+    }
+    i = argc - 1
+    while i >= 0 {
+        warm_pop_to("x" + int_to_str(i))
+        i = i - 1
+    }
+    warm_out("    bl " + name)
+    return 0
+}
+
+fn warm_gen_expr(nd) {
+    let t = ast_tag(nd)
+    if t == AST_INT_LIT {
+        warm_emit_load_imm("x0", nd[1])
+        return 0
+    }
+    if t == AST_BOOL_LIT {
+        if nd[1] == 1 {
+            warm_out("    mov x0, #1")
+        } else {
+            warm_out("    mov x0, #0")
+        }
+        return 0
+    }
+    if t == AST_NONE_LIT {
+        warm_out("    mov x0, #0")
+        return 0
+    }
+    if t == AST_STR_LIT {
+        let idx = warm_add_string(nd[1])
+        warm_out("    adrp x0, _wstr_" + int_to_str(idx))
+        warm_out("    add x0, x0, :lo12:_wstr_" + int_to_str(idx))
+        return 0
+    }
+    if t == AST_IDENT {
+        let nm = nd[1]
+        if warm_has_local(nm) == 1 {
+            let off = warm_local_off(nm)
+            warm_out("    ldr x0, [x29, #-" + int_to_str(off) + "]")
+            return 0
+        }
+        warm_out("    adrp x0, " + nm)
+        warm_out("    add x0, x0, :lo12:" + nm)
+        return 0
+    }
+    if t == AST_BIN_OP {
+        let op = nd[1]
+        warm_gen_expr(nd[2])
+        warm_push_x0()
+        warm_gen_expr(nd[3])
+        warm_out("    mov x1, x0")
+        warm_pop_to("x0")
+        if op == "+" { warm_out("    add x0, x0, x1"); return 0 }
+        if op == "-" { warm_out("    sub x0, x0, x1"); return 0 }
+        if op == "*" { warm_out("    mul x0, x0, x1"); return 0 }
+        if op == "/" { warm_out("    sdiv x0, x0, x1"); return 0 }
+        if op == "%" {
+            warm_out("    sdiv x2, x0, x1")
+            warm_out("    msub x0, x2, x1, x0")
+            return 0
+        }
+        if op == "==" { warm_out("    cmp x0, x1"); warm_out("    cset x0, eq"); return 0 }
+        if op == "!=" { warm_out("    cmp x0, x1"); warm_out("    cset x0, ne"); return 0 }
+        if op == "<" { warm_out("    cmp x0, x1"); warm_out("    cset x0, lt"); return 0 }
+        if op == ">" { warm_out("    cmp x0, x1"); warm_out("    cset x0, gt"); return 0 }
+        if op == "<=" { warm_out("    cmp x0, x1"); warm_out("    cset x0, le"); return 0 }
+        if op == ">=" { warm_out("    cmp x0, x1"); warm_out("    cset x0, ge"); return 0 }
+        warm_out("    // unsupported winarm64 binop: " + op)
+        return 0
+    }
+    if t == AST_UNARY_OP {
+        let op = nd[1]
+        warm_gen_expr(nd[2])
+        if op == "-" { warm_out("    neg x0, x0"); return 0 }
+        if op == "!" { warm_out("    cmp x0, #0"); warm_out("    cset x0, eq"); return 0 }
+        warm_out("    // unsupported winarm64 unary: " + op)
+        return 0
+    }
+    if t == AST_AND_EXPR {
+        let end = warm_new_label()
+        warm_gen_expr(nd[1])
+        warm_out("    cbz x0, " + end)
+        warm_gen_expr(nd[2])
+        warm_label(end)
+        return 0
+    }
+    if t == AST_OR_EXPR {
+        let end = warm_new_label()
+        warm_gen_expr(nd[1])
+        warm_out("    cbnz x0, " + end)
+        warm_gen_expr(nd[2])
+        warm_label(end)
+        return 0
+    }
+    if t == AST_CALL {
+        warm_gen_call(nd)
+        return 0
+    }
+    warm_out("    // unsupported winarm64 expression tag " + int_to_str(t))
+    warm_out("    mov x0, #0")
+    return 0
+}
+
+fn warm_gen_stmt(nd) {
+    let t = ast_tag(nd)
+    if t == AST_LET_STMT {
+        let nm = nd[1]
+        let val = nd[2]
+        warm_gen_expr(val)
+        let off = warm_local_off(nm)
+        warm_out("    str x0, [x29, #-" + int_to_str(off) + "]")
+        return 0
+    }
+    if t == AST_ASSIGN_STMT {
+        let nm = nd[1]
+        warm_gen_expr(nd[2])
+        let off = warm_local_off(nm)
+        warm_out("    str x0, [x29, #-" + int_to_str(off) + "]")
+        return 0
+    }
+    if t == AST_EXPR_STMT {
+        warm_gen_expr(nd[1])
+        return 0
+    }
+    if t == AST_RETURN_STMT {
+        let val = nd[1]
+        if val == 0 {
+            warm_out("    mov x0, #0")
+        } else {
+            warm_gen_expr(val)
+        }
+        warm_out("    b _warm_fn_epilogue_" + warm_current_fn())
+        return 0
+    }
+    if t == AST_IF_STMT {
+        let cond = nd[1]
+        let then_b = nd[2]
+        let else_b = nd[3]
+        let else_lbl = warm_new_label()
+        let end_lbl = warm_new_label()
+        warm_gen_expr(cond)
+        warm_out("    cbz x0, " + else_lbl)
+        warm_gen_stmt(then_b)
+        warm_out("    b " + end_lbl)
+        warm_label(else_lbl)
+        if else_b != 0 {
+            warm_gen_stmt(else_b)
+        }
+        warm_label(end_lbl)
+        return 0
+    }
+    if t == AST_WHILE_STMT {
+        let head_lbl = warm_new_label()
+        let end_lbl = warm_new_label()
+        let saved_break = warm_break_label
+        let saved_cont = warm_continue_label
+        warm_break_label = end_lbl
+        warm_continue_label = head_lbl
+        warm_label(head_lbl)
+        warm_gen_expr(nd[1])
+        warm_out("    cbz x0, " + end_lbl)
+        warm_gen_stmt(nd[2])
+        warm_out("    b " + head_lbl)
+        warm_label(end_lbl)
+        warm_break_label = saved_break
+        warm_continue_label = saved_cont
+        return 0
+    }
+    if t == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            warm_gen_stmt(stmts[i])
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_BREAK_STMT {
+        if len(warm_break_label) > 0 {
+            warm_out("    b " + warm_break_label)
+        }
+        return 0
+    }
+    if t == AST_CONTINUE_STMT {
+        if len(warm_continue_label) > 0 {
+            warm_out("    b " + warm_continue_label)
+        }
+        return 0
+    }
+    warm_out("    // unsupported winarm64 stmt tag " + int_to_str(t))
+    return 0
+}
+
+fn warm_gen_function(nd) {
+    let name = nd[1]
+    let params = nd[2]
+    let body = nd[3]
+
+    warm_locals = list_new()
+    warm_local_count = 0
+    warm_params = params
+    warm_param_count = len(params)
+    warm_current_fn_name = name
+
+    let pi = 0
+    while pi < warm_param_count {
+        push(warm_locals, params[pi])
+        warm_local_count = warm_local_count + 1
+        pi = pi + 1
+    }
+    warm_collect_locals(body)
+
+    let frame_bytes = warm_local_count * 8
+    let rem = frame_bytes % 16
+    if rem > 0 { frame_bytes = frame_bytes + (16 - rem) }
+    if frame_bytes < 16 { frame_bytes = 16 }
+
+    warm_out("")
+    warm_out(".globl " + name)
+    warm_out(".p2align 2")
+    warm_label(name)
+    warm_out("    stp x29, x30, [sp, #-16]!")
+    warm_out("    mov x29, sp")
+    warm_out("    sub sp, sp, #" + int_to_str(frame_bytes))
+
+    let ai = 0
+    while ai < warm_param_count {
+        if ai < 8 {
+            let off = (ai + 1) * 8
+            warm_out("    str x" + int_to_str(ai) + ", [x29, #-" + int_to_str(off) + "]")
+        }
+        ai = ai + 1
+    }
+
+    warm_gen_stmt(body)
+
+    warm_out("    mov x0, #0")
+    warm_label("_warm_fn_epilogue_" + name)
+    warm_out("    add sp, sp, #" + int_to_str(frame_bytes))
+    warm_out("    ldp x29, x30, [sp], #16")
+    warm_out("    ret")
+}
+
+fn warm_emit_stub(label, msg) {
+    let idx = warm_add_string(msg)
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label(label)
+    warm_out("    adrp x0, _wstr_" + int_to_str(idx))
+    warm_out("    add x0, x0, :lo12:_wstr_" + int_to_str(idx))
+    warm_out("    bl _nova_warm_println")
+    warm_out("    mov w0, #1")
+    warm_call_import("__imp_ExitProcess")
+}
+
+// Tiny Win32 runtime: enough to make println(string) work via
+// GetStdHandle+WriteFile, plus error-stubs for unsupported builtins.
+// All routines preserve the AAPCS64 frame discipline and 16-byte SP
+// alignment at call boundaries.
+fn warm_emit_runtime() {
+    // ---- _nova_warm_strlen: NUL-terminated byte count of x0 in x0 ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_strlen")
+    warm_out("    mov x1, x0")
+    warm_out("    mov x2, #0")
+    warm_label(".Lwarm_strlen_loop")
+    warm_out("    ldrb w3, [x1, x2]")
+    warm_out("    cbz w3, .Lwarm_strlen_done")
+    warm_out("    add x2, x2, #1")
+    warm_out("    b .Lwarm_strlen_loop")
+    warm_label(".Lwarm_strlen_done")
+    warm_out("    mov x0, x2")
+    warm_out("    ret")
+
+    // ---- _nova_warm_write_stdout(ptr=x0, len=x1) ----
+    // GetStdHandle(-11) -> stdout handle, then
+    // WriteFile(handle, buf, len, &written, NULL).
+    // We need a tiny scratch slot for lpNumberOfBytesWritten — use the
+    // stack. Frame layout: [sp, #0..7] saved x19 (buf ptr while we call
+    // GetStdHandle), [sp, #8..15] saved x20 (len), [sp, #16..23]
+    // lpNumberOfBytesWritten, [sp, #24..31] padding to 32-byte shadow.
+    // Windows ARM64 does NOT require the 32-byte shadow space the x64
+    // ABI does; we still keep 16-byte SP alignment.
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_write_stdout")
+    warm_out("    stp x29, x30, [sp, #-48]!")
+    warm_out("    mov x29, sp")
+    warm_out("    str x19, [sp, #16]")           // save buf
+    warm_out("    str x20, [sp, #24]")           // save len
+    warm_out("    str x21, [sp, #32]")           // saved space for &written
+    warm_out("    mov x19, x0")                  // buf
+    warm_out("    mov x20, x1")                  // len
+    // GetStdHandle(STD_OUTPUT_HANDLE = -11). DWORD arg in w0; we want
+    // the 32-bit value 0xFFFFFFF5 = -11. movn produces this directly.
+    warm_out("    movn w0, #10")                 // -11 in 32-bit
+    warm_call_import("__imp_GetStdHandle")
+    // x0 = stdout handle. Now WriteFile(hFile=x0, lpBuffer=x19,
+    // nNumberOfBytesToWrite=x20, lpNumberOfBytesWritten=&[sp+32],
+    // lpOverlapped=NULL).
+    warm_out("    mov x1, x19")                  // lpBuffer
+    warm_out("    mov x2, x20")                  // nNumberOfBytesToWrite
+    warm_out("    add x3, sp, #32")              // &lpNumberOfBytesWritten
+    warm_out("    mov x4, #0")                   // lpOverlapped = NULL
+    warm_call_import("__imp_WriteFile")
+    warm_out("    ldr x21, [sp, #32]")
+    warm_out("    ldr x20, [sp, #24]")
+    warm_out("    ldr x19, [sp, #16]")
+    warm_out("    ldp x29, x30, [sp], #48")
+    warm_out("    ret")
+
+    // ---- _nova_warm_print: write(stdout, x0, strlen(x0)) ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_print")
+    warm_out("    stp x29, x30, [sp, #-32]!")
+    warm_out("    mov x29, sp")
+    warm_out("    str x19, [sp, #16]")
+    warm_out("    mov x19, x0")
+    warm_out("    bl _nova_warm_strlen")
+    warm_out("    mov x1, x0")                   // len
+    warm_out("    mov x0, x19")                  // buf
+    warm_out("    bl _nova_warm_write_stdout")
+    warm_out("    ldr x19, [sp, #16]")
+    warm_out("    ldp x29, x30, [sp], #32")
+    warm_out("    ret")
+
+    // ---- _nova_warm_println: print + CRLF ----
+    // Windows console expects \r\n; PE binaries that emit only \n
+    // print fine in modern terminals but cmd.exe sometimes ignores
+    // the LF without CR. Use CRLF for compatibility.
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_println")
+    warm_out("    stp x29, x30, [sp, #-16]!")
+    warm_out("    mov x29, sp")
+    warm_out("    bl _nova_warm_print")
+    warm_out("    adrp x0, _warm_crlf")
+    warm_out("    add x0, x0, :lo12:_warm_crlf")
+    warm_out("    mov x1, #2")
+    warm_out("    bl _nova_warm_write_stdout")
+    warm_out("    ldp x29, x30, [sp], #16")
+    warm_out("    ret")
+
+    warm_emit_stub("_nova_warm_stub_list_new", "winarm64: list_new not yet supported")
+    warm_emit_stub("_nova_warm_stub_push", "winarm64: push not yet supported")
+    warm_emit_stub("_nova_warm_stub_len", "winarm64: len not yet supported")
+    warm_emit_stub("_nova_warm_stub_read_file", "winarm64: read_file not yet supported")
+    warm_emit_stub("_nova_warm_stub_write_file", "winarm64: write_file not yet supported")
+}
+
+fn winarm64_gen_program(program) {
+    warm_locals = list_new()
+    warm_local_count = 0
+    warm_params = list_new()
+    warm_param_count = 0
+    warm_strings = list_new()
+    warm_str_count = 0
+    warm_label_count = 0
+    warm_fns = list_new()
+    warm_output = list_new()
+    warm_break_label = ""
+    warm_continue_label = ""
+
+    let decls = program[1]
+
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            push(warm_fns, d[1])
+        }
+        i = i + 1
+    }
+
+    // PE32+ import declarations. The Windows loader populates these IAT
+    // slots at process startup; we BLR through __imp_<name>.
+    warm_out(".extern __imp_ExitProcess")
+    warm_out(".extern __imp_GetStdHandle")
+    warm_out(".extern __imp_WriteFile")
+    warm_out(".extern __imp_BCryptGenRandom")
+    warm_out("")
+    warm_out(".section .text,\"xr\"")
+
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            warm_gen_function(d)
+        }
+        i = i + 1
+    }
+
+    // Emit `mainCRTStartup` for top-level statements. lld-link's default
+    // console entry for non-CRT binaries is `mainCRTStartup`, so we land
+    // there from the OS loader.
+    warm_locals = list_new()
+    warm_local_count = 0
+    warm_params = list_new()
+    warm_param_count = 0
+    warm_current_fn_name = "mainCRTStartup"
+
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        let dt = ast_tag(d)
+        let count_this = 1
+        if dt == AST_FN_DECL { count_this = 0 }
+        if dt == AST_STRUCT_DECL { count_this = 0 }
+        if dt == AST_ENUM_DECL { count_this = 0 }
+        if dt == AST_METHOD_DECL { count_this = 0 }
+        if dt == AST_EXTERN_FN { count_this = 0 }
+        if dt == AST_ASM { count_this = 0 }
+        if count_this == 1 {
+            warm_collect_locals(d)
+        }
+        i = i + 1
+    }
+    let start_frame = warm_local_count * 8
+    let srem = start_frame % 16
+    if srem > 0 { start_frame = start_frame + (16 - srem) }
+    if start_frame < 16 { start_frame = 16 }
+
+    warm_out("")
+    warm_out(".globl mainCRTStartup")
+    warm_out(".p2align 2")
+    warm_label("mainCRTStartup")
+    warm_out("    stp x29, x30, [sp, #-16]!")
+    warm_out("    mov x29, sp")
+    warm_out("    sub sp, sp, #" + int_to_str(start_frame))
+
+    i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        let dt = ast_tag(d)
+        let skip = 0
+        if dt == AST_FN_DECL { skip = 1 }
+        if dt == AST_STRUCT_DECL { skip = 1 }
+        if dt == AST_ENUM_DECL { skip = 1 }
+        if dt == AST_METHOD_DECL { skip = 1 }
+        if dt == AST_EXTERN_FN { skip = 1 }
+        if dt == AST_ASM { skip = 1 }
+        if skip == 0 {
+            warm_gen_stmt(d)
+        }
+        i = i + 1
+    }
+
+    warm_out("    add sp, sp, #" + int_to_str(start_frame))
+    warm_out("    ldp x29, x30, [sp], #16")
+    warm_out("    mov w0, #0")
+    warm_call_import("__imp_ExitProcess")
+    // Safety net — should never be reached, ExitProcess is noreturn.
+    warm_out("    ret")
+
+    warm_emit_runtime()
+
+    // String table goes in .rdata so the PE loader maps it read-only.
+    // Also emit the CRLF blob used by _nova_warm_println.
+    warm_out("")
+    warm_out(".section .rdata,\"dr\"")
+    warm_label("_warm_crlf")
+    warm_out("    .byte 13, 10")
+    if warm_str_count > 0 {
+        let si = 0
+        while si < warm_str_count {
+            warm_out(".p2align 3")
+            warm_label("_wstr_" + int_to_str(si))
+            warm_out("    .asciz " + DQ + escape_for_asm(warm_strings[si]) + DQ)
+            si = si + 1
+        }
+    }
+
+    return join(warm_output, chr(10))
+}
+
 fn gen_program(program) {
     if cg_target == 2 {
         return wasm_gen_program(program)
     }
     if cg_target == 4 {
         return arm64_gen_program(program)
+    }
+    if cg_target == 5 {
+        return winarm64_gen_program(program)
     }
     let decls = program[1]
 

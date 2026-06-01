@@ -212,3 +212,88 @@ Tests:
   isolation, per-thread `next`/`stepIn`/`stepOut`, `pause`, and
   `continue` (with and without `singleThread`). SKIPs cleanly if
   `gcc` or `gdb` is unavailable.
+
+## R7A — Windows ARM64 (PE32+ AArch64) backend
+
+NOVA's sixth codegen target. Closes the last gap in the cross-platform
+matrix (Linux x86-64 + macOS x86-64 + WASM + Windows x86-64 + ARM64-
+Linux/Android + Windows ARM64).
+
+Changes (`src/compiler/codegen.nova`):
+- New `winarm64_gen_program` standalone AST-walking backend modeled on
+  the Linux ARM64 path (`arm64_gen_program`). Selected via target id
+  `5`, exposed as `--target=windows-arm64`.
+- Emits GAS-syntax ARM64 instructions with PE section directives
+  (`.section .text,"xr"`, `.section .rdata,"dr"`) and IAT-style import
+  declarations (`.extern __imp_<API>` for ExitProcess, GetStdHandle,
+  WriteFile, BCryptGenRandom).
+- Imported APIs are called via the standard PE pattern:
+  `adrp x16, __imp_<name>; ldr x16, [x16, :lo12:__imp_<name>]; blr x16`.
+  x16 is the AArch64 caller-saved scratch (IP0 in the AAPCS64 spec).
+- Win32 entry symbol `mainCRTStartup` (lld-link's default console
+  entry when no CRT is present). The entry sets up an ARM64 frame,
+  runs top-level statements, then calls `ExitProcess(0)`.
+- 16-byte SP alignment maintained at every call boundary; standard
+  `stp x29, x30, [sp, #-16]!` prologue / `ldp x29, x30, [sp], #16`
+  epilogue; locals laid out below x29 with 8-byte slots.
+- Tiny runtime: `_nova_warm_strlen`, `_nova_warm_write_stdout`
+  (GetStdHandle(-11) + WriteFile via IAT), `_nova_warm_print`,
+  `_nova_warm_println` (CRLF append for Windows console compat),
+  printable-error stubs for unsupported builtins (list_new/push/len/
+  read_file/write_file).
+- `secure_random(buf, n)` lowers to `BCryptGenRandom(NULL, buf, n,
+  BCRYPT_USE_SYSTEM_PREFERRED_RNG=2)` via the IAT. NTSTATUS == 0 ->
+  returns n_bytes; else -1.
+
+Changes (`src/compiler/compiler.nova`):
+- `--target=windows-arm64` is parsed, `cg_target = 5`, banner reads
+  "Target: Windows ARM64 (PE32+ AArch64)".
+
+Changes (`Makefile`):
+- New `smoke-winarm64` target (alias `cross-winarm64`): generates
+  bin/hello_winarm64.exe and bin/secure_random_winarm64.exe. Pipeline:
+    1. NOVA --target=windows-arm64 -> ARM64 GAS .s
+    2. clang -target aarch64-windows-gnu -c -> Aarch64 COFF .o
+    3. llvm-dlltool -m arm64 fabricates ARM64 import libs from .def
+       files (KERNEL32.DLL: ExitProcess, GetStdHandle, WriteFile;
+       BCRYPT.DLL: BCryptGenRandom). No upstream mingw-w64 aarch64
+       import lib package exists on Debian/Ubuntu, so we synthesize
+       them at build time.
+    4. lld-link /machine:arm64 /subsystem:console
+       /entry:mainCRTStartup -> PE32+ executable
+  Skips cleanly if clang / lld-link / llvm-dlltool are missing.
+
+Tests (`tests/test_winarm64_emitter.sh`):
+- Runs `make smoke-winarm64` then asserts:
+  * `file` reports PE32+ executable Aarch64 for MS Windows
+  * `llvm-readobj` reports IMAGE_FILE_MACHINE_ARM64 (0xAA64)
+  * Raw byte check at PE signature+4 == `64 AA` (little-endian
+    0xAA64) on disk
+  * KERNEL32.DLL import present in both binaries
+  * BCRYPT.DLL import present in secure_random binary
+  * IAT call sequence (adrp x16 / ldr x16 / blr x16) appears in
+    .text disassembly
+  * Standard ARM64 prologue is present
+  * Binary sizes within sanity bounds (1024..20480 bytes)
+
+Verification artifacts:
+- bin/hello_winarm64.exe — 2048 bytes, KERNEL32.DLL import (loops +
+  string concat omitted; standalone path doesn't yet lower them).
+- bin/secure_random_winarm64.exe — 3072 bytes, KERNEL32.DLL +
+  BCRYPT.DLL imports.
+- Both binaries: COFF machine 0xAA64, entry `mainCRTStartup`,
+  ImageBase 0x140000000, 2 sections (.text + .rdata), proper IAT.
+- Cannot execute on Linux x86-64 host — runtime confirmation
+  requires an ARM-Windows tester. Format is verified end-to-end
+  on the Linux host via llvm-readobj / llvm-objdump.
+
+Gap status (deferred for future R-rounds):
+- The standalone winarm64 path covers the same surface as the
+  Linux ARM64 standalone path: integer arithmetic, control flow,
+  print/println, exit, secure_random. It does NOT yet wire
+  list/map/string-concat/file-IO — those require the full IR-based
+  Windows backend (cg_target == 3) which still targets x86-64.
+  Lifting the IR path to ARM64 (via lower_arm64.nova's IR-walking
+  emitter) is the next milestone.
+- DWARF/CodeView debugging info on the winarm64 target is not
+  emitted (matches the Linux ARM64 standalone path).

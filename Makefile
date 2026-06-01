@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows smoke-windows smoke-macos smoke-wasm smoke-wasm-file smoke-gpu smoke-dwarf bench-simd bench-int-safe
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-gpu smoke-dwarf bench-simd bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux
 
 all: bin/nova
 
@@ -105,6 +105,73 @@ smoke-windows: bin/nova examples/hello_win32.nova
 			WINEDEBUG=-all wine bin/secure_random.exe 2>&1 | grep -v "wine: configuration\|^$$" | head -10; \
 		echo "wine secure_random exit=$$?"; \
 	fi
+
+# Build the Windows ARM64 (PE32+ AArch64) smoke test.
+#
+# Pipeline:
+#   1. NOVA --target=windows-arm64 emits ARM64 GAS assembly with PE
+#      section directives (.section .text,"xr", .section .rdata,"dr")
+#      and .extern __imp_<API> declarations for the IAT-resolved
+#      KERNEL32.DLL + BCRYPT.DLL imports.
+#   2. clang -target aarch64-windows-gnu -c assembles to an Aarch64
+#      COFF object file.
+#   3. llvm-dlltool -m arm64 fabricates ARM64 import libs from .def
+#      files at build time (no upstream mingw-w64 aarch64 import lib
+#      package exists on Debian/Ubuntu).
+#   4. lld-link /machine:arm64 produces a PE32+ ARM64 executable.
+#
+# Verification on the Linux host (cannot execute — requires ARM-Windows
+# tester for runtime confirmation):
+#   * `file` reports "PE32+ executable (console) Aarch64, for MS Windows"
+#   * llvm-readobj reports IMAGE_FILE_MACHINE_ARM64 (0xAA64) in the
+#     COFF header at signature+4
+#   * llvm-objdump -p reports KERNEL32.DLL + BCRYPT.DLL in the import
+#     directory.
+#
+# Skips cleanly if clang or lld-link are missing.
+smoke-winarm64: bin/nova examples/hello.nova examples/hello_secure_random_winarm64.nova
+	@mkdir -p bin
+	@if ! command -v clang >/dev/null 2>&1; then \
+		echo "(skip: winarm64 toolchain not available -- need clang with aarch64-windows-gnu)"; \
+		exit 0; \
+	fi
+	@if ! command -v lld-link >/dev/null 2>&1; then \
+		echo "(skip: winarm64 toolchain not available -- need lld-link; apt install lld)"; \
+		exit 0; \
+	fi
+	@if ! command -v llvm-dlltool >/dev/null 2>&1; then \
+		echo "(skip: winarm64 toolchain not available -- need llvm-dlltool; apt install llvm)"; \
+		exit 0; \
+	fi
+	@printf 'LIBRARY KERNEL32.DLL\nEXPORTS\nExitProcess\nGetStdHandle\nWriteFile\n' > /tmp/winarm64_k32.def
+	@printf 'LIBRARY BCRYPT.DLL\nEXPORTS\nBCryptGenRandom\n' > /tmp/winarm64_bcrypt.def
+	@llvm-dlltool -m arm64 -d /tmp/winarm64_k32.def -l /tmp/libkernel32-arm64.a
+	@llvm-dlltool -m arm64 -d /tmp/winarm64_bcrypt.def -l /tmp/libbcrypt-arm64.a
+	@echo "--- hello_winarm64.exe (PE32+ ARM64 + KERNEL32 imports) ---"
+	@bin/nova examples/hello.nova --target=windows-arm64 -o /tmp/hello_winarm64.s
+	@clang -target aarch64-windows-gnu -c /tmp/hello_winarm64.s -o /tmp/hello_winarm64.o
+	@lld-link /machine:arm64 /subsystem:console /entry:mainCRTStartup \
+		/out:bin/hello_winarm64.exe \
+		/tmp/hello_winarm64.o /tmp/libkernel32-arm64.a /tmp/libbcrypt-arm64.a
+	@file bin/hello_winarm64.exe
+	@echo "--- COFF machine type ---"
+	@llvm-readobj --file-headers bin/hello_winarm64.exe | grep -E "Machine:" | head -1
+	@echo "--- Import directory ---"
+	@llvm-objdump -p bin/hello_winarm64.exe | awk '/The Import Tables:/,/^Library/' | head -30
+	@echo ""
+	@echo "--- secure_random_winarm64.exe (PE32+ ARM64 + BCRYPT.dll) ---"
+	@bin/nova examples/hello_secure_random_winarm64.nova --target=windows-arm64 -o /tmp/sr_winarm64.s
+	@clang -target aarch64-windows-gnu -c /tmp/sr_winarm64.s -o /tmp/sr_winarm64.o
+	@lld-link /machine:arm64 /subsystem:console /entry:mainCRTStartup \
+		/out:bin/secure_random_winarm64.exe \
+		/tmp/sr_winarm64.o /tmp/libkernel32-arm64.a /tmp/libbcrypt-arm64.a
+	@file bin/secure_random_winarm64.exe
+	@echo "--- Import directory ---"
+	@llvm-objdump -p bin/secure_random_winarm64.exe | awk '/The Import Tables:/,/^Library/' | head -30
+	@echo "(binary needs a real ARM-Windows host to actually run; format verified above)"
+
+# Cross-compile for Windows ARM64 — convenience alias for smoke-winarm64.
+cross-winarm64: smoke-winarm64
 
 # Build the macOS smoke test (hello-world + concat + int_to_str).
 # Pipeline: NOVA --target=macos emits GAS-syntax x86-64 asm with __TEXT/__DATA

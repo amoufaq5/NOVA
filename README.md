@@ -18,7 +18,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
 | **Tests** | 139 tests (133 pass, 6 skip) |
-| **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64 (AArch64) codegen |
+| **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64-Linux, Windows ARM64 (PE32+ AArch64) |
 
 ---
 
@@ -236,7 +236,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 
 ### Compiler and Tooling
 
-- Cross-compilation: `--target=linux` (default), `--target=macos`, `--target=wasm`, `--target=windows`, ARM64 lowering pass available
+- Cross-compilation: `--target=linux` (default), `--target=macos`, `--target=wasm`, `--target=windows`, `--target=arm64` (ARM64-Linux/Android), `--target=windows-arm64` (PE32+ AArch64)
 - Hash-accelerated O(1) function lookup in codegen (8-bucket list-of-lists)
 - `--check` for syntax validation without code generation
 - `--stats` for compilation statistics
@@ -740,6 +740,7 @@ make examples       # Build and run all 29 examples
 make agent          # Run the cognitive agent
 make cross-macos    # Generate macOS x86-64 assembly
 make cross-windows  # Generate Windows x86-64 PE32+ executable
+make smoke-winarm64 # Generate Windows ARM64 PE32+ binaries (hello + secure_random)
 make wasm FILE=path # Compile to WebAssembly and run (requires Node.js + wabt)
 make stats          # Show codebase statistics
 make clean          # Remove build artifacts
@@ -751,7 +752,7 @@ make clean          # Remove build artifacts
 bin/nova <input.nova> [-o output.s] [options]
 
   -o <file>              Output assembly file (default: output.s)
-  --target=<t>           Target platform: linux, macos, wasm, windows
+  --target=<t>           Target platform: linux, macos, wasm, windows, arm64, windows-arm64
   --check                Syntax check only (no code generation)
   --stats                Show compilation statistics
   --debug                Enable debug output
@@ -777,6 +778,15 @@ make cross-windows
 # Or directly:
 bin/nova examples/hello.nova --target=windows -o hello_win.s
 # Transfer hello_win.exe to a Windows machine and run
+
+# Windows ARM64 (PE32+ AArch64): build hello + secure_random for ARM-Windows
+make smoke-winarm64
+# Pipeline: NOVA --target=windows-arm64 emits ARM64 GAS asm with PE section
+# directives + IAT imports; clang -target aarch64-windows-gnu assembles to
+# Aarch64 COFF; llvm-dlltool -m arm64 fabricates ARM64 import libs from
+# .def files; lld-link /machine:arm64 produces the final PE32+ executable.
+# Binaries land at bin/hello_winarm64.exe and bin/secure_random_winarm64.exe;
+# format is verified locally, runtime needs an ARM-Windows host.
 
 # WebAssembly (WASI)
 make wasm FILE=examples/hello.nova

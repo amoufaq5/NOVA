@@ -29,6 +29,8 @@ bin/nova_windows.s
 bin/secure_random.exe
 bin/secure_random_macos
 bin/hello_secure_random.wasm
+bin/hello_winarm64.exe
+bin/secure_random_winarm64.exe
 
 # release-dry-run.sh output (matches GH Actions release artifact layout)
 dist/
