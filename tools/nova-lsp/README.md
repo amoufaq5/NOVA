@@ -15,7 +15,7 @@ for the install hook.
 | `textDocument/didSave`              | yes    |
 | `textDocument/didClose`             | yes    |
 | `textDocument/publishDiagnostics`   | yes (runs `nova --check`) |
-| `textDocument/hover`                | yes (function signatures from imports) |
+| `textDocument/hover`                | yes (signatures from imports + `///` doc comments rendered as markdown) |
 | `textDocument/completion`           | yes (builtins + fn/let scan, triggers on `.` and `(`) |
 | `textDocument/rename`               | yes (workspace-wide for top-level fn/let/const/type, single-buffer for locals + params) |
 | `textDocument/references`           | yes (regex scan, open docs + transitively imported files) |
@@ -30,6 +30,51 @@ references for `fn name(args)` and `let X = ...` definitions, plus the
 builtin function table mirrored from `src/compiler/codegen.nova`'s
 `is_builtin_fn`. The hovered identifier is resolved by reading the word
 under the cursor.
+
+When the resolved symbol has a `///` doc-comment block immediately
+above its declaration, the hover response includes the doc rendered as
+markdown — the signature is shown in a fenced `nova` code block,
+separated from the docs by a `---` horizontal rule. For example:
+
+```
+/// Returns the n-th Fibonacci number.
+/// Time complexity: O(2^n) (naive recursion).
+/// Examples:
+///   fib(0) == 0
+///   fib(10) == 55
+fn fib(n) { ... }
+```
+
+Hovering over any call site for `fib` renders:
+
+> ```nova
+> fn fib(n)
+> ```
+> ---
+> Returns the n-th Fibonacci number.
+> Time complexity: O(2^n) (naive recursion).
+> Examples:
+> &nbsp;&nbsp;fib(0) == 0
+> &nbsp;&nbsp;fib(10) == 55
+
+The doc collector (see `nova_lsp/hover_docs.py`) walks **backward** from
+the declaration line and gathers every contiguous `///` line. It stops
+at the first non-`///` non-blank line, AND **stops at the first blank
+line** — doc blocks must be contiguous with the declaration they
+document (same convention as `rustdoc`). A `///` with no following
+space (`///foo`) is treated the same as `/// foo`; at most one space
+after the prefix is consumed so deliberately indented markdown
+(bullets, nested lists, code blocks) survives verbatim. Empty `///`
+lines become empty markdown lines inside the joined block, enabling
+paragraph breaks inside a single doc block. A `////` (four or more
+slashes) is treated as a visual divider, not a doc comment.
+
+Cross-file hovers are routed through R5F's `find_definition` so the
+docs come from whichever file actually declares the symbol — open
+buffers override on-disk content so the user sees their unsaved doc
+edits immediately. Builtins (`println`, `len`, ...) have no source
+line, so the hover renders only the signature plus the `(builtin)`
+marker.
 
 Completion returns the same symbol set (builtins + user `fn`/`let`),
 sorted with builtins first; triggered manually or by typing `.` / `(`.
@@ -175,9 +220,10 @@ python tools/nova-lsp/tests/definition_cross_file_smoke.py
 python tools/nova-lsp/tests/test_workspace_symbols.py
 python tools/nova-lsp/tests/test_rename_workspace.py
 python tools/nova-lsp/tests/test_semantic_tokens.py
+python tools/nova-lsp/tests/test_hover_docs.py
 ```
 
-The eight `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The nine `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
 ~10 ms each (the workspace-symbol + workspace-rename integration legs
@@ -232,6 +278,7 @@ tools/nova-lsp/
     workspace_symbols.py    # workspace/symbol index + fuzzy matcher
     rename_workspace.py     # workspace-wide rename engine (top-level decls)
     semantic_tokens.py      # semantic-tokens classifier + delta encoder
+    hover_docs.py           # `///` doc-comment extractor for hover
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -242,4 +289,5 @@ tools/nova-lsp/
     test_workspace_symbols.py
     test_rename_workspace.py
     test_semantic_tokens.py
+    test_hover_docs.py
 ```

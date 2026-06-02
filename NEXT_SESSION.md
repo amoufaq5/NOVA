@@ -1,5 +1,115 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R14A — DAP function breakpoints (20th DAP capability)
+
+R14A lights up the most common remaining IDE debugger feature
+nova-dap was missing: **function breakpoints**. Until now, breaking
+on entry to `main` (or any function) required knowing its file/line
+to set a source-line breakpoint. With R14A, a DAP client can send
+`setFunctionBreakpoints({breakpoints: [{name: "main"}]})` and the
+adapter installs a gdb `-break-insert main`, returning a verified
+breakpoint that fires on entry. Useful when you don't know which
+file/line a function lives in (cross-file imports), when you want to
+catch all overloads (C++ FFI bindings), or for tracing
+dynamically-resolved symbols.
+
+### What landed
+
+**New module:** `tools/nova-dap/nova_dap/function_breakpoints.py`
+(~240 lines):
+
+  - `build_function_breakpoint_command(name, condition)` — composes
+    the MI string. Plain form is `-break-insert "<name>"`;
+    conditional form is `-break-insert -c "<expr>" "<name>"`. Names
+    and conditions are MI-c-string-quoted so embedded `"` characters
+    don't mis-tokenise.
+  - `parse_function_breakpoint_response(fields)` — extracts
+    `{id, verified, line?, source_path?, function?}` from the
+    `^done,bkpt={...}` reply. `<PENDING>` addr -> `verified=false`
+    (so the IDE shows a pending indicator for symbols that haven't
+    resolved yet, e.g. dlopen'd ones). `<MULTIPLE>` addr (C++
+    overloads) still counts as verified — the breakpoint IS armed.
+  - `is_unresolved_function_error(message)` — classifies the
+    "Function "x" not defined." family of gdb errors so the server
+    can surface them as `verified: false` without aborting the
+    rest of the request.
+  - `FunctionBreakpointRecord` / `FunctionBreakpointManager` —
+    thread-safe registry the `Session` holds; indexed by both
+    gdb_id (for `*stopped,bkptno=...` routing) and name (for the
+    `"Entry to <name>"` description builder).
+  - `describe_function_entry(name)` -> `"Entry to <name>"` —
+    matches the VS Code Node debug-adapter convention.
+
+**server.py changes:**
+
+  - `Session` gains `function_breakpoints: FunctionBreakpointManager`.
+  - `handle_launch` resets the manager (gdb forgets all breakpoints
+    when the inferior restarts; otherwise stale gdb ids could route
+    the wrong description on a subsequent stop).
+  - `handle_set_function_breakpoints` replaces the prior stub:
+    tears down the previously-installed function bps via
+    `-break-delete <id>` (per id, so source-line bps + watchpoints
+    survive), then installs each entry via the new module's command
+    builder. Per-entry errors (unresolved names, bad condition
+    syntax) surface as `verified: false` with the gdb message; the
+    rest of the request still completes. Complete-replacement
+    semantics per the DAP spec.
+  - `_handle_stopped` extension: when a `*stopped,reason="breakpoint-hit"`
+    arrives with `bkptno=<id>` and `<id>` is in the function-bp
+    manager, the DAP `stopped` event's `reason` is upgraded from
+    `"breakpoint"` to `"function breakpoint"` and `description` is
+    set to `"Entry to <name>"`. Source-line bp stops are untouched.
+  - Capability flip: `supportsFunctionBreakpoints: false` -> `true`.
+
+### Verification
+
+  - **103 unit assertions** in
+    `tools/nova-dap/tests/test_function_breakpoints.py` covering:
+    command builder (bare / conditional / quote-escape / empty
+    rejection), response parser (verified / pending / multiple
+    locations / missing-bkpt), error classifier, manager bookkeeping,
+    description builder, handler-with-stub-bridge cases (single
+    install, unresolved-returns-unverified, conditional-forwarding,
+    multiple-in-one-call, complete-replacement, empty-list-clears-all,
+    malformed entries, not-launched, capability advertisement,
+    stopped-event description routing, unrelated-bp not upgraded,
+    launch clears registry).
+  - **End-to-end** against a C fixture with three functions (main,
+    helper, unused): main entry fires with `reason: "function
+    breakpoint"` + `description: "Entry to main"`, helper hits 3
+    times (called from a 0..2 loop), bogus_xyz_xxx comes back
+    `verified: false` without failing the whole request.
+  - **NOVA integration** against `bin/hello_dwarf`: function bps on
+    `main` + `greet` both verify, stop at main fires with
+    `description: "Entry to main"`, continue produces a stop at
+    greet entry with `description: "Entry to greet"`.
+  - **Total: 138 assertions, all pass.**
+  - **Existing tests:** dap_smoke OK, dap_multi_thread OK (3 threads,
+    per-thread step/pause/continue), test_evaluate OK (100 asserts),
+    test_conditional_breakpoint OK (54 asserts), test_data_breakpoints
+    OK (131 asserts) — no regressions.
+
+### Capability tally
+
+DAP capabilities: **19 -> 20**. The full table is now: breakpoints,
+conditional breakpoints, **function breakpoints (NEW)**, data
+breakpoints, step in/out/over, continue, pause, stack traces, scopes,
+variables, evaluate (watch/REPL/hover), threads, multi-thread
+coordination (singleThread requests), exception breakpoints,
+configurationDone, launch, initialize, disconnect, terminate, output
+events.
+
+### Files touched (R14A)
+
+  - `tools/nova-dap/nova_dap/server.py` (extended: import + Session
+    field + clear-on-launch + capability flip + handler + stop
+    routing)
+  - `tools/nova-dap/nova_dap/function_breakpoints.py` (NEW, ~240 lines)
+  - `tools/nova-dap/tests/test_function_breakpoints.py` (NEW, ~700 lines)
+  - `tools/nova-dap/README.md` (capability table + docs)
+  - `README.md` (19 -> 20)
+  - `NEXT_SESSION.md` (this section)
+
 ## R13A — codegen call-site inlining (realize R12A's SIMD wiring)
 
 R13A closed the loop on the SIMD-perf story: R11D added the AVX2/NEON

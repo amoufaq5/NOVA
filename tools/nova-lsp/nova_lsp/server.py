@@ -44,6 +44,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse, unquote
 
 from nova_lsp import __version__
+from nova_lsp.hover_docs import (
+    extract_doc_comment,
+    extract_doc_comment_from_text,
+    render_hover_markdown,
+)
 from nova_lsp.imports import FileCache, find_definition, walk_imports
 from nova_lsp.rename_workspace import (
     build_workspace_edit,
@@ -532,7 +537,60 @@ def word_at(text: str, line: int, character: int) -> Optional[str]:
 
 # ---------------------------------------------------------------------------
 # Hover.
+#
+# The hover handler resolves the word under the cursor to a NOVA fn / let
+# / const / type (or builtin), then enriches the response with the `///`
+# doc-comment block above the declaration. Doc extraction is delegated
+# to `hover_docs.extract_doc_comment*` so the stop-rule (contiguous,
+# stop-at-blank) lives in one well-tested place.
+#
+# Cross-file behavior: when the cursor sits on `foo` in `A.nova` and
+# `foo` is defined in `B.nova`, the docs come from B — we use R5F's
+# `find_definition` over the live import graph (with open buffers
+# treated as authoritative via `_text_overrides`) so unsaved edits to
+# the declaration site are still surfaced.
 # ---------------------------------------------------------------------------
+
+
+def _resolve_definition_for_hover(
+    state: ServerState, doc: Document, name: str
+) -> Optional[Tuple[str, int]]:
+    """Locate the file + zero-based line where `name` is declared.
+
+    Returns `(abs_path, def_line)` for the declaration site (used by the
+    doc-comment extractor), or `None` if the symbol isn't a top-level
+    fn/let reachable from this document's import graph. Builtins return
+    `None` — they have no source line.
+    """
+    start = uri_to_path(doc.uri)
+    if not start:
+        return None
+    hit = find_definition(
+        name,
+        os.path.abspath(start),
+        state.file_cache,
+        text_overrides=_text_overrides(state),
+    )
+    if hit is None:
+        return None
+    path, (line, _c0, _c1) = hit
+    return path, line
+
+
+def _doc_comment_for(
+    state: ServerState, def_path: str, def_line: int
+) -> str:
+    """Extract the `///` doc block above `def_line` in `def_path`.
+
+    Honours live buffer overrides: when the declaration's file is open
+    in the editor we read from the buffer text (not disk) so edits to
+    the docs are reflected in hover immediately, before the user saves.
+    """
+    abs_path = os.path.abspath(def_path)
+    overrides = _text_overrides(state)
+    if abs_path in overrides:
+        return extract_doc_comment_from_text(overrides[abs_path], def_line)
+    return extract_doc_comment(abs_path, def_line)
 
 
 def handle_hover(state: ServerState, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -554,7 +612,16 @@ def handle_hover(state: ServerState, params: Dict[str, Any]) -> Optional[Dict[st
         sig = BUILTIN_FUNCTIONS[name] + "  (builtin)"
     if not sig:
         return None
-    return {"contents": {"kind": "markdown", "value": f"```nova\n{sig}\n```"}}
+    # Look up the declaration site so we can pull `///` docs above it.
+    # Builtins (no source location) and unresolved symbols silently skip
+    # this step — the hover still renders the signature.
+    docs = ""
+    if name not in BUILTIN_FUNCTIONS:
+        hit = _resolve_definition_for_hover(state, doc, name)
+        if hit is not None:
+            def_path, def_line = hit
+            docs = _doc_comment_for(state, def_path, def_line)
+    return {"contents": {"kind": "markdown", "value": render_hover_markdown(sig, docs)}}
 
 
 # ---------------------------------------------------------------------------
