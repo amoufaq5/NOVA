@@ -1,5 +1,178 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R12E — Compiler optimization passes (constant folding + DCE)
+
+NOVA's codegen had grown capabilities for several rounds without
+acquiring a real **optimization pass**. R12E added two: explicit
+AST-rewriting **constant folding** and **dead-code elimination**
+that run between parse and codegen. Previously, codegen contained
+embedded per-operator folding (`try_fold` / `is_foldable` helpers
+called inline from `gen_expr`), which worked but had to be
+re-implemented across each per-target lowering path (x86-64,
+ARM64, WASM, etc). The new passes operate **once** on the AST
+upstream of any target-specific codegen.
+
+### What the passes do
+
+**Constant folding** (`cg_fold_constants` in `codegen.nova`):
+
+- Walks every expression node and replaces pure-int subtrees with
+  a single `AST_INT_LIT` carrying the folded value.
+- Operators folded: `+ - * / % & | ^ << >> ** == != < > <= >=`,
+  unary `- ! ~`, plus deep nesting (`(2+3)*4` → `20` in one pass).
+- Pre-folds operands inside `_cg_fold_eval` so that even when the
+  top-level node isn't constant, its inner constants collapse.
+- Walks into function-call args, list literals, map literals,
+  struct initializers, lambdas, do-expressions, list/map
+  comprehensions, ternary, and short-circuit `and`/`or` (these
+  recurse into their pieces without folding the whole node when
+  the condition can't be evaluated to a constant).
+- **Skipped**: function-call results (`foo() + 1`), variable
+  reads (`y + 1`), string concat / list ops (operands aren't int
+  literals, so they never reach the int fold path), and division
+  by literal zero (left as-is so the runtime trap fires as
+  documented).
+- **Two's-complement wraparound**: integer arithmetic is signed
+  i64; folding preserves NOVA runtime semantics including
+  wraparound on overflow.
+
+**Dead-code elimination** (`cg_eliminate_dead_code`):
+
+1. **Unreachable-after-terminator**: in any block (`AST_BLOCK`),
+   statements following the first `return` / `break` / `continue`
+   / `throw` are truncated. The walk descends through nested
+   if/while/for/try-catch/match before truncating.
+2. **Function-scope unused-let drop**: a top-level
+   `let x = pure_expr` whose name is never read OR reassigned in
+   the rest of the function body is removed. Purity gate: only
+   literals, identifier reads, arithmetic over those, and pure
+   field/index access qualify (calls, allocations, throws are
+   impure and never folded out). Conservative: only top-level
+   statements of each function body are examined, because NOVA
+   `collect_locals` hoists every nested `let` to function scope,
+   so reasoning about deeper nests is fragile.
+3. **Constant-condition `if` / `while`**: NOT collapsed at AST
+   level. NOVA allows `if`/`match` to appear in both statement
+   and expression position (e.g. `let a = if c { x } else { y }`),
+   and the AST doesn't distinguish those contexts. Rewriting in
+   place would break the expression form. The existing per-target
+   codegen already emits only the chosen branch when it sees a
+   literal condition (`gen_stmt`'s `AST_IF_STMT` / `AST_WHILE_STMT`
+   shortcuts), so the savings are preserved.
+
+### Pipeline & flag
+
+`compile()` in `compiler.nova` now reads:
+
+```
+parse → cg_fold_constants → cg_eliminate_dead_code → cg_init → gen_program
+```
+
+A new `--no-opt` flag (set `cg_no_opt = 1`) makes both passes
+no-ops, useful when debugging codegen issues against the
+unoptimized AST.
+
+### Interaction with R6A's PTR_THRESHOLD root fix
+
+R6A replaced the legacy `cmp rdi, 100000` pointer-vs-int heuristic
+with **range-based** classification in `_nova_check_rdi` /
+`_nova_check_rsi`: a NOVA value is a pointer iff its address lies
+in `[_strlit_start, _strlit_end)` or `[_heap_base, _heap_end)` or
+above 16 GiB. Crucially, this means folded integer literals like
+`65792` are correctly classified as **integers** regardless of
+their magnitude — they don't fall in any pointer range. Folding to
+plain integer literals (rather than runtime smart-op values) is
+safe; the classifier sees `mov rax, 5` exactly like it sees
+`mov rax, X; mov rax, Y; add rax, rdi` for `5 = 2 + 3`.
+
+### Bugs caught while implementing
+
+The first iteration of DCE collapsed `if false { ... } else { ... }`
+to a plain `AST_BLOCK` in place. That broke the `test_match_if_expr`
+and `test_try_expr` tests because NOVA accepts `if` and `match` as
+both statements AND expressions (e.g. `let a = if c { x } else { y }`,
+`let b = match v { 1 => "a"; _ => "z" }`), and the parser builds
+identical AST nodes in either context. Replacing the if-stmt with a
+block would have left a block-typed value on the let's RHS, which
+codegen doesn't accept as an expression. The fix was to leave the
+collapse to the existing per-target codegen shortcut (which emits
+inline code in both contexts correctly).
+
+A second bug surfaced from the line-number suffix that
+`parse_stmt` appends to every statement node. AST_TRY_CATCH has
+shape `[tag, try, catch, err_var, line]` (5 elts, no `finally`) or
+`[tag, try, catch, err_var, finally, line]` (6 elts, with
+`finally`). The legacy `collect_locals` correctly uses `len(nd) > 5`
+to gate `finally` recursion; the new fold/DCE passes initially used
+`> 4`, which made them recurse into the line number (an int!) as
+though it were a statement node and segfaulted. Fixed by aligning
+with the existing convention.
+
+A third bug: `_cg_dce_expr_uses` initially had no handlers for
+`AST_MATCH_STMT` / `AST_IF_STMT` / `AST_TRY_CATCH`. Because those
+can appear in expression position (RHS of a `let`), the function
+needs to recurse into them via the stmt walker. Without that,
+`let val = 3; let c = match val { ... }` would see `val` as unused
+in the let-rhs `match val { ... }` and incorrectly drop the `let val`
+binding. Fixed by reusing `_cg_dce_stmt_uses` for those tags.
+
+### Changes
+
+- `src/compiler/codegen.nova`:
+  - `cg_no_opt` global flag.
+  - `_cg_replace_with_int`, `_cg_fold_eval`, `cg_fold_expr`,
+    `cg_fold_stmt`, `cg_fold_constants` — folding pass.
+  - `_cg_dce_is_terminator`, `_cg_dce_is_pure`,
+    `_cg_dce_expr_uses`, `_cg_dce_stmt_uses`,
+    `_cg_dce_stmt_assigns`, `_cg_dce_has_assign_to`,
+    `_cg_dce_count_reads_anywhere`,
+    `_cg_dce_drop_unused_lets_in_fn`, `_cg_dce_block_stmts`,
+    `cg_dce_stmt`, `cg_eliminate_dead_code` — DCE pass.
+- `src/compiler/compiler.nova`:
+  - `--no-opt` CLI flag.
+  - `compile()` calls `cg_fold_constants` and
+    `cg_eliminate_dead_code` between parse and codegen.
+  - Updated `_print_usage` to mention `--no-opt`.
+- `tests/test_const_folding.nova` (new): ~29 assertions verifying
+  every fold path plus skipped cases (variables, function calls,
+  division by literal zero).
+- `tests/test_dce.nova` (new): ~15 assertions verifying every DCE
+  category (return/break/continue/throw-terminated blocks, unused
+  pure-let drop, constant-cond if/while at codegen level, impure
+  RHS preservation).
+
+### Verification
+
+- `make test-all` → 157 passed / 0 failed / 6 skipped
+  (was 155 / 0 / 6; +2 new test files = `test_const_folding` and
+  `test_dce`). Zero regressions in the existing 155.
+- `make self-host` → stage2.s bit-identical to stage3.s.
+- `make test` → 5/5 pass.
+- Cross-target builds verified: `smoke-windows`, `smoke-macos`,
+  `smoke-wasm`, `smoke-winarm64`, `smoke-mobile-android`.
+- CrossEngin unit tests → 160 / 0 passed (no regressions).
+- `bench_fold.nova` microbench (30 stmts, mix of foldable and
+  non-foldable): ~4.3% smaller .s with opt on
+  (74374 vs 77712 bytes). Compiler self-compile: ~0.036%
+  smaller (3280305 vs 3281488 bytes) — most of the compiler
+  source already used literal constants where folding would
+  apply.
+
+### Future work
+
+- Algebraic identity simplification at the AST level (`x + 0 → x`,
+  `x * 1 → x`, `x * 0 → 0`). Subset already done at codegen
+  level for pure-int ops; could be lifted to the AST pass.
+- Common subexpression elimination (CSE).
+- Loop-invariant code motion (LICM).
+- Inlining of small leaf functions.
+- AST collapse of `if 0 / 1 / true / false` conditions when the
+  enclosing context can be statically determined to be statement
+  (not expression) — requires the parser to annotate or a
+  separate is-expression-context analysis.
+
+---
+
 ## R11D — SIMD i32x8 codegen intrinsics
 
 Added five explicit SIMD builtins for 8-lane int32 operations,

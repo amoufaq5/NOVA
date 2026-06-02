@@ -44,6 +44,7 @@ fn _print_usage() {
     println("  --stats                Show compilation statistics")
     println("  --debug / --no-debug   Enable/disable debug info")
     println("  --link-libc            Link with libc (enables FFI)")
+    println("  --no-opt               Disable constant folding + DCE passes")
     println("  --version, -V          Show compiler version and exit")
     println("  --help, -h             Show this help message and exit")
     println("")
@@ -613,6 +614,9 @@ fn compile(source) {
         println("OK: syntax check passed")
         exit(0)
     }
+    // Optimization passes (skip when --no-opt was passed).
+    cg_fold_constants(ast)
+    cg_eliminate_dead_code(ast)
     cg_init()
     let asm_code = gen_program(ast)
     if cg_show_stats == 1 {
@@ -738,12 +742,16 @@ fn main() {
                                         cg_link_libc = 1
                                         println("Mode: linking with libc (FFI enabled)")
                                     } else {
-                                        if cur == "--version" {
-                                            print("nova ")
-                                            println(_read_version_file())
-                                            exit(0)
+                                        if cur == "--no-opt" {
+                                            cg_no_opt = 1
                                         } else {
-                                            input_file = cur
+                                            if cur == "--version" {
+                                                print("nova ")
+                                                println(_read_version_file())
+                                                exit(0)
+                                            } else {
+                                                input_file = cur
+                                            }
                                         }
                                     }
                                 }

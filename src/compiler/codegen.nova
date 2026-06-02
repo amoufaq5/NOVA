@@ -1557,6 +1557,1084 @@ fn is_foldable(val) {
     return 1
 }
 
+// ===================================================================
+// AST-level Optimization Passes (R12E)
+//
+// Two pre-codegen passes that rewrite the AST in place:
+//
+//   cg_fold_constants(program)    — constant folding
+//   cg_eliminate_dead_code(program) — DCE
+//
+// Pipeline: parse → cg_fold_constants → cg_eliminate_dead_code → codegen.
+// Both are no-ops when cg_no_opt == 1 (set by the --no-opt CLI flag).
+//
+// All integer arithmetic in NOVA is signed 64-bit (i64). Folding follows
+// two's-complement wraparound semantics: e.g. (1 << 62) * 4 wraps to a
+// negative i64 the same way the runtime computation would, so source-level
+// behavior is preserved.
+//
+// Folding only operates on constant expressions: integer/bool/none literals
+// and arithmetic/comparison/bitwise operators applied to constants. It does
+// NOT fold expressions containing function calls, variable references, or
+// strings (string + is overloaded as concat; the smart-op runtime handles
+// it at runtime). This keeps the pass safe in the presence of NOVA's
+// overloaded operators and the smart-op runtime described in R6A.
+// ===================================================================
+
+let cg_no_opt = 0
+
+// ---- Constant Folding Pass ----
+
+// Replace a node's contents with an int-literal node carrying `value`.
+// Mutates the existing list (so identity is preserved for parent pointers).
+fn _cg_replace_with_int(nd, value) {
+    // Clear the list and rebuild as [AST_INT_LIT, value].
+    while len(nd) > 0 {
+        pop(nd)
+    }
+    push(nd, AST_INT_LIT)
+    push(nd, value)
+    return nd
+}
+
+// Try to evaluate an AST node as an integer constant.
+// Returns the integer value or FOLD_SENTINEL if not foldable.
+// Recursively folds sub-expressions as a side effect.
+fn _cg_fold_eval(nd) {
+    if nd == 0 { return FOLD_SENTINEL }
+    let tag = ast_tag(nd)
+    if tag == AST_INT_LIT { return nd[1] }
+    if tag == AST_BOOL_LIT { return nd[1] }
+    // Skip floats: folding floats requires the float layout; keep them as is.
+    if tag == AST_FLOAT_LIT { return FOLD_SENTINEL }
+    if tag == AST_NONE_LIT { return FOLD_SENTINEL }
+    if tag == AST_UNARY_OP {
+        // Fold operand first (deep-fold).
+        cg_fold_expr(nd[2])
+        let inner = _cg_fold_eval(nd[2])
+        if inner == FOLD_SENTINEL { return FOLD_SENTINEL }
+        if nd[1] == "-" { return 0 - inner }
+        if nd[1] == "!" {
+            if inner == 0 { return 1 }
+            return 0
+        }
+        if nd[1] == "~" { return ~inner }
+        return FOLD_SENTINEL
+    }
+    if tag == AST_BIN_OP {
+        // Deep-fold operands first so nested constants collapse.
+        cg_fold_expr(nd[2])
+        cg_fold_expr(nd[3])
+        let lv = _cg_fold_eval(nd[2])
+        if lv == FOLD_SENTINEL { return FOLD_SENTINEL }
+        let rv = _cg_fold_eval(nd[3])
+        if rv == FOLD_SENTINEL { return FOLD_SENTINEL }
+        let op = nd[1]
+        // String concat / list ops aren't reachable here because their
+        // operands aren't int/bool literals (skipped above).
+        if op == "+" { return lv + rv }
+        if op == "-" { return lv - rv }
+        if op == "*" { return lv * rv }
+        if op == "/" {
+            if rv == 0 { return FOLD_SENTINEL }
+            return lv / rv
+        }
+        if op == "%" {
+            if rv == 0 { return FOLD_SENTINEL }
+            return lv % rv
+        }
+        if op == "&" { return lv & rv }
+        if op == "|" { return lv | rv }
+        if op == "^" { return lv ^ rv }
+        if op == "<<" { return lv << rv }
+        if op == ">>" { return lv >> rv }
+        if op == "==" {
+            if lv == rv { return 1 }
+            return 0
+        }
+        if op == "!=" {
+            if lv == rv { return 0 }
+            return 1
+        }
+        if op == "<" {
+            if lv < rv { return 1 }
+            return 0
+        }
+        if op == ">" {
+            if lv > rv { return 1 }
+            return 0
+        }
+        if op == "<=" {
+            if lv <= rv { return 1 }
+            return 0
+        }
+        if op == ">=" {
+            if lv >= rv { return 1 }
+            return 0
+        }
+        if op == "**" {
+            // Limit to small positive exponents to avoid pathological loops.
+            if rv < 0 { return FOLD_SENTINEL }
+            if rv > 30 { return FOLD_SENTINEL }
+            let pw = 1
+            let pi = 0
+            while pi < rv {
+                pw = pw * lv
+                pi = pi + 1
+            }
+            return pw
+        }
+        return FOLD_SENTINEL
+    }
+    return FOLD_SENTINEL
+}
+
+// Walk an expression node and fold any constant subexpressions in place.
+// Returns the (possibly rewritten) node — same identity unless the whole
+// node was a constant expression, in which case it has been mutated to
+// AST_INT_LIT in place.
+fn cg_fold_expr(nd) {
+    if nd == 0 { return nd }
+    let tag = ast_tag(nd)
+    // Leaf literals: nothing to do.
+    if tag == AST_INT_LIT { return nd }
+    if tag == AST_STR_LIT { return nd }
+    if tag == AST_BOOL_LIT { return nd }
+    if tag == AST_NONE_LIT { return nd }
+    if tag == AST_FLOAT_LIT { return nd }
+    if tag == AST_IDENT { return nd }
+    if tag == AST_WILDCARD { return nd }
+
+    if tag == AST_BIN_OP {
+        // Try to evaluate to a constant integer.
+        let v = _cg_fold_eval(nd)
+        if is_foldable(v) == 1 {
+            _cg_replace_with_int(nd, v)
+            return nd
+        }
+        // Operands are already folded by _cg_fold_eval; nothing further.
+        return nd
+    }
+    if tag == AST_UNARY_OP {
+        let v = _cg_fold_eval(nd)
+        if is_foldable(v) == 1 {
+            _cg_replace_with_int(nd, v)
+            return nd
+        }
+        return nd
+    }
+    if tag == AST_TERNARY {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        cg_fold_expr(nd[3])
+        // If cond is constant, simplify by reusing the chosen branch's
+        // contents. But we can't easily swap node tags safely; leave the
+        // ternary in place and let codegen's existing constant-cond
+        // shortcut handle it.
+        return nd
+    }
+    if tag == AST_AND_EXPR {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_OR_EXPR {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_NULLISH {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_CALL {
+        // Walk arguments. Don't fold the callee identifier itself.
+        let args = nd[2]
+        let i = 0
+        while i < len(args) {
+            cg_fold_expr(args[i])
+            i = i + 1
+        }
+        return nd
+    }
+    if tag == AST_INDEX_EXPR {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_SLICE {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        cg_fold_expr(nd[3])
+        return nd
+    }
+    if tag == AST_FIELD_ACCESS {
+        cg_fold_expr(nd[1])
+        return nd
+    }
+    if tag == AST_LIST_LIT {
+        let els = nd[1]
+        let i = 0
+        while i < len(els) {
+            cg_fold_expr(els[i])
+            i = i + 1
+        }
+        return nd
+    }
+    if tag == AST_MAP_LIT {
+        let ks = nd[1]
+        let vs = nd[2]
+        let i = 0
+        while i < len(ks) {
+            cg_fold_expr(ks[i])
+            cg_fold_expr(vs[i])
+            i = i + 1
+        }
+        return nd
+    }
+    if tag == AST_STRUCT_INIT {
+        let sv = nd[2]
+        let i = 0
+        while i < len(sv) {
+            cg_fold_expr(sv[i])
+            i = i + 1
+        }
+        return nd
+    }
+    if tag == AST_LAMBDA {
+        cg_fold_stmt(nd[3])
+        return nd
+    }
+    if tag == AST_PIPE {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_NULL_ACCESS {
+        cg_fold_expr(nd[1])
+        return nd
+    }
+    if tag == AST_DO_EXPR {
+        let ds = nd[1]
+        let i = 0
+        while i < len(ds) {
+            cg_fold_stmt(ds[i])
+            i = i + 1
+        }
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_CONFIDENCE {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_SPREAD {
+        return nd
+    }
+    if tag == AST_LIST_COMP {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[3])
+        if len(nd) > 4 {
+            if nd[4] != 0 { cg_fold_expr(nd[4]) }
+        }
+        return nd
+    }
+    if tag == AST_MAP_COMP {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        cg_fold_expr(nd[4])
+        if len(nd) > 5 {
+            if nd[5] != 0 { cg_fold_expr(nd[5]) }
+        }
+        return nd
+    }
+    return nd
+}
+
+// Walk a statement (or block) and fold expressions inside it.
+fn cg_fold_stmt(nd) {
+    if nd == 0 { return nd }
+    let tag = ast_tag(nd)
+    if tag == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            cg_fold_stmt(stmts[i])
+            i = i + 1
+        }
+        return nd
+    }
+    if tag == AST_LET_STMT {
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_ASSIGN_STMT {
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_EXPR_STMT {
+        cg_fold_expr(nd[1])
+        return nd
+    }
+    if tag == AST_RETURN_STMT {
+        if nd[1] != 0 { cg_fold_expr(nd[1]) }
+        return nd
+    }
+    if tag == AST_IF_STMT {
+        cg_fold_expr(nd[1])
+        if nd[2] != 0 { cg_fold_stmt(nd[2]) }
+        if nd[3] != 0 { cg_fold_stmt(nd[3]) }
+        return nd
+    }
+    if tag == AST_WHILE_STMT {
+        cg_fold_expr(nd[1])
+        cg_fold_stmt(nd[2])
+        if len(nd) > 4 {
+            if nd[4] != 0 { cg_fold_stmt(nd[4]) }
+        }
+        return nd
+    }
+    if tag == AST_DO_WHILE {
+        cg_fold_stmt(nd[1])
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    if tag == AST_FOR_STMT {
+        cg_fold_expr(nd[2])
+        cg_fold_stmt(nd[3])
+        if len(nd) > 5 {
+            if nd[5] != 0 { cg_fold_stmt(nd[5]) }
+        }
+        return nd
+    }
+    if tag == AST_FOR_INDEXED {
+        cg_fold_expr(nd[3])
+        cg_fold_stmt(nd[4])
+        return nd
+    }
+    if tag == AST_TRY_CATCH {
+        cg_fold_stmt(nd[1])
+        cg_fold_stmt(nd[2])
+        // try_catch shape: [tag, try, catch, err_var, line]               (5 elts, no finally)
+        //                  [tag, try, catch, err_var, finally_body, line] (6 elts, with finally)
+        // Recurse into finally only when present. The line number sits at
+        // the end either way and must not be treated as a statement node.
+        if len(nd) > 5 {
+            if nd[4] != 0 { cg_fold_stmt(nd[4]) }
+        }
+        return nd
+    }
+    if tag == AST_THROW {
+        if nd[1] != 0 { cg_fold_expr(nd[1]) }
+        return nd
+    }
+    if tag == AST_MATCH_STMT {
+        cg_fold_expr(nd[1])
+        let arms = nd[2]
+        let i = 0
+        while i < len(arms) {
+            let arm = arms[i]
+            // arm is [AST_MATCH_ARM, pattern, body]
+            cg_fold_stmt(arm[2])
+            i = i + 1
+        }
+        return nd
+    }
+    if tag == AST_DEFER_STMT {
+        cg_fold_stmt(nd[1])
+        return nd
+    }
+    if tag == AST_FN_DECL {
+        cg_fold_stmt(nd[3])
+        return nd
+    }
+    if tag == AST_METHOD_DECL {
+        cg_fold_stmt(nd[4])
+        return nd
+    }
+    if tag == AST_INDEX_ASSIGN {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[2])
+        cg_fold_expr(nd[3])
+        return nd
+    }
+    if tag == AST_FIELD_ASSIGN {
+        cg_fold_expr(nd[1])
+        cg_fold_expr(nd[3])
+        return nd
+    }
+    if tag == AST_DESTRUCTURE {
+        cg_fold_expr(nd[2])
+        return nd
+    }
+    // Treat anything else as an expression statement.
+    return nd
+}
+
+// Top-level constant-folding entry point. Walks every declaration in the
+// program AST and folds every expression in place.
+fn cg_fold_constants(program) {
+    if cg_no_opt == 1 { return program }
+    if program == 0 { return program }
+    let decls = program[1]
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        let dt = ast_tag(d)
+        if dt == AST_FN_DECL {
+            cg_fold_stmt(d[3])
+        } else {
+            if dt == AST_METHOD_DECL {
+                cg_fold_stmt(d[4])
+            } else {
+                cg_fold_stmt(d)
+            }
+        }
+        i = i + 1
+    }
+    return program
+}
+
+// ---- Dead Code Elimination Pass ----
+//
+// Three categories of dead code targeted:
+//   1. Unreachable statements after return/break/continue/throw.
+//   2. Constant-condition if/while/do-while:
+//        if false { A } else { B }  →  B
+//        if true  { A } else { B }  →  A
+//        while false { ... }         →  removed entirely
+//   3. Unused let bindings whose RHS has no side effects.
+
+// Returns 1 iff the statement unconditionally terminates the enclosing
+// block: return / break / continue / throw. Statements after such a
+// terminator are dead.
+fn _cg_dce_is_terminator(nd) {
+    if nd == 0 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_RETURN_STMT { return 1 }
+    if t == AST_BREAK_STMT { return 1 }
+    if t == AST_CONTINUE_STMT { return 1 }
+    if t == AST_THROW { return 1 }
+    return 0
+}
+
+// Returns 1 iff the expression has no observable side effects, i.e. it is
+// safe to delete its computation when its result is unused. Conservative:
+// only pure literals, ident reads, and arithmetic over those qualify.
+// Calls (any callee), assignments, increments, throws etc. are NOT pure.
+fn _cg_dce_is_pure(nd) {
+    if nd == 0 { return 1 }
+    let t = ast_tag(nd)
+    if t == AST_INT_LIT { return 1 }
+    if t == AST_STR_LIT { return 1 }
+    if t == AST_BOOL_LIT { return 1 }
+    if t == AST_NONE_LIT { return 1 }
+    if t == AST_FLOAT_LIT { return 1 }
+    if t == AST_IDENT { return 1 }
+    if t == AST_BIN_OP {
+        if _cg_dce_is_pure(nd[2]) == 0 { return 0 }
+        if _cg_dce_is_pure(nd[3]) == 0 { return 0 }
+        return 1
+    }
+    if t == AST_UNARY_OP {
+        return _cg_dce_is_pure(nd[2])
+    }
+    if t == AST_INDEX_EXPR {
+        if _cg_dce_is_pure(nd[1]) == 0 { return 0 }
+        if _cg_dce_is_pure(nd[2]) == 0 { return 0 }
+        return 1
+    }
+    if t == AST_FIELD_ACCESS {
+        return _cg_dce_is_pure(nd[1])
+    }
+    if t == AST_TERNARY {
+        if _cg_dce_is_pure(nd[1]) == 0 { return 0 }
+        if _cg_dce_is_pure(nd[2]) == 0 { return 0 }
+        if _cg_dce_is_pure(nd[3]) == 0 { return 0 }
+        return 1
+    }
+    if t == AST_AND_EXPR {
+        if _cg_dce_is_pure(nd[1]) == 0 { return 0 }
+        if _cg_dce_is_pure(nd[2]) == 0 { return 0 }
+        return 1
+    }
+    if t == AST_OR_EXPR {
+        if _cg_dce_is_pure(nd[1]) == 0 { return 0 }
+        if _cg_dce_is_pure(nd[2]) == 0 { return 0 }
+        return 1
+    }
+    if t == AST_NULLISH {
+        if _cg_dce_is_pure(nd[1]) == 0 { return 0 }
+        if _cg_dce_is_pure(nd[2]) == 0 { return 0 }
+        return 1
+    }
+    // CALL, LIST_LIT, MAP_LIT, STRUCT_INIT, LAMBDA, DO_EXPR, LIST_COMP,
+    // MAP_COMP, etc. may have observable effects (allocation, calls).
+    return 0
+}
+
+// Returns 1 iff identifier `name` appears anywhere in expression node.
+fn _cg_dce_expr_uses(nd, name) {
+    if nd == 0 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_IDENT {
+        if nd[1] == name { return 1 }
+        return 0
+    }
+    if t == AST_BIN_OP {
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[3], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_UNARY_OP {
+        return _cg_dce_expr_uses(nd[2], name)
+    }
+    if t == AST_CALL {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        let args = nd[2]
+        let i = 0
+        while i < len(args) {
+            if _cg_dce_expr_uses(args[i], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_INDEX_EXPR {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_SLICE {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[3], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_FIELD_ACCESS {
+        return _cg_dce_expr_uses(nd[1], name)
+    }
+    if t == AST_TERNARY {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[3], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_AND_EXPR {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_OR_EXPR {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_NULLISH {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_LIST_LIT {
+        let els = nd[1]
+        let i = 0
+        while i < len(els) {
+            if _cg_dce_expr_uses(els[i], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_MAP_LIT {
+        let ks = nd[1]
+        let vs = nd[2]
+        let i = 0
+        while i < len(ks) {
+            if _cg_dce_expr_uses(ks[i], name) == 1 { return 1 }
+            if _cg_dce_expr_uses(vs[i], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_STRUCT_INIT {
+        let sv = nd[2]
+        let i = 0
+        while i < len(sv) {
+            if _cg_dce_expr_uses(sv[i], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_PIPE {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_NULL_ACCESS {
+        return _cg_dce_expr_uses(nd[1], name)
+    }
+    if t == AST_LAMBDA {
+        return _cg_dce_stmt_uses(nd[3], name)
+    }
+    if t == AST_DO_EXPR {
+        let ds = nd[1]
+        let i = 0
+        while i < len(ds) {
+            if _cg_dce_stmt_uses(ds[i], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return _cg_dce_expr_uses(nd[2], name)
+    }
+    if t == AST_LIST_COMP {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[3], name) == 1 { return 1 }
+        if len(nd) > 4 {
+            if nd[4] != 0 {
+                if _cg_dce_expr_uses(nd[4], name) == 1 { return 1 }
+            }
+        }
+        return 0
+    }
+    if t == AST_MAP_COMP {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[4], name) == 1 { return 1 }
+        if len(nd) > 5 {
+            if nd[5] != 0 {
+                if _cg_dce_expr_uses(nd[5], name) == 1 { return 1 }
+            }
+        }
+        return 0
+    }
+    if t == AST_CONFIDENCE {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_SPREAD {
+        if nd[1] == name { return 1 }
+        return 0
+    }
+    // if/match/try can appear in expression position (e.g. `let x = if c { a } else { b }`,
+    // `let x = match v { ... }`). Reuse the stmt walker for these.
+    if t == AST_IF_STMT { return _cg_dce_stmt_uses(nd, name) }
+    if t == AST_MATCH_STMT { return _cg_dce_stmt_uses(nd, name) }
+    if t == AST_TRY_CATCH { return _cg_dce_stmt_uses(nd, name) }
+    if t == AST_BLOCK { return _cg_dce_stmt_uses(nd, name) }
+    return 0
+}
+
+// Returns 1 iff identifier `name` appears anywhere in a statement node.
+fn _cg_dce_stmt_uses(nd, name) {
+    if nd == 0 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            if _cg_dce_stmt_uses(stmts[i], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_LET_STMT {
+        // The let's own name shadows the outer one — but in the search-
+        // pre-deletion case we only ever ask "is `name` used in the rest
+        // of the block?" and rely on the caller to skip the let itself.
+        return _cg_dce_expr_uses(nd[2], name)
+    }
+    if t == AST_ASSIGN_STMT {
+        if nd[1] == name { return 1 }
+        return _cg_dce_expr_uses(nd[2], name)
+    }
+    if t == AST_EXPR_STMT { return _cg_dce_expr_uses(nd[1], name) }
+    if t == AST_RETURN_STMT {
+        if nd[1] == 0 { return 0 }
+        return _cg_dce_expr_uses(nd[1], name)
+    }
+    if t == AST_IF_STMT {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if nd[2] != 0 {
+            if _cg_dce_stmt_uses(nd[2], name) == 1 { return 1 }
+        }
+        if nd[3] != 0 {
+            if _cg_dce_stmt_uses(nd[3], name) == 1 { return 1 }
+        }
+        return 0
+    }
+    if t == AST_WHILE_STMT {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_stmt_uses(nd[2], name) == 1 { return 1 }
+        if len(nd) > 4 {
+            if nd[4] != 0 {
+                if _cg_dce_stmt_uses(nd[4], name) == 1 { return 1 }
+            }
+        }
+        return 0
+    }
+    if t == AST_DO_WHILE {
+        if _cg_dce_stmt_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_FOR_STMT {
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        if _cg_dce_stmt_uses(nd[3], name) == 1 { return 1 }
+        if len(nd) > 5 {
+            if nd[5] != 0 {
+                if _cg_dce_stmt_uses(nd[5], name) == 1 { return 1 }
+            }
+        }
+        return 0
+    }
+    if t == AST_FOR_INDEXED {
+        if _cg_dce_expr_uses(nd[3], name) == 1 { return 1 }
+        return _cg_dce_stmt_uses(nd[4], name)
+    }
+    if t == AST_TRY_CATCH {
+        if _cg_dce_stmt_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_stmt_uses(nd[2], name) == 1 { return 1 }
+        // finally only present when len > 5 (see ast_try_catch shape note).
+        if len(nd) > 5 {
+            if nd[4] != 0 {
+                if _cg_dce_stmt_uses(nd[4], name) == 1 { return 1 }
+            }
+        }
+        return 0
+    }
+    if t == AST_THROW {
+        if nd[1] == 0 { return 0 }
+        return _cg_dce_expr_uses(nd[1], name)
+    }
+    if t == AST_MATCH_STMT {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        let arms = nd[2]
+        let i = 0
+        while i < len(arms) {
+            let arm = arms[i]
+            if _cg_dce_stmt_uses(arm[2], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_DEFER_STMT {
+        return _cg_dce_stmt_uses(nd[1], name)
+    }
+    if t == AST_INDEX_ASSIGN {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[2], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[3], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_FIELD_ASSIGN {
+        if _cg_dce_expr_uses(nd[1], name) == 1 { return 1 }
+        if _cg_dce_expr_uses(nd[3], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_DESTRUCTURE {
+        return _cg_dce_expr_uses(nd[2], name)
+    }
+    if t == AST_FN_DECL {
+        return _cg_dce_stmt_uses(nd[3], name)
+    }
+    if t == AST_METHOD_DECL {
+        return _cg_dce_stmt_uses(nd[4], name)
+    }
+    return 0
+}
+
+// Helper to make an AST_BLOCK from a single statement.
+fn _cg_dce_singleton_block(stmt) {
+    let stmts = list_new()
+    push(stmts, stmt)
+    return ast_block(stmts)
+}
+
+// Rebuilds a stmt-list in place: drops dead stmts after a terminator and
+// recursively DCE-ifies each surviving statement. Block-local only —
+// unused-let elimination is handled separately at function scope (see
+// _cg_dce_drop_unused_lets_in_fn) because NOVA has function-scope let
+// hoisting: a `let` inside any nested block is still visible in the
+// enclosing function via collect_locals.
+fn _cg_dce_block_stmts(stmts) {
+    // Pass 1: recurse into nested control-flow.
+    let i = 0
+    while i < len(stmts) {
+        cg_dce_stmt(stmts[i])
+        i = i + 1
+    }
+    // Pass 2: truncate after first terminator (unreachable-after-return).
+    let cut = len(stmts)
+    let j = 0
+    let found = 0
+    while j < len(stmts) {
+        if found == 0 {
+            if _cg_dce_is_terminator(stmts[j]) == 1 {
+                cut = j + 1
+                found = 1
+            }
+        }
+        j = j + 1
+    }
+    while len(stmts) > cut {
+        pop(stmts)
+    }
+    return stmts
+}
+
+// Function-scope unused-let drop.
+// A `let x = pure_expr` is removable iff:
+//   1. The RHS is pure (no calls/allocations/visible effects).
+//   2. x is never read in any descendant of the function body, except
+//      inside the let itself.
+//   3. x is never assigned to elsewhere (otherwise removing the let
+//      would change semantics of those assignments — they would create
+//      a new binding scope).
+//   4. The name is not a known global, capture, or compile-time symbol
+//      that would still be referenced through indirect codegen paths.
+// Conservative: skip destructure lets and lets inside lambdas / loops
+// (analyzed only at top-level depth of the function body).
+fn _cg_dce_count_reads_anywhere(body_stmts, name, except_idx) {
+    let total = 0
+    let i = 0
+    while i < len(body_stmts) {
+        if i == except_idx {
+        } else {
+            if _cg_dce_stmt_uses(body_stmts[i], name) == 1 {
+                total = total + 1
+            }
+        }
+        i = i + 1
+    }
+    return total
+}
+
+// Returns 1 iff there's an AST_ASSIGN_STMT somewhere in the stmt list
+// targeting `name`. We don't reach into nested blocks via this check
+// (the recursive walk for _cg_dce_stmt_uses already covered them, but
+// here we want to be even more conservative about reassignment).
+fn _cg_dce_has_assign_to(body_stmts, name) {
+    let i = 0
+    while i < len(body_stmts) {
+        if _cg_dce_stmt_assigns(body_stmts[i], name) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _cg_dce_stmt_assigns(nd, name) {
+    if nd == 0 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_ASSIGN_STMT {
+        if nd[1] == name { return 1 }
+        return 0
+    }
+    if t == AST_BLOCK {
+        let stmts = nd[1]
+        let i = 0
+        while i < len(stmts) {
+            if _cg_dce_stmt_assigns(stmts[i], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_IF_STMT {
+        if nd[2] != 0 {
+            if _cg_dce_stmt_assigns(nd[2], name) == 1 { return 1 }
+        }
+        if nd[3] != 0 {
+            if _cg_dce_stmt_assigns(nd[3], name) == 1 { return 1 }
+        }
+        return 0
+    }
+    if t == AST_WHILE_STMT {
+        if _cg_dce_stmt_assigns(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_DO_WHILE { return _cg_dce_stmt_assigns(nd[1], name) }
+    if t == AST_FOR_STMT { return _cg_dce_stmt_assigns(nd[3], name) }
+    if t == AST_FOR_INDEXED { return _cg_dce_stmt_assigns(nd[4], name) }
+    if t == AST_TRY_CATCH {
+        if _cg_dce_stmt_assigns(nd[1], name) == 1 { return 1 }
+        if _cg_dce_stmt_assigns(nd[2], name) == 1 { return 1 }
+        return 0
+    }
+    if t == AST_MATCH_STMT {
+        let arms = nd[2]
+        let i = 0
+        while i < len(arms) {
+            if _cg_dce_stmt_assigns(arms[i][2], name) == 1 { return 1 }
+            i = i + 1
+        }
+        return 0
+    }
+    if t == AST_DEFER_STMT { return _cg_dce_stmt_assigns(nd[1], name) }
+    return 0
+}
+
+// Walk a function body's top-level statements and drop pure unused lets.
+// Only operates at the top level of the body (no recursing into blocks);
+// nested lets are not visible to the outer scope's collect_locals (they
+// ARE, but reasoning about them is fragile, so skip).
+fn _cg_dce_drop_unused_lets_in_fn(body_stmts) {
+    let k = 0
+    while k < len(body_stmts) {
+        let s = body_stmts[k]
+        let stag = ast_tag(s)
+        let removed = 0
+        if stag == AST_LET_STMT {
+            let lname = s[1]
+            let lvalue = s[2]
+            if _cg_dce_is_pure(lvalue) == 1 {
+                // Check no other top-level stmt reads or assigns to lname.
+                let reads = _cg_dce_count_reads_anywhere(body_stmts, lname, k)
+                if reads == 0 {
+                    if _cg_dce_has_assign_to(body_stmts, lname) == 0 {
+                        // Shift remaining stmts left.
+                        let n = k
+                        while n < len(body_stmts) - 1 {
+                            body_stmts[n] = body_stmts[n + 1]
+                            n = n + 1
+                        }
+                        pop(body_stmts)
+                        removed = 1
+                    }
+                }
+            }
+        }
+        if removed == 0 {
+            k = k + 1
+        }
+    }
+    return body_stmts
+}
+
+// Recursively DCE a single statement node, mutating in place. For
+// control-flow nodes with constant conditions, the *contents* of the
+// node are rewritten in place (e.g. an if(false) becomes the else
+// branch's block contents).
+fn cg_dce_stmt(nd) {
+    if nd == 0 { return nd }
+    let t = ast_tag(nd)
+    if t == AST_BLOCK {
+        _cg_dce_block_stmts(nd[1])
+        return nd
+    }
+    if t == AST_LET_STMT {
+        // RHS may contain a lambda or do-expr; recurse into it.
+        // (Expression-level fold/DCE handled by fold pass + recursion below.)
+        return nd
+    }
+    if t == AST_ASSIGN_STMT { return nd }
+    if t == AST_EXPR_STMT { return nd }
+    if t == AST_RETURN_STMT { return nd }
+    if t == AST_IF_STMT {
+        // Recurse into branches. We DO NOT collapse if-with-constant-cond
+        // at the AST level because NOVA permits if/match as both
+        // statements AND expressions, and the AST does not distinguish
+        // them. Rewriting in place would replace an expression-valued
+        // node (RHS of `let a = if true { 42 } else { 0 }`) with a plain
+        // block, breaking codegen. The existing per-target codegen
+        // already handles constant-cond if-stmts as a separate fast path
+        // (see gen_stmt's AST_IF_STMT shortcut around line 2755), which
+        // works correctly in both contexts because it emits inline code.
+        if nd[2] != 0 { cg_dce_stmt(nd[2]) }
+        if nd[3] != 0 { cg_dce_stmt(nd[3]) }
+        return nd
+    }
+    if t == AST_WHILE_STMT {
+        // Recurse into body and while-else. We do NOT replace
+        // `while false { ... }` in place because while is parsed at both
+        // statement and expression boundaries (e.g. `loop { ... }` is
+        // desugared to `while 1 { ... }`) and rewriting in place could
+        // perturb constant-cond detection in the codegen. The existing
+        // per-target codegen already handles a literal-false condition
+        // by emitting only the optional while-else and skipping the body
+        // (see gen_stmt's AST_WHILE_STMT shortcut around line 3883).
+        cg_dce_stmt(nd[2])
+        if len(nd) > 4 {
+            if nd[4] != 0 { cg_dce_stmt(nd[4]) }
+        }
+        return nd
+    }
+    if t == AST_DO_WHILE {
+        cg_dce_stmt(nd[1])
+        return nd
+    }
+    if t == AST_FOR_STMT {
+        cg_dce_stmt(nd[3])
+        if len(nd) > 5 {
+            if nd[5] != 0 { cg_dce_stmt(nd[5]) }
+        }
+        return nd
+    }
+    if t == AST_FOR_INDEXED {
+        cg_dce_stmt(nd[4])
+        return nd
+    }
+    if t == AST_TRY_CATCH {
+        cg_dce_stmt(nd[1])
+        cg_dce_stmt(nd[2])
+        // finally only present when len > 5 (see ast_try_catch shape note).
+        if len(nd) > 5 {
+            if nd[4] != 0 { cg_dce_stmt(nd[4]) }
+        }
+        return nd
+    }
+    if t == AST_THROW { return nd }
+    if t == AST_MATCH_STMT {
+        let arms = nd[2]
+        let i = 0
+        while i < len(arms) {
+            let arm = arms[i]
+            cg_dce_stmt(arm[2])
+            i = i + 1
+        }
+        return nd
+    }
+    if t == AST_DEFER_STMT {
+        cg_dce_stmt(nd[1])
+        return nd
+    }
+    if t == AST_FN_DECL {
+        cg_dce_stmt(nd[3])
+        return nd
+    }
+    if t == AST_METHOD_DECL {
+        cg_dce_stmt(nd[4])
+        return nd
+    }
+    return nd
+}
+
+// Top-level DCE entry point. Walks every declaration in the program AST.
+fn cg_eliminate_dead_code(program) {
+    if cg_no_opt == 1 { return program }
+    if program == 0 { return program }
+    let decls = program[1]
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        cg_dce_stmt(d)
+        // For function/method bodies, do a function-scope pass to drop
+        // pure unused let bindings. Only top-level stmts of the body
+        // are examined — nested lets are conservatively left alone.
+        let dt = ast_tag(d)
+        if dt == AST_FN_DECL {
+            if ast_tag(d[3]) == AST_BLOCK {
+                _cg_dce_drop_unused_lets_in_fn(d[3][1])
+            }
+        }
+        if dt == AST_METHOD_DECL {
+            if ast_tag(d[4]) == AST_BLOCK {
+                _cg_dce_drop_unused_lets_in_fn(d[4][1])
+            }
+        }
+        i = i + 1
+    }
+    return program
+}
+
 fn gen_float_operand(nd, xmm_reg) {
     let tag = ast_tag(nd)
     if tag == AST_FLOAT_LIT {

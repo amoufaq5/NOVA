@@ -17,7 +17,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 160 tests (154 pass, 6 skip) |
+| **Tests** | 163 tests (157 pass, 6 skip) |
 | **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64-Linux, Windows ARM64 (PE32+ AArch64) |
 
 ---
@@ -72,7 +72,7 @@ make
 # Compile and run a program
 make run FILE=examples/hello.nova
 
-# Run all 160 tests (154 pass, 6 skip — see tests/run_tests.sh)
+# Run all 163 tests (157 pass, 6 skip — see tests/run_tests.sh)
 make test-all
 
 # Verify self-hosting (stage2.s == stage3.s)
@@ -764,7 +764,7 @@ That's it. No C compiler. No package manager. No downloads.
 ```bash
 make                # Build bin/nova
 make self-host      # Verify self-hosting (stage2.s == stage3.s)
-make test-all       # Run all 160 tests (154 pass, 6 skip)
+make test-all       # Run all 163 tests (157 pass, 6 skip)
 make run FILE=path  # Compile and run a .nova file
 make examples       # Build and run all 29 examples
 make agent          # Run the cognitive agent
@@ -903,6 +903,45 @@ make smoke-wasi-preopens
 ### SIMD (SSE2)
 `simd_vec_new` `simd_vec_set` `simd_vec_get` `simd_add_f64` `simd_sub_f64` `simd_mul_f64` `simd_div_f64` `simd_dot_f64` `simd_scale_f64` `simd_sum_f64` `simd_norm_f64` `simd_fma_f64` `simd_relu_f64` `simd_max_f64`
 
+### Optimization passes (R12E)
+
+Two AST-level optimization passes run between parse and codegen,
+on by default, opt-out with `--no-opt`:
+
+- **Constant folding** (`cg_fold_constants`) — evaluates pure
+  integer/bool/none expressions at compile time. Examples:
+  `2 + 3` → `5`, `(2 + 3) * 4` → `20`, `1 << 8` → `256`,
+  `(1 << 8) + (1 << 16)` → `65792`, `5 * 1000` → `5000`,
+  `!1` → `0`. Skips function calls, variables, string concat
+  (overloaded operator), and division by literal zero. Folds
+  through unary minus, bitwise (`& | ^ << >> ~`), comparison
+  (`== != < > <= >=`), and small-exponent `**`.
+
+- **Dead code elimination** (`cg_eliminate_dead_code`) — three
+  rewrites:
+  1. Statements after `return` / `break` / `continue` / `throw`
+     are unreachable; truncate the enclosing block at the
+     terminator.
+  2. Function-scope unused-let drop: `let x = pure_literal`
+     where `x` is never read or reassigned is removed. RHS
+     must be pure (no calls, allocations, or visible effects).
+  3. Constant-condition `if` / `while` are handled by the
+     existing per-target codegen shortcut (preserved from prior
+     rounds, not duplicated at AST level since NOVA permits
+     `if` as both a statement and an expression).
+
+Folding follows two's-complement i64 wraparound (the same
+semantics as runtime evaluation). The smart-op classifier in
+`gen_runtime` correctly handles folded integer literals because
+classification is range-based (PTR_THRESHOLD root fix, R6A), not
+threshold-based. Pipeline:
+`parse → cg_fold_constants → cg_eliminate_dead_code → codegen`.
+
+Measured on a synthetic 30-stmt benchmark (`bench_fold.nova`):
+~4.3% reduction in emitted .s size; self-hosting stage2/stage3
+remains bit-identical because the compiler source already used
+literals where folding would apply.
+
 ### SIMD i32x8 codegen intrinsics (R11D)
 Explicit 8-lane int32 SIMD builtins lowered directly by the compiler.
 All take raw 32-byte int32 buffers (caller-allocated with `alloc(32)`):
@@ -990,7 +1029,7 @@ To get started:
 1. Read the code -- start with `src/compiler/compiler.nova` (entry point, 547 lines) and work outward
 2. Make your changes
 3. Run `make self-host` to verify the compiler can still compile itself
-4. Run `make test-all` to check for regressions (154 of 160 tests should pass, 6 skip)
+4. Run `make test-all` to check for regressions (157 of 163 tests should pass, 6 skip)
 
 The cognitive architecture lives in `src/core/` (types, soul, system) and `src/mind/` (systems). The runtime is in `src/runtime/`. The agent systems (cognitive LLM, RAG) are in `src/agent/`. The 31 examples in `examples/` demonstrate most language features.
 
