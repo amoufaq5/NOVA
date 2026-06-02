@@ -22,6 +22,8 @@ for the install hook.
 | `textDocument/codeAction`           | yes (extract function, organize imports, sort fn declarations) |
 | `textDocument/definition`           | yes (intra-file + follows `import "..."` transitively) |
 | `workspace/symbol`                  | yes (fuzzy name search across every indexed `.nova` file) |
+| `textDocument/semanticTokens/full`  | yes (variable / function / type / namespace / keyword / string / number / comment / parameter / constant with declaration / readonly / static modifiers) |
+| `textDocument/semanticTokens/range` | yes (same classifier, filtered to the requested line range) |
 
 Hover scans the open document and every `import "..."` it transitively
 references for `fn name(args)` and `let X = ...` definitions, plus the
@@ -90,6 +92,47 @@ Code actions surface three refactorings via the VS Code lightbulb menu:
 All three return `WorkspaceEdit`s in the `{"changes": {uri: TextEdit[]}}`
 shape, which VS Code applies in-place without diff reconciliation.
 
+Semantic tokens (`textDocument/semanticTokens/full` + `/range`) drive
+rich syntax highlighting beyond TextMate regex scopes. Each identifier
+is classified into one of `variable` / `function` / `type` /
+`namespace` / `keyword` / `string` / `number` / `comment` /
+`parameter` / `constant`, plus a modifier bitmask of `declaration` /
+`definition` / `readonly` / `static` / `deprecated`. Editors use this
+to colour `let` bindings differently from `mut`, italicise types vs
+values, fade out deprecated symbols, and so on.
+
+Classification rules (in priority order):
+
+  * `fn NAME` -> `function + declaration`; the bracketed parameter list
+    that follows emits `parameter + declaration` tokens.
+  * `let NAME` -> `variable + declaration + readonly` (NOVA `let` is
+    immutable); ALL_CAPS names like `TAU` instead emit `constant`.
+  * `const NAME` -> `constant + declaration + readonly + static`.
+  * `mut NAME` -> writeable `variable + declaration`.
+  * `type NAME` / `struct NAME` / `enum NAME` -> `type + declaration`.
+  * `module NAME` -> `namespace + declaration`.
+  * `import "..."` -> the string literal is classified as `namespace`
+    so the editor can colour the path distinctively.
+  * Identifier followed by `(` -> `function` (call site).
+  * Identifier matching a known function / constant from the workspace
+    symbol index (R8C) -> classified accordingly, even when there's no
+    local declaration in the same buffer.
+  * Numeric literals: decimal, hex `0x`, octal `0o`, binary `0b`, plus
+    floats and scientific notation.
+  * `//` line and `/* ... */` block comments (block comments crossing
+    lines are emitted as one comment slice per line, since semantic
+    tokens cannot span line boundaries).
+  * Triple-quoted strings (`"""..."""`) are emitted as one string
+    slice per line, mirroring the lexer's multiline handling.
+
+The wire format is the standard LSP delta-compressed flat int array:
+`[deltaLine, deltaStart, length, tokenType, tokenModifiers]` per token,
+sorted by source position. The token-type + modifier legend is
+advertised under `semanticTokensProvider.legend` at `initialize` time.
+Tokenization of `src/compiler/codegen.nova` (~17000 lines, ~520 kB)
+emits about 37000 tokens in roughly 140 ms — fast enough for
+interactive recolouring on every keystroke.
+
 Workspace symbols (`workspace/symbol`) drives Cmd+T / Ctrl+T in the
 editor. The server keeps an in-memory inverted index of every top-level
 `fn`, `let`, and (in `codegen.nova` / `compiler.nova`) every
@@ -131,9 +174,10 @@ python tools/nova-lsp/tests/code_action_smoke.py
 python tools/nova-lsp/tests/definition_cross_file_smoke.py
 python tools/nova-lsp/tests/test_workspace_symbols.py
 python tools/nova-lsp/tests/test_rename_workspace.py
+python tools/nova-lsp/tests/test_semantic_tokens.py
 ```
 
-The seven `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The eight `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
 ~10 ms each (the workspace-symbol + workspace-rename integration legs
@@ -187,6 +231,7 @@ tools/nova-lsp/
     imports.py              # import-graph walker + mtime-invalidated file cache
     workspace_symbols.py    # workspace/symbol index + fuzzy matcher
     rename_workspace.py     # workspace-wide rename engine (top-level decls)
+    semantic_tokens.py      # semantic-tokens classifier + delta encoder
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -196,4 +241,5 @@ tools/nova-lsp/
     code_action_smoke.py
     test_workspace_symbols.py
     test_rename_workspace.py
+    test_semantic_tokens.py
 ```

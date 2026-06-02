@@ -18,6 +18,10 @@ using only the Python standard library. Supports:
     * `workspace/symbol` (fuzzy name search across all indexed `.nova`
       files; index is warmed incrementally on didOpen/didChange and
       lazily crawls the workspace root on first query)
+    * `textDocument/semanticTokens/full` + `/range` (per-token
+      classification beyond TextMate: variables vs constants vs
+      functions vs types, declaration vs reference, readonly + static
+      modifiers, namespace tagging for import paths)
 
 Run with::
 
@@ -46,7 +50,16 @@ from nova_lsp.rename_workspace import (
     classify_symbol,
     plan_workspace_rename,
 )
-from nova_lsp.workspace_symbols import WorkspaceSymbolIndex
+from nova_lsp.semantic_tokens import (
+    SemanticTokenizer,
+    semantic_tokens_legend,
+    tokens_to_lsp_array,
+)
+from nova_lsp.workspace_symbols import (
+    SYMBOL_KIND_CONSTANT,
+    SYMBOL_KIND_FUNCTION,
+    WorkspaceSymbolIndex,
+)
 
 LOG_FILE = os.environ.get("NOVA_LSP_LOG")
 
@@ -1500,6 +1513,110 @@ def handle_workspace_symbol(
 
 
 # ---------------------------------------------------------------------------
+# Semantic tokens — `textDocument/semanticTokens/full` and `/range`.
+#
+# Returns a delta-compressed flat int array classifying every identifier,
+# string, number, and keyword in the buffer. The legend (token-type names
+# + modifier names) is advertised at `initialize` time via
+# `server_capabilities()` and must be referenced symmetrically by the
+# client.
+#
+# Cross-file context: we use R8C's WorkspaceSymbolIndex to look up
+# already-indexed `fn` / `const` declarations from sibling files so a
+# bare identifier like `compute_total` (no parens, no local declaration)
+# still gets classified as `function` when it's defined elsewhere in the
+# workspace. The workspace index is warmed on the first
+# `workspace/symbol` query and on every didOpen/didChange, so by the
+# time the client asks for semantic tokens the cross-file picture is
+# usually ready.
+# ---------------------------------------------------------------------------
+
+
+def _known_symbol_names(state: ServerState) -> Tuple[Set[str], Set[str], Set[str]]:
+    """Walk the warm workspace symbol index and return three sets:
+    (function names, type names, constant names). Used to seed the
+    semantic tokenizer with cross-file knowledge.
+
+    Type names: NOVA's index doesn't currently emit a SymbolKind for
+    type declarations (they show up as Function/Variable depending on the
+    decl keyword), so this set is empty for now. We keep the slot for
+    forward compatibility when R8C-or-similar adds a Type kind.
+    """
+    fn_names: Set[str] = set()
+    const_names: Set[str] = set()
+    for entry in state.workspace_symbols.all_symbols():
+        if entry.kind == SYMBOL_KIND_FUNCTION:
+            fn_names.add(entry.name)
+        elif entry.kind == SYMBOL_KIND_CONSTANT:
+            const_names.add(entry.name)
+    return fn_names, set(), const_names
+
+
+def handle_semantic_tokens_full(
+    state: ServerState, params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Return the full semantic-token array for the document under `uri`.
+
+    Response shape per LSP spec: `{"data": [int, int, int, int, int, ...]}`.
+    The five-int-per-token encoding is documented in semantic_tokens.py."""
+    uri = params.get("textDocument", {}).get("uri", "")
+    doc = state.documents.get(uri)
+    if not doc:
+        return {"data": []}
+    # Warm the workspace index so cross-file fn/const refs classify well.
+    # Cheap when already warm (lazy crawls are guarded by _crawled_roots).
+    if state.root_path:
+        state.workspace_symbols.index_workspace_root(state.root_path)
+    for d in state.documents.values():
+        _refresh_workspace_symbols_for_doc(state, d)
+    known_fns, known_types, known_consts = _known_symbol_names(state)
+    tokenizer = SemanticTokenizer(
+        doc.text,
+        known_functions=known_fns,
+        known_types=known_types,
+        known_constants=known_consts,
+    )
+    tokens = tokenizer.tokenize()
+    return {"data": tokens_to_lsp_array(tokens)}
+
+
+def handle_semantic_tokens_range(
+    state: ServerState, params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Return semantic tokens for the lines covered by `params.range`.
+
+    The whole document is still tokenized internally — semantic-tokens
+    classification depends on top-level context (which fns are declared,
+    etc) — but we filter the output to tokens whose line falls inside
+    the requested range. This gives clients a cheaper payload for
+    initial paints in big files while preserving classification quality.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    rng = params.get("range") or {}
+    doc = state.documents.get(uri)
+    if not doc:
+        return {"data": []}
+    start_line = rng.get("start", {}).get("line", 0)
+    end_line = rng.get("end", {}).get("line", 0)
+    if start_line > end_line:
+        return {"data": []}
+    if state.root_path:
+        state.workspace_symbols.index_workspace_root(state.root_path)
+    for d in state.documents.values():
+        _refresh_workspace_symbols_for_doc(state, d)
+    known_fns, known_types, known_consts = _known_symbol_names(state)
+    tokenizer = SemanticTokenizer(
+        doc.text,
+        known_functions=known_fns,
+        known_types=known_types,
+        known_constants=known_consts,
+    )
+    all_tokens = tokenizer.tokenize()
+    in_range = [t for t in all_tokens if start_line <= t.line <= end_line]
+    return {"data": tokens_to_lsp_array(in_range)}
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher.
 # ---------------------------------------------------------------------------
 
@@ -1539,6 +1656,11 @@ def server_capabilities() -> Dict[str, Any]:
             ],
         },
         "workspaceSymbolProvider": {"resolveProvider": False},
+        "semanticTokensProvider": {
+            "legend": semantic_tokens_legend(),
+            "range": True,
+            "full": True,
+        },
         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
     }
 
@@ -1659,6 +1781,14 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "workspace/symbol":
         result = handle_workspace_symbol(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/semanticTokens/full":
+        result = handle_semantic_tokens_full(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/semanticTokens/range":
+        result = handle_semantic_tokens_range(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 

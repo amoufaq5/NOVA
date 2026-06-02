@@ -1,5 +1,121 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R13C — LSP semantic tokens (advanced syntax highlighting)
+
+R13C added the 11th LSP capability: **semantic tokens** via
+`textDocument/semanticTokens/full` and `textDocument/semanticTokens/range`.
+Where TextMate grammars colour syntax through regex patterns
+("everything matching `\bfn\b` is a keyword"), semantic tokens let the
+server classify each individual identifier with rich type +
+modifier information so editors can colour variables differently from
+constants, italicise types vs values, fade out deprecated symbols, and
+so on.
+
+### What was added
+
+**New module** `tools/nova-lsp/nova_lsp/semantic_tokens.py`:
+
+  - `SemanticTokenizer(text, *, known_functions, known_types,
+    known_constants)` — a single-pass scanner that walks NOVA source
+    character by character (not a regex) emitting classified tokens.
+  - `tokens_to_lsp_array(tokens) -> list[int]` — delta-compresses the
+    token stream into the standard LSP wire format
+    `[deltaLine, deltaStart, length, tokenType, tokenModifiers]` per
+    token.
+  - `semantic_tokens_legend()` — returns the legend payload (token-type
+    names + modifier names) advertised at `initialize` time.
+
+**Token type legend (11 types):**
+
+  | Index | Name | Used for |
+  | --- | --- | --- |
+  | 0 | `variable` | `let` bindings, default for bare identifier refs |
+  | 1 | `function` | `fn` declarations + call sites + workspace-known refs |
+  | 2 | `type` | `type` / `struct` / `enum` declarations + refs |
+  | 3 | `namespace` | `module NAME` decls + `import "..."` path strings |
+  | 4 | `keyword` | fn / let / if / while / etc |
+  | 5 | `string` | regular `"..."` literals |
+  | 6 | `number` | decimal / hex / octal / binary / floats |
+  | 7 | `comment` | `//` line + `/* */` block (per-line slices) |
+  | 8 | `operator` | reserved (not currently emitted) |
+  | 9 | `parameter` | function parameter names (decl + body uses) |
+  | 10 | `constant` | `const` decls + ALL_CAPS `let` + workspace-known consts |
+
+**Modifier legend (5 bitfields):** `declaration`, `definition`,
+`readonly`, `static`, `deprecated`. `let` declarations are
+`declaration | definition | readonly`; `const` adds `static` on top;
+function decls are `declaration | definition`; call sites have no
+modifiers.
+
+### Server wiring
+
+`server.py` now imports `SemanticTokenizer` and exposes two handlers:
+
+  - `handle_semantic_tokens_full(state, params)` — full-document
+    classification.
+  - `handle_semantic_tokens_range(state, params)` — same tokenizer,
+    output filtered to the requested line range (responsive partial
+    paints in big files).
+
+Capability registration:
+
+```python
+"semanticTokensProvider": {
+    "legend": semantic_tokens_legend(),
+    "range": True,
+    "full": True,
+}
+```
+
+Cross-file context comes from R8C's `WorkspaceSymbolIndex` — when the
+classifier sees a bare identifier with no local declaration, it checks
+the workspace index for a same-name fn or const and classifies
+accordingly. The index is already warmed by `didOpen` / `didChange`
+handlers so semantic-tokens requests don't pay the indexing cost.
+
+### Performance
+
+On `src/compiler/codegen.nova` (~17,000 lines, ~520 kB):
+
+  - **Tokens emitted:** 37,442
+  - **Tokenize wall-clock:** ~140 ms (single-pass scanner, no regex
+    fallbacks)
+  - **Delta-compressed payload:** 187,210 ints (37,442 logical tokens)
+
+Fast enough for interactive recolouring on every keystroke even on the
+largest NOVA source file in the tree.
+
+### Tests
+
+New: `tools/nova-lsp/tests/test_semantic_tokens.py` (~30 test
+functions, 119 assertions) covers empty file, basic
+let/fn/const/type/module declarations, function calls, parameters,
+keywords, comments (line + block + multiline), numbers (all bases),
+strings (regular + triple-quoted), imports as namespace, delta
+encoding (same-line + new-line + multi-line), cross-file workspace
+hints (`known_functions` / `known_constants`), legend shape, server-
+level dispatch through the harness, range queries, and an integration
+test that tokenizes the real `codegen.nova`.
+
+### Capability count
+
+10 -> 11 capabilities (initialize/initialized/shutdown/exit excluded;
+counting hover, completion, diagnostics, definition, rename,
+references, code actions, workspace symbols, signature help is not
+implemented — see README capability table).
+
+### Files touched
+
+  - NEW `tools/nova-lsp/nova_lsp/semantic_tokens.py` (~570 lines)
+  - `tools/nova-lsp/nova_lsp/server.py` (+ handlers + capability +
+    dispatcher routes)
+  - NEW `tools/nova-lsp/tests/test_semantic_tokens.py` (~620 lines)
+  - `tools/nova-lsp/README.md` (capability table + section)
+  - `README.md` (top-level LSP bullet)
+  - `NEXT_SESSION.md` (this section)
+
+---
+
 ## R12E — Compiler optimization passes (constant folding + DCE)
 
 NOVA's codegen had grown capabilities for several rounds without
