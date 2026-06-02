@@ -6,12 +6,12 @@ framed) into `gdb --interpreter=mi3` machine-interface commands and
 turns gdb's async records back into DAP events.
 
 This is the **MVP** of `nova-dap`: source-level breakpoints (incl.
-conditional + data breakpoints / watchpoints), step in / over / out,
-continue, stack traces, evaluate (watch / REPL / hover), and a single
-Locals scope per frame. The adapter itself does **no DWARF parsing**
-— gdb does. The NOVA compiler already emits a working `.debug_line`
-section on Linux ELF (see `DWARF_AUDIT.md` in the repo root and
-`make smoke-dwarf`).
+conditional + data breakpoints / watchpoints + function breakpoints
+by name), step in / over / out, continue, stack traces, evaluate
+(watch / REPL / hover), and a single Locals scope per frame. The
+adapter itself does **no DWARF parsing** — gdb does. The NOVA
+compiler already emits a working `.debug_line` section on Linux ELF
+(see `DWARF_AUDIT.md` in the repo root and `make smoke-dwarf`).
 
 ## What works
 
@@ -20,6 +20,7 @@ section on Linux ELF (see `DWARF_AUDIT.md` in the repo root and
 | `initialize`              | Returns the capabilities table (see below).       |
 | `launch`                  | Spawns gdb, enables `mi-async` + `non-stop`, `-file-exec-and-symbols <program>`, optional `cwd` + `args`. |
 | `setBreakpoints`          | `-break-delete` then `-break-insert <src>:<line>` per breakpoint. Conditional breakpoints (`condition: "x > 5"`) are forwarded via `-break-insert -c "<expr>"`. |
+| `setFunctionBreakpoints`  | Tears down prior function bps via `-break-delete <id>` (per id, so source-line breakpoints + watchpoints survive) and installs `-break-insert [-c "<expr>"] "<name>"` per entry. Names gdb can't resolve come back `verified: false` with the gdb error in `message`. Hits surface as `stopped` events with `reason: "function breakpoint"` and `description: "Entry to <name>"`. |
 | `setExceptionBreakpoints` | Accepted, no-op (gdb has none for Nova).          |
 | `configurationDone`       | `-exec-run` first time; `-exec-continue --all` thereafter. |
 | `threads`                 | Multi-thread: backstop reconcile with `-thread-info`; tracks `=thread-created` / `=thread-exited` for live updates. |
@@ -44,6 +45,17 @@ Capabilities advertised:
   forwarded verbatim to gdb's `-break-insert -c "<expr>"`. gdb only
   fires the breakpoint when the expression is non-zero, so a loop
   with `condition: "x > 5"` skips iterations where `x <= 5`.
+* `supportsFunctionBreakpoints: true`
+  — `setFunctionBreakpoints` accepts a list of `{name, condition?}`
+  entries and installs gdb breakpoints by symbol name. Useful when
+  you don't know which file or line a function lives in, or when
+  you want to catch all overloads. Stops fire on entry to any
+  function whose symbol resolves; the `stopped` event carries
+  `reason: "function breakpoint"`, `hitBreakpointIds: [<id>]`,
+  and `description: "Entry to <name>"`. Names that don't resolve
+  (e.g. typos, dynamically-loaded symbols) come back
+  `verified: false` so the IDE can render a pending indicator
+  without aborting the whole request.
 * `supportsEvaluateForHovers: true`
   — `evaluate` accepts `context: "watch" | "repl" | "hover"`. All
   three route through the same gdb path; hover is safe because
@@ -140,12 +152,19 @@ tools/nova-dap/
                                           encoding, access-type mapping, gdb
                                           `-break-watch` command builder,
                                           `WatchpointManager` + stop classifier.
+    function_breakpoints.py              Function breakpoints by name: gdb
+                                          `-break-insert <fn_name>` command
+                                          builder, response parser (verified
+                                          vs pending), `FunctionBreakpointManager`
+                                          + `describe_function_entry` description
+                                          builder.
   tests/
     dap_smoke.py                         end-to-end single-thread smoke test
     dap_multi_thread.py                  end-to-end multi-thread coordination test
     test_evaluate.py                     evaluate request: decoder + REPL/watch/hover
     test_conditional_breakpoint.py       conditional `setBreakpoints` with `condition`
     test_data_breakpoints.py             data breakpoints / watchpoints (dataBreakpointInfo + setDataBreakpoints)
+    test_function_breakpoints.py         function breakpoints by name (setFunctionBreakpoints)
     fixtures/multi_thread.c              pthread fixture (built on demand by the test)
 ```
 
@@ -256,7 +275,18 @@ python tools/nova-dap/tests/test_data_breakpoints.py
 #   NOVA integration:   ok
 ```
 
-All four tests have a pure-Python phase that runs anywhere (no gdb
+For function breakpoints (by name):
+
+```sh
+python tools/nova-dap/tests/test_function_breakpoints.py
+# test_function_breakpoints: OK
+#   unit assertions:    103
+#   total assertions:   138
+#   end-to-end:         ok (helper hits=3) (35 extra checks)
+#   NOVA integration:   ok (main main_id=1, greet_hit=True)
+```
+
+All five tests have a pure-Python phase that runs anywhere (no gdb
 required) plus an end-to-end phase that SKIPs cleanly when `gdb` /
 `gcc` are missing.
 

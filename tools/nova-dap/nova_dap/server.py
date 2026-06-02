@@ -21,6 +21,14 @@ Supported requests
                              a ``condition`` string, it's forwarded
                              via ``-break-insert -c "<expr>"`` so gdb
                              only stops when the condition is true.
+* ``setFunctionBreakpoints`` — installs gdb breakpoints by function
+                             name via ``-break-insert [-c "<expr>"]
+                             <name>``. Names that don't resolve come
+                             back ``verified: false`` (DAP allows
+                             pending breakpoints). Hits surface as
+                             ``stopped`` events with ``reason:
+                             "function breakpoint"`` and a description
+                             like ``"Entry to main"``.
 * ``configurationDone``   — runs the inferior (``-exec-run``).
 * ``threads``             — real multi-thread list from ``-thread-info``.
                              For single-thread programs this still
@@ -115,6 +123,14 @@ from nova_dap.watchpoints import (
     extract_watch_values,
     is_watchpoint_stop,
     parse_watchpoint_id,
+)
+from nova_dap.function_breakpoints import (
+    FunctionBreakpointManager,
+    FunctionBreakpointRecord,
+    build_function_breakpoint_command,
+    describe_function_entry,
+    is_unresolved_function_error,
+    parse_function_breakpoint_response,
 )
 
 
@@ -225,6 +241,14 @@ class Session:
     # The manager is reset on every ``launch`` since gdb forgets all
     # watchpoints when the inferior restarts.
     watchpoints: WatchpointManager = field(default_factory=WatchpointManager)
+    # Function breakpoint registry. See ``nova_dap.function_breakpoints``
+    # for the wire shape + gdb integration. Like the watchpoint
+    # registry, reset on every ``launch``; unlike it, populated by
+    # ``setFunctionBreakpoints`` (complete-replacement semantics —
+    # every call tears down the previous set and reinstalls).
+    function_breakpoints: FunctionBreakpointManager = field(
+        default_factory=FunctionBreakpointManager
+    )
 
     def alloc_var_ref(self, frame_id: int) -> int:
         ref = self.next_var_ref
@@ -456,6 +480,21 @@ def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
             body["description"] = describe_watch_change(
                 record.name, record.access_type, old_val, new_val
             )
+    # For function-breakpoint hits, gdb emits the same
+    # ``reason="breakpoint-hit"`` record as a source-line bp; we tell
+    # them apart by looking the ``bkptno`` up in the function-bp
+    # manager. If we find a match, refine the DAP wire shape so the
+    # IDE renders "function breakpoint" instead of plain "breakpoint"
+    # and the description says which function was entered.
+    if (
+        reason == "breakpoint-hit"
+        and hit_id is not None
+        and not is_watchpoint_stop(reason)
+    ):
+        fn_record = session.function_breakpoints.lookup_by_gdb_id(hit_id)
+        if fn_record is not None:
+            body["reason"] = "function breakpoint"
+            body["description"] = describe_function_entry(fn_record.name)
     send_event(session, "stopped", body)
 
 
@@ -556,7 +595,12 @@ def _capabilities() -> Dict[str, Any]:
         # gdb evaluates the expression at the breakpoint hit site and
         # only stops when it's non-zero. See ``handle_set_breakpoints``.
         "supportsConditionalBreakpoints": True,
-        "supportsFunctionBreakpoints": False,
+        # Function breakpoints: ``-break-insert <fn_name>`` (optionally
+        # with ``-c "<expr>"``). Stops fire on entry to any function
+        # whose symbol matches the supplied name; unresolved names
+        # come back ``verified: false`` so the IDE can render a
+        # pending indicator. See ``handle_set_function_breakpoints``.
+        "supportsFunctionBreakpoints": True,
         "supportsHitConditionalBreakpoints": False,
         # Evaluate-for-hovers: hovering an identifier in the editor
         # triggers an ``evaluate`` request with ``context="hover"``.
@@ -631,6 +675,11 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     # launch may have left in the registry so dataIds from the old
     # session can't collide with the new gdb-assigned numbers.
     session.watchpoints.clear_all()
+    # Same story for function breakpoints — gdb forgets every
+    # breakpoint when the inferior restarts, so the manager must be
+    # reset or stale gdb ids will route the wrong "Entry to <fn>"
+    # description on a subsequent breakpoint-hit stop.
+    session.function_breakpoints.clear_all()
 
     # Try to negotiate non-stop + mi-async so individual threads can
     # be paused / continued. If gdb rejects either (e.g. it's running
@@ -741,8 +790,127 @@ def handle_set_breakpoints(session: Session, req: Dict[str, Any]) -> None:
 
 
 def handle_set_function_breakpoints(session: Session, req: Dict[str, Any]) -> None:
-    # MVP: stub — we declared no support but VS Code may still ask.
-    send_response(session, req, body={"breakpoints": []})
+    """DAP ``setFunctionBreakpoints`` request.
+
+    Replaces the active set of function breakpoints with the supplied
+    list. Each entry has ``{name, condition?, hitCondition?}``; we
+    forward each to gdb via ``-break-insert [-c "<expr>"] <name>``
+    and record the assigned breakpoint number so a later
+    ``*stopped,bkptno=...`` can be routed to the right ``"Entry to
+    <fn>"`` description.
+
+    Behaviour notes:
+
+    * Like ``setBreakpoints`` + ``setDataBreakpoints``, this is a
+      complete-replacement request: every call tears down the
+      previously-installed function breakpoints via ``-break-delete
+      <id>`` (per id, so source-line breakpoints + watchpoints
+      survive) and reinstalls from scratch.
+    * Names that gdb can't resolve (``Function "foo" not defined.``)
+      come back ``verified: false`` with gdb's message in
+      ``message`` — the entry is reported but not active. Other
+      gdb errors (e.g. malformed condition expression) get the same
+      shape; the DAP client can choose to render them differently
+      based on the message.
+    * The ``hitCondition`` field is accepted but ignored — we
+      declare ``supportsHitConditionalBreakpoints: false`` so well-
+      behaved clients won't send it; we tolerate it for robustness.
+    """
+    args = req.get("arguments", {}) or {}
+    bridge = session.bridge
+    if bridge is None:
+        send_response(
+            session, req, success=False, message="not launched"
+        )
+        return
+    # Tear down any previously-installed function breakpoints. We use
+    # the per-id delete so source-line breakpoints + watchpoints
+    # aren't affected.
+    for old_id in session.function_breakpoints.clear_all():
+        try:
+            bridge.command(f"-break-delete {old_id}", timeout=2.0)
+        except (TimeoutError, RuntimeError):
+            pass
+    raw_breakpoints = args.get("breakpoints") or []
+    if not isinstance(raw_breakpoints, list):
+        raw_breakpoints = []
+    out: List[Dict[str, Any]] = []
+    for bp in raw_breakpoints:
+        if not isinstance(bp, dict):
+            out.append({"verified": False, "message": "malformed breakpoint entry"})
+            continue
+        name = bp.get("name")
+        if not isinstance(name, str) or not name.strip():
+            out.append({"verified": False, "message": "missing function name"})
+            continue
+        condition = bp.get("condition")
+        if not isinstance(condition, str):
+            condition = None
+        elif not condition.strip():
+            condition = None
+        cmd = build_function_breakpoint_command(name, condition=condition)
+        if cmd is None:
+            out.append({"verified": False, "message": "could not compose breakpoint"})
+            continue
+        try:
+            result = bridge.command(cmd, timeout=5.0)
+        except TimeoutError as exc:
+            out.append({"verified": False, "message": f"gdb timed out: {exc}"})
+            continue
+        except RuntimeError as exc:
+            out.append({"verified": False, "message": f"gdb error: {exc}"})
+            continue
+        if not result.ok:
+            err = result.error_message or "could not set function breakpoint"
+            # Symbol-resolution failures are soft: the entry stays in
+            # the response as ``verified: false`` so the IDE can
+            # render a pending indicator instead of treating the
+            # whole request as failed. Other errors (e.g. bad
+            # condition syntax) also surface as unverified — the
+            # message field tells the user what went wrong.
+            entry: Dict[str, Any] = {"verified": False, "message": err}
+            if is_unresolved_function_error(err):
+                # No gdb id assigned in this case (gdb didn't accept
+                # the install), so we don't register anything in the
+                # manager — just report the entry back to the IDE.
+                pass
+            out.append(entry)
+            continue
+        parsed = parse_function_breakpoint_response(result.fields)
+        if parsed is None:
+            out.append(
+                {
+                    "verified": False,
+                    "message": "gdb returned no breakpoint id",
+                }
+            )
+            continue
+        record = FunctionBreakpointRecord(
+            gdb_id=parsed["id"],
+            name=name,
+            condition=condition,
+            verified=bool(parsed.get("verified")),
+            line=parsed.get("line"),
+            source_path=parsed.get("source_path"),
+        )
+        session.function_breakpoints.register(record)
+        entry = {
+            "verified": bool(parsed.get("verified")),
+            "id": parsed["id"],
+        }
+        # Include the resolved source location so the IDE can render
+        # a gutter indicator at the function entry. Best-effort:
+        # symbols without DWARF line info come back without a file /
+        # line, which is fine — the IDE just won't show a marker.
+        if parsed.get("line") is not None:
+            entry["line"] = parsed["line"]
+        if parsed.get("source_path"):
+            entry["source"] = {
+                "path": parsed["source_path"],
+                "name": os.path.basename(parsed["source_path"]),
+            }
+        out.append(entry)
+    send_response(session, req, body={"breakpoints": out})
 
 
 def handle_set_exception_breakpoints(session: Session, req: Dict[str, Any]) -> None:
