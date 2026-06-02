@@ -17,7 +17,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 163 tests (157 pass, 6 skip) |
+| **Tests** | 164 tests (158 pass, 6 skip) |
 | **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64-Linux, Windows ARM64 (PE32+ AArch64) |
 
 ---
@@ -964,6 +964,25 @@ The AVX2 path assumes the host CPU implements AVX2 (Intel Haswell 2013+
 or AMD Excavator 2015+). Run `make bench-simd-sad` to measure the AVX2
 SAD-on-1024 speedup; the existing `make bench-simd` covers
 `__intrinsic_dot_i32`. See `SIMD_AUDIT.md` for the design rationale.
+
+### Call-site builtin inlining (R13A)
+
+On Linux x86-64, the SIMD primitives above plus the cheapest int_*
+helpers (`int_add`, `int_sub`, `int_mul`, `int_div`, `int_mod`,
+`int_and`, `int_or`, `int_xor`, `int_shl`, `int_shr`) are emitted
+INLINE at the call site, skipping the runtime label's call / ret /
+prologue / epilogue. Bit-identical to the runtime label body — the
+runtime labels are still emitted in every binary so function-pointer
+callers and the other targets (macOS, Windows, WASM, ARM64) still
+resolve correctly. Realized R13A perf vs R12A baseline on the 256x256
+CrossEngin stereo SAD bench (ws=7, max_disp=16): SIMD wallclock
+~1.45 s → ~0.75 s (**1.93x absolute speedup**); SIMD now beats scalar
+**1.10x relative** (was 0.85x in R12A — i.e. SIMD was slower than
+scalar before inlining). LK speedup is bounded by the per-pixel
+staging step in the CE wrapper (5x `_lk_store_i32_le` per cell);
+hitting the 2x SIMD/scalar target on LK requires a future `simd_sad_u8`
+primitive that works on raw bytes via `vpsadbw`. See R11D + R12A +
+R13A sections in `NEXT_SESSION.md` for the full perf walkthrough.
 
 ### Tensor
 `tensor_new` `tensor_set` `tensor_get` `tensor_matmul` `tensor_add` `tensor_sub` `tensor_scale` `tensor_relu` `tensor_softmax` `tensor_transpose` `tensor_cosine_sim` `tensor_print`

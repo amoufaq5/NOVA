@@ -1401,6 +1401,223 @@ fn is_builtin_fn(name) {
     return 0
 }
 
+// R13A: subset of is_builtin_fn that can be emitted INLINE at the call
+// site -- skipping the runtime label's call/ret + push rbp / pop rbp
+// overhead. The motivating workload is the production stereo SAD inner
+// loop, which calls simd_sum_abs_diff ~65k times per disparity scan
+// with only ~49 lanes per call; the per-call overhead (~10 ns)
+// amortised over so few lanes exceeds the AVX2 inner-loop win, so
+// R12A's wired SIMD path actually regressed to 0.85x / 0.20x.
+//
+// Inlined targets:
+//   * cg_target == 0  (Linux x86-64) : AVX2 sequence emitted inline,
+//                                       no call/ret/prologue/epilogue.
+// The other targets (macOS, Windows, WASM, ARM64) keep using the
+// runtime label fallback -- the scalar fallback's overhead is already
+// dominated by the loop body, and the ARM64 paths use a separate AST
+// walker (arm_gen_call / warm_gen_call) anyway. Function-pointer
+// callers (e.g. `let f = simd_sum_abs_diff; f(...)`) also still resolve
+// to the runtime label since the inline path requires a direct call.
+//
+// Inlining is ALSO extended to the cheapest integer arithmetic
+// helpers (int_add / int_sub / int_mul / int_div / int_mod / int_and /
+// int_or / int_xor / int_shl / int_shr). Each runtime label is 2-4
+// instructions; calling them through the function-call ABI adds ~5 ns
+// / call. CE's SIMD staging code (which deliberately uses int_* to
+// bypass the smart-op classifier) hits these in tight loops --
+// inlining recovers a material fraction of the per-iteration overhead
+// that was disqualifying the SIMD wiring from showing a win.
+// int_div / int_mod use `cqo + idiv rsi` which clobbers rdx; this is
+// safe at the call site because 2-arg calls leave rdx undefined per
+// the System V ABI (the caller didn't load it for arg 2).
+fn is_inline_builtin_fn(name) {
+    if cg_target != 0 { return 0 }
+    if name == "simd_add_i32x8" { return 1 }
+    if name == "simd_sub_i32x8" { return 1 }
+    if name == "simd_load_i32x8" { return 1 }
+    if name == "simd_store_i32x8" { return 1 }
+    if name == "simd_sum_abs_diff" { return 1 }
+    if name == "int_add" { return 1 }
+    if name == "int_sub" { return 1 }
+    if name == "int_mul" { return 1 }
+    if name == "int_div" { return 1 }
+    if name == "int_mod" { return 1 }
+    if name == "int_and" { return 1 }
+    if name == "int_or"  { return 1 }
+    if name == "int_xor" { return 1 }
+    if name == "int_shl" { return 1 }
+    if name == "int_shr" { return 1 }
+    return 0
+}
+
+// R13A: emit AVX2 body for a SIMD builtin at the call site, assuming
+// the args are already in (rdi, rsi, rdx) per the System V ABI just as
+// the runtime label expects. Bit-identical to the runtime label body
+// but skips push rbp / mov rbp,rsp / pop rbp / ret -- saves ~5
+// instructions per call site (the dominant per-call overhead at small
+// lane counts).
+//
+// Uses fresh labels via new_label() so two inlined calls in the same
+// function don't collide on .sad_loop / .sad_tail / etc.
+//
+// Caller must have already evaluated args and placed them in rdi/rsi
+// (and rdx for sum_abs_diff). All inlined paths preserve every
+// callee-saved register (only ymm0..ymm3 / rax / r8 / r9 / r10 / rcx
+// are clobbered -- the same set already clobbered by `call simd_*`).
+fn emit_inline_simd(name) {
+    // simd_add_i32x8(a_ptr, b_ptr, dst_ptr) -> dst_ptr in rax.
+    if name == "simd_add_i32x8" {
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu ymm1, [rsi]")
+        out("    vpaddd ymm0, ymm0, ymm1")
+        out("    vmovdqu [rdx], ymm0")
+        out("    mov rax, rdx")
+        out("    vzeroupper")
+        return 0
+    }
+    // simd_sub_i32x8(a_ptr, b_ptr, dst_ptr) -> dst_ptr in rax.
+    if name == "simd_sub_i32x8" {
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu ymm1, [rsi]")
+        out("    vpsubd ymm0, ymm0, ymm1")
+        out("    vmovdqu [rdx], ymm0")
+        out("    mov rax, rdx")
+        out("    vzeroupper")
+        return 0
+    }
+    // simd_load_i32x8(src_ptr, dst_ptr) -> dst_ptr in rax.
+    if name == "simd_load_i32x8" {
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu [rsi], ymm0")
+        out("    mov rax, rsi")
+        out("    vzeroupper")
+        return 0
+    }
+    // simd_store_i32x8(dst_ptr, src_ptr) -> dst_ptr in rax.
+    if name == "simd_store_i32x8" {
+        out("    vmovdqu ymm0, [rsi]")
+        out("    vmovdqu [rdi], ymm0")
+        out("    mov rax, rdi")
+        out("    vzeroupper")
+        return 0
+    }
+    // simd_sum_abs_diff(a_ptr, b_ptr, n) -> scalar sum in rax.
+    if name == "simd_sum_abs_diff" {
+        let lbl_loop = new_label()
+        let lbl_tail = new_label()
+        let lbl_tail_loop = new_label()
+        let lbl_done = new_label()
+        out("    xor eax, eax")
+        out("    vpxor ymm2, ymm2, ymm2")
+        out("    mov rcx, rdx")
+        out("    shr rcx, 3")
+        out("    test rcx, rcx")
+        out("    jz " + lbl_tail)
+        out_label(lbl_loop)
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu ymm1, [rsi]")
+        out("    vpsubd ymm3, ymm0, ymm1")
+        out("    vpabsd ymm3, ymm3")
+        out("    vpaddd ymm2, ymm2, ymm3")
+        out("    add rdi, 32")
+        out("    add rsi, 32")
+        out("    dec rcx")
+        out("    jnz " + lbl_loop)
+        out("    vextracti128 xmm0, ymm2, 1")
+        out("    vpaddd xmm2, xmm2, xmm0")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vmovd eax, xmm2")
+        out("    movsxd rax, eax")
+        out_label(lbl_tail)
+        out("    and rdx, 7")
+        out("    test rdx, rdx")
+        out("    jz " + lbl_done)
+        out_label(lbl_tail_loop)
+        out("    mov r8d, [rdi]")
+        out("    sub r8d, [rsi]")
+        out("    mov r9d, r8d")
+        out("    sar r9d, 31")
+        out("    xor r8d, r9d")
+        out("    sub r8d, r9d")
+        out("    movsxd r10, r8d")
+        out("    add rax, r10")
+        out("    add rdi, 4")
+        out("    add rsi, 4")
+        out("    dec rdx")
+        out("    jnz " + lbl_tail_loop)
+        out_label(lbl_done)
+        out("    vzeroupper")
+        return 0
+    }
+    // R13A: cheapest integer-arithmetic helpers -- each runtime label
+    // is 2-3 instructions, so inlining replaces a call/ret round-trip
+    // with a single instruction. Bit-identical to the runtime label
+    // (same opcode sequence, just without the surrounding ret). Args
+    // are already in rdi (arg 0) and rsi (arg 1) per the System V ABI.
+    if name == "int_add" {
+        out("    lea rax, [rdi + rsi]")
+        return 0
+    }
+    if name == "int_sub" {
+        out("    mov rax, rdi")
+        out("    sub rax, rsi")
+        return 0
+    }
+    if name == "int_mul" {
+        out("    mov rax, rdi")
+        out("    imul rax, rsi")
+        return 0
+    }
+    if name == "int_div" {
+        // Signed 64-bit divide: rax / rsi -> rax. cqo sign-extends rax
+        // into rdx:rax for idiv. Clobbers rdx, which the call-site ABI
+        // leaves undefined for 2-arg calls.
+        out("    mov rax, rdi")
+        out("    cqo")
+        out("    idiv rsi")
+        return 0
+    }
+    if name == "int_mod" {
+        // Signed 64-bit remainder: rax mod rsi -> rdx, copied to rax.
+        out("    mov rax, rdi")
+        out("    cqo")
+        out("    idiv rsi")
+        out("    mov rax, rdx")
+        return 0
+    }
+    if name == "int_and" {
+        out("    mov rax, rdi")
+        out("    and rax, rsi")
+        return 0
+    }
+    if name == "int_or" {
+        out("    mov rax, rdi")
+        out("    or rax, rsi")
+        return 0
+    }
+    if name == "int_xor" {
+        out("    mov rax, rdi")
+        out("    xor rax, rsi")
+        return 0
+    }
+    if name == "int_shl" {
+        // shl needs rcx as the shift count; runtime label moves rsi to rcx.
+        out("    mov rax, rdi")
+        out("    mov rcx, rsi")
+        out("    shl rax, cl")
+        return 0
+    }
+    if name == "int_shr" {
+        // sar (arithmetic shift right) mirrors the runtime label.
+        out("    mov rax, rdi")
+        out("    mov rcx, rsi")
+        out("    sar rax, cl")
+        return 0
+    }
+    return 0
+}
+
 fn is_known_function(name) {
     if _cg_ht_has(cg_fns_ht, name) == 1 { return 1 }
     if is_builtin_fn(name) == 1 { return 1 }
@@ -3170,6 +3387,18 @@ fn gen_expr(nd) {
             if argc > 3 { out("    pop rcx") }
             if argc > 4 { out("    pop r8") }
             if argc > 5 { out("    pop r9") }
+            // R13A: inline SIMD intrinsic call sites on Linux x86-64.
+            // Eliminates the call/ret + push rbp/pop rbp overhead that
+            // dominated wallclock at small lane counts (~49 lanes per
+            // call in stereo SAD), which was the root cause of R12A's
+            // realized 0.85x stereo / 0.20x LK regression vs scalar.
+            // Args are already in rdi/rsi/rdx so we just emit the
+            // AVX2 body directly. The runtime label is still emitted
+            // below for fn-pointer callers and other targets.
+            if is_inline_builtin_fn(callee_name) == 1 {
+                emit_inline_simd(callee_name)
+                return 0
+            }
             let call_target = callee_name
             if cg_link_libc == 1 {
                 if callee_name == "main" {

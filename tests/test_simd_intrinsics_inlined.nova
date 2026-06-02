@@ -1,0 +1,261 @@
+// R13A — SIMD intrinsic INLINING correctness test.
+//
+// Verifies the codegen path introduced in R13A: SIMD builtins are now
+// emitted INLINE at the call site on Linux x86-64 (cg_target == 0),
+// skipping the runtime label's push rbp / mov rbp,rsp / pop rbp / ret
+// sequence. This eliminated the ~10ns per-call overhead that
+// dominated wallclock at small lane counts in the R12A production
+// stereo/LK paths.
+//
+// Bit-identical correctness must be preserved: the inlined body
+// produces the same lane-wise result as the runtime label body, for
+// every SIMD builtin. This file exercises:
+//
+//   * MULTIPLE inlined calls in the SAME function (fresh-label
+//     correctness -- if new_label() collided across call sites the
+//     second call's branches would target the first call's labels).
+//   * CHAINED inlined calls where one builtin's output feeds the next
+//     (register-allocator correctness -- the inlined body must not
+//     clobber unrelated locals).
+//   * INLINED calls in TIGHT LOOPS (the motivating workload --
+//     verifies neither the YMM accumulator state nor the AVX2-scalar
+//     fallback boundary leaks across iterations).
+//   * TAIL-ONLY n < 8 path inlined (verifies the fresh-label tail
+//     loop terminates correctly).
+//   * INLINED sum_abs_diff intermixed with NORMAL function calls
+//     (verifies vzeroupper hygiene -- the inlined body must zero the
+//     upper YMM halves before any following non-SIMD call that would
+//     otherwise stall the SSE/AVX transition path).
+//
+// The runtime label `simd_sum_abs_diff` is still emitted in the binary
+// (for future function-pointer use and other targets); a separate
+// helper test verifies that path too via fn-pointer indirection.
+
+import "std/io"
+
+// ---------- int32 LE buffer helpers (copied from R11D test) -----------------
+
+fn store_i32(buf, idx, v) {
+    let off = int_mul(idx, 4)
+    let u = v
+    if v < 0 { u = 4294967296 - (0 - v) }
+    store8(int_add(buf, off),                  u % 256)
+    store8(int_add(buf, int_add(off, 1)),      int_div(u, 256) % 256)
+    store8(int_add(buf, int_add(off, 2)),      int_div(u, 65536) % 256)
+    store8(int_add(buf, int_add(off, 3)),      int_div(u, 16777216) % 256)
+}
+
+fn load_i32(buf, idx) {
+    let off = int_mul(idx, 4)
+    let b0 = load8(int_add(buf, off))
+    let b1 = load8(int_add(buf, int_add(off, 1)))
+    let b2 = load8(int_add(buf, int_add(off, 2)))
+    let b3 = load8(int_add(buf, int_add(off, 3)))
+    let u = b0 + int_mul(b1, 256) + int_mul(b2, 65536) + int_mul(b3, 16777216)
+    if u >= 2147483648 { return u - 4294967296 }
+    return u
+}
+
+fn fill_buf(buf, v0, v1, v2, v3, v4, v5, v6, v7) {
+    store_i32(buf, 0, v0)
+    store_i32(buf, 1, v1)
+    store_i32(buf, 2, v2)
+    store_i32(buf, 3, v3)
+    store_i32(buf, 4, v4)
+    store_i32(buf, 5, v5)
+    store_i32(buf, 6, v6)
+    store_i32(buf, 7, v7)
+}
+
+// ---------- minimal test framework ------------------------------------------
+
+let passes = 0
+let fails = 0
+
+fn check(label, got, want) {
+    if got == want {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("  FAIL ")
+        print(label)
+        print(": got ")
+        print_int(got)
+        print(", want ")
+        print_int(want)
+        println("")
+    }
+}
+
+// ---------- tests -----------------------------------------------------------
+
+// Three back-to-back inlined sum_abs_diff calls. If new_label() reused
+// .sad_loop across them, the second call's `jnz` would jump back into
+// the first call's loop body (or fail to assemble due to duplicate
+// label). The test passes only if every result is bit-correct, which
+// implicitly verifies label freshness.
+fn test_multi_inline_sad() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 10, 12, 14, 16, 18, 20, 22, 24)
+    let s1 = simd_sum_abs_diff(a, b, 8)
+    let s2 = simd_sum_abs_diff(a, b, 8)
+    let s3 = simd_sum_abs_diff(a, b, 8)
+    check("inline sad #1 == 100", s1, 100)
+    check("inline sad #2 == 100", s2, 100)
+    check("inline sad #3 == 100", s3, 100)
+}
+
+// Chained inlined calls: dst1 = a + b, dst2 = dst1 - a; dst2 must
+// equal b. If any inlined body clobbered the `dst1` local
+// (rbp-relative slot), the second call would read garbage.
+fn test_chained_inline() {
+    let a = alloc(32)
+    let b = alloc(32)
+    let dst1 = alloc(32)
+    let dst2 = alloc(32)
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 100, 200, 300, 400, 500, 600, 700, 800)
+    simd_add_i32x8(a, b, dst1)
+    simd_sub_i32x8(dst1, a, dst2)
+    check("chained inline lane 0", load_i32(dst2, 0), 100)
+    check("chained inline lane 3", load_i32(dst2, 3), 400)
+    check("chained inline lane 7", load_i32(dst2, 7), 800)
+}
+
+// Tight-loop inlined sad: simulates the production stereo SAD inner
+// loop where simd_sum_abs_diff is called ~65k times per scan with
+// small n. The test runs 256 iterations on the same buffers; total
+// should equal 256 * 100 = 25600. If the YMM accumulator leaked
+// across iterations (e.g. ymm2 not re-zeroed by `vpxor` each call),
+// later iterations would over-count.
+fn test_tight_loop_inline() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 10, 12, 14, 16, 18, 20, 22, 24)
+    let total = 0
+    let it = 0
+    while it < 256 {
+        total = int_add(total, simd_sum_abs_diff(a, b, 8))
+        it = int_add(it, 1)
+    }
+    check("tight-loop inline total", total, 25600)
+}
+
+// Tail-only path (n < 8): exercises the inlined tail-scalar branch
+// without ever entering the AVX2 main loop. The inlined version uses
+// fresh labels for tail vs done; if those collide the program would
+// fail to assemble.
+fn test_tail_only_inline() {
+    let a3 = alloc(16)
+    let b3 = alloc(16)
+    store_i32(a3, 0, 10)
+    store_i32(a3, 1, 20)
+    store_i32(a3, 2, 30)
+    store_i32(b3, 0, 1)
+    store_i32(b3, 1, 4)
+    store_i32(b3, 2, 9)
+    // |10-1| + |20-4| + |30-9| = 9 + 16 + 21 = 46.
+    let s = simd_sum_abs_diff(a3, b3, 3)
+    check("tail-only inline n=3", s, 46)
+    // Empty path (n=0): should return 0.
+    check("tail-only inline n=0", simd_sum_abs_diff(a3, b3, 0), 0)
+    // n=1: single tail iteration.
+    check("tail-only inline n=1", simd_sum_abs_diff(a3, b3, 1), 9)
+}
+
+// Inlined sad followed by a non-SIMD function call. The inlined body
+// must emit vzeroupper before returning to avoid an AVX-SSE
+// transition penalty on later code. We verify behaviour (not cycles)
+// by ensuring the value returned across the boundary matches.
+fn _round_trip(v) {
+    return int_add(v, 0)
+}
+
+fn test_inline_then_call() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 10, 12, 14, 16, 18, 20, 22, 24)
+    let s = simd_sum_abs_diff(a, b, 8)
+    let r = _round_trip(s)
+    check("inline then call round-trip", r, 100)
+}
+
+// Mixed add/sub/sad in a single expression chain -- stresses the
+// codegen's argument-eval push/pop sequencing through multiple
+// inlined builtins. dst = a + b; then sad(dst, b, 8) == sum(a) ==
+// 1+2+3+4+5+6+7+8 == 36.
+fn test_inline_mixed_chain() {
+    let a = alloc(32)
+    let b = alloc(32)
+    let dst = alloc(32)
+    fill_buf(a, 1, 2, 3, 4, 5, 6, 7, 8)
+    fill_buf(b, 100, 100, 100, 100, 100, 100, 100, 100)
+    simd_add_i32x8(a, b, dst)
+    // dst = [101, 102, ..., 108]; sad(dst, b) = 1+2+...+8 = 36.
+    let s = simd_sum_abs_diff(dst, b, 8)
+    check("inline mixed chain sad == 36", s, 36)
+}
+
+// Load+store roundtrip inlined back-to-back. Verifies that
+// simd_load_i32x8 and simd_store_i32x8 emit correct YMM-load/store
+// pairs inline (no `call`, no `ret`).
+fn test_inline_load_store() {
+    let src = alloc(32)
+    let mid = alloc(32)
+    let dst = alloc(32)
+    fill_buf(src, 11, 22, 33, 44, 55, 66, 77, 88)
+    simd_load_i32x8(src, mid)
+    simd_store_i32x8(dst, mid)
+    check("inline load/store lane 0", load_i32(dst, 0), 11)
+    check("inline load/store lane 4", load_i32(dst, 4), 55)
+    check("inline load/store lane 7", load_i32(dst, 7), 88)
+}
+
+// Large-buffer SAD (n=64): exercises 8 main-loop iterations plus
+// horizontal-reduce, all inlined. The runtime label has the same
+// reduce; if the inlined version used a different label name for
+// the reduce step they would still both produce 64*5=320 if the
+// inputs match... but the inlined path uses `.Lxx` labels not
+// `.sad_*` so this verifies the fresh-label inlining works for the
+// big-n case too.
+fn test_inline_large_n() {
+    let a64 = alloc(256)
+    let b64 = alloc(256)
+    let i = 0
+    while i < 64 {
+        store_i32(a64, i, int_mul(i, 5))
+        store_i32(b64, i, int_mul(i, 3))
+        i = int_add(i, 1)
+    }
+    // sum_{k=0..63} |5k - 3k| = sum_{k=0..63} 2k = 2 * 63 * 64 / 2 = 4032.
+    let s = simd_sum_abs_diff(a64, b64, 64)
+    check("inline large-n sad", s, 4032)
+}
+
+fn main() {
+    println("=== R13A SIMD intrinsic INLINING correctness ===")
+    test_multi_inline_sad()
+    test_chained_inline()
+    test_tight_loop_inline()
+    test_tail_only_inline()
+    test_inline_then_call()
+    test_inline_mixed_chain()
+    test_inline_load_store()
+    test_inline_large_n()
+    print("  passed: ")
+    print_int(passes)
+    print("/")
+    print_int(passes + fails)
+    println("")
+    if fails > 0 {
+        println("FAIL: inlined SIMD intrinsics produced wrong results")
+        exit(1)
+    }
+    println("ALL R13A INLINING TESTS PASSED")
+}
+
+main()

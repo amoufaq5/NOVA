@@ -1,5 +1,128 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R13A — codegen call-site inlining (realize R12A's SIMD wiring)
+
+R13A closed the loop on the SIMD-perf story: R11D added the AVX2/NEON
+primitives, R12A wired them into CrossEngin's stereo SAD + optical-flow
+LK production paths bit-identically — and honestly reported that the
+realized speedup was **0.84x (slower)** on stereo and **0.20x (5x
+slower)** on LK because per-call overhead dominated the AVX2 inner-loop
+win at small lane counts (~49 lanes per call in stereo, called ~65k
+times per disparity scan). R13A adds the codegen path that eliminates
+that overhead: SIMD intrinsics — plus the cheapest int_* helpers — are
+now emitted INLINE at the call site, skipping the runtime label's
+push rbp / mov rbp,rsp / call / ret / pop rbp sequence.
+
+### What landed
+
+**New codegen functions** in `src/compiler/codegen.nova`:
+
+  - `is_inline_builtin_fn(name) -> int` — returns 1 for the inline-
+    eligible builtins on Linux x86-64 (cg_target == 0). All other
+    targets still route to the runtime label.
+  - `emit_inline_simd(name) -> int` — emits the AVX2 body (for SIMD
+    intrinsics) or the 1-2 instruction body (for int_*) directly at
+    the call site, assuming args are already in rdi/rsi/rdx per the
+    System V ABI just as the runtime label expects. Bit-identical
+    output to the runtime label body, minus the prologue/epilogue/ret.
+
+**Call-site dispatch** in `gen_expr(AST_CALL, ...)`:
+
+```nova
+if is_inline_builtin_fn(callee_name) == 1 {
+    emit_inline_simd(callee_name)
+    return 0
+}
+// fall through to the regular `call <name>` path
+```
+
+The runtime labels (`simd_sum_abs_diff`, `int_add`, ...) are STILL
+emitted in every binary so that:
+
+  - Function-pointer callers (`let f = simd_sum_abs_diff; f(a,b,n)`)
+    still resolve via the indirect-call path.
+  - Cross-target builds (Linux ARM64, macOS, Windows, WASM) still
+    dispatch through the runtime label — those targets have their own
+    AST walker / scalar fallback path, and the per-call overhead is
+    already dominated by the scalar loop body anyway.
+
+**Inline-eligible builtins (Linux x86-64 only):**
+
+| Name | Why inline |
+| --- | --- |
+| `simd_sum_abs_diff` | The R12A motivating workload. AVX2 vpsadbw/vpsubd/vpabsd loop emitted inline with fresh `new_label()` per call site so multiple inlined calls in the same function don't collide on `.sad_loop`. |
+| `simd_add_i32x8` | 4-instruction body (`vmovdqu / vpaddd / vmovdqu / vzeroupper`). |
+| `simd_sub_i32x8` | mirror of add. |
+| `simd_load_i32x8` / `simd_store_i32x8` | 3-instruction 32-byte copy via YMM. |
+| `int_add` | `lea rax, [rdi + rsi]` — single instruction. |
+| `int_sub` / `int_and` / `int_or` / `int_xor` | 2 instructions each. |
+| `int_mul` | `mov rax, rdi; imul rax, rsi`. |
+| `int_div` / `int_mod` | `cqo; idiv rsi` — clobbers rdx, safe because 2-arg call leaves rdx undefined per the ABI. |
+| `int_shl` / `int_shr` | shifts via cl. |
+
+### Realized end-to-end perf (256x256 R12A bench)
+
+| Path | Pre-R13A scalar | Pre-R13A SIMD | Post-R13A scalar | Post-R13A SIMD |
+| --- | --- | --- | --- | --- |
+| stereo SAD (ws=7) | ~1.24 s | ~1.45 s (0.85x) | ~0.83 s (1.5x absolute) | ~0.75 s (1.10x relative, 1.93x absolute) |
+| optical-flow LK (ws=5) | ~106 ms | ~520 ms (0.20x) | ~57 ms (1.85x absolute) | ~365 ms (0.15x relative, 1.42x absolute) |
+
+**Stereo SAD: the SIMD path is now faster than scalar (1.10x relative
+speedup, vs the R12A 0.85x regression).** The 1.93x absolute SIMD
+wallclock improvement comes from inlining: per-call overhead at 49
+lanes per call was the bottleneck, and now the AVX2 inner loop runs
+without the call/ret round trip.
+
+**Optical-flow LK: the SIMD path is still slower than scalar
+relatively, even though its absolute wallclock improved 1.42x.**
+Investigation: LK calls `simd_add_i32x8` only ~4 times per pixel, and
+the staging cost dominates — each call site first invokes
+`_lk_store_i32_le(buf, i, v)` which is a CE function (not a builtin
+that R13A can inline) that internally makes ~7 int_* helper calls per
+4-byte store. The scalar LK path skips all of this staging because it
+operates on i32 values directly, so the scalar path benefits MORE from
+R13A's int_* inlining than the SIMD path does, widening the relative
+gap. The 2x SIMD/scalar target on LK would require either (a) CE
+restructuring `_lk_store_i32_le` to be a builtin (out of R13A's file
+ownership), or (b) a new `simd_sad_u8` / `simd_madd_u8` primitive that
+works on raw bytes via `vpsadbw` and eliminates the staging step
+entirely (deferred to R14+ — would unlock the 2x ceiling on stereo SAD
+too).
+
+### Correctness verification
+
+  - **R11D's 27 assertions** (`tests/test_simd_intrinsics.nova`) pass
+    bit-identical after inlining — the runtime label and the inlined
+    body produce the same lanewise / scalar outputs.
+  - **R12A's 35 CE assertions**
+    (`Crossengin-demo/tests/unit/test_simd_production.nova`) pass
+    bit-identical — the production stereo SAD and LK paths agree with
+    their scalar references at the pixel level (0 mismatched pixels).
+  - **New R13A test** (`tests/test_simd_intrinsics_inlined.nova`) adds
+    16 assertions specifically for the inlining path: multiple back-
+    to-back inlined sum_abs_diff calls (fresh-label correctness),
+    chained add/sub through intermediate buffers, tight-loop YMM
+    accumulator state, n=0 / n<8 tail-only path, vzeroupper hygiene
+    across inlined-then-call boundaries, mixed add+sad in a single
+    expression, load/store roundtrip, n=64 large-buffer SAD.
+  - **NOVA test suite**: 158 passed / 0 failed / 6 skipped (no
+    regressions vs R13C's 158/0/6).
+  - **Self-host bit-identical** preserved (`make self-host`: stage2.s
+    == stage3.s, empty diff).
+  - **All cross-target builds clean**: hello-windows (PE32+ x86-64),
+    hello-macos (Mach-O x86-64), hello-wasm (WASI), hello-winarm64
+    (PE32+ ARM64), arm64-linux (ELF AArch64) — none affected by the
+    Linux-x86-64-only inlining path.
+
+### Files touched
+
+  - `src/compiler/codegen.nova` (+~140 lines: 2 new fns,
+    call-site dispatch, comments).
+  - `tests/test_simd_intrinsics_inlined.nova` (NEW — 16 inlining-
+    correctness assertions).
+  - `NEXT_SESSION.md` (this section).
+  - `README.md` (status line refresh).
+
 ## R13C — LSP semantic tokens (advanced syntax highlighting)
 
 R13C added the 11th LSP capability: **semantic tokens** via
