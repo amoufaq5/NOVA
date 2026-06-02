@@ -17,7 +17,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 164 tests (158 pass, 6 skip) |
+| **Tests** | 165 tests (159 pass, 6 skip) |
 | **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64-Linux, Windows ARM64 (PE32+ AArch64) |
 
 ---
@@ -983,6 +983,26 @@ staging step in the CE wrapper (5x `_lk_store_i32_le` per cell);
 hitting the 2x SIMD/scalar target on LK requires a future `simd_sad_u8`
 primitive that works on raw bytes via `vpsadbw`. See R11D + R12A +
 R13A sections in `NEXT_SESSION.md` for the full perf walkthrough.
+
+### Raw-byte SAD primitive `simd_sad_u8` (R14B)
+
+`simd_sad_u8(a_ptr, b_ptr, n_bytes) -> int` computes the sum of
+absolute byte differences over `n_bytes` raw u8 lanes directly on
+caller-allocated byte buffers — skipping the byte→i32 staging that
+`simd_sum_abs_diff` requires upstream (4 `store8` calls per i32 lane
+in CE's `stereo_sad_block_simd` / `lk_optical_flow_simd`). One AVX2
+`vpsadbw` instruction reduces 32 input bytes to four i64 partial sums
+in a single op; the inline path emits `vmovdqu` / `vpsadbw` / `vpaddq`
+in a loop with horizontal-sum via `vextracti128` / `vpshufd` /
+`vmovq`. Per-target lowering: Linux x86-64 AVX2 inline (same call-site
+inlining as the R13A SIMD primitives), ARM64 Linux/Windows NEON
+(`uabd v.16b` + `uaddlp .8h` + `uaddlp .4s`), macOS / Windows x86-64
+scalar 1-byte fallback. Eligible for the next-round CE wire-in that
+replaces the i32-staged SAD wrappers with raw byte ones to close the
+2x SIMD/scalar ceiling on stereo and LK. Correctness: 21 assertions in
+`tests/test_simd_sad_u8.nova` (identical buffers, known diff, asymmetric
+unsigned, multi-chunk + tail, n=0, tail-only, exact chunks, boundary
+0/255, tight loop, 16 KiB large buffer, mixed pattern vs scalar oracle).
 
 ### Tensor
 `tensor_new` `tensor_set` `tensor_get` `tensor_matmul` `tensor_add` `tensor_sub` `tensor_scale` `tensor_relu` `tensor_softmax` `tensor_transpose` `tensor_cosine_sim` `tensor_print`

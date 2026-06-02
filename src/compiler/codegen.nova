@@ -1380,6 +1380,16 @@ fn is_builtin_fn(name) {
     if name == "simd_load_i32x8" { return 1 }
     if name == "simd_store_i32x8" { return 1 }
     if name == "simd_sum_abs_diff" { return 1 }
+    // R14B: raw-byte SAD primitive. Eliminates the i32 staging buffer
+    // that R12A's stereo_sad_block_simd / lk_optical_flow_simd require:
+    // a single 32-byte AVX2 `vpsadbw` instruction reduces 32 bytes of
+    // input to four i64 partial sums, vs the 8 i32 lanes of
+    // simd_sum_abs_diff which need 8x more bytes converted upstream
+    // via store8 + store8 + store8 + store8 per int32. Targets where
+    // image pixels live as raw byte buffers (PGM, RGB, YUV) and the
+    // SAD is computed per-block over the raw bytes -- exactly the
+    // stereo block matching / optical flow workloads.
+    if name == "simd_sad_u8" { return 1 }
     // WASI low-level builtins (R8A): expose raw WASI snapshot_preview1
     // primitives so NOVA programs targeting serverless / CDN-edge can
     // drive the runtime directly. On the WASM target they wrap the
@@ -1437,6 +1447,11 @@ fn is_inline_builtin_fn(name) {
     if name == "simd_load_i32x8" { return 1 }
     if name == "simd_store_i32x8" { return 1 }
     if name == "simd_sum_abs_diff" { return 1 }
+    // R14B: raw-byte SAD via AVX2 vpsadbw. Same inlining motivation
+    // as simd_sum_abs_diff -- the stereo SAD inner loop calls this
+    // ~65k times per disparity scan; the call/ret overhead at
+    // ~49 bytes per call ate the AVX2 win in R12A.
+    if name == "simd_sad_u8" { return 1 }
     if name == "int_add" { return 1 }
     if name == "int_sub" { return 1 }
     if name == "int_mul" { return 1 }
@@ -1547,6 +1562,67 @@ fn emit_inline_simd(name) {
         out("    dec rdx")
         out("    jnz " + lbl_tail_loop)
         out_label(lbl_done)
+        out("    vzeroupper")
+        return 0
+    }
+    // R14B: simd_sad_u8(a_ptr, b_ptr, n_bytes) -> scalar i64 sum in rax.
+    // Operates on RAW BYTES (u8 lanes), unlike simd_sum_abs_diff which
+    // operates on packed i32 lanes. Uses AVX2 `vpsadbw` which produces
+    // 4 partial i64 sums per 32-byte input (one per 8-byte lane); we
+    // accumulate them across the loop and horizontal-sum at the end.
+    //
+    // This eliminates the byte->i32 staging that R12A's
+    // stereo_sad_block_simd / lk_optical_flow_simd require: a single
+    // `vpsadbw` reduces 32 bytes -> 4 i64 partials in one instruction,
+    // vs 4x32 = 128 store8 calls per 32-element SAD via the i32 path.
+    // The tail (n_bytes % 32) is a scalar loop.
+    //
+    // Calling convention: rdi=a_ptr, rsi=b_ptr, rdx=n_bytes. Returns
+    // int64 in rax. Clobbers ymm0..ymm3, xmm3, rcx, rax, r8, r9.
+    if name == "simd_sad_u8" {
+        let lbl_loop_u8 = new_label()
+        let lbl_tail_u8 = new_label()
+        let lbl_tail_loop_u8 = new_label()
+        let lbl_done_u8 = new_label()
+        out("    xor eax, eax")
+        out("    vpxor ymm2, ymm2, ymm2")
+        out("    mov rcx, rdx")
+        out("    shr rcx, 5")
+        out("    test rcx, rcx")
+        out("    jz " + lbl_tail_u8)
+        out_label(lbl_loop_u8)
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu ymm1, [rsi]")
+        out("    vpsadbw ymm3, ymm0, ymm1")
+        out("    vpaddq ymm2, ymm2, ymm3")
+        out("    add rdi, 32")
+        out("    add rsi, 32")
+        out("    dec rcx")
+        out("    jnz " + lbl_loop_u8)
+        out("    vextracti128 xmm3, ymm2, 1")
+        out("    vpaddq xmm2, xmm2, xmm3")
+        out("    vpshufd xmm3, xmm2, 0x4e")
+        out("    vpaddq xmm2, xmm2, xmm3")
+        out("    vmovq rax, xmm2")
+        out_label(lbl_tail_u8)
+        out("    and rdx, 31")
+        out("    test rdx, rdx")
+        out("    jz " + lbl_done_u8)
+        out_label(lbl_tail_loop_u8)
+        out("    movzx r8d, byte ptr [rdi]")
+        out("    movzx r9d, byte ptr [rsi]")
+        out("    sub r8d, r9d")
+        out("    mov r9d, r8d")
+        out("    sar r9d, 31")
+        out("    xor r8d, r9d")
+        out("    sub r8d, r9d")
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz " + lbl_tail_loop_u8)
+        out_label(lbl_done_u8)
         out("    vzeroupper")
         return 0
     }
@@ -5297,6 +5373,25 @@ fn arm_gen_call(nd) {
         arm_out("    bl _nova_arm_simd_sum_abs_diff")
         return 0
     }
+    // R14B: byte-level SAD via NEON `uabd v0.16b, v1.16b, v2.16b` +
+    // `uaddlv h0, v0.16b`. 16-byte vector iter (vs the x86 32-byte
+    // AVX2 iter); the helper handles tails scalar.
+    if name == "simd_sad_u8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            arm_gen_expr(args[s_i])
+            arm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            arm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        arm_out("    bl _nova_arm_simd_sad_u8")
+        return 0
+    }
 
     // Generic user-function call.
     let argc = len(args)
@@ -5721,6 +5816,49 @@ fn arm_emit_runtime() {
     arm_out("    subs x5, x5, #1")
     arm_out("    b.ne .arm_sad_tail_loop")
     arm_label(".arm_sad_done")
+    arm_out("    ret")
+
+    // ---- _nova_arm_simd_sad_u8: x0 = sum(abs(a[i]-b[i]), i in [0,n_bytes)) ----
+    // R14B byte-level SAD on raw u8 lanes. x0=a_ptr, x1=b_ptr, x2=n_bytes.
+    // Vector loop: 16 bytes / iter via `uabd v3.16b, v0.16b, v1.16b`
+    // (per-byte unsigned absolute diff) + `uaddlp v3.8h, v3.16b`
+    // (sum adjacent byte pairs to halfwords) accumulated into a 4x i32
+    // running sum. Tail (n_bytes % 16) is scalar.
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_simd_sad_u8")
+    arm_out("    mov x3, x0")
+    arm_out("    mov x4, x1")
+    arm_out("    mov x5, x2")
+    arm_out("    movi v2.4s, #0")
+    arm_out("    lsr x6, x5, #4")
+    arm_out("    cbz x6, .arm_sad8_tail")
+    arm_label(".arm_sad8_loop")
+    arm_out("    ldr q0, [x3], #16")
+    arm_out("    ldr q1, [x4], #16")
+    arm_out("    uabd v3.16b, v0.16b, v1.16b")
+    arm_out("    uaddlp v3.8h, v3.16b")
+    arm_out("    uaddlp v3.4s, v3.8h")
+    arm_out("    add v2.4s, v2.4s, v3.4s")
+    arm_out("    subs x6, x6, #1")
+    arm_out("    b.ne .arm_sad8_loop")
+    arm_label(".arm_sad8_tail")
+    arm_out("    and x5, x5, #15")
+    arm_out("    addv s2, v2.4s")
+    arm_out("    fmov w0, s2")
+    arm_out("    sxtw x0, w0")
+    arm_out("    cbz x5, .arm_sad8_done")
+    arm_label(".arm_sad8_tail_loop")
+    arm_out("    ldrb w7, [x3], #1")
+    arm_out("    ldrb w8, [x4], #1")
+    arm_out("    sub w7, w7, w8")
+    arm_out("    cmp w7, #0")
+    arm_out("    cneg w7, w7, lt")
+    arm_out("    sxtw x7, w7")
+    arm_out("    add x0, x0, x7")
+    arm_out("    subs x5, x5, #1")
+    arm_out("    b.ne .arm_sad8_tail_loop")
+    arm_label(".arm_sad8_done")
     arm_out("    ret")
 }
 
@@ -6255,6 +6393,23 @@ fn warm_gen_call(nd) {
         warm_out("    bl _nova_warm_simd_sum_abs_diff")
         return 0
     }
+    // R14B: byte-level SAD primitive on ARM64 Windows (NEON).
+    if name == "simd_sad_u8" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            warm_gen_expr(args[s_i])
+            warm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            warm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        warm_out("    bl _nova_warm_simd_sad_u8")
+        return 0
+    }
 
     // Generic user-function call.
     let argc = len(args)
@@ -6710,6 +6865,45 @@ fn warm_emit_runtime() {
     warm_out("    subs x5, x5, #1")
     warm_out("    b.ne .Lwarm_sad_tail_loop")
     warm_label(".Lwarm_sad_done")
+    warm_out("    ret")
+
+    // ---- _nova_warm_simd_sad_u8: raw-byte SAD primitive (R14B) ----
+    // x0=a_ptr, x1=b_ptr, x2=n_bytes. Vector loop: 16 bytes / iter.
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_simd_sad_u8")
+    warm_out("    mov x3, x0")
+    warm_out("    mov x4, x1")
+    warm_out("    mov x5, x2")
+    warm_out("    movi v2.4s, #0")
+    warm_out("    lsr x6, x5, #4")
+    warm_out("    cbz x6, .Lwarm_sad8_tail")
+    warm_label(".Lwarm_sad8_loop")
+    warm_out("    ldr q0, [x3], #16")
+    warm_out("    ldr q1, [x4], #16")
+    warm_out("    uabd v3.16b, v0.16b, v1.16b")
+    warm_out("    uaddlp v3.8h, v3.16b")
+    warm_out("    uaddlp v3.4s, v3.8h")
+    warm_out("    add v2.4s, v2.4s, v3.4s")
+    warm_out("    subs x6, x6, #1")
+    warm_out("    b.ne .Lwarm_sad8_loop")
+    warm_label(".Lwarm_sad8_tail")
+    warm_out("    and x5, x5, #15")
+    warm_out("    addv s2, v2.4s")
+    warm_out("    fmov w0, s2")
+    warm_out("    sxtw x0, w0")
+    warm_out("    cbz x5, .Lwarm_sad8_done")
+    warm_label(".Lwarm_sad8_tail_loop")
+    warm_out("    ldrb w7, [x3], #1")
+    warm_out("    ldrb w8, [x4], #1")
+    warm_out("    sub w7, w7, w8")
+    warm_out("    cmp w7, #0")
+    warm_out("    cneg w7, w7, lt")
+    warm_out("    sxtw x7, w7")
+    warm_out("    add x0, x0, x7")
+    warm_out("    subs x5, x5, #1")
+    warm_out("    b.ne .Lwarm_sad8_tail_loop")
+    warm_label(".Lwarm_sad8_done")
     warm_out("    ret")
 }
 
@@ -16354,6 +16548,88 @@ fn gen_runtime() {
         out("    dec rdx")
         out("    jnz .sads_loop")
         out(".sads_done:")
+        out("    pop rbp")
+        out("    ret")
+    }
+
+    // --- simd_sad_u8(a_ptr, b_ptr, n_bytes) -> int ---
+    // R14B: byte-level SAD primitive. Skips the i32 staging that
+    // simd_sum_abs_diff requires upstream: feeds 32 raw bytes per loop
+    // iteration through AVX2 `vpsadbw`, which produces 4x i64 partial
+    // sums in one instruction. Horizontal-sum reduces to scalar i64.
+    //
+    // Calling convention: rdi=a_ptr, rsi=b_ptr, rdx=n_bytes. Returns
+    // int64 in rax. Caller-allocated raw byte buffers. Per-byte values
+    // treated as unsigned (0..255) -- the absolute difference is always
+    // in [0, 255] so the partial sums never overflow i64 even for
+    // gigabyte-scale buffers.
+    out_label("simd_sad_u8")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    vpxor ymm2, ymm2, ymm2")
+        out("    mov rcx, rdx")
+        out("    shr rcx, 5")
+        out("    test rcx, rcx")
+        out("    jz .sadu8_tail")
+        out(".sadu8_loop:")
+        out("    vmovdqu ymm0, [rdi]")
+        out("    vmovdqu ymm1, [rsi]")
+        out("    vpsadbw ymm3, ymm0, ymm1")
+        out("    vpaddq ymm2, ymm2, ymm3")
+        out("    add rdi, 32")
+        out("    add rsi, 32")
+        out("    dec rcx")
+        out("    jnz .sadu8_loop")
+        out("    vextracti128 xmm3, ymm2, 1")
+        out("    vpaddq xmm2, xmm2, xmm3")
+        out("    vpshufd xmm3, xmm2, 0x4e")
+        out("    vpaddq xmm2, xmm2, xmm3")
+        out("    vmovq rax, xmm2")
+        out(".sadu8_tail:")
+        out("    and rdx, 31")
+        out("    test rdx, rdx")
+        out("    jz .sadu8_done")
+        out(".sadu8_tail_loop:")
+        out("    movzx r8d, byte ptr [rdi]")
+        out("    movzx r9d, byte ptr [rsi]")
+        out("    sub r8d, r9d")
+        out("    mov r9d, r8d")
+        out("    sar r9d, 31")
+        out("    xor r8d, r9d")
+        out("    sub r8d, r9d")
+        out("    movsxd r10, r8d")
+        out("    add rax, r10")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz .sadu8_tail_loop")
+        out(".sadu8_done:")
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    test rdx, rdx")
+        out("    jz .sadu8s_done")
+        out(".sadu8s_loop:")
+        out("    movzx r8d, byte ptr [rdi]")
+        out("    movzx r9d, byte ptr [rsi]")
+        out("    sub r8d, r9d")
+        out("    mov r9d, r8d")
+        out("    sar r9d, 31")
+        out("    xor r8d, r9d")
+        out("    sub r8d, r9d")
+        out("    movsxd r10, r8d")
+        out("    add rax, r10")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz .sadu8s_loop")
+        out(".sadu8s_done:")
         out("    pop rbp")
         out("    ret")
     }

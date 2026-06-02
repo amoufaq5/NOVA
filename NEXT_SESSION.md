@@ -1,5 +1,114 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R14B — `simd_sad_u8` raw-byte SAD primitive (close R13A's LK ceiling)
+
+R14B adds the `simd_sad_u8(a_ptr, b_ptr, n_bytes) -> int` codegen
+builtin that computes the sum of absolute byte differences over raw
+u8 buffers directly — eliminating the byte→i32 staging that R12A's
+`stereo_sad_block_simd` / `lk_optical_flow_simd` require upstream. The
+motivating constraint is the R13A perf report: after inlining brought
+stereo SAD to 1.93x absolute and 1.10x relative-to-scalar, the
+remaining ceiling on stereo (~2x SIMD/scalar target) and on LK
+(currently 1.42x absolute, 0.15x relative) is the per-cell byte→i32
+staging — 4 `store8` calls per 32-element SAD via `simd_sum_abs_diff`,
+amortised across only ~49 lanes per call. `simd_sad_u8` skips the
+staging entirely: one AVX2 `vpsadbw` instruction reduces 32 input
+bytes to 4 i64 partial sums in a single op.
+
+### What landed
+
+**New builtin** in `src/compiler/codegen.nova`:
+
+  - `simd_sad_u8(a_ptr, b_ptr, n_bytes)` registered in
+    `is_builtin_fn` AND `is_inline_builtin_fn` (the same inlining
+    motivation as R13A applies — small lane count per call in CE's
+    inner loops makes per-call overhead the dominant cost).
+  - `emit_inline_simd("simd_sad_u8")` emits the AVX2 body at the
+    call site with fresh `new_label()` per call so multiple inlined
+    calls in the same function don't collide on `.sad_loop` /
+    `.sad_tail` / etc.
+  - Runtime label `simd_sad_u8` emitted as well (Linux x86-64 AVX2 +
+    scalar fallback for macOS / Windows / WASM) for function-pointer
+    callers and the existing per-target ABI.
+  - ARM64 Linux helper `_nova_arm_simd_sad_u8` and dispatch in
+    `arm_gen_call`: NEON `uabd v.16b` + `uaddlp .8h` + `uaddlp .4s`
+    for the 16-byte vector loop (vs 32 bytes on x86), scalar tail.
+  - ARM64 Windows helper `_nova_warm_simd_sad_u8` and dispatch in
+    `warm_gen_call`: same NEON sequence, PE labels.
+
+**Calling convention** (matching `simd_sum_abs_diff`):
+
+  - Linux x86-64 + macOS + Windows: System V — `rdi=a_ptr`,
+    `rsi=b_ptr`, `rdx=n_bytes`, returns `int64` in `rax`.
+  - ARM64 Linux + Windows: AAPCS — `x0=a_ptr`, `x1=b_ptr`,
+    `x2=n_bytes`, returns `int64` in `x0`.
+
+**Why a separate primitive vs reusing `simd_sum_abs_diff`:** The two
+have fundamentally different lane widths. `simd_sum_abs_diff` operates
+on 8 i32 lanes per 32-byte buffer (`vpaddd / vpsubd / vpabsd`).
+`simd_sad_u8` operates on 32 u8 lanes per 32-byte buffer (`vpsadbw`).
+The byte version reduces 32 bytes → 4 i64 partial sums in one AVX2
+instruction; the i32 version reduces 8 i32 lanes → 1 sum after the
+`vpaddd` / `vpabsd` chain plus horizontal sum. For image SAD where the
+inputs are raw 0..255 bytes (PGM, RGB, YUV), the byte version is the
+right primitive and saves 4x the staging-buffer write bandwidth (one
+`store8` per pixel vs four for an i32 lane).
+
+### Correctness verification
+
+  - **21 assertions** in `tests/test_simd_sad_u8.nova` (NEW):
+    identical 32-byte buffers → 0; all-zero / all-255 → 0;
+    `[1..32]` vs `[33..64]` → 1024 (32*32); asymmetric a > b vs
+    b > a confirming unsigned absolute diff; 100-byte buffer
+    (3 chunks + 4-byte tail) → 100; n_bytes=0 → 0 (no segfault);
+    tail-only (n=1, 5, 7) hitting only the scalar loop;
+    exact-chunk-multiples (n=64, n=96) hitting only the vector loop;
+    boundary 0 vs 255 → 8160 (32*255) in both directions (proves no
+    sign extension); 3 back-to-back calls → fresh-label correctness;
+    tight-loop accumulator (100 iters × 1920 → 192000); 16 KiB+
+    large buffer crossing memory pages; mixed pseudo-textured pattern
+    against a scalar oracle (confirms vector + tail compose correctly).
+  - **R11D's 27 assertions** (`tests/test_simd_intrinsics.nova`):
+    pass — `simd_sum_abs_diff` semantics unchanged.
+  - **R13A's 16 inlining assertions**
+    (`tests/test_simd_intrinsics_inlined.nova`): pass — the
+    `simd_sad_u8` addition shares `emit_inline_simd` infrastructure
+    with the existing intrinsics; no regressions in their inlining
+    paths or fresh-label generation.
+  - **NOVA test suite**: 159 passed / 0 failed / 6 skipped (was
+    158/0/6 in R13A; the +1 is the new `test_simd_sad_u8`).
+  - **Self-host bit-identical** preserved (`make self-host`:
+    stage2.s == stage3.s, empty diff).
+  - **All cross-target builds clean**: cross-windows (PE32+ x86-64),
+    cross-macos (Mach-O x86-64 .s), smoke-wasm (WASI), smoke-winarm64
+    (PE32+ ARM64 with new `_nova_warm_simd_sad_u8` helper), ARM64
+    Linux assembly via `clang -target aarch64-linux-gnu` clean.
+
+### CE wire-in status
+
+The primitive is available for follow-up: CE's `image_stereo.nova`
+currently routes through `stereo_sad_block_simd` which stages bytes
+into 4-byte i32 lanes (`store8 + store8 + store8 + store8` per pixel
+with upper 3 bytes zero) and calls `simd_sum_abs_diff(buf, buf, n)`.
+A future CE-owned change can swap this for a `stereo_sad_block_u8`
+that uses `simd_sad_u8` directly on a packed 1-byte-per-pixel buffer,
+cutting the staging-buffer write bandwidth by 4x. Estimated wallclock
+improvement: stereo SAD scalar 1.25 s → target ≤ 0.4 s (3-4x absolute
+speedup vs the current 1.93x). R14B deliberately left CE untouched
+(strict 5-line cap on `image_stereo.nova`; concurrent R14D/E/F agents
+own CE).
+
+### Files touched
+
+  - `src/compiler/codegen.nova` — `is_builtin_fn` +
+    `is_inline_builtin_fn` registration; `emit_inline_simd` AVX2
+    inline body; x86-64 runtime label (AVX2 + scalar fallback); ARM64
+    Linux NEON helper + dispatch; ARM64 Windows NEON helper +
+    dispatch. ~120 lines total.
+  - `tests/test_simd_sad_u8.nova` (NEW — 21 assertions).
+  - `NEXT_SESSION.md` (this section).
+  - `README.md` (status table refresh + R14B paragraph in SIMD section).
+
 ## R14A — DAP function breakpoints (20th DAP capability)
 
 R14A lights up the most common remaining IDE debugger feature

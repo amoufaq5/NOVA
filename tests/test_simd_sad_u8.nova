@@ -1,0 +1,280 @@
+// R14B -- simd_sad_u8 correctness test.
+//
+// simd_sad_u8(a_ptr, b_ptr, n_bytes) -> int
+//   Sum of absolute byte differences over n_bytes raw u8 lanes.
+//   Bytes are treated as UNSIGNED (0..255). Eliminates the byte->i32
+//   staging that R12A's stereo_sad_block_simd / lk_optical_flow_simd
+//   require: a single AVX2 `vpsadbw` reduces 32 bytes -> 4 i64 partials,
+//   vs 32 store8 calls per i32 lane upstream.
+//
+// Lowering verified by this test:
+//   Linux x86-64  : AVX2 inline (vmovdqu / vpsadbw / vpaddq /
+//                   vextracti128 / vpshufd / vmovq), tail scalar.
+//   macOS / Windows x86-64 : scalar 1-byte-at-a-time fallback.
+//   Linux/Windows ARM64    : NEON (uabd v.16b + uaddlp halfword/word),
+//                            tail scalar.
+//
+// Exercises:
+//   * Identical buffers -> 0.
+//   * Known-diff buffers (a[i] - b[i] = 32 for 32 bytes -> 1024).
+//   * Asymmetric (a > b vs b > a) ensuring unsigned absolute diff.
+//   * Multi-chunk + tail (100 bytes = 3 full 32-byte chunks + 4 tail).
+//   * n_bytes = 0 -> 0 (no segfault).
+//   * Multiple back-to-back calls (fresh-label correctness when inlined).
+//   * Boundary u8 values (0 and 255) -> abs diff = 255.
+//   * Tail-only (n_bytes < 32) and chunk-only (n_bytes % 32 == 0).
+//   * Large buffer (>16 KiB) crossing memory pages.
+
+import "std/io"
+
+// ---------- helpers ---------------------------------------------------------
+
+fn fill_inc(buf, n, start) {
+    let i = 0
+    while i < n {
+        store8(buf + i, (start + i) % 256)
+        i = i + 1
+    }
+}
+
+fn fill_const(buf, n, v) {
+    let i = 0
+    while i < n {
+        store8(buf + i, v)
+        i = i + 1
+    }
+}
+
+// ---------- minimal test framework ------------------------------------------
+
+let passes = 0
+let fails = 0
+
+fn check(label, got, want) {
+    if got == want {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("  FAIL ")
+        print(label)
+        print(": got ")
+        print_int(got)
+        print(", want ")
+        print_int(want)
+        println("")
+    }
+}
+
+// ---------- tests -----------------------------------------------------------
+
+fn test_identical() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_inc(a, 32, 7)
+    fill_inc(b, 32, 7)
+    check("identical 32B", simd_sad_u8(a, b, 32), 0)
+    fill_const(a, 32, 0)
+    fill_const(b, 32, 0)
+    check("all-zero 32B", simd_sad_u8(a, b, 32), 0)
+    fill_const(a, 32, 255)
+    fill_const(b, 32, 255)
+    check("all-255 32B", simd_sad_u8(a, b, 32), 0)
+}
+
+fn test_known_diff() {
+    // a = [1, 2, 3, ..., 32], b = [33, 34, 35, ..., 64].
+    // All a[i] < b[i], so |a[i] - b[i]| = 32 for all i.
+    // Total = 32 * 32 = 1024.
+    let a = alloc(32)
+    let b = alloc(32)
+    let i = 0
+    while i < 32 {
+        store8(a + i, i + 1)
+        store8(b + i, i + 33)
+        i = i + 1
+    }
+    check("known diff 32 each", simd_sad_u8(a, b, 32), 1024)
+}
+
+fn test_asymmetric() {
+    // Half a > b, half b > a: ensure absolute (unsigned) diff.
+    let a = alloc(32)
+    let b = alloc(32)
+    let i = 0
+    while i < 16 {
+        store8(a + i, 200)
+        store8(b + i, 50)         // |200 - 50| = 150 per lane
+        i = i + 1
+    }
+    while i < 32 {
+        store8(a + i, 50)
+        store8(b + i, 200)        // |50 - 200| = 150 per lane (unsigned)
+        i = i + 1
+    }
+    check("asymmetric a vs b", simd_sad_u8(a, b, 32), 4800)  // 32 * 150
+}
+
+fn test_multi_chunk_with_tail() {
+    // 100 bytes = 3 full 32-byte chunks + 4-byte tail.
+    // a[i] = i, b[i] = i + 1 (mod 256). |a-b| = 1 for all 100 bytes
+    // EXCEPT where b wraps (a=255, b=0 -> |255-0|=255).
+    // For i in [0, 100): a=i, b=(i+1)%256. i=255 not reached (only 100
+    // bytes), so all 100 deltas are 1. Total = 100.
+    let a = alloc(100)
+    let b = alloc(100)
+    fill_inc(a, 100, 0)
+    fill_inc(b, 100, 1)
+    check("100B (3 chunks + 4 tail)", simd_sad_u8(a, b, 100), 100)
+}
+
+fn test_zero_n() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 100)
+    fill_const(b, 32, 200)
+    // n_bytes = 0 must short-circuit (no segfault, returns 0).
+    check("n_bytes = 0", simd_sad_u8(a, b, 0), 0)
+}
+
+fn test_tail_only_small() {
+    // n_bytes < 32: skips the vector loop, hits the scalar tail only.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 10)
+    fill_const(b, 32, 3)
+    // 7 per byte, 5 bytes -> 35.
+    check("tail only n=5", simd_sad_u8(a, b, 5), 35)
+    // 1 byte tail: |10 - 3| = 7.
+    check("tail only n=1", simd_sad_u8(a, b, 1), 7)
+    // 7 bytes (well below 32): 7 * 7 = 49.
+    check("tail only n=7", simd_sad_u8(a, b, 7), 49)
+}
+
+fn test_exact_chunks_no_tail() {
+    // n_bytes = exact multiple of 32: no tail loop entered.
+    let a = alloc(96)
+    let b = alloc(96)
+    fill_const(a, 96, 100)
+    fill_const(b, 96, 30)
+    // 70 per byte, 96 bytes -> 6720.
+    check("3 full chunks n=96", simd_sad_u8(a, b, 96), 6720)
+    // n_bytes = 64 (2 full chunks).
+    fill_const(a, 64, 0)
+    fill_const(b, 64, 255)
+    check("2 full chunks n=64, max diff", simd_sad_u8(a, b, 64), 16320)  // 64 * 255
+}
+
+fn test_boundary_values() {
+    let a = alloc(32)
+    let b = alloc(32)
+    let i = 0
+    while i < 32 {
+        store8(a + i, 0)
+        store8(b + i, 255)
+        i = i + 1
+    }
+    // 32 * 255 = 8160.
+    check("0 vs 255 boundary 32B", simd_sad_u8(a, b, 32), 8160)
+    i = 0
+    while i < 32 {
+        store8(a + i, 255)
+        store8(b + i, 0)
+        i = i + 1
+    }
+    // |255 - 0| unsigned = 255 per byte (proves we don't sign-extend).
+    check("255 vs 0 boundary 32B", simd_sad_u8(a, b, 32), 8160)
+}
+
+fn test_multiple_calls_fresh_labels() {
+    // Inlined builtins use fresh new_label() per call site -- ensure
+    // two back-to-back calls in the same fn body don't clobber each
+    // other's loop labels.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 7)
+    fill_const(b, 32, 4)
+    let s1 = simd_sad_u8(a, b, 32)
+    let s2 = simd_sad_u8(a, b, 32)
+    let s3 = simd_sad_u8(a, b, 32)
+    check("call 1 of 3", s1, 96)  // 32 * 3
+    check("call 2 of 3", s2, 96)
+    check("call 3 of 3", s3, 96)
+    let total = s1 + s2 + s3
+    check("sum across 3 calls", total, 288)
+}
+
+fn test_in_tight_loop() {
+    // Tight loop: 100 iterations of SAD on a 64-byte buffer.
+    // Each call should return the SAME value (a / b are constant).
+    let a = alloc(64)
+    let b = alloc(64)
+    fill_const(a, 64, 50)
+    fill_const(b, 64, 20)
+    let acc = 0
+    let i = 0
+    while i < 100 {
+        acc = acc + simd_sad_u8(a, b, 64)
+        i = i + 1
+    }
+    // Per call: 64 * 30 = 1920. 100 calls -> 192000.
+    check("tight-loop accumulator", acc, 192000)
+}
+
+fn test_large_buffer() {
+    // Large buffer to exercise multi-iteration vector loop + cross-page.
+    // 16 KiB + small tail. Constant a - b -> known total.
+    let n = 16387                   // 512 chunks + 3-byte tail
+    let a = alloc(n)
+    let b = alloc(n)
+    fill_const(a, n, 99)
+    fill_const(b, n, 17)
+    // Per byte diff = 82, total = 82 * 16387 = 1343734.
+    check("large buffer 16387B", simd_sad_u8(a, b, n), 1343734)
+}
+
+fn test_mixed_pattern() {
+    // Realistic stereo SAD: pseudo-textured input similar to bench harness.
+    let a = alloc(64)
+    let b = alloc(64)
+    let i = 0
+    let want = 0
+    while i < 64 {
+        let va = (int_mul(i, 37) + 5) % 256
+        let vb = (int_mul(i, 31) + 11) % 256
+        store8(a + i, va)
+        store8(b + i, vb)
+        let d = va - vb
+        if d < 0 { d = 0 - d }
+        want = want + d
+        i = i + 1
+    }
+    check("mixed pattern 64B (scalar oracle)", simd_sad_u8(a, b, 64), want)
+}
+
+fn main() {
+    println("=== R14B simd_sad_u8 correctness ===")
+    test_identical()
+    test_known_diff()
+    test_asymmetric()
+    test_multi_chunk_with_tail()
+    test_zero_n()
+    test_tail_only_small()
+    test_exact_chunks_no_tail()
+    test_boundary_values()
+    test_multiple_calls_fresh_labels()
+    test_in_tight_loop()
+    test_large_buffer()
+    test_mixed_pattern()
+    print("  passed: ")
+    print_int(passes)
+    print("/")
+    print_int(passes + fails)
+    println("")
+    if fails > 0 {
+        println("FAIL: simd_sad_u8 produced wrong results")
+        exit(1)
+    }
+    println("ALL R14B SIMD_SAD_U8 TESTS PASSED")
+}
+
+main()
