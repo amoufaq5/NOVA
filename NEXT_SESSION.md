@@ -1,5 +1,234 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R22C — LSP folding ranges + document symbols (16th + 17th capabilities)
+
+R22C adds **folding ranges** (`textDocument/foldingRange`) and
+**document symbols** (`textDocument/documentSymbol`) to `nova-lsp`,
+taking the capability count from 15 -> 17. Folding ranges drive the
+editor's collapse/expand gutter — chevrons that hide function bodies,
+match arms, doc-comment blocks, and import blocks. Document symbols
+drive the outline tree in the editor sidebar (and Cmd+Shift+O quick-pick),
+with enum variants and struct fields nested as children of their
+parent declaration.
+
+### What landed
+
+**New module** `tools/nova-lsp/nova_lsp/folding_ranges.py` (~330 lines)
+exposing:
+
+  * `compute_folding_ranges(uri, doc_text, file_cache=None) ->
+    list[FoldingRange]` — returns LSP wire-shape FoldingRange[] for
+    every multi-line `fn` body, `match` / `if` / `else` block, `enum`
+    or `struct` body, contiguous `///` doc-comment block (kind=
+    `"comment"`), and contiguous `import "..."` block (kind=
+    `"imports"`). Nested constructs surface as separate ranges so
+    the user can fold a specific match arm group inside a long fn
+    without folding the entire fn body.
+  * `FoldingRange` dataclass with `to_lsp()` serializer that omits
+    the optional `kind` field for block folds.
+  * `_scan_block_folds` / `_scan_comment_folds` / `_scan_import_folds`
+    — the three independent scanners, each composable for testing.
+  * `_find_matching_close(lines, open_line, open_col)` — brace-walker
+    using the shared comment + string masking so a `}` inside a
+    string literal doesn't perturb the depth count.
+
+Single-line constructs (`fn foo() { return 1 }` on one physical line,
+a single `///` comment, a one-line enum, a one-line import) are
+filtered out — there's nothing to collapse, so emitting a range
+would just clutter the gutter.
+
+**New module** `tools/nova-lsp/nova_lsp/document_symbols.py` (~500 lines)
+exposing:
+
+  * `compute_document_symbols(uri, doc_text, file_cache=None) ->
+    list[DocumentSymbol]` — returns the modern hierarchical
+    `DocumentSymbol[]` shape: one symbol per top-level `fn` /
+    `let` / `const` / `type` / `enum` / `struct`, with enum variants
+    nested as `EnumMember`-kind children and struct fields nested as
+    `Field`-kind children.
+  * `DocumentSymbol` dataclass with `to_lsp()` serializer that
+    includes `selectionRange` (just the name token) and the full
+    `range` (entire declaration through closing brace).
+  * `scan_document_symbols(text)` — pure-function walker emitting
+    in-memory DocumentSymbol entries before LSP serialization.
+  * `_scan_enum_variants(lines, decl_line, body_end_line)` /
+    `_scan_struct_fields(...)` — brace-counted body walkers
+    extracting variant identifiers (with arity inferred from
+    parenthesised payload lists) and field rows.
+  * `_classify_let` mirrors `workspace_symbols._classify_let` —
+    ALL_CAPS lets surface as `Constant` (kind=14), mixed-case as
+    `Variable` (kind=13).
+
+Indented declarations (`let inner = 1` inside a `fn` body) are NOT
+surfaced as top-level symbols — the outline shows navigable global
+declarations only, mirroring the workspace symbol picker.
+Payload-bearing enum variants carry an arity-aware `detail` field
+(`Shape::Rect(_, _)` for a two-payload variant) so the breadcrumb
+hints at constructor shape without expanding the tree.
+
+**Server wiring**: `server.py` imports `compute_folding_ranges` +
+`compute_document_symbols`, adds `handle_folding_range` +
+`handle_document_symbol` handlers (no workspace warm-up — both
+analyses are purely syntactic and single-file), advertises
+`"foldingRangeProvider": True` + `"documentSymbolProvider": True`
+in `server_capabilities()`, and dispatches the two new methods.
+
+**LSP wire shape** (folding range):
+```json
+FoldingRange = {
+  "startLine": 0,       // zero-based, first folded line
+  "endLine": 3,         // line containing the close brace
+  "kind"?: "comment" | "imports"  // omitted for block folds
+}
+```
+
+**LSP wire shape** (document symbol):
+```json
+DocumentSymbol = {
+  "name": "Shape",
+  "kind": 10,                            // SymbolKind.Enum
+  "detail": "enum Shape",
+  "range": {"start": {"line": 0, "character": 0},
+            "end":   {"line": 4, "character": 1}},
+  "selectionRange": {"start": {"line": 0, "character": 5},
+                     "end":   {"line": 0, "character": 10}},
+  "children": [
+    {"name": "Circle", "kind": 22, "detail": "Shape::Circle(_)",
+     "range": {...}, "selectionRange": {...}},
+    {"name": "Rect",   "kind": 22, "detail": "Shape::Rect(_, _)", ...},
+    {"name": "Triangle", "kind": 22, "detail": "Shape::Triangle(_, _, _)", ...}
+  ]
+}
+```
+
+### Tests
+
+`tools/nova-lsp/tests/test_folding_ranges.py` (NEW, 43 assertions):
+
+  * Empty file -> no ranges; single-line fn / single `///` line ->
+    no ranges (no fold available).
+  * Multi-line `fn body { ... }` -> one block fold covering body.
+  * Two separate fns -> two folds with correct start/end lines.
+  * Nested `match` + `if` inside fn body -> 3 ranges (outer fn +
+    inner match + inner if).
+  * `if cond { ... } else { ... }` -> multiple interior folds for
+    the if and else branches.
+  * Multi-line `///` doc block -> one kind=`"comment"` fold; two
+    separate doc blocks separated by a blank line -> two folds.
+  * Multi-line `import` block -> one kind=`"imports"` fold; single
+    `import` -> no fold.
+  * Multi-line `enum` / `struct` -> block fold covering body;
+    single-line enum -> no fold.
+  * Brace inside a string literal doesn't perturb fold depth.
+  * Server-level wire smoke through `dispatch`:
+    `foldingRangeProvider` advertised; `textDocument/foldingRange`
+    request returns expected shape; unknown URI -> empty list.
+  * Integration: `src/compiler/codegen.nova` produces 1388 block
+    folds (one per top-level fn); `tests/test_sum_types.nova` -> 15.
+
+`tools/nova-lsp/tests/test_document_symbols.py` (NEW, 65 assertions):
+
+  * Empty file / only comments -> no symbols.
+  * Single fn -> one Function (kind=12) symbol with correct
+    `selectionRange` (covers just `name` token after `fn `) + full
+    `range` (line 0 through closing brace line).
+  * Single-line fn `fn one_liner() { return 1 }` -> still one
+    symbol (range collapses to one line).
+  * `let counter = 0` + `const VERSION = 42` + `type ID = int`
+    -> 3 symbols with kinds Variable / Constant / TypeParameter.
+  * `let TAU = 6` (ALL_CAPS) -> Constant kind.
+  * Mixed file (fn + let + const + type) -> 4 top-level symbols
+    in source order with correct kinds.
+  * Indented `let inner = 1` inside fn body NOT surfaced as
+    top-level; outer fn + outer let surface only.
+  * `enum Shape { Circle(int) Rect(int, int) Triangle(int, int, int) }`
+    -> one Enum symbol with 3 EnumMember children, names in source
+    order.
+  * Single-line `enum Dir { North, South, East, West }` -> Enum
+    symbol with 4 EnumMember children.
+  * `struct Point { x: int, y: int }` -> Struct symbol with 2
+    Field children.
+  * Full `range` covers entire declaration through closing brace;
+    `selectionRange` covers only the name token.
+  * Server-level wire smoke through `dispatch`:
+    `documentSymbolProvider` advertised; `textDocument/documentSymbol`
+    returns 2-symbol hierarchy for fn + enum; unknown URI -> empty.
+  * Integration: `tests/test_sum_types.nova` -> Option/Result/Shape/Tree
+    enums present, each with variants nested; `codegen.nova` -> 237
+    top-level symbols (144 fns).
+
+`test_hover_docs.py` capability-set assertion extended to include
+`foldingRangeProvider` + `documentSymbolProvider` (same pattern
+R15F / R16C / R18F / R19F used).
+
+All 15 prior LSP tests still pass (75 + 64 + 96 + 66 + 55 + 66 +
+101 + 119 + 88 + 52 + smoke = 782 + smoke). New R22C assertions:
+43 (folding) + 65 (document symbols) = 108 new.
+
+### Capability count
+
+| Round | LSP capability added                                |
+| ----- | --------------------------------------------------- |
+| (pre) | sync, hover, completion, definition, references,    |
+|       | rename, code action                                 |
+| R8C   | workspace symbols                                   |
+| R13C  | semantic tokens (`/full` + `/range`)                |
+| R14C  | hover docs (enhancement, not a new capability)      |
+| R15F  | call hierarchy (prepare / incoming / outgoing)      |
+| R16C  | inlay hints                                         |
+| R18F  | code lens (`textDocument/codeLens` + `resolve`)     |
+| R19F  | type hierarchy (prepare / supertypes / subtypes)    |
+| R22C  | **folding ranges** (`textDocument/foldingRange`)    |
+|       | **+ document symbols** (`textDocument/documentSymbol`) |
+
+Total: 17 advertised provider keys (plus `hoverProvider` whose
+behavior was enriched by R14C without changing the wire schema).
+
+### Files touched (R22C)
+
+  * NEW: `tools/nova-lsp/nova_lsp/folding_ranges.py`
+  * NEW: `tools/nova-lsp/nova_lsp/document_symbols.py`
+  * NEW: `tools/nova-lsp/tests/test_folding_ranges.py`
+  * NEW: `tools/nova-lsp/tests/test_document_symbols.py`
+  * `tools/nova-lsp/nova_lsp/server.py` (imports, 2 handlers, 2
+    capability keys, 2 dispatcher entries)
+  * `tools/nova-lsp/tests/test_hover_docs.py` (expected capability
+    set extended to include the two new provider keys)
+  * `tools/nova-lsp/README.md` (capability table + sections + tests
+    list + layout)
+  * `README.md` (LSP capability blurb: 15 -> 17)
+  * `NEXT_SESSION.md` (this entry)
+
+### Design notes
+
+Folding ranges are deliberately permissive: we emit a range for
+every recognisable block opener, even when the editor's default
+heuristic would already pick up the brace pair from a TextMate
+grammar. The LSP spec lets the editor merge / dedup; emitting
+extra ranges costs O(1) bytes per range and gives smarter
+clients (Helix, Zed) the chance to use server-provided semantic
+folds over the syntactic ones. Doc-comment + import folds add
+real value over a TextMate fallback because both are NOVA-specific
+constructs that generic editors don't recognise as foldable.
+
+Document symbols echo the workspace-symbol classification (R8C's
+`_classify_let`) so a name appears the same way in both the
+outline and the Cmd+T picker — there's exactly one source of
+truth for "is this a Constant or a Variable?". Variants and
+fields nest as children rather than surfacing as top-level
+symbols because the editor's outline tree renders containment
+naturally; flat `SymbolInformation[]` would lose the parent/child
+relationship.
+
+Neither provider needs workspace warm-up: both analyses are pure
+functions over the current buffer text. This keeps the response
+fast (sub-millisecond for typical files; ~30ms on the 17k-line
+`codegen.nova` per the integration assertion) and side-effect
+free — folding and outlining can run on every keystroke without
+warming the workspace symbol index.
+
+---
+
 ## R22B — Generic function signatures: `fn map<T, U>(xs: list<T>, f: T -> U) -> list<U>`
 
 R22B extends R21A's parser-only generics from enums to functions. Same

@@ -40,6 +40,14 @@ using only the Python standard library. Supports:
       sub/supertype edges — enum -> variants, type alias -> RHS base
       and other aliases pointing back at it, cross-file via imports +
       workspace index; reuses R8C's symbol index for the candidate set)
+    * `textDocument/foldingRange` (collapse/expand markers in the
+      editor gutter — fn bodies, match / if / else blocks, enum +
+      struct bodies, contiguous ``///`` doc comment blocks, contiguous
+      import blocks)
+    * `textDocument/documentSymbol` (file outline tree shown in the
+      editor sidebar — hierarchical `DocumentSymbol[]` with each
+      top-level fn / let / const / type / enum / struct as a node, and
+      enum variants / struct fields nested as children)
 
 Run with::
 
@@ -68,6 +76,7 @@ from nova_lsp.call_hierarchy import (
     prepare_call_hierarchy,
 )
 from nova_lsp.code_lens import compute_code_lenses, resolve_code_lens
+from nova_lsp.document_symbols import compute_document_symbols
 from nova_lsp.exhaustiveness_fix import (
     KIND_QUICKFIX,
     build_exhaustiveness_code_actions,
@@ -75,6 +84,7 @@ from nova_lsp.exhaustiveness_fix import (
 from nova_lsp.extract_function import (
     build_extract_action as build_extract_function_action,
 )
+from nova_lsp.folding_ranges import compute_folding_ranges
 from nova_lsp.hover_docs import (
     extract_doc_comment,
     extract_doc_comment_from_text,
@@ -1978,6 +1988,72 @@ def handle_type_subtypes(
 
 
 # ---------------------------------------------------------------------------
+# Folding ranges — `textDocument/foldingRange`.
+#
+# The 16th LSP capability. Returns FoldingRange[] for collapsible
+# blocks: fn bodies, match / if / else expressions, enum + struct
+# bodies, contiguous `///` doc-comment blocks, and contiguous import
+# blocks. Folding is purely syntactic and single-file — no workspace
+# warm-up needed.
+# ---------------------------------------------------------------------------
+
+
+def handle_folding_range(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return FoldingRange[] for the document under `uri`.
+
+    Per LSP spec the response is `FoldingRange[] | null`; we return an
+    empty list (which the client treats identically to null) when the
+    document isn't open in the server. Folding ranges are purely
+    syntactic so there's no workspace index warm-up — the analysis runs
+    over the current buffer text in isolation.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    doc = state.documents.get(uri)
+    if not doc:
+        return []
+    return compute_folding_ranges(
+        uri=doc.uri,
+        doc_text=doc.text,
+        file_cache=state.file_cache,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Document symbols — `textDocument/documentSymbol`.
+#
+# The 17th LSP capability. Returns a hierarchical DocumentSymbol[] tree
+# driving the editor's outline panel + Cmd+Shift+O quick-pick. Top-level
+# fn / let / const / type / enum / struct each surface as one symbol;
+# enum variants and struct fields nest as children of their parent
+# declaration. Single-file analysis — no workspace warm-up needed.
+# ---------------------------------------------------------------------------
+
+
+def handle_document_symbol(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return DocumentSymbol[] for the document under `uri`.
+
+    Per LSP spec the response is `DocumentSymbol[] | SymbolInformation[] | null`;
+    we return the modern hierarchical `DocumentSymbol[]` shape so the
+    editor renders parent/child containment (variants under their
+    enum, fields under their struct). Returns an empty list when the
+    document isn't open in the server.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    doc = state.documents.get(uri)
+    if not doc:
+        return []
+    return compute_document_symbols(
+        uri=doc.uri,
+        doc_text=doc.text,
+        file_cache=state.file_cache,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher.
 # ---------------------------------------------------------------------------
 
@@ -2027,6 +2103,8 @@ def server_capabilities() -> Dict[str, Any]:
         "inlayHintProvider": {"resolveProvider": False},
         "codeLensProvider": {"resolveProvider": True},
         "typeHierarchyProvider": True,
+        "foldingRangeProvider": True,
+        "documentSymbolProvider": True,
         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
     }
 
@@ -2191,6 +2269,14 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "typeHierarchy/subtypes":
         result = handle_type_subtypes(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/foldingRange":
+        result = handle_folding_range(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/documentSymbol":
+        result = handle_document_symbol(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 

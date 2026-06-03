@@ -536,7 +536,8 @@ def test_capability_count_unchanged() -> None:
     # new capability. The expected key set grows only when a new LSP
     # capability is wired up (e.g. R15F added `callHierarchyProvider`,
     # R16C added `inlayHintProvider`, R18F added `codeLensProvider`,
-    # R19F added `typeHierarchyProvider`).
+    # R19F added `typeHierarchyProvider`, R22C added
+    # `foldingRangeProvider` + `documentSymbolProvider`).
     # `semanticTokensProvider` advertises both /full and /range under a
     # single provider key.
     expected_keys = {
@@ -553,6 +554,8 @@ def test_capability_count_unchanged() -> None:
         "inlayHintProvider",
         "codeLensProvider",
         "typeHierarchyProvider",
+        "foldingRangeProvider",
+        "documentSymbolProvider",
         "diagnosticProvider",
     }
     assert_eq(set(caps.keys()), expected_keys,

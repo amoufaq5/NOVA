@@ -33,6 +33,8 @@ for the install hook.
 | `textDocument/prepareTypeHierarchy` | yes (resolves cursor to a `TypeHierarchyItem` for an enum / struct / type alias declaration, an enum variant via `Name::Variant`, or a cross-file use site; falls through imports + workspace index) |
 | `typeHierarchy/supertypes`          | yes (enum / struct -> empty; `type T = U` -> the `U` base resolved to its decl or a builtin placeholder; enum variant -> the parent enum) |
 | `typeHierarchy/subtypes`            | yes (enum -> every declared variant as an `EnumMember` item; `type Base = ...` -> every other `type X = Base` alias in the workspace; struct + variant -> empty) |
+| `textDocument/foldingRange`         | yes (collapse/expand gutter markers for `fn` bodies, `match` / `if` / `else` blocks, `enum` + `struct` bodies, contiguous `///` doc-comment blocks rendered as `kind=comment`, contiguous `import "..."` blocks as `kind=imports`) |
+| `textDocument/documentSymbol`       | yes (hierarchical `DocumentSymbol[]` outline tree for the editor sidebar — top-level `fn` / `let` / `const` / `type` / `enum` / `struct`, with enum variants and struct fields nested as children with `selectionRange` covering only the name token) |
 
 Hover scans the open document and every `import "..."` it transitively
 references for `fn name(args)` and `let X = ...` definitions, plus the
@@ -342,6 +344,48 @@ items are leaves (empty list). Both directions reuse R5F's
 set, with comments and string literals masked so a name inside a
 doc comment never inflates the result.
 
+Folding ranges (`textDocument/foldingRange`) drive the editor's
+collapse/expand gutter — the chevrons next to a function declaration
+that let the reader hide its body, keeping signatures visible while
+implementation details collapse out of view. The provider emits
+`FoldingRange[]` for every multi-line `fn` body, `match` / `if` /
+`else` block, `enum` or `struct` body, contiguous run of `///`
+doc-comment lines (kind=`"comment"`), and contiguous run of `import
+"..."` statements (kind=`"imports"`). Nested constructs surface as
+separate ranges so the user can fold a specific `match` arm group
+inside a long fn without folding the entire fn. Single-line
+constructs (`fn foo() { return 1 }` on one physical line, a single
+`///` comment, a one-line enum) are filtered out because there's
+nothing to collapse. Brace counting uses the shared comment + string
+masking so a `}` inside a string literal doesn't perturb the depth.
+The analysis is purely syntactic and single-file — no workspace
+warm-up is needed, the response is computed in O(lines) over the
+current buffer.
+
+Document symbols (`textDocument/documentSymbol`) render the editor's
+outline tree — VS Code's "Outline" sidebar, the breadcrumb bar, and
+the Cmd+Shift+O quick-pick. The server returns the modern
+hierarchical `DocumentSymbol[]` shape so containment is preserved:
+each top-level `fn` / `let` / `const` / `type` / `enum` / `struct`
+is one symbol, with enum variants nesting as `EnumMember`-kind
+children of their enum and struct fields nesting as `Field`-kind
+children of their struct. The `selectionRange` covers only the name
+token (e.g. `foo` in `fn foo(a, b)`) so clicking lands precisely on
+the identifier; the full `range` covers the entire declaration
+through the closing brace so the editor can scroll the whole block
+into view when navigating. `let` names classified as constants
+(ALL_CAPS like `TAU` / `MAX_SIZE`) emit `SymbolKind.Constant` while
+mixed-case `let` emits `SymbolKind.Variable`, matching the
+classification rules `workspace_symbols.py` uses for `workspace/symbol`.
+Indented declarations (a `let` inside a `fn` body) are NOT surfaced
+as top-level symbols — the outline shows the navigable global
+declarations only, mirroring `code_lens` / `workspace_symbols`.
+Variants on payload-bearing enums carry an arity-aware `detail`
+field (`Shape::Rect(_, _)` for a two-payload variant) so the
+breadcrumb hints at the constructor shape without expanding the
+tree. The analysis is purely syntactic and single-file — no
+workspace warm-up is needed.
+
 Diagnostics are produced by writing the buffer to a tempfile and running
 `nova --check <tempfile>`. The server falls back to `nova <tempfile> -o
 /dev/null` if `--check` is not recognised by the installed compiler.
@@ -377,9 +421,12 @@ python tools/nova-lsp/tests/test_inlay_hints.py
 python tools/nova-lsp/tests/test_code_lens.py
 python tools/nova-lsp/tests/test_type_hierarchy.py
 python tools/nova-lsp/tests/test_exhaustiveness_fix.py
+python tools/nova-lsp/tests/test_extract_function.py
+python tools/nova-lsp/tests/test_folding_ranges.py
+python tools/nova-lsp/tests/test_document_symbols.py
 ```
 
-The fourteen `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The bundled `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
 ~10 ms each (the workspace-symbol + workspace-rename + call-hierarchy
@@ -440,6 +487,9 @@ tools/nova-lsp/
     code_lens.py            # reference-count annotations above decls
     type_hierarchy.py       # prepare / supertypes / subtypes resolver
     exhaustiveness_fix.py   # quickfix: auto-add missing match arms
+    extract_function.py     # refactor.extract code-action analysis
+    folding_ranges.py       # collapse/expand markers for blocks + comments
+    document_symbols.py     # hierarchical outline tree for the sidebar
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -456,4 +506,7 @@ tools/nova-lsp/
     test_code_lens.py
     test_type_hierarchy.py
     test_exhaustiveness_fix.py
+    test_extract_function.py
+    test_folding_ranges.py
+    test_document_symbols.py
 ```
