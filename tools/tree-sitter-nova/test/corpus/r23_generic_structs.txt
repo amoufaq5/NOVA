@@ -1,0 +1,132 @@
+================================================================================
+R23A: generic struct with single type parameter
+================================================================================
+
+struct Box<T> {
+    value: T
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_decl
+    name: (identifier)
+    type_parameters: (type_parameters
+      (type_parameter
+        name: (identifier)))
+    (struct_field_list
+      (struct_field
+        name: (identifier)
+        type: (type_expression
+          (identifier))))))
+
+================================================================================
+R23A: generic struct with two type parameters
+================================================================================
+
+struct Pair<A, B> {
+    first: A,
+    second: B
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_decl
+    name: (identifier)
+    type_parameters: (type_parameters
+      (type_parameter
+        name: (identifier))
+      (type_parameter
+        name: (identifier)))
+    (struct_field_list
+      (struct_field
+        name: (identifier)
+        type: (type_expression
+          (identifier)))
+      (struct_field
+        name: (identifier)
+        type: (type_expression
+          (identifier))))))
+
+================================================================================
+R23A: struct with semicolon-separated typed fields
+================================================================================
+
+struct Triple<A, B, C> {
+    a: A;
+    b: B;
+    c: C
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_decl
+    name: (identifier)
+    type_parameters: (type_parameters
+      (type_parameter
+        name: (identifier))
+      (type_parameter
+        name: (identifier))
+      (type_parameter
+        name: (identifier)))
+    (struct_field_list
+      (struct_field
+        name: (identifier)
+        type: (type_expression
+          (identifier)))
+      (struct_field
+        name: (identifier)
+        type: (type_expression
+          (identifier)))
+      (struct_field
+        name: (identifier)
+        type: (type_expression
+          (identifier))))))
+
+================================================================================
+R23A: struct fields without separators (newline only)
+================================================================================
+
+struct Point {
+    x
+    y
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_decl
+    name: (identifier)
+    (struct_field_list
+      (struct_field
+        name: (identifier))
+      (struct_field
+        name: (identifier)))))
+
+================================================================================
+R23A: fn Type.method method-binding head
+================================================================================
+
+fn Point.translate(self, dx, dy) {
+    return self
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (qualified_fn_name
+      type: (identifier)
+      method: (identifier))
+    parameters: (parameter_list
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier)))
+    body: (block
+      (return_statement
+        value: (identifier)))))

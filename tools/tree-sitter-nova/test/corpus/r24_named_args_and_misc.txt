@@ -1,0 +1,421 @@
+================================================================================
+R24B: named-argument call form
+================================================================================
+
+let r = greet(name: "Alice", greeting: "Hello")
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (call_expression
+      function: (identifier)
+      arguments: (argument_list
+        (named_argument
+          name: (identifier)
+          value: (string_literal))
+        (named_argument
+          name: (identifier)
+          value: (string_literal))))))
+
+================================================================================
+R24B: positional ctor `Box(value: 42)` via named-argument syntax
+================================================================================
+
+let b = Box(value: 42)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (call_expression
+      function: (identifier)
+      arguments: (argument_list
+        (named_argument
+          name: (identifier)
+          value: (number))))))
+
+================================================================================
+R24B: const declaration
+================================================================================
+
+const MAX_SIZE = 1024
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_decl
+    name: (identifier)
+    value: (number)))
+
+================================================================================
+R24B: const with type annotation
+================================================================================
+
+const PI: float = 3.14
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (const_decl
+    name: (identifier)
+    type: (type_expression
+      (identifier))
+    value: (float)))
+
+================================================================================
+R24B: `#` line comment
+================================================================================
+
+# this is a hash comment
+let x = 1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (let_decl
+    name: (identifier)
+    value: (number)))
+
+================================================================================
+R24B: octal literal
+================================================================================
+
+let perms = 0o755
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (number)))
+
+================================================================================
+R24B: `not` keyword unary
+================================================================================
+
+let y = not false
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (unary_expression
+      operand: (boolean))))
+
+================================================================================
+R24B: `and` / `or` keyword binary operators
+================================================================================
+
+let r = true and false or true
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (binary_expression
+      left: (binary_expression
+        left: (boolean)
+        right: (boolean))
+      right: (boolean))))
+
+================================================================================
+R24B: range operator `..` and `..=`
+================================================================================
+
+let r = 1..5
+let e = 1..=5
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (binary_expression
+      left: (number)
+      right: (number)))
+  (let_decl
+    name: (identifier)
+    value: (binary_expression
+      left: (number)
+      right: (number))))
+
+================================================================================
+R24B: pipe operator `|>`
+================================================================================
+
+let r = 5 |> double
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (binary_expression
+      left: (number)
+      right: (identifier))))
+
+================================================================================
+R24B: nullish coalescing `??`
+================================================================================
+
+let a = x ?? 99
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (binary_expression
+      left: (identifier)
+      right: (number))))
+
+================================================================================
+R24B: list pattern destructure in `let`
+================================================================================
+
+let [a, b, c] = get_triple()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (list_pattern
+      (identifier)
+      (identifier)
+      (identifier))
+    value: (call_expression
+      function: (identifier))))
+
+================================================================================
+R24B: rest pattern destructure
+================================================================================
+
+let [first, ...rest] = nums
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (list_pattern
+      (identifier)
+      (rest_pattern
+        name: (identifier)))
+    value: (identifier)))
+
+================================================================================
+R24B: map literal
+================================================================================
+
+let m = {"name": "Nova", "version": "1"}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (map_literal
+      (map_entry
+        key: (string_literal)
+        value: (string_literal))
+      (map_entry
+        key: (string_literal)
+        value: (string_literal)))))
+
+================================================================================
+R24B: list comprehension
+================================================================================
+
+let doubled = [x * 2 for x in nums]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (list_comprehension
+      expression: (binary_expression
+        left: (identifier)
+        right: (number))
+      binding: (identifier)
+      iterable: (identifier))))
+
+================================================================================
+R24B: cognitive mind declaration
+================================================================================
+
+mind Agent {
+    nodes {
+        Sense: perceiver
+        Think: reasoner
+    }
+    channels {
+        perception: Sense ~> Think
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (cognitive_decl
+    name: (identifier)
+    (cognitive_section
+      name: (identifier)
+      (cognitive_entry
+        name: (identifier)
+        value: (identifier))
+      (cognitive_entry
+        name: (identifier)
+        value: (identifier)))
+    (cognitive_section
+      name: (identifier)
+      (cognitive_entry
+        name: (identifier)
+        value: (binary_expression
+          left: (identifier)
+          right: (identifier))))))
+
+================================================================================
+R24B: labeled while loop with `break @label`
+================================================================================
+
+fn main() {
+    @outer while true {
+        break @outer
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (labeled_statement
+        label: (label
+          name: (identifier))
+        statement: (while_statement
+          condition: (boolean)
+          body: (block
+            (break_statement
+              target: (label
+                name: (identifier)))))))))
+
+================================================================================
+R24B: `break if cond` guard
+================================================================================
+
+fn main() {
+    while true {
+        break if i > 5
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (while_statement
+        condition: (boolean)
+        body: (block
+          (break_statement
+            condition: (binary_expression
+              left: (identifier)
+              right: (number))))))))
+
+================================================================================
+R24B: do-while loop
+================================================================================
+
+fn main() {
+    do {
+        count = count + 1
+    } while count < 5
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    body: (block
+      (do_while_statement
+        body: (block
+          (assignment_statement
+            lhs: (identifier)
+            rhs: (binary_expression
+              left: (identifier)
+              right: (number))))
+        condition: (binary_expression
+          left: (identifier)
+          right: (number))))))
+
+================================================================================
+R24B: impl block bundles methods on a struct
+================================================================================
+
+impl Point {
+    fn describe(self) {
+        return self
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (impl_block
+    type: (identifier)
+    (fn_decl
+      name: (identifier)
+      parameters: (parameter_list
+        (parameter
+          name: (identifier)))
+      body: (block
+        (return_statement
+          value: (identifier))))))
+
+================================================================================
+R24B: `if cond { a } else { b }` as expression
+================================================================================
+
+let a = if 1 == 1 { 42 } else { 0 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (if_expression
+      condition: (binary_expression
+        left: (number)
+        right: (number))
+      consequence: (block
+        (expression_statement
+          (number)))
+      alternative: (block
+        (expression_statement
+          (number))))))
+
+================================================================================
+R24B: trailing comma in function call
+================================================================================
+
+let r = add(1, 2,)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (call_expression
+      function: (identifier)
+      arguments: (argument_list
+        (number)
+        (number)))))

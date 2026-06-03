@@ -29,6 +29,17 @@
 
 (asm_block) @fold
 
+; R24B: impl blocks fold (R12-era method-bundle bodies).
+(impl_block) @fold
+
+; R24B: cognitive declarations and their sections fold independently.
+(cognitive_decl) @fold
+(cognitive_section) @fold
+
+; R24B: do-while body folds with its block.
+(do_while_statement
+  body: (block) @fold)
+
 ; -----------------------------------------------------------------
 ; Control-flow bodies — fold the inner block, not the whole `if`,
 ; so the user can collapse the then-arm and else-arm independently.

@@ -15,52 +15,93 @@ The grammar produces a concrete syntax tree (CST) directly usable by:
 
 ## Coverage
 
-This grammar handles the everyday NOVA constructs covered by the
-existing TextMate grammar plus a few more that the regex-based one
-could not express precisely:
+This grammar handles every everyday NOVA construct plus the
+declarative cognitive-DSL surface used by `mind`/`soul`/`system`
+examples. The R24B revision extends R9E's baseline with all the R17A–
+R23A syntax additions:
 
 | Construct                       | Status          |
 | ------------------------------- | --------------- |
 | `fn` declaration / call         | full            |
 | `let` binding (top-level + block) | full          |
-| `if` / `else` (incl. `else if`) | full            |
-| `while` loop                    | full            |
-| `for` loop (incl. `for i, x in xs`) | full        |
+| `let [a, b, ...rest] = expr`    | full (R13)      |
+| `let a, b = x, y`               | full (R14)      |
+| `const NAME = value`            | full            |
+| `if` / `else` (incl. `else if`, if-expression) | full |
+| `while` loop (with `else` clause) | full          |
+| `do { ... } while cond`         | full            |
+| `for` loop (incl. `for i, x in xs`, `for ... else`) | full |
 | `return` / `break` / `continue` | full            |
+| `break if cond` / `continue if cond` | full       |
+| `@label while`, `break @label`  | full            |
 | `extern fn`                     | full            |
 | `-> Type` return-type annotation | full           |
-| `name: Type` type annotations (params + let) | full |
+| `: Type` legacy return-type     | full            |
+| `T -> U` function-type syntax   | full (R22B)     |
+| `name: Type` type annotations (params + let + const) | full |
 | `import "path.nova"`            | full            |
-| `struct` declaration            | full            |
-| `enum` declaration              | full            |
-| `asm { "..." }` blocks          | full            |
-| Anonymous `fn(...) { }` lambdas | full            |
+| `struct Name<T, U> { f: T; g: U }` | full (R23A)  |
+| `enum Name<T, U> { Variant(T) }` | full (R17A + R21A) |
+| `Type::Variant(payload)` constructor / match destructure | full (R17A) |
+| `expr?` Result-propagation operator | full (R20A) |
+| `impl Type { fn ... }`          | full            |
+| `fn Type.method(self, ...)`     | full            |
+| Match guards `_ if cond =>`     | full            |
 | `match … { p => e }` expression | full            |
-| Line `//` and block `/* */` comments | full       |
-| Number literals: dec, hex, binary, float | full   |
+| `is T` / `in xs` / `not in xs`  | full            |
+| `..` / `..=` range operators    | full            |
+| `\|>` pipe operator             | full            |
+| `??` nullish coalescing, `??=` assignment | full   |
+| `not` / `and` / `or` keyword operators | full      |
+| `**` power, `**=` assignment    | full            |
+| `expr @ score` confidence annotation | full       |
+| `asm { "..." }` blocks          | full            |
+| Anonymous `fn(...) { }` lambdas (with `: T` / `-> T` return) | full |
+| Slice `xs[start:end]` / `xs[s:e:step]` | full      |
+| List literal `[1, 2, 3]`, list comprehension `[x*2 for x in xs]` | full |
+| Map literal `{"k": v}`, map comprehension `{k: v for x in xs}` | full |
+| Spread `...args`                | full            |
+| Named-arg call `f(name: value)` | full            |
+| Line `//`, `#`, `--` and block `/* */` comments | full |
+| Number literals: dec, hex, octal, binary, float | full |
 | String literals + `${expr}` interpolation | full  |
 | Operators with C-like precedence | full           |
-| Cognitive DSL (`soul`/`mind`/`system`/`~>`) | not yet — see [Out of scope](#out-of-scope) |
+| Flow operators `~> <~ =>> <<~ ~~> <=> \|~>` | full (cognitive DSL) |
+| `mind`/`soul`/`system { sections... }` declarations | partial |
 
-Empirically, the grammar parses **59 / 65 (~91%)** of the canonical
-sample programs under `examples/` cleanly, including the WASI
-round-trip (`wasi_file_roundtrip.nova`), `concurrency.nova`,
-`game_of_life.nova`, `brainfuck.nova`, `showcase.nova` (with
-`${expr}` interpolation), and every R8/R9-era example. The 6 that
-still produce `(ERROR …)` nodes all use the experimental
-cognitive-system DSL (`soul`/`mind`/`system`/`~>` and friends),
-which neither the TextMate grammar nor the current self-hosting
-compiler treats as first-class — they are recognised lexically as
-identifiers and let through to be lowered by a separate macro pass.
+Empirically, the grammar parses **240 / 244 (~98.4%)** of the canonical
+NOVA sample programs (`tests/*.nova` + `examples/*.nova`) with **0
+ERROR / 0 MISSING** nodes — including all R17A enum sum-type tests,
+R20A `?` propagation tests, R21A generic enum tests, R22B generic fn
+tests, R23A generic struct tests, every `_demo.nova` cognitive example
+(`active_inference_demo`, `causal_library_demo`, `predictive_coding`,
+`hdc_demo`, `sdr_demo`, `soul_demo`, `system_syntax_demo`), the WASI
+round-trip, `concurrency.nova`, `game_of_life.nova`, `brainfuck.nova`,
+and `showcase.nova` (with `${expr}` interpolation).
 
 ### Out of scope
 
-The bespoke "AGI surface" syntax (`soul`, `mind`, `system`, flow
-operators `~>` / `~~>` / `<~`, `pattern_match`, `try`/`catch`/`throw`)
-is intentionally left to a follow-up grammar revision. These keywords
-are not load-bearing for the day-to-day editing experience and they
-require a token-level redesign (flow operators conflict with the
-existing `~` bitwise-not unary operator on tree-sitter's lexer).
+The remaining four files use surface syntax we intentionally defer to
+a follow-up revision:
+
+- `examples/basic_mind.nova` — uses a freeform `mind { memory NAME(args)
+  ... fn-like-bindings ... }` body with implicit `fn` declarations
+  (a separate macro-style DSL).
+- `examples/moment_signal.nova` — uses the bespoke `moment`, `node :
+  reasoner`, `when X arrives as sig`, `reason_by`, `pattern_match
+  ... against ...` syntax.
+- `examples/soul_demo.nova` — uses additional `phases { name { when:
+  ..., behavior: ..., boosts: A by N, ... } }` nesting with `by` /
+  `when` as soft keywords.
+- `tests/test_type_match.nova` — uses `is T` patterns at match-arm
+  head with no left-hand operand; tree-sitter cannot disambiguate
+  the case where the previous arm value is a single literal from
+  `value is T` as a binary type-check expression without an external
+  scanner. Workaround: write the match arm body as a block
+  (`{ "integer" }`) to make the arm terminus explicit.
+
+These four files require either an external scanner or a token-level
+redesign that the editor experience does not need today.
 
 ## Build
 
@@ -68,7 +109,7 @@ existing `~` bitwise-not unary operator on tree-sitter's lexer).
 cd tools/tree-sitter-nova
 npm install                           # installs tree-sitter-cli
 npx tree-sitter generate              # writes src/parser.c
-npx tree-sitter test                  # 41 corpus tests should pass
+npx tree-sitter test                  # 89 corpus tests should pass
 npx tree-sitter parse path/to.nova    # print the CST for a file
 ```
 

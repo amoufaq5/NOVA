@@ -1,0 +1,98 @@
+================================================================================
+R20A: postfix ? on Result::Ok
+================================================================================
+
+let x = ok?
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (try_propagate_expression
+      value: (identifier))))
+
+================================================================================
+R20A: postfix ? on a call
+================================================================================
+
+let v = parse_pos(s)?
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (try_propagate_expression
+      value: (call_expression
+        function: (identifier)
+        arguments: (argument_list
+          (identifier))))))
+
+================================================================================
+R20A: ternary cond ? a : b still parses
+================================================================================
+
+let r = 1 == 1 ? 100 : 200
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (ternary_expression
+      condition: (binary_expression
+        left: (number)
+        right: (number))
+      consequence: (number)
+      alternative: (number))))
+
+================================================================================
+R20A: ? inside arithmetic expression
+================================================================================
+
+let dp = (a?) + (b?)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (binary_expression
+      left: (parenthesized_expression
+        (try_propagate_expression
+          value: (identifier)))
+      right: (parenthesized_expression
+        (try_propagate_expression
+          value: (identifier))))))
+
+================================================================================
+R20A: ? in match-arm body
+================================================================================
+
+let arm = match r {
+    Result::Ok(v) => v
+    Result::Err(_) => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (identifier))
+        value: (identifier))
+      (match_arm
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (wildcard_pattern))
+        value: (number)))))

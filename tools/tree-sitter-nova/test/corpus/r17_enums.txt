@@ -1,0 +1,150 @@
+================================================================================
+R17A: enum variant with no payload
+================================================================================
+
+enum Option {
+    Some(int)
+    None
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_decl
+    name: (identifier)
+    (enum_variant_list
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier))))
+      (enum_variant
+        name: (identifier)))))
+
+================================================================================
+R17A: enum variant with multi-field payload
+================================================================================
+
+enum Shape {
+    Circle(int)
+    Rect(int, int)
+    Triangle(int, int, int)
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_decl
+    name: (identifier)
+    (enum_variant_list
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier))))
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier))
+          (type_expression
+            (identifier))))
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier))
+          (type_expression
+            (identifier))
+          (type_expression
+            (identifier)))))))
+
+================================================================================
+R17A: Type::Variant constructor in expression position
+================================================================================
+
+let s = Option::Some(42)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (call_expression
+      function: (path_expression
+        type: (identifier)
+        member: (identifier))
+      arguments: (argument_list
+        (number)))))
+
+================================================================================
+R17A: Type::Variant constructor with no args
+================================================================================
+
+let n = Option::None
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (path_expression
+      type: (identifier)
+      member: (identifier))))
+
+================================================================================
+R17A: match arm destructuring an enum variant
+================================================================================
+
+let x = match s {
+    Option::Some(v) => v
+    Option::None => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (identifier))
+        value: (identifier))
+      (match_arm
+        pattern: (path_expression
+          type: (identifier)
+          member: (identifier))
+        value: (number)))))
+
+================================================================================
+R17A: multi-binder variant pattern with wildcard
+================================================================================
+
+let v = match s {
+    Shape::Rect(w, _) => w
+    _ => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (identifier)
+          (wildcard_pattern))
+        value: (identifier))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (number)))))

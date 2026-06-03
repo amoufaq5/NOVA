@@ -1,0 +1,142 @@
+================================================================================
+R21A: enum with single type parameter
+================================================================================
+
+enum Option<T> {
+    Some(T)
+    None
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_decl
+    name: (identifier)
+    type_parameters: (type_parameters
+      (type_parameter
+        name: (identifier)))
+    (enum_variant_list
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier))))
+      (enum_variant
+        name: (identifier)))))
+
+================================================================================
+R21A: enum with two type parameters
+================================================================================
+
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_decl
+    name: (identifier)
+    type_parameters: (type_parameters
+      (type_parameter
+        name: (identifier))
+      (type_parameter
+        name: (identifier)))
+    (enum_variant_list
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier))))
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier)))))))
+
+================================================================================
+R21A: let binding with generic type annotation
+================================================================================
+
+let a: Result<int, str> = make_ok()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    type: (type_expression
+      (generic_type
+        base: (identifier)
+        (type_expression
+          (identifier))
+        (type_expression
+          (identifier))))
+    value: (call_expression
+      function: (identifier))))
+
+================================================================================
+R21A: nested generic type annotation
+================================================================================
+
+let outer: Result<Result<int, str>, str> = make_ok()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    type: (type_expression
+      (generic_type
+        base: (identifier)
+        (type_expression
+          (generic_type
+            base: (identifier)
+            (type_expression
+              (identifier))
+            (type_expression
+              (identifier))))
+        (type_expression
+          (identifier))))
+    value: (call_expression
+      function: (identifier))))
+
+================================================================================
+R21A: three-parameter enum
+================================================================================
+
+enum Triple<A, B, C> {
+    First(A)
+    Second(B)
+    Third(C)
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_decl
+    name: (identifier)
+    type_parameters: (type_parameters
+      (type_parameter
+        name: (identifier))
+      (type_parameter
+        name: (identifier))
+      (type_parameter
+        name: (identifier)))
+    (enum_variant_list
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier))))
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier))))
+      (enum_variant
+        name: (identifier)
+        payload: (enum_variant_payload
+          (type_expression
+            (identifier)))))))

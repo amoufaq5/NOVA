@@ -39,6 +39,12 @@
 ; open a scope for value bindings, so they are intentionally not
 ; tagged here. They show up via @local.definition only.
 
+; impl block introduces a method-bound scope.
+(impl_block) @local.scope
+
+; do-while body
+(do_while_statement) @local.scope
+
 ; -----------------------------------------------------------------
 ; Definitions
 ; -----------------------------------------------------------------
@@ -81,6 +87,22 @@
 ; struct fields — record-scoped definitions.
 (struct_field
   name: (identifier) @local.definition.field)
+
+; enum variants — declaration-scoped constructor definitions.
+(enum_variant
+  name: (identifier) @local.definition.constant)
+
+; const decls — top-level value bindings.
+(const_decl
+  name: (identifier) @local.definition.constant)
+
+; Type parameters introduced on generic enum / struct / fn decls.
+(type_parameter
+  name: (identifier) @local.definition.type)
+
+; impl block: the `Type` it impls is a reference, not a definition.
+(impl_block
+  type: (identifier) @local.reference)
 
 ; -----------------------------------------------------------------
 ; References

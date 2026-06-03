@@ -11,17 +11,23 @@
 [
   "fn"
   "let"
+  "const"
   "extern"
   "struct"
   "enum"
   "import"
+  "impl"
   "asm"
+  "mind"
+  "soul"
+  "system"
 ] @keyword
 
 [
   "if"
   "else"
   "while"
+  "do"
   "for"
   "in"
   "return"
@@ -29,6 +35,14 @@
   "continue"
   "match"
 ] @keyword.control
+
+; Keyword-style operators
+[
+  "and"
+  "or"
+  "not"
+  "is"
+] @keyword.operator
 
 ; -----------------------------------------------------------------
 ; Identifiers & functions
@@ -38,6 +52,12 @@
 (extern_fn_decl name: (identifier) @function)
 (lambda_expression) @function
 
+; `fn Type.method(...)` — highlight method name as function, type as type.
+(fn_decl
+  name: (qualified_fn_name
+    type: (identifier) @type
+    method: (identifier) @function))
+
 (call_expression
   function: (identifier) @function.call)
 
@@ -45,12 +65,47 @@
   function: (field_expression
     field: (identifier) @function.method.call))
 
+; `Type::Variant(...)` — highlight type as type, variant as constructor.
+(call_expression
+  function: (path_expression
+    type: (identifier) @type
+    member: (identifier) @function.constructor))
+
+(path_expression
+  type: (identifier) @type
+  member: (identifier) @constructor)
+
 (parameter (identifier) @variable.parameter)
+(parameter (type_expression (identifier) @type))
+
+; Named arguments: highlight name as parameter, value through normal rules.
+(named_argument
+  name: (identifier) @variable.parameter)
 
 (struct_decl name: (identifier) @type)
 (enum_decl name: (identifier) @type)
+(enum_variant name: (identifier) @constructor)
+(impl_block type: (identifier) @type)
 (struct_field name: (identifier) @property)
 (field_expression field: (identifier) @property)
+
+; Type parameters
+(type_parameter name: (identifier) @type.parameter)
+
+; Generic type references
+(generic_type base: (identifier) @type)
+(path_qualified_type) @type
+
+; Map entries
+(map_entry key: (string_literal) @property)
+
+; Cognitive DSL
+(cognitive_decl name: (identifier) @type)
+(cognitive_section name: (identifier) @keyword.section)
+(cognitive_entry name: (identifier) @property)
+
+; Labels
+(label name: (identifier) @label)
 
 ; -----------------------------------------------------------------
 ; Literals
@@ -82,6 +137,7 @@
   "*"
   "/"
   "%"
+  "**"
   "=="
   "!="
   "<"
@@ -106,6 +162,21 @@
   "?"
   "=>"
   "->"
+  "::"
+  ".."
+  "..="
+  "|>"
+  "??"
+  "@"
+  ; Flow operators
+  "~>"
+  "<~"
+  "~~>"
+  "<~~"
+  "=>>"
+  "<<~"
+  "<=>"
+  "|~>"
 ] @operator
 
 ; Return-type annotations in function signatures.
@@ -122,11 +193,28 @@
     (identifier) @type))
 
 ; Type annotations on parameters / let bindings.
-(parameter
+(let_decl
   type: (type_expression
     (identifier) @type))
 
-(let_decl
+(const_decl
+  type: (type_expression
+    (identifier) @type))
+
+; Function-type `T -> U` parameter annotations.
+(function_type
+  param: (identifier) @type)
+(function_type
+  result: (type_expression
+    (identifier) @type))
+
+; Enum-variant payload types.
+(enum_variant_payload
+  (type_expression
+    (identifier) @type))
+
+; Struct field types.
+(struct_field
   type: (type_expression
     (identifier) @type))
 

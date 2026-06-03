@@ -1,5 +1,107 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R24B — tree-sitter grammar refresh (R17A–R23A coverage)
+
+R24B extends `tools/tree-sitter-nova/` from R9E's 41-test baseline to
+**89 corpus tests** and parses **240 / 244 = 98.4%** of
+`tests/*.nova` + `examples/*.nova` files with 0 ERROR / 0 MISSING
+nodes (R9E hit 59 / 65 = ~91% on examples only).
+
+### Grammar additions
+
+- **R17A** — sum-type enums with payloads `Variant(int, str)`,
+  `Type::Variant(args)` constructor syntax, match destructure
+  `Option::Some(v) => v` with `_` wildcards inside variants. New
+  rules: `enum_variant_list`, `enum_variant`, `enum_variant_payload`,
+  `path_expression`, `variant_pattern`, `_variant_binder`.
+- **R20A** — postfix `?` Result-propagation operator. Disambiguated
+  from the classic ternary `cond ? a : b` via dynamic precedence
+  (ternary > try_propagate) + a same-static-precedence conflict
+  declaration. `1 == 1 ? 100 : 200` still parses as a ternary;
+  `parse(s)?` parses as `try_propagate_expression`.
+- **R21A** — generic enums `enum Result<T, E> { Ok(T) Err(E) }`.
+  Shared `type_parameters` / `type_parameter` rules used by enum /
+  struct / fn decls. Nested generic type annotations
+  `Result<Result<int, str>, str>` work.
+- **R22B** — generic fns `fn name<T, U>(p: T) -> U`. Plus the
+  `T -> U` function-type spelling inside parameter type annotations
+  (`f: T -> U`). New rules: `generic_type`, `path_qualified_type`,
+  `function_type`, `qualified_fn_name`.
+- **R23A** — generic structs `struct Box<T> { value: T }` and
+  semicolon-separated field lists (`a: A; b: B; c: C`).
+
+### Other grammar additions (long-standing NOVA syntax R9E missed)
+
+`#` and `--` line comments, `not` / `and` / `or` keyword operators,
+`is` / `in` / `not in` type and membership operators, `..` / `..=`
+range, `|>` pipe, `??` nullish coalescing + `??=`, octal literals
+`0o755`, `const` declarations, slice expressions `xs[s:e:step]`, map
+literals + map comprehensions, list comprehensions `[x*2 for x in
+xs]`, multi-binding and list-pattern destructure `let`,
+`...rest` spread, `expr @ score` confidence annotation, `;` statement
+separator, `break / continue if cond`, labeled loops `@outer while
+... break @outer if cond`, `do { ... } while cond`, `impl Type { fn
+... }` method bundles, `fn Type.method(self, ...)` heads,
+`if cond { a } else { b }` as expression, match guards `_ if cond`,
+`is T` patterns at match-arm head, trailing commas in calls / lists,
+power `**`, flow operators `~> <~ =>> <<~ ~~> <=> |~>`, and a
+`mind`/`soul`/`system { sections { entries } }` cognitive
+declaration form.
+
+### Corpus tests added
+
+6 new corpus files under `test/corpus/`:
+
+- `r17_enums.txt` — 6 tests (variant payload shapes, ctor sites,
+  match destructure with `_` binder).
+- `r20_result_question.txt` — 5 tests (`expr?`, `cond ? a : b` still
+  parsing, `?` inside arithmetic, `?` in match-arm body).
+- `r21_generic_enums.txt` — 5 tests (`<T>` / `<T, E>` / `<A, B, C>`
+  decl + `Result<int, str>` / nested `Result<Result<int, str>, str>`
+  annotations).
+- `r22_generic_fns.txt` — 5 tests (single + multi-param generic fn,
+  `f: T -> U` higher-order parameter, legacy `: int` return-type,
+  generic fn taking `Result<T, E>`).
+- `r23_generic_structs.txt` — 5 tests (`<T>` / `<A, B>` / `<A, B,
+  C>` with `;` separator, fields without separators, `fn
+  Type.method` head).
+- `r24_named_args_and_misc.txt` — 22 tests (named args, `const`,
+  `#` comment, octal, `not`/`and`/`or`, ranges, pipe, `??`,
+  destructure `let`, rest pattern, map literal, list comprehension,
+  cognitive mind, labeled loop with `break @label`, `break if`,
+  do-while, impl block, if-as-expression, trailing comma).
+
+`declarations.txt` was also updated for the new `enum_variant_list` /
+`enum_variant` shape so the two pre-existing enum tests still pass.
+
+### Verification
+
+- `tree-sitter generate` → portable parser.c (~2.7 MiB).
+- `tree-sitter test` → **89 / 89 corpus tests pass** (was 41).
+- `tree-sitter parse` on every R17A/R20A/R21A/R22B/R23A reference
+  test → 0 ERROR / 0 MISSING:
+  - `tests/test_sum_types.nova` ✓
+  - `tests/test_result.nova` ✓
+  - `tests/test_generic_enum.nova` ✓
+  - `tests/test_generic_fn.nova` ✓
+  - `tests/test_generic_struct.nova` ✓
+- **Parse-everything sweep:** `tests/*.nova` + `examples/*.nova` =
+  **240 / 244 (98.4%)** clean. The 4 remaining ERROR files are
+  documented as out-of-scope in `tools/tree-sitter-nova/README.md`
+  (cognitive macro DSL + one ambiguous `is`-pattern case).
+- `tree-sitter query queries/highlights.scm` emits expected
+  captures: `keyword`, `keyword.control`, `keyword.operator`,
+  `function`, `function.call`, `function.constructor`,
+  `function.method.call`, `type`, `type.builtin`, `type.parameter`,
+  `constructor`, `property`, `variable.parameter`, `label`,
+  `string`, `escape_sequence`, `interpolation`, `number`, `float`,
+  `boolean`, `comment`, `operator`, `punctuation.*`.
+- `queries/folds.scm` covers `enum_decl`, `struct_decl`,
+  `impl_block`, `cognitive_decl`, `cognitive_section`,
+  `do_while_statement`.
+- `queries/locals.scm` adds defs for enum variants, const decls, and
+  type parameters; references for `impl Type` heads.
+
 ## R24A — Fn-call + struct-ctor type-check (R23A.2 followup)
 
 R24A finishes the type-check pass started in R23A by closing the two

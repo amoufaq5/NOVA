@@ -56,7 +56,9 @@ enum Color {
 (source_file
   (enum_decl
     name: (identifier)
-    (identifier)))
+    (enum_variant_list
+      (enum_variant
+        name: (identifier)))))
 
 ================================================================================
 enum with multiple variants and trailing comma
@@ -74,10 +76,15 @@ enum Direction {
 (source_file
   (enum_decl
     name: (identifier)
-    (identifier)
-    (identifier)
-    (identifier)
-    (identifier)))
+    (enum_variant_list
+      (enum_variant
+        name: (identifier))
+      (enum_variant
+        name: (identifier))
+      (enum_variant
+        name: (identifier))
+      (enum_variant
+        name: (identifier)))))
 
 ================================================================================
 struct with typed fields
