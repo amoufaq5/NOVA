@@ -66,6 +66,13 @@ let AST_SOUL = 61
 let AST_SYSTEM = 62
 let AST_CONFIDENCE = 63
 let AST_IMPL_BLOCK = 64
+// R17A: sum-type variant construction (`Option::Some(42)`) and
+// variant patterns inside `match` arms (`Option::Some(n) => ...`).
+// Wire representation: each variant value is a tagged tuple
+//   `[tag_int, field0, field1, ...]`
+// where `tag_int` is the declaration-order index of the variant.
+let AST_ENUM_CTOR = 65
+let AST_ENUM_PATTERN = 66
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -573,6 +580,33 @@ fn ast_confidence(expr, level) {
     push(n, AST_CONFIDENCE)
     push(n, expr)
     push(n, level)
+    return n
+}
+
+// R17A: sum-type variant construction. `enum_name` and `variant_name`
+// are the dotted-path components; `args` is the list of payload exprs
+// (empty list for nullary variants like `Option::None`). Lowered by
+// codegen to a fresh list whose first slot is the variant tag.
+fn ast_enum_ctor(enum_name, variant_name, args) {
+    let n = list_new()
+    push(n, AST_ENUM_CTOR)
+    push(n, enum_name)
+    push(n, variant_name)
+    push(n, args)
+    return n
+}
+
+// R17A: `match` arm pattern matching a sum-type variant. `binders` is
+// the list of identifier names introduced by destructuring the variant
+// payload (e.g. `Option::Some(n)` -> binders=["n"]). Bindings are
+// installed in the arm body's scope; the discriminant is matched by
+// comparing `value[0]` against the variant's tag.
+fn ast_enum_pattern(enum_name, variant_name, binders) {
+    let n = list_new()
+    push(n, AST_ENUM_PATTERN)
+    push(n, enum_name)
+    push(n, variant_name)
+    push(n, binders)
     return n
 }
 

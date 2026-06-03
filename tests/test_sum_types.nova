@@ -1,0 +1,148 @@
+// R17A: NOVA sum types with payloads + variant patterns in match.
+//
+// Wire-level representation: each variant value is a tagged tuple
+// `[tag_int, field0, field1, ...]` where `tag_int` is the
+// declaration-order index of the variant on the enum.
+//
+//   Option::Some(42)        -> [0, 42]
+//   Option::None            -> [1]
+//   Shape::Triangle(3,4,5)  -> [2, 3, 4, 5]
+
+enum Option {
+    Some(int)
+    None
+}
+
+enum Result {
+    Ok(int)
+    Err(str)
+}
+
+enum Shape {
+    Circle(int)
+    Rect(int, int)
+    Triangle(int, int, int)
+}
+
+enum Tree {
+    Leaf(int)
+    Node(int, int)
+}
+
+// --- Constructor sites ---
+
+let s = Option::Some(42)
+assert(s[0] == 0, "Some tag == 0")
+assert(s[1] == 42, "Some payload == 42")
+assert(len(s) == 2, "Some has 2 slots")
+
+let n = Option::None
+assert(n[0] == 1, "None tag == 1")
+assert(len(n) == 1, "None has 1 slot (just the tag)")
+
+let ok = Result::Ok(7)
+assert(ok[0] == 0, "Ok tag == 0")
+assert(ok[1] == 7, "Ok payload == 7")
+
+let err = Result::Err("oops")
+assert(err[0] == 1, "Err tag == 1")
+assert(err[1] == "oops", "Err payload == oops")
+
+let tri = Shape::Triangle(3, 4, 5)
+assert(tri[0] == 2, "Triangle tag == 2")
+assert(tri[1] == 3, "Triangle sides[0] == 3")
+assert(tri[2] == 4, "Triangle sides[1] == 4")
+assert(tri[3] == 5, "Triangle sides[2] == 5")
+
+let rect = Shape::Rect(10, 20)
+assert(rect[0] == 1, "Rect tag == 1")
+assert(rect[1] == 10, "Rect w == 10")
+assert(rect[2] == 20, "Rect h == 20")
+
+// --- Match-as-statement: extracts the int correctly ---
+
+let extracted = 0
+match s {
+    Option::Some(v) => { extracted = v }
+    Option::None => { extracted = -1 }
+}
+assert(extracted == 42, "match Some extracted 42")
+
+let none_branch = 0
+match n {
+    Option::Some(v) => { none_branch = v }
+    Option::None => { none_branch = 999 }
+}
+assert(none_branch == 999, "match None took right arm")
+
+// --- Match-as-expression: returns correct value ---
+
+let mexpr_some = match s {
+    Option::Some(v) => v
+    Option::None => -1
+}
+assert(mexpr_some == 42, "match-as-expr Some returns 42")
+
+let mexpr_none = match n {
+    Option::Some(v) => v
+    Option::None => -1
+}
+assert(mexpr_none == -1, "match-as-expr None returns -1")
+
+// --- Multi-field variant destructure ---
+
+let area = match rect {
+    Shape::Circle(r) => r * r
+    Shape::Rect(w, h) => w * h
+    Shape::Triangle(a, b, c) => a + b + c
+}
+assert(area == 200, "Rect area = w*h = 10*20 = 200")
+
+let perim_tri = match tri {
+    Shape::Circle(r) => r * 2
+    Shape::Rect(w, h) => w + w + h + h
+    Shape::Triangle(a, b, c) => a + b + c
+}
+assert(perim_tri == 12, "Triangle perimeter = 3+4+5 = 12")
+
+// Result with string payload
+let msg = match err {
+    Result::Ok(v) => "got int"
+    Result::Err(m) => m
+}
+assert(msg == "oops", "Err string payload extracted")
+
+// --- Nested enum: Tree ---
+
+let leaf = Tree::Leaf(99)
+let node = Tree::Node(1, 2)
+
+let leaf_val = match leaf {
+    Tree::Leaf(x) => x
+    Tree::Node(l, r) => l + r
+}
+assert(leaf_val == 99, "Tree Leaf extracted 99")
+
+let node_sum = match node {
+    Tree::Leaf(x) => x
+    Tree::Node(l, r) => l + r
+}
+assert(node_sum == 3, "Tree Node sum = 1+2 = 3")
+
+// --- Catch-all `_` alongside enum patterns ---
+
+let catchall = match Option::Some(7) {
+    Option::Some(v) => v * 10
+    _ => 0
+}
+assert(catchall == 70, "catch-all alongside Some")
+
+// --- Pattern binder named `_` is ignored ---
+
+let ignored = match Result::Ok(123) {
+    Result::Ok(_) => 1
+    Result::Err(_) => 0
+}
+assert(ignored == 1, "ignored binder still matches by tag")
+
+println("All sum type tests passed!")

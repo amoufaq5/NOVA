@@ -692,7 +692,27 @@ fn collect_comp_vars(expr) {
         let ai = 0
         while ai < len(arms) {
             let arm = arms[ai]
+            let pat = arm[1]
             let body = arm[2]
+            // R17A: register binders from enum-variant patterns in
+            // expression-position match too — otherwise `let x = match v
+            // { Option::Some(n) => n  Option::None => -1 }` would write
+            // to an unreserved stack slot.
+            if ast_tag(pat) == AST_ENUM_PATTERN {
+                let binders = pat[3]
+                let bi = 0
+                while bi < len(binders) {
+                    let bn = binders[bi]
+                    if bn == "_" {
+                    } else {
+                        if is_global(bn) == 0 {
+                            push(cg_locals, bn)
+                            cg_local_count = cg_local_count + 1
+                        }
+                    }
+                    bi = bi + 1
+                }
+            }
             if body == 0 {
             } else {
                 let btag = ast_tag(body)
@@ -839,7 +859,26 @@ fn collect_locals(nd) {
         let ai = 0
         while ai < len(arms) {
             let arm = arms[ai]
+            let pattern = arm[1]
             let body = arm[2]
+            // R17A: register binder names from enum-variant patterns so
+            // the function prologue reserves stack slots for them. Same
+            // mechanism as AST_DESTRUCTURE / AST_FOR_INDEXED.
+            if ast_tag(pattern) == AST_ENUM_PATTERN {
+                let binders = pattern[3]
+                let bi = 0
+                while bi < len(binders) {
+                    let bn = binders[bi]
+                    if bn == "_" {
+                    } else {
+                        if is_global(bn) == 0 {
+                            push(cg_locals, bn)
+                            cg_local_count = cg_local_count + 1
+                        }
+                    }
+                    bi = bi + 1
+                }
+            }
             if ast_tag(body) == AST_BLOCK {
                 collect_locals(body)
             }
@@ -988,6 +1027,33 @@ fn is_enum_name(name) {
     return 0
 }
 
+// R17A: variant entries now have shape [name, arity]; the parser
+// always emits this form (even legacy `enum X { A, B }` records as
+// [["A", 0], ["B", 0]]). The accessors below intentionally take an
+// already-extracted variant entry to keep the call sites compact.
+fn enum_variant_entry_name(vent) {
+    if vent == 0 { return "" }
+    // A list has type_of == 3. A string has type_of == 2. The
+    // simplest discriminator that works pre-self-host is len() — a
+    // [name, arity] pair always has len >= 2; we never push a 1-elem
+    // variant entry. Calling len() on a string returns the byte
+    // count, which is > 0 for all real variant names, so we have to
+    // distinguish via type_of.
+    if type_of(vent) == 3 {
+        if len(vent) >= 1 { return vent[0] }
+        return ""
+    }
+    return vent
+}
+
+fn enum_variant_entry_arity(vent) {
+    if vent == 0 { return 0 }
+    if type_of(vent) == 3 {
+        if len(vent) >= 2 { return vent[1] }
+    }
+    return 0
+}
+
 fn enum_variant_index(enum_name, variant_name) {
     let si = 0
     while si < cg_enum_count {
@@ -995,7 +1061,7 @@ fn enum_variant_index(enum_name, variant_name) {
             let variants = cg_enums[si][1]
             let vi = 0
             while vi < len(variants) {
-                if variants[vi] == variant_name {
+                if enum_variant_entry_name(variants[vi]) == variant_name {
                     return vi
                 }
                 vi = vi + 1
@@ -1004,6 +1070,132 @@ fn enum_variant_index(enum_name, variant_name) {
         si = si + 1
     }
     return 0 - 1
+}
+
+// R17A: arity of a sum-type variant (0 for nullary). Returns -1 if
+// the variant doesn't exist on the named enum.
+fn enum_variant_arity(enum_name, variant_name) {
+    let si = 0
+    while si < cg_enum_count {
+        if cg_enums[si][0] == enum_name {
+            let variants = cg_enums[si][1]
+            let vi = 0
+            while vi < len(variants) {
+                if enum_variant_entry_name(variants[vi]) == variant_name {
+                    return enum_variant_entry_arity(variants[vi])
+                }
+                vi = vi + 1
+            }
+        }
+        si = si + 1
+    }
+    return 0 - 1
+}
+
+// R17A: variant count of an enum (used for exhaustiveness).
+fn enum_variant_count(enum_name) {
+    let si = 0
+    while si < cg_enum_count {
+        if cg_enums[si][0] == enum_name {
+            return len(cg_enums[si][1])
+        }
+        si = si + 1
+    }
+    return 0
+}
+
+// R17A: declaration-order name of variant i of an enum (for warnings).
+fn enum_variant_name_at(enum_name, idx) {
+    let si = 0
+    while si < cg_enum_count {
+        if cg_enums[si][0] == enum_name {
+            let variants = cg_enums[si][1]
+            if idx >= 0 {
+                if idx < len(variants) {
+                    return enum_variant_entry_name(variants[idx])
+                }
+            }
+            return ""
+        }
+        si = si + 1
+    }
+    return ""
+}
+
+// R17A: exhaustiveness pass for match-on-sum-type. When at least one
+// arm pattern is an AST_ENUM_PATTERN for enum E we treat the match as
+// E-typed and demand coverage of every E variant unless a wildcard
+// arm is present. Missing variants emit a single-line WARN to stderr
+// (printed once per match) — non-fatal, as the task spec calls for.
+//
+// Implementation note: we walk arms left-to-right twice — once to
+// pick the enum name + collect covered variants, once just for the
+// wildcard check. Cheap; matches are tiny.
+fn cg_check_exhaustive(match_nd) {
+    let arms = match_nd[2]
+    let enum_name = ""
+    let has_wildcard = 0
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        let pat = arm[1]
+        let ptag = ast_tag(pat)
+        if ptag == AST_WILDCARD { has_wildcard = 1 }
+        if ptag == AST_TYPE_PATTERN { has_wildcard = 1 }
+        if ptag == AST_ENUM_PATTERN {
+            if enum_name == "" { enum_name = pat[1] }
+        }
+        ai = ai + 1
+    }
+    if enum_name == "" { return 0 }
+    if has_wildcard == 1 { return 0 }
+    let total = enum_variant_count(enum_name)
+    if total == 0 { return 0 }
+    // Collect covered tag indices.
+    let covered = list_new()
+    ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        let pat = arm[1]
+        if ast_tag(pat) == AST_ENUM_PATTERN {
+            let vidx = enum_variant_index(pat[1], pat[2])
+            if vidx >= 0 {
+                let dup = 0
+                let ci = 0
+                while ci < len(covered) {
+                    if covered[ci] == vidx { dup = 1 }
+                    ci = ci + 1
+                }
+                if dup == 0 { push(covered, vidx) }
+            }
+        }
+        ai = ai + 1
+    }
+    if len(covered) >= total { return 0 }
+    // Build a comma-separated list of missing variant names for the
+    // warning message — humans read this, not the compiler.
+    let missing = ""
+    let vi = 0
+    let first = 1
+    while vi < total {
+        let seen = 0
+        let ci = 0
+        while ci < len(covered) {
+            if covered[ci] == vi { seen = 1 }
+            ci = ci + 1
+        }
+        if seen == 0 {
+            if first == 1 {
+                missing = enum_variant_name_at(enum_name, vi)
+                first = 0
+            } else {
+                missing = missing + ", " + enum_variant_name_at(enum_name, vi)
+            }
+        }
+        vi = vi + 1
+    }
+    println("warning: non-exhaustive match on " + enum_name + " (missing: " + missing + ")")
+    return 0
 }
 
 fn get_lambda_caps(lname) {
@@ -3663,6 +3855,33 @@ fn gen_expr(nd) {
         return 0
     }
 
+    // R17A: sum-type variant constructor. Lowers to a fresh list whose
+    // first slot is the variant's declaration-order tag. e.g.
+    //   Option::Some(42)  ->  [0, 42]
+    //   Option::None      ->  [1]
+    if tag == AST_ENUM_CTOR {
+        let ec_enum = nd[1]
+        let ec_variant = nd[2]
+        let ec_args = nd[3]
+        let ec_tag = enum_variant_index(ec_enum, ec_variant)
+        out("    call _nova_list_new")
+        out("    push rax")
+        out("    mov rax, " + int_to_str(ec_tag))
+        out("    mov rsi, rax")
+        out("    mov rdi, [rsp]")
+        out("    call _nova_push")
+        let eci = 0
+        while eci < len(ec_args) {
+            gen_expr(ec_args[eci])
+            out("    mov rsi, rax")
+            out("    mov rdi, [rsp]")
+            out("    call _nova_push")
+            eci = eci + 1
+        }
+        out("    pop rax")
+        return 0
+    }
+
     if tag == AST_LAMBDA {
         let lname = nd[1]
         let lcaps = get_lambda_caps(lname)
@@ -3978,6 +4197,7 @@ fn gen_expr(nd) {
         let mexpr = nd[1]
         let marms = nd[2]
         let mend = new_label()
+        cg_check_exhaustive(nd)
         gen_expr(mexpr)
         out("    push rax")
         let mi = 0
@@ -4027,6 +4247,54 @@ fn gen_expr(nd) {
                 } }
                 out("    jmp " + mend)
                 out_label(mnxt_t)
+            } else { if mptag == AST_ENUM_PATTERN {
+                // R17A: sum-type pattern. Tag-check against
+                // `value[0]`, then bind each binder name to the
+                // corresponding payload slot (`value[1+i]`).
+                let mnxt_e = new_label()
+                let ep_enum = mpat[1]
+                let ep_variant = mpat[2]
+                let ep_binders = mpat[3]
+                let ep_tag = enum_variant_index(ep_enum, ep_variant)
+                out("    mov rax, [rsp]")
+                out("    mov rdi, rax")
+                out("    mov rsi, 0")
+                out("    call _nova_index")
+                out("    cmp rax, " + int_to_str(ep_tag))
+                out("    jne " + mnxt_e)
+                let ebi = 0
+                while ebi < len(ep_binders) {
+                    let bname = ep_binders[ebi]
+                    if bname == "_" {
+                    } else {
+                        out("    mov rax, [rsp]")
+                        out("    mov rdi, rax")
+                        out("    mov rsi, " + int_to_str(ebi + 1))
+                        out("    call _nova_index")
+                        if is_global(bname) == 1 {
+                            out("    mov [rip + _g_" + bname + "], rax")
+                        } else {
+                            let boff = local_offset(bname)
+                            out("    mov [rbp - " + int_to_str(boff) + "], rax")
+                        }
+                    }
+                    ebi = ebi + 1
+                }
+                if mhas_guard == 1 {
+                    gen_expr(marm[3])
+                    out("    test rax, rax")
+                    out("    jz " + mnxt_e)
+                }
+                out("    add rsp, 8")
+                if ast_tag(mbody) == AST_EXPR_STMT {
+                    gen_expr(mbody[1])
+                } else { if ast_tag(mbody) == AST_BLOCK {
+                    gen_block(mbody)
+                } else {
+                    gen_stmt(mbody)
+                } }
+                out("    jmp " + mend)
+                out_label(mnxt_e)
             } else {
                 let mnxt = new_label()
                 gen_expr(mpat)
@@ -4052,7 +4320,7 @@ fn gen_expr(nd) {
                 } }
                 out("    jmp " + mend)
                 out_label(mnxt)
-            } }
+            } } }
             mi = mi + 1
         }
         out("    add rsp, 8")
@@ -4616,6 +4884,7 @@ fn gen_stmt(nd) {
         let arms = nd[2]
         let end_lbl = new_label()
 
+        cg_check_exhaustive(nd)
         // Evaluate the match expression once, save on stack
         gen_expr(expr)
         out("    push rax")
@@ -4666,6 +4935,51 @@ fn gen_stmt(nd) {
                 }
                 out("    jmp " + end_lbl)
                 out_label(next_arm_t)
+            } else { if pat_tag == AST_ENUM_PATTERN {
+                // R17A: sum-type pattern (statement-position match).
+                // Same shape as the expression-position arm in gen_expr.
+                let next_arm_e = new_label()
+                let ep2_enum = pattern[1]
+                let ep2_variant = pattern[2]
+                let ep2_binders = pattern[3]
+                let ep2_tag = enum_variant_index(ep2_enum, ep2_variant)
+                out("    mov rax, [rsp]")
+                out("    mov rdi, rax")
+                out("    mov rsi, 0")
+                out("    call _nova_index")
+                out("    cmp rax, " + int_to_str(ep2_tag))
+                out("    jne " + next_arm_e)
+                let ebi2 = 0
+                while ebi2 < len(ep2_binders) {
+                    let bname2 = ep2_binders[ebi2]
+                    if bname2 == "_" {
+                    } else {
+                        out("    mov rax, [rsp]")
+                        out("    mov rdi, rax")
+                        out("    mov rsi, " + int_to_str(ebi2 + 1))
+                        out("    call _nova_index")
+                        if is_global(bname2) == 1 {
+                            out("    mov [rip + _g_" + bname2 + "], rax")
+                        } else {
+                            let boff2 = local_offset(bname2)
+                            out("    mov [rbp - " + int_to_str(boff2) + "], rax")
+                        }
+                    }
+                    ebi2 = ebi2 + 1
+                }
+                if has_guard == 1 {
+                    gen_expr(arm[3])
+                    out("    test rax, rax")
+                    out("    jz " + next_arm_e)
+                }
+                out("    add rsp, 8")
+                if ast_tag(body) == AST_BLOCK {
+                    gen_block(body)
+                } else {
+                    gen_stmt(body)
+                }
+                out("    jmp " + end_lbl)
+                out_label(next_arm_e)
             } else {
                 // Compare match value with pattern
                 let next_arm = new_label()
@@ -4691,7 +5005,7 @@ fn gen_stmt(nd) {
                 }
                 out("    jmp " + end_lbl)
                 out_label(next_arm)
-            } }
+            } } }
             i = i + 1
         }
 

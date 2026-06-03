@@ -1,5 +1,247 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R17A — sum types with payloads + match exhaustiveness (R16B.2)
+
+R17A closes the R16B.2 follow-up: NOVA now supports **sum types**
+(`enum Option { Some(int) None }`), **variant constructors** with the
+new `::` path syntax (`Option::Some(42)`), and **destructuring match
+arms** (`match v { Option::Some(n) => n  Option::None => -1 }`).
+Exhaustiveness checking ships in the same round as a non-fatal
+compile-time WARN — missing variants surface but don't break
+existing code.
+
+### What landed
+
+**Lexer** (`src/compiler/lexer.nova`):
+
+  - `TOK_COLONCOLON = 116` for the new `::` path separator. The
+    `:` handler peeks ahead one byte; `::` emits the new token,
+    `:` alone still emits `TOK_COLON`. No conflict with existing
+    code (the only `::` in the tree before R17A was a comment in
+    a WASI path doc).
+
+**AST** (`src/compiler/ast.nova`):
+
+  - `AST_ENUM_CTOR = 65` — variant constructor at use site.
+    Shape: `[tag, enum_name, variant_name, args_list]`.
+  - `AST_ENUM_PATTERN = 66` — variant pattern in a match arm.
+    Shape: `[tag, enum_name, variant_name, binders_list]`.
+  - Variant entries in `AST_ENUM_DECL` are now `[name, arity]`
+    pairs instead of bare name strings, so the parser can record
+    per-variant payload counts. Legacy `enum X { A, B }` declares
+    with arity 0 — unchanged at use site.
+
+**Parser** (`src/compiler/parser.nova`):
+
+  - `parse_enum()` extended: `Variant(int, str)` payload is
+    accepted; types are consumed via `par_skip_type()` (no static
+    type enforcement yet — that's a future round). Each variant is
+    stored as `[name, arity]`.
+  - `parse_primary()` extended: when an `IDENT` is followed by
+    `::`, we lower to `AST_ENUM_CTOR`. Parenthesised payload args
+    are parsed as expressions; nullary `Name::Variant` is allowed
+    (no `(...)`).
+  - `parse_match()` extended: when a pattern looks like
+    `IDENT :: IDENT (...)`, we hand-parse it as
+    `AST_ENUM_PATTERN`. Binders are identifiers (or `_`), not
+    arbitrary expressions, so this branch is kept separate from
+    the general `parse_expr()` pattern lane.
+
+**Codegen** (`src/compiler/codegen.nova`):
+
+  - `enum_variant_entry_name(vent)` / `enum_variant_entry_arity(vent)`
+    — tiny helpers that read `[name, arity]` pairs. Backward-compat:
+    a bare string entry (defensive) is treated as arity 0.
+  - `enum_variant_index(enum_name, variant_name)` updated to use the
+    new helpers; returns -1 if not found.
+  - `enum_variant_arity(enum_name, variant_name)` — new lookup.
+  - `enum_variant_count(enum_name)` — number of variants.
+  - `enum_variant_name_at(enum_name, idx)` — declaration-order name
+    of variant i (used by the exhaustiveness WARN message).
+  - `cg_check_exhaustive(match_nd)` — walks arms, collects covered
+    variant indices, emits `warning: non-exhaustive match on <Enum>
+    (missing: <V1>, <V2>)` via `println` if any variant is missing
+    and no wildcard (or type pattern) is present. Non-fatal.
+  - `gen_expr(AST_ENUM_CTOR)` — lowers to a fresh list whose first
+    slot is the variant tag, followed by the payload exprs.
+    `Option::Some(42)` → `[0, 42]`; `Option::None` → `[1]`.
+  - `gen_expr(AST_MATCH_STMT)` and `gen_stmt(AST_MATCH_STMT)` both
+    handle the new `AST_ENUM_PATTERN` arm: tag-check
+    `value[0] == ep_tag`, then bind each binder name to
+    `value[1+i]` via `_nova_index`. `_` binders are skipped. The
+    exhaustiveness check runs once per match at the top of each
+    handler.
+  - `collect_locals(AST_MATCH_STMT)` and
+    `collect_comp_vars(AST_MATCH_STMT)` register binder names from
+    enum patterns so the function prologue reserves stack slots —
+    same trick R16B used to fix the block-body bug.
+
+### Wire-level representation
+
+Every sum-type value is a tagged tuple:
+
+  - `Option::Some(42)`        -> `[0, 42]`     (tag 0 + 1 payload)
+  - `Option::None`            -> `[1]`         (tag 1 + 0 payloads)
+  - `Result::Ok(7)`           -> `[0, 7]`
+  - `Result::Err("oops")`     -> `[1, "oops"]`
+  - `Shape::Circle(3)`        -> `[0, 3]`
+  - `Shape::Rect(10, 20)`     -> `[1, 10, 20]`
+  - `Shape::Triangle(3,4,5)`  -> `[2, 3, 4, 5]`
+
+Tags are assigned in declaration order. Match arms compare
+`value[0]` against the tag and (for non-nullary variants) bind
+`value[1..1+arity]` to the named binders.
+
+### Tests
+
+`tests/test_sum_types.nova` (NEW, **27 assertions**):
+
+  - Construction: `Option::Some(42)` -> `[0, 42]`, `Option::None`
+    -> `[1]`, `Result::Ok(7)`, `Result::Err("oops")`,
+    `Shape::Triangle(3,4,5)`, `Shape::Rect(10,20)`.
+  - Match-as-statement: extracts Some payload, takes None arm.
+  - Match-as-expression: returns correct value from both arms.
+  - Multi-field destructure: Shape area / perimeter switch.
+  - Nested enum: `Tree::Leaf(99)` / `Tree::Node(1, 2)`.
+  - Catch-all `_` alongside enum patterns.
+  - Pattern binder `_` is ignored (matches by tag only).
+  - Result with string payload (mixed-type variants).
+
+`tests/test_exhaustiveness.nova` (NEW, **15 assertions**):
+
+  - Full coverage on Option / Result / Shape / Color (4-way): no
+    warning, runtime values check out.
+  - `_` catch-all suppresses warning even when variants missing.
+  - Reversed arm order: order doesn't affect coverage check.
+  - Multiple full-coverage matches in one expression
+    (expression-position regression check).
+  - Single-arm `_` catch-all for Option and Color.
+
+`tests/test_exhaustiveness_warn.nova` (NEW, **4 assertions**):
+
+  - Compiles with two `Option` matches missing `None` and two
+    `Shape` matches missing `Triangle`. Compile-time WARN fires
+    four times (visible in compiler output). Runtime asserts check
+    the documented fallthrough behaviour: when no arm matches, the
+    match expression yields 0 (the codegen's default empty
+    result) — which is exactly what the WARN is warning you about.
+
+Total NEW assertions: **46** across 3 test files (target was 35-40).
+
+### Compile-time WARN
+
+```
+$ bin/nova test.nova -o /tmp/out.s
+=== Nova Compiler Starting ===
+warning: non-exhaustive match on Option (missing: None)
+Compiled: test.nova -> /tmp/out.s
+```
+
+The WARN goes to stdout via `println` (the compiler has no stderr
+helper yet). Multiple missing variants are comma-separated:
+`(missing: Rect, Triangle)`. The check fires once per match — both
+gen_expr and gen_stmt paths call `cg_check_exhaustive(nd)` at the
+top, but a given match AST node is only visited by ONE of the two
+paths (expression-position vs statement-position).
+
+### Verification
+
+  - `make self-host` -> bit-identical (`diff stage2.s stage3.s`
+    empty).
+  - `bash tests/run_tests.sh` -> **164 passed / 0 failed / 6
+    skipped** (was 161/0/6 in R16B; +3 from
+    `test_sum_types`, `test_exhaustiveness`,
+    `test_exhaustiveness_warn`).
+  - `tests/test_enum.nova` (legacy nullary enums) still passes — the
+    variant-storage migration from bare strings to `[name, arity]`
+    pairs is fully backward compatible through the new
+    `enum_variant_entry_*` accessors.
+  - Cross-target smokes pass:
+    `smoke-macos` (Mach-O x86-64),
+    `smoke-windows` (PE32+ x86-64),
+    `smoke-winarm64` (PE32+ AArch64),
+    `smoke-wasm` (WASI module),
+    `smoke-mobile-android` (ELF ARM64). The cross-target backends
+    don't lower `AST_ENUM_CTOR` / `AST_ENUM_PATTERN` yet (their
+    hello programs don't use sum types) — they continue treating
+    `AST_ENUM_DECL` as a no-op, so existing programs keep
+    building.
+
+### Sample NOVA program
+
+```nova
+enum Option {
+    Some(int)
+    None
+}
+
+enum Shape {
+    Circle(int)
+    Rect(int, int)
+    Triangle(int, int, int)
+}
+
+fn unwrap_or(opt, fallback) {
+    return match opt {
+        Option::Some(v) => v
+        Option::None => fallback
+    }
+}
+
+fn area(s) {
+    return match s {
+        Shape::Circle(r) => r * r * 3
+        Shape::Rect(w, h) => w * h
+        Shape::Triangle(a, b, c) => (a + b + c) / 2
+    }
+}
+
+let r = unwrap_or(Option::Some(42), -1)        // -> 42
+let n = unwrap_or(Option::None, -1)             // -> -1
+let a = area(Shape::Rect(5, 6))                 // -> 30
+```
+
+### Scope discipline
+
+R17A shipped BOTH sum types and exhaustiveness in the same round
+(the spec budgeted "if both ship cleanly, even better"). Sum types
+were the load-bearing piece; exhaustiveness fell out almost for
+free since the variant table was already needed for tag lookup.
+
+### R17A.2 follow-up list
+
+  - **Cross-target codegen for sum types.** ARM64 Linux,
+    Windows ARM64, and WASM don't yet lower `AST_ENUM_CTOR` /
+    `AST_ENUM_PATTERN`. Their AST walkers fall through to the
+    unknown-tag case (returning 0 from `gen_expr`). Hello programs
+    on those targets don't use sum types, but a user-supplied
+    `--target=arm64` build that calls `Option::Some(42)` would emit
+    a 0 instead of a real list. Lowering them mirrors the x64 path:
+    `_nova_list_new` + `_nova_push tag` + `_nova_push args[i]`.
+  - **Static type checking on variant payloads.** The parser
+    accepts `Variant(int, str)` but only records the arity (2),
+    not the types. Callers can pass anything — `Option::Some("x")`
+    compiles and runs. A type-aware pass would catch this at
+    compile time.
+  - **Exhaustiveness for nested patterns.** `match (a, b) {
+    (Some(_), None) => ...; ... }` (tuple-of-enums) isn't
+    supported; only top-level enum patterns are checked. The match
+    expression itself still works if there's a `_` catch-all.
+  - **WARN -> ERROR upgrade flag.** A `--strict` (or
+    `--warnings-as-errors`) flag would let CI gate on
+    exhaustiveness. Currently the WARN is informational only.
+  - **`stderr` for diagnostics.** All warnings currently go to
+    stdout. A `_nova_eprintln` runtime helper that writes to fd 2
+    would cleanly separate compiler diagnostics from compiled-
+    program output. Useful when the compiler is invoked in a
+    pipeline.
+  - **Variant tag injection into match-on-int.** Currently `match
+    v[0] { 0 => ... }` is the byte-saving way to discriminate
+    without binding payloads. Compiler could detect this idiom and
+    suggest the enum-pattern form for clarity.
+
+---
+
 ## R17F — DAP instruction-level stepping (21st DAP capability)
 
 R17F lights up the IDE feature most useful to systems-level NOVA

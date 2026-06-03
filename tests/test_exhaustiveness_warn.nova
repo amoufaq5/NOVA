@@ -1,0 +1,52 @@
+// R17A: exhaustiveness WARN integration.
+//
+// This file deliberately contains non-exhaustive `match` expressions
+// against a sum type. Compiling it must emit a compile-time WARN of
+// the form:
+//   warning: non-exhaustive match on Option (missing: None)
+//   warning: non-exhaustive match on Shape (missing: Triangle)
+//
+// The test harness does not capture compile-time output directly, but
+// the asserts below verify the runtime fallthrough behaviour the WARN
+// is telling you about: when no arm matches, the match expression
+// yields 0 (the codegen's "default empty result"). That's the bug the
+// WARN exists to catch — silent zero where you expected a real value.
+
+enum Option {
+    Some(int)
+    None
+}
+
+enum Shape {
+    Circle(int)
+    Rect(int, int)
+    Triangle(int, int, int)
+}
+
+// Non-exhaustive: missing `Option::None`. Compiling triggers WARN.
+// Calling with Some(7) hits the covered arm — result is 7.
+let r1 = match Option::Some(7) {
+    Option::Some(n) => n
+}
+assert(r1 == 7, "non-exhaustive but value covered -> 7")
+
+// Calling with None falls through every arm — result is 0.
+let r2 = match Option::None {
+    Option::Some(n) => n
+}
+assert(r2 == 0, "uncovered None falls through to 0 (the WARN's warning)")
+
+// Non-exhaustive: missing `Shape::Triangle`. Compiling triggers WARN.
+let r3 = match Shape::Rect(4, 5) {
+    Shape::Circle(r) => r
+    Shape::Rect(w, h) => w + h
+}
+assert(r3 == 9, "covered Rect -> 9")
+
+let r4 = match Shape::Triangle(1, 2, 3) {
+    Shape::Circle(r) => r
+    Shape::Rect(w, h) => w + h
+}
+assert(r4 == 0, "uncovered Triangle falls through to 0")
+
+println("Non-exhaustive match runtime behaviour confirmed!")

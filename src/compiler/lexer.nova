@@ -112,6 +112,10 @@ let TOK_MIND = 112
 let TOK_SOUL = 113
 let TOK_SYSTEM = 114
 let TOK_IMPL = 115
+// Sum types: `Option::Some(42)`, `match v { Option::Some(n) => n  None => 0 }`.
+// `::` is the path separator that distinguishes a sum-type variant from a
+// plain field access (which would be lexed as TOK_DOT). Introduced in R17A.
+let TOK_COLONCOLON = 116
 
 // --- Lexer State ---
 let lex_src = ""
@@ -692,7 +696,16 @@ fn lex_all() {
                     else { if c == 91 { lex_advance(); emit_tok(TOK_LBRACKET, "[") }
                     else { if c == 93 { lex_advance(); emit_tok(TOK_RBRACKET, "]") }
                     else { if c == 44 { lex_advance(); emit_tok(TOK_COMMA, ",") }
-                    else { if c == 58 { lex_advance(); emit_tok(TOK_COLON, ":") }
+                    else { if c == 58 {
+                        lex_advance()
+                        if lex_peek() == 58 {
+                            // `::` — sum type variant path (R17A).
+                            lex_advance()
+                            emit_tok(TOK_COLONCOLON, "::")
+                        } else {
+                            emit_tok(TOK_COLON, ":")
+                        }
+                    }
                     else { if c == 59 { lex_advance(); emit_tok(TOK_SEMI, ";") }
                     else { if c == 38 {
                         lex_advance()

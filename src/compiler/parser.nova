@@ -175,6 +175,7 @@ fn token_type_name(t) {
     if t == 82 { return "%=" }
     if t == 83 { return "?" }
     if t == 84 { return "do" }
+    if t == 116 { return "::" }
     return concat("token(", concat(int_to_str(t), ")"))
 }
 
@@ -349,6 +350,30 @@ fn parse_primary() {
     }
     if t == TOK_IDENT {
         let tok = par_advance()
+        // R17A: sum-type variant path `Name::Variant(args)`. Lower to
+        // an enum-ctor AST node so codegen can emit `[tag, ...args]`.
+        // Nullary case `Name::Variant` (no following `(`) lowers to
+        // `[tag]` only.
+        if par_peek_type() == TOK_COLONCOLON {
+            par_advance()
+            let vtok = par_expect(TOK_IDENT)
+            let ctor_args = list_new()
+            if par_peek_type() == TOK_LPAREN {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN {
+                    par_advance()
+                } else {
+                    push(ctor_args, parse_expr())
+                    while par_peek_type() == TOK_COMMA {
+                        par_advance()
+                        if par_peek_type() == TOK_RPAREN { break }
+                        push(ctor_args, parse_expr())
+                    }
+                    par_expect(TOK_RPAREN)
+                }
+            }
+            return ast_enum_ctor(tok[1], vtok[1], ctor_args)
+        }
         return ast_ident(tok[1])
     }
     if t == TOK_LPAREN {
@@ -1405,7 +1430,53 @@ fn parse_match() {
             }
             pattern = ast_type_pattern(tp_id)
         } else {
-            pattern = parse_expr()
+            // R17A: detect sum-type variant pattern `Name::Variant(binders)`.
+            // Binders are identifiers (or `_` for don't-care), not arbitrary
+            // expressions, so we hand-parse this case. Other patterns fall
+            // through to the general `parse_expr` lane (which still handles
+            // integer / string / ident value patterns plus the regular
+            // `Name::Variant(args)` constructor lowering — but for ctor
+            // *patterns* in a match arm the args are binder names, so we
+            // need this dedicated branch).
+            if par_peek_type() == TOK_IDENT {
+                if par_peek_at_type(1) == TOK_COLONCOLON {
+                    let n1 = par_advance()
+                    par_advance()
+                    let n2 = par_expect(TOK_IDENT)
+                    let binders = list_new()
+                    if par_peek_type() == TOK_LPAREN {
+                        par_advance()
+                        if par_peek_type() == TOK_RPAREN {
+                            par_advance()
+                        } else {
+                            if par_peek_type() == TOK_UNDERSCORE {
+                                par_advance()
+                                push(binders, "_")
+                            } else {
+                                let b1 = par_expect(TOK_IDENT)
+                                push(binders, b1[1])
+                            }
+                            while par_peek_type() == TOK_COMMA {
+                                par_advance()
+                                if par_peek_type() == TOK_RPAREN { break }
+                                if par_peek_type() == TOK_UNDERSCORE {
+                                    par_advance()
+                                    push(binders, "_")
+                                } else {
+                                    let bk = par_expect(TOK_IDENT)
+                                    push(binders, bk[1])
+                                }
+                            }
+                            par_expect(TOK_RPAREN)
+                        }
+                    }
+                    pattern = ast_enum_pattern(n1[1], n2[1], binders)
+                } else {
+                    pattern = parse_expr()
+                }
+            } else {
+                pattern = parse_expr()
+            }
         } }
         let mg = 0
         if par_peek_type() == TOK_IF {
@@ -2242,7 +2313,33 @@ fn parse_enum() {
                 par_advance()
             } else {
                 let v = par_expect(TOK_IDENT)
-                push(variants, v[1])
+                // R17A: sum-type payload. `Variant(int, str)` declares
+                // a variant with arity 2. Skip type identifiers — we
+                // don't yet enforce static types but the parser must
+                // consume the type list so the lexer position advances.
+                let arity = 0
+                if par_peek_type() == TOK_LPAREN {
+                    par_advance()
+                    if par_peek_type() == TOK_RPAREN {
+                        par_advance()
+                    } else {
+                        arity = 1
+                        par_skip_type()
+                        while par_peek_type() == TOK_COMMA {
+                            par_advance()
+                            if par_peek_type() == TOK_RPAREN {
+                            } else {
+                                arity = arity + 1
+                                par_skip_type()
+                            }
+                        }
+                        par_expect(TOK_RPAREN)
+                    }
+                }
+                let vent = list_new()
+                push(vent, v[1])
+                push(vent, arity)
+                push(variants, vent)
             }
         }
     }

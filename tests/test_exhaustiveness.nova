@@ -1,0 +1,146 @@
+// R17A: exhaustiveness checking on `match` against a sum type.
+//
+// When a match arm uses an `Enum::Variant(...)` pattern the compiler
+// records the discriminated enum and verifies every variant is
+// covered unless a `_` catch-all is present. Missing variants emit a
+// compile-time WARN (non-fatal) so existing code keeps building.
+//
+// This file exercises the runtime side: matches that should NOT warn
+// either cover every variant or have a `_` catch-all, and the values
+// they extract are checked at runtime. The compile-time warning
+// itself is verified by the dedicated shell harness alongside this
+// file — search for `warning: non-exhaustive` after compiling
+// `test_exhaustiveness_warn.nova`.
+
+enum Option {
+    Some(int)
+    None
+}
+
+enum Result {
+    Ok(int)
+    Err(str)
+}
+
+enum Shape {
+    Circle(int)
+    Rect(int, int)
+    Triangle(int, int, int)
+}
+
+// --- Full coverage: no warning expected ---
+
+let r1 = match Option::Some(5) {
+    Option::Some(n) => n
+    Option::None => -1
+}
+assert(r1 == 5, "Option::Some full coverage")
+
+let r2 = match Option::None {
+    Option::Some(n) => n
+    Option::None => 42
+}
+assert(r2 == 42, "Option::None full coverage")
+
+let r3 = match Result::Ok(7) {
+    Result::Ok(v) => v
+    Result::Err(m) => 0
+}
+assert(r3 == 7, "Result full coverage Ok")
+
+let r4 = match Result::Err("nope") {
+    Result::Ok(v) => v
+    Result::Err(m) => -1
+}
+assert(r4 == -1, "Result full coverage Err")
+
+let r5 = match Shape::Circle(3) {
+    Shape::Circle(r) => r
+    Shape::Rect(w, h) => w + h
+    Shape::Triangle(a, b, c) => a + b + c
+}
+assert(r5 == 3, "Shape full coverage Circle")
+
+let r6 = match Shape::Rect(4, 5) {
+    Shape::Circle(r) => r
+    Shape::Rect(w, h) => w + h
+    Shape::Triangle(a, b, c) => a + b + c
+}
+assert(r6 == 9, "Shape full coverage Rect")
+
+let r7 = match Shape::Triangle(1, 2, 3) {
+    Shape::Circle(r) => r
+    Shape::Rect(w, h) => w + h
+    Shape::Triangle(a, b, c) => a + b + c
+}
+assert(r7 == 6, "Shape full coverage Triangle")
+
+// --- Catch-all `_`: no warning even when variants missing ---
+
+let r8 = match Option::Some(99) {
+    Option::Some(n) => n
+    _ => 0
+}
+assert(r8 == 99, "_ catch-all suppresses warning")
+
+let r9 = match Shape::Triangle(2, 3, 4) {
+    Shape::Circle(r) => r
+    _ => -1
+}
+assert(r9 == -1, "_ catches non-Circle")
+
+// --- Type pattern catch-all (is list/int/etc.) also acts as catch-all ---
+
+let r10 = match Result::Ok(11) {
+    Result::Ok(v) => v
+    _ => 0
+}
+assert(r10 == 11, "Ok matched with catch-all rest")
+
+// --- Many variants covered: regression check that we don't false-positive ---
+
+enum Color {
+    Red(int)
+    Green(int)
+    Blue(int)
+    Alpha(int)
+}
+
+let c = Color::Green(128)
+let cv = match c {
+    Color::Red(x) => x
+    Color::Green(x) => x
+    Color::Blue(x) => x
+    Color::Alpha(x) => x
+}
+assert(cv == 128, "Color 4-way full coverage")
+
+// --- match in expression position with full coverage ---
+
+let total = (match Option::Some(10) { Option::Some(v) => v  Option::None => 0 }) +
+            (match Option::None      { Option::Some(v) => v  Option::None => 5 })
+assert(total == 15, "expr-position full coverage sums")
+
+// --- Single-arm match with catch-all (not exhaustive but `_` suppresses) ---
+
+let r11 = match Option::Some(7) { _ => 1 }
+assert(r11 == 1, "single arm _ catch-all")
+
+let r12 = match Color::Blue(40) { _ => 99 }
+assert(r12 == 99, "single arm _ for Color")
+
+// --- Reordered arm patterns: order doesn't matter for coverage ---
+
+let r13 = match Option::None {
+    Option::None => 100
+    Option::Some(n) => n
+}
+assert(r13 == 100, "reversed arm order still covers")
+
+// Note: a test that DOES trigger an exhaustiveness warning (e.g.
+// `match Option::Some(5) { Option::Some(n) => n }`) intentionally
+// lives in a separate harness — the warn is emitted at compile time
+// to stdout. Run `bin/nova examples/exhaustiveness_warn.nova` to see
+// `warning: non-exhaustive match on Option (missing: None)`.
+
+println("All exhaustiveness positive-case tests passed!")
