@@ -29,6 +29,10 @@ using only the Python standard library. Supports:
     * `textDocument/inlayHint` (parameter-name ghost text at call
       sites + literal-RHS type hints on `let` bindings; reuses R5F's
       `find_definition` to resolve the called fn's declared params)
+    * `textDocument/codeLens` + `codeLens/resolve` (annotations above
+      top-level declarations — "N references" on fn / let / const,
+      "N variants used" on enum, with an optional "/ tested" marker
+      when a `tests/test_*.nova` mentions the declaration)
 
 Run with::
 
@@ -56,6 +60,7 @@ from nova_lsp.call_hierarchy import (
     outgoing_calls,
     prepare_call_hierarchy,
 )
+from nova_lsp.code_lens import compute_code_lenses, resolve_code_lens
 from nova_lsp.hover_docs import (
     extract_doc_comment,
     extract_doc_comment_from_text,
@@ -1866,6 +1871,99 @@ def handle_inlay_hints(
 
 
 # ---------------------------------------------------------------------------
+# Code lens — `textDocument/codeLens` + `codeLens/resolve`.
+#
+# Renders a clickable summary line above each top-level declaration —
+# "N references" on fn / let / const, "N variants used" on enum, with
+# an optional "/ tested" suffix when a tests/test_*.nova mentions the
+# decl. Reference counts share R8C's workspace symbol index + R9C's
+# reference-finding shape; see `code_lens.py` for the per-decl
+# breakdown.
+# ---------------------------------------------------------------------------
+
+
+def _warm_workspace_for_code_lens(state: ServerState) -> List[str]:
+    """Make sure the workspace symbol index has seen the project root
+    and every open buffer; return the union of open-doc paths +
+    transitive import closures so cross-file reference counts include
+    files outside the indexed workspace root.
+
+    Mirrors `_warm_workspace_for_call_hierarchy` — same warming dance,
+    different downstream consumer.
+    """
+    overrides = _text_overrides(state)
+    if state.root_path:
+        state.workspace_symbols.index_workspace_root(state.root_path)
+    extra_paths: List[str] = []
+    seen: Set[str] = set()
+    crawled_roots: Set[str] = set()
+    if state.root_path:
+        crawled_roots.add(os.path.abspath(state.root_path))
+    for d in state.documents.values():
+        p = uri_to_path(d.uri)
+        if not p:
+            continue
+        abs_p = os.path.abspath(p)
+        if abs_p not in seen:
+            extra_paths.append(abs_p)
+            seen.add(abs_p)
+        state.workspace_symbols.index_text(p, d.text)
+        parent_dir = os.path.dirname(abs_p)
+        if parent_dir and parent_dir not in crawled_roots:
+            state.workspace_symbols.index_workspace_root(parent_dir)
+            crawled_roots.add(parent_dir)
+        for entry in walk_imports(
+            abs_p,
+            state.file_cache,
+            text_overrides=overrides,
+        ):
+            if entry.path not in seen:
+                extra_paths.append(entry.path)
+                seen.add(entry.path)
+    return extra_paths
+
+
+def handle_code_lens(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return CodeLens[] for the document in `params.textDocument`.
+
+    Warms the workspace index + import closure (so a cross-file
+    caller counted by the lens is actually visible) before delegating
+    to `code_lens.compute_code_lenses`. Returns an empty list when
+    the document isn't open in the server — the client should send
+    `didOpen` before requesting lenses.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    doc = state.documents.get(uri)
+    if not doc:
+        return []
+    extra_paths = _warm_workspace_for_code_lens(state)
+    return compute_code_lenses(
+        uri=doc.uri,
+        doc_text=doc.text,
+        file_cache=state.file_cache,
+        workspace_index=state.workspace_symbols,
+        extra_paths=extra_paths,
+        text_overrides=_text_overrides(state),
+        workspace_root=state.root_path,
+    )
+
+
+def handle_code_lens_resolve(
+    state: ServerState, params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Resolve a single CodeLens.
+
+    Pass-through in the current implementation (we eagerly populate
+    `command` in `handle_code_lens`). Declared in `server_capabilities`
+    so the client wire shape stays compatible with future rounds that
+    might shift expensive resolution out of the initial response.
+    """
+    return resolve_code_lens(params or {})
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher.
 # ---------------------------------------------------------------------------
 
@@ -1912,6 +2010,7 @@ def server_capabilities() -> Dict[str, Any]:
         },
         "callHierarchyProvider": True,
         "inlayHintProvider": {"resolveProvider": False},
+        "codeLensProvider": {"resolveProvider": True},
         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
     }
 
@@ -2056,6 +2155,14 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "textDocument/inlayHint":
         result = handle_inlay_hints(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/codeLens":
+        result = handle_code_lens(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "codeLens/resolve":
+        result = handle_code_lens_resolve(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 

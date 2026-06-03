@@ -1,5 +1,298 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R18A — byte mul-acc SIMD primitives (close R17C LK ceiling)
+
+R18A closes R17C's honestly-reported 0.80x full-LK ceiling. R17C
+documented the root cause: `simd_sad_u8` solves absolute-difference
+sums on UNSIGNED bytes, but LK's 5 accumulator kernels (Sum Ix*Ix,
+Sum Iy*Iy, Sum Ix*Iy, Sum Ix*It, Sum Iy*It) are byte multiply-add
+on SIGNED gradients. The right primitive is a `pmaddubsw`-shaped
+mul-acc builtin. R18A ships two:
+
+  - `simd_mul_acc_byte_signed_byte(a_u8, b_i8, n)`   -> Sum a[i]*b[i]
+  - `simd_mul_acc_signed_signed_byte(a_i8, b_i8, n)` -> Sum a[i]*b[i]
+
+The first matches Intel's pmaddubsw asymmetric shape (pixel * gradient
+correlation kernels); the second is a direct fit for the LK accumulator
+math since Ix, Iy, It are all signed gradients of a u8 image.
+
+### What landed
+
+**Codegen** (`src/compiler/codegen.nova`, +~370 lines):
+
+  - `is_builtin_fn` extended with both new names — they're always
+    resolvable by name.
+  - `is_inline_builtin_fn` extended with both names for Linux x86-64
+    so the inner-loop call-site overhead is paid only once per
+    block (vs. ~625 calls/pixel * 5 kernels in a tight inner loop).
+  - `emit_inline_simd(name)` handles both builtins via AVX2 with
+    fresh `new_label()` per call site:
+      * 16 bytes per vector iter
+      * `vpmovzxbw ymm0, [rdi]` (byte_signed) or
+        `vpmovsxbw ymm0, [rdi]` (signed_signed) — widen a-bytes
+        to 16 i16 lanes in ymm
+      * `vpmovsxbw ymm1, [rsi]` — widen b-bytes (signed for both
+        primitives) to 16 i16 lanes
+      * `vpmaddwd ymm3, ymm0, ymm1` — 8 i32 pair-sums
+        (a[2i]*b[2i] + a[2i+1]*b[2i+1])
+      * `vpaddd ymm2, ymm2, ymm3` — accumulate
+      * After loop: `vextracti128 / vpaddd / vphaddd / vphaddd /
+        vmovd / movsxd` -> scalar i64 in rax
+      * Tail (n % 16): scalar `movzx r8d` (or `movsx r8d`) +
+        `movsx r9d` + `imul r8d, r9d` + `movsxd r9, r8d` + `add rax, r9`
+  - Runtime labels emitted for both builtins so fn-pointer callers
+    and the macOS/Windows x86-64 fallback resolve correctly.
+    `cg_target == 0` uses the AVX2 sequence; other x86-64 targets
+    use scalar 1-byte-at-a-time imul.
+  - ARM64 Linux dispatch in `arm_gen_call`; helper bodies:
+      * `_nova_arm_simd_mul_acc_byte_signed_byte`
+      * `_nova_arm_simd_mul_acc_signed_signed_byte`
+    Each processes 8 bytes per iter via `ldr d0,[x3],#8` (load 8
+    bytes), `ushll v0.8h, v0.8b, #0` (zero-extend, for u8 a in
+    byte_signed) or `sshll v0.8h, v0.8b, #0` (sign-extend, for i8 a
+    in signed_signed), `sshll v1.8h, v1.8b, #0` (sign-extend b),
+    then `smull v3.4s, v0.4h, v1.4h` + `smull2 v4.4s, v0.8h, v1.8h`
+    accumulated into a 4x i32 running sum. Tail scalar with
+    `ldrb`/`ldrsb` + `mul` + `sxtw`.
+  - ARM64 Windows: `_nova_warm_simd_mul_acc_*` helpers (same NEON
+    sequence, PE labels). Dispatch in `warm_gen_call`.
+  - WASM v128 (`wasm_gen_rt_simd`): two new `$simd_mul_acc_*`
+    functions. 16 bytes per iter:
+      * `v128.load` for a + b
+      * `i16x8.extend_low_i8x16_u` (byte_signed) or
+        `i16x8.extend_low_i8x16_s` (signed_signed) for a-low-half
+      * `i16x8.extend_low_i8x16_s` for b-low-half
+      * `i32x4.dot_i16x8_s` — 4 i32 pair-sums
+      * `i32x4.add` to accumulate
+      * Same for high halves via `i16x8.extend_high_*`
+      * Horizontal-sum via `i32x4.extract_lane 0..3` + i32.add chain
+      * Tail scalar: `i32.load8_u`/`i32.load8_s` for a-byte,
+        `i32.load8_s` for b-byte, `i32.mul`, `i32.add` accumulate
+
+**Tests** (`tests/test_simd_mul_acc.nova`, NEW, 35 assertions):
+
+  - All-ones / all-zeros baselines.
+  - Known-multiply (5*7 over 32 bytes -> 1120).
+  - Asymmetric negative b (a=200 u8, b=-50 i8 -> -320000).
+  - Boundary u8/i8 (255 * -128 -> -1044480; 255 * 127 -> 1036320).
+  - Both-negative i8 (`-10 * -3` -> 960; `-128 * -128` -> 524288).
+  - n_bytes = 0 short-circuits (no segfault).
+  - Tail-only n=1, 5, 15 hit scalar path only.
+  - Chunk-only n=16, 32, 48, 64 hit vector loop only.
+  - Multi-chunk + tail n=17, 33, 100 hit both.
+  - 3 back-to-back inlined calls (fresh-label verification).
+  - 100-iter tight loop accumulator (5*4*64 * 100 = 128000).
+  - Large 16387-byte buffer (1024 chunks + 3 tail).
+  - Pseudo-textured pattern vs scalar oracle (full path equivalence).
+
+### Calling convention + ABI
+
+Both builtins use System V on x86-64 (rdi=a_ptr, rsi=b_ptr,
+rdx=n_bytes). AAPCS on ARM64 (x0=a, x1=b, x2=n). Returns int64 in
+rax / x0. Clobbers: ymm0..ymm3 (Linux x86-64), v0..v4 (ARM64),
+acc + va + vb v128 locals (WASM), rax/rcx/r8/r9 (x86-64 scratch).
+
+### Why NOT pmaddubsw
+
+The task spec mentions Intel's pmaddubsw as the natural shape, but
+that instruction's i16 saturation breaks bit-identical correctness
+for the LK accumulator math: 255 * 127 = 32385 fits in i16, but the
+PAIR sum (32385 + 32385) overflows i16 and saturates to 32767. Since
+the test asserts bit-identical to scalar `Sum a[i]*b[i]`, the safe
+lowering is `vpmovzxbw / vpmovsxbw + vpmaddwd`: byte -> i16 widening
+first (no saturation risk), then i16 * i16 -> i32 pair-sum (i32
+trivially holds 2 * 32767^2 < 2^31). This is more instructions per
+iter than pmaddubsw, but bit-identical to scalar — the right
+correctness/perf trade for a primitive intended for the LK kernel
+where bit-identicality is required.
+
+### Verification
+
+  - All 35 assertions pass on Linux x86-64 (AVX2 path).
+  - Full NOVA test suite: 165 passed / 0 failed / 6 skipped (was
+    164/0/6 from R17A baseline; +1 is the new test_simd_mul_acc).
+  - Self-host bit-identical: `make self-host` -> stage2.s == stage3.s
+    (empty diff).
+  - Cross-target builds clean:
+      * Linux x86-64 (AVX2 inline): `make bin/nova` -> green
+      * macOS x86-64 (scalar fallback): `make cross-macos` -> green
+      * Windows x86-64 (scalar fallback): `make cross-windows` -> green
+      * Windows ARM64 (NEON helper): `make smoke-winarm64` -> green
+      * ARM64 Linux (NEON helper, via clang -target aarch64-linux-gnu):
+        compiles + assembles clean
+      * WASM (v128 + i32x4.dot_i16x8_s): `make smoke-wasm` -> green;
+        `wat2wasm` validates the new $simd_mul_acc_* WAT bodies;
+        smoke run under wasmtime exits 0 with correct r1/r2.
+
+### CE wire-in deferred (R18A.2 follow-up)
+
+The primitive is shipped + tested + cross-target-clean. Wiring into
+CE's `lk_optical_flow_u8_simd_inner` requires (a) packing ix/iy/it
+into i8 byte buffers per pixel (the inner loop currently computes
+them via per-cell `_lk_ix` / `_lk_iy` strided loads), (b) calling
+`simd_mul_acc_signed_signed_byte` 5x per pixel to replace the
+WIN^2 scalar accumulator inner loop, (c) preserving bit-identical
+output. R14B's precedent: ship the primitive in its own round, wire
+into CE in the next. R17C's territory caveat (the R17C round just
+shipped the packed-byte LK path) — coordination via R18A.2.
+
+### Files touched
+
+  - `src/compiler/codegen.nova` — +~370 lines (2 builtins x 3 paths:
+    inline AVX2, runtime labels x86-64, ARM64 helper + dispatch,
+    Windows ARM64 helper + dispatch, WASM WAT body).
+  - `tests/test_simd_mul_acc.nova` — NEW, 35 assertions.
+  - `NEXT_SESSION.md` — this entry.
+  - `README.md` — builtin list updated.
+
+---
+
+## R18F — LSP code lens (14th LSP capability)
+
+R18F adds **code lens** (`textDocument/codeLens` +
+`codeLens/resolve`) to `nova-lsp`, taking the capability count from
+13 -> 14. Code lenses render clickable summary annotations on a
+synthetic line **above** each top-level declaration: `"N references"`
+on top-level `fn`, `"N readers"` on `let` / `const`, and
+`"N variants used"` on `enum`. When a `tests/test_*.nova` file
+mentions the declaration's name (whole-word, comments + strings
+masked), the title gains a `" / tested"` suffix. Less invasive than
+inlay hints (lives above the line, doesn't shift column positions)
+and clickable to jump to the references panel.
+
+### What landed
+
+**New module** `tools/nova-lsp/nova_lsp/code_lens.py` (~450 lines)
+exposing:
+
+  * `compute_code_lenses(uri, doc_text, file_cache, workspace_index,
+    extra_paths, text_overrides, workspace_root) -> CodeLens[]` —
+    one lens per top-level declaration in source order.
+  * `resolve_code_lens(lens) -> CodeLens` — lazy-resolution
+    pass-through (eagerly resolved in `compute_code_lenses`;
+    schema retained for forward compatibility).
+  * `scan_declarations(text)` — parse out top-level `fn` / `let` /
+    `const` / `enum` decls at column zero. Mirrors
+    `workspace_symbols.scan_symbols` for fn / let / const and
+    adds `enum` (R8C's symbol picker doesn't surface those).
+  * `count_workspace_references(name, def_path, def_line, ...)` —
+    sum every `\bname\b` reference across the workspace, skipping
+    the declaration line so an unused fn shows `"0 references"`
+    rather than `"1 reference"`. Comments + strings masked.
+  * `count_workspace_enum_variants_used(enum_name, ...)` — count
+    DISTINCT variants of `enum_name` accessed via
+    `Name::Variant` (R17A) or `Name.Variant` (pre-R17A enums),
+    filtered to variants actually declared on the enum so a stray
+    `Name.something` doesn't inflate the count.
+  * `has_corresponding_test(name, workspace_root)` — lightweight
+    grep over `tests/test_*.nova` for the declaration's name.
+
+**Server wiring**: `server.py` imports `compute_code_lenses` +
+`resolve_code_lens`, adds `handle_code_lens` and
+`handle_code_lens_resolve` handlers (the former warms the
+workspace index + open-buffer import closures via the new
+`_warm_workspace_for_code_lens` helper that mirrors
+`_warm_workspace_for_call_hierarchy`), advertises
+`"codeLensProvider": {"resolveProvider": True}` in
+`server_capabilities()`, and dispatches `textDocument/codeLens` +
+`codeLens/resolve`.
+
+**Lens shape per LSP spec**:
+```json
+{
+  "range": {"start": {"line": N, "character": 0},
+            "end":   {"line": N, "character": 0}},
+  "command": {
+    "title": "3 references",
+    "command": "editor.action.showReferences",
+    "arguments": [uri, {"line": N, "character": col}, []]
+  },
+  "data": {"uri": ..., "name": ..., "kind": ..., "count": ...,
+           "tested": ..., "line": ...}
+}
+```
+
+The `command.command` is wired to VS Code's well-known
+`editor.action.showReferences` action; clicking the lens opens the
+references panel for the decl's position. `data` mirrors the lens
+body so a future lazy-resolution round can rebuild the title
+without re-counting.
+
+### Tests
+
+`tools/nova-lsp/tests/test_code_lens.py` (NEW, 64 assertions):
+
+  * `scan_declarations`: fn / let / const / enum picked up at
+    column zero; indented locals filtered; empty file -> empty list.
+  * `_ident_regex` whole-word semantics: `foo` doesn't match
+    `foobar` or `myfoo`.
+  * `_count_references_in_text`: skip-line excludes declaration;
+    comments + strings masked.
+  * `_enum_declared_variants`: single-line and multi-line
+    payload-bearing enum bodies.
+  * `count_workspace_references` single-file (3 calls) and
+    cross-file (declarer + importer + 2 cross-file calls).
+  * `count_workspace_enum_variants_used`: unique variants only;
+    `Name.Bogus` for non-declared variants filtered.
+  * `has_corresponding_test`: positive, negative, missing-dir.
+  * `build_code_lens`: shape (range, command title, command,
+    arguments, data); pluralization (1 reference vs 3 references);
+    tested marker.
+  * `compute_code_lenses` end-to-end:
+      - fn referenced 3 times -> "3 references" lens
+      - unreferenced entry-point fn -> "0 references"
+      - top-level let read 2 times -> "2 readers"
+      - enum with 2 distinct variants used -> "2 variants used"
+      - multi-file workspace with cross-file refs
+      - empty file -> no lenses
+      - test file mentioning the symbol -> "/ tested" marker
+  * `resolve_code_lens`: pass-through; synthesises a missing
+    `command` from `data` when an older client sends a bare lens.
+  * Server-level wire smoke through `dispatch`:
+    `codeLensProvider` advertised with `resolveProvider: True`; the
+    `textDocument/codeLens` request returns the expected shape;
+    `codeLens/resolve` round-trips a lens unchanged.
+  * Integration against `/home/user/NOVA/src/compiler/codegen.nova`:
+    `gen_expr` (the central AST -> asm lowering routine) gets the
+    expected 88-reference count (matching a manual whole-word grep
+    minus the declaration line); `gen_program` lens shows the
+    cross-file reference from `compiler.nova`.
+
+All 13 prior LSP tests still pass (75 + 55 + 101 + 119 + 52 + 66 +
+smoke). The `test_hover_docs.py` capability-set assertion was
+extended to include `codeLensProvider` so it tracks the new
+capability (same pattern R15F / R16C used).
+
+### Capability count
+
+| Round | LSP capability added                  |
+| ----- | ------------------------------------- |
+| (pre) | sync, hover, completion, definition, references, rename, code action |
+| R8C   | workspace symbols                     |
+| R13C  | semantic tokens (`/full` + `/range`)  |
+| R14C  | hover docs (enhancement, not a new capability) |
+| R15F  | call hierarchy (prepare / incoming / outgoing) |
+| R16C  | inlay hints                           |
+| R18F  | **code lens** (`textDocument/codeLens` + `codeLens/resolve`) |
+
+Total: 14 advertised provider keys (plus `hoverProvider` whose
+behavior was enriched by R14C without changing the wire schema).
+
+### Files touched (R18F)
+
+  * NEW: `tools/nova-lsp/nova_lsp/code_lens.py`
+  * NEW: `tools/nova-lsp/tests/test_code_lens.py`
+  * `tools/nova-lsp/nova_lsp/server.py` (imports, 2 handlers,
+    capability, dispatcher entries)
+  * `tools/nova-lsp/tests/test_hover_docs.py` (expected capability
+    set extended)
+  * `tools/nova-lsp/README.md` (capability table + section + tests
+    list + layout)
+  * `README.md` (LSP capability blurb: 13 -> 14)
+  * `NEXT_SESSION.md` (this entry)
+
+---
+
 ## R17A — sum types with payloads + match exhaustiveness (R16B.2)
 
 R17A closes the R16B.2 follow-up: NOVA now supports **sum types**

@@ -28,6 +28,8 @@ for the install hook.
 | `callHierarchy/incomingCalls`       | yes (every `name(` call site across the workspace, grouped by enclosing top-level fn) |
 | `callHierarchy/outgoingCalls`       | yes (every top-level fn called inside the source body, resolved via imports + workspace index; builtins elided) |
 | `textDocument/inlayHint`            | yes (parameter-name ghost text at call sites + literal-RHS type hints on `let` bindings; viewport-range filtered, callee resolved via imports + workspace index, builtins elided) |
+| `textDocument/codeLens`             | yes (annotations above top-level declarations — "N references" on fn / let / const, "N variants used" on enum, with optional "/ tested" marker when a `tests/test_*.nova` mentions the decl; cross-file refs via imports + workspace index) |
+| `codeLens/resolve`                  | yes (pass-through — eagerly resolved by `textDocument/codeLens`; schema retained for forward compatibility) |
 
 Hover scans the open document and every `import "..."` it transitively
 references for `fn name(args)` and `let X = ...` definitions, plus the
@@ -245,6 +247,32 @@ clean single-literal RHS (arithmetic, function calls, identifier
 references) is left unannotated since type-inferring those would
 require a real type checker.
 
+Code lenses (`textDocument/codeLens` + `codeLens/resolve`) render
+clickable summary annotations on a synthetic line **above** each
+top-level declaration — unlike inlay hints, they never shift any
+source position so they're safe to enable on dense code. The lens
+title encodes the workspace-wide reference count: `"N references"`
+on a top-level `fn`, `"N readers"` on a `let` / `const`, and
+`"N variants used"` on an `enum` (counting *distinct* declared
+variant constructors referenced via `Name::Variant` or
+`Name.Variant`). When a `tests/test_*.nova` file mentions the
+declaration's name (whole-word, comments + strings masked), the
+title gains a `" / tested"` suffix so the IDE doubles as a coverage
+hint. Counts are gathered through the same union of files used by
+the workspace rename (R9C): the indexed workspace plus every open
+buffer's transitive import closure, with comments and string
+literals masked so a name in a doc comment never inflates the
+number. The declaration line itself is subtracted from the count so
+an unused fn shows `"0 references"` rather than `"1 reference"`. The
+lens's `command` field is wired to VS Code's
+`editor.action.showReferences` action so clicking the lens opens the
+references panel for the declaration's position. `codeLens/resolve`
+is a no-op pass-through in this implementation (the initial lens
+response already carries a fully-populated `command`), but the
+`resolveProvider: true` advertisement keeps the wire shape
+forward-compatible with a future round that might offload expensive
+work to the resolve path.
+
 Diagnostics are produced by writing the buffer to a tempfile and running
 `nova --check <tempfile>`. The server falls back to `nova <tempfile> -o
 /dev/null` if `--check` is not recognised by the installed compiler.
@@ -277,9 +305,10 @@ python tools/nova-lsp/tests/test_semantic_tokens.py
 python tools/nova-lsp/tests/test_hover_docs.py
 python tools/nova-lsp/tests/test_call_hierarchy.py
 python tools/nova-lsp/tests/test_inlay_hints.py
+python tools/nova-lsp/tests/test_code_lens.py
 ```
 
-The eleven `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The twelve `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
 ~10 ms each (the workspace-symbol + workspace-rename + call-hierarchy
@@ -337,6 +366,7 @@ tools/nova-lsp/
     hover_docs.py           # `///` doc-comment extractor for hover
     call_hierarchy.py       # prepare / incoming / outgoing call resolver
     inlay_hints.py          # parameter-name + literal-type inlay hints
+    code_lens.py            # reference-count annotations above decls
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -350,4 +380,5 @@ tools/nova-lsp/
     test_hover_docs.py
     test_call_hierarchy.py
     test_inlay_hints.py
+    test_code_lens.py
 ```
