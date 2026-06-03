@@ -1242,9 +1242,15 @@ fn parse_let() {
     }
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
+    // R23A: capture the type annotation (was: par_skip_type which
+    // discards). The annotation lives on the AST_LET_STMT's third slot
+    // as a [base_name, [type_args]] pair (recursive). Codegen ignores
+    // it; the lightweight type-check pass reads it back to check ctor
+    // arg literal types against the param binding.
+    let type_annot = 0
     if par_peek_type() == TOK_COLON {
         par_advance()
-        par_skip_type()
+        type_annot = par_collect_type()
     }
     if par_peek_type() == TOK_COMMA {
         let names = list_new()
@@ -1278,7 +1284,9 @@ fn parse_let() {
     if is_const_decl == 1 {
         push(par_consts, name)
     }
-    return ast_let(name, value)
+    let lnd = ast_let(name, value)
+    push(lnd, type_annot)
+    return lnd
 }
 
 fn parse_param_list() {
@@ -1418,6 +1426,100 @@ fn par_skip_generic_params() {
     return 0
 }
 
+// R23A: same as par_skip_generic_params but returns the list of
+// type-parameter names (as strings). Used by parse_enum / parse_fn /
+// parse_struct_decl when we want to retain the names for the lightweight
+// type-check pass (R23A.2). Caller has already verified TOK_LT is next.
+fn par_collect_generic_params() {
+    let names = list_new()
+    par_advance()  // consume the opening `<`
+    if par_peek_type() == TOK_GT {
+        par_advance()
+        return names
+    }
+    if par_peek_type() == TOK_SHR {
+        par_advance()
+        return names
+    }
+    let n1 = par_expect(TOK_IDENT)
+    push(names, n1[1])
+    while par_peek_type() == TOK_COMMA {
+        par_advance()
+        if par_peek_type() == TOK_GT { break }
+        let nk = par_expect(TOK_IDENT)
+        push(names, nk[1])
+    }
+    let close_t = par_peek_type()
+    if close_t == TOK_GT {
+        par_advance()
+    } else { if close_t == TOK_SHR {
+        par_advance()
+    } else {
+        par_error("expected '>' to close generic type parameters")
+    } }
+    return names
+}
+
+// R23A: like par_skip_type() but returns the captured type as a pair
+// [base_name, [type_args]] where each arg is recursively the same shape.
+// Used by the lightweight type-check pass to read `let x: Enum<int, str>`
+// bindings without re-parsing the source. Returns 0 for malformed input
+// (caller treats as "no annotation"). NOTE: this duplicates par_skip_type
+// to avoid altering existing call-sites; the two MUST stay in sync.
+fn par_collect_type() {
+    if par_peek_type() != TOK_IDENT {
+        return 0
+    }
+    let base_tok = par_advance()
+    let base = base_tok[1]
+    let args = list_new()
+    if par_peek_type() == TOK_LT {
+        par_advance()
+        // Empty `<>` is allowed for symmetry with par_collect_generic_params.
+        if par_peek_type() == TOK_GT {
+            par_advance()
+        } else { if par_peek_type() == TOK_SHR {
+            // Tight nested close — let caller's outer level handle the
+            // overshoot. We've consumed the inner `>>` half.
+            par_advance()
+        } else {
+            let first = par_collect_type()
+            if first != 0 { push(args, first) }
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_GT { break }
+                if par_peek_type() == TOK_SHR { break }
+                let nxt = par_collect_type()
+                if nxt != 0 { push(args, nxt) }
+            }
+            let close_t = par_peek_type()
+            if close_t == TOK_GT {
+                par_advance()
+            } else { if close_t == TOK_SHR {
+                // Tight nested close `>>`. Outer caller compensates.
+                par_advance()
+            } else {
+                // Malformed — fall through; don't error since this is a
+                // best-effort collect path used by the type-check pass.
+            } }
+        } }
+    }
+    // R22B: function-type `T -> U`. We don't model the result type yet
+    // for type-check purposes; consume it and discard so the parser
+    // position advances correctly.
+    if par_peek_type() == TOK_MINUS {
+        if par_peek_at_type(1) == TOK_GT {
+            par_advance()
+            par_advance()
+            let _r = par_collect_type()
+        }
+    }
+    let r = list_new()
+    push(r, base)
+    push(r, args)
+    return r
+}
+
 // R22B: optional return-type annotation after a function's parameter
 // list. Accepts `: T` (legacy syntax) or `-> T` (Rust-like). Both are
 // purely parser-level metadata — discarded after par_skip_type.
@@ -1449,8 +1551,9 @@ fn parse_fn() {
         let meth = mtok[1]
         // R22B: method decls also accept generic type parameters,
         // e.g. `fn Box.map<U>(self, f) { ... }`. Parser-only.
+        let mtype_params = list_new()
         if par_peek_type() == TOK_LT {
-            par_skip_generic_params()
+            mtype_params = par_collect_generic_params()
         }
         par_expect(TOK_LPAREN)
         let pinfo = parse_param_list()
@@ -1460,12 +1563,17 @@ fn parse_fn() {
         par_skip_return_type()
         let body = parse_block()
         body = inject_defaults(body, defaults)
-        return ast_method_decl(name, meth, params, body)
+        let mnd = ast_method_decl(name, meth, params, body)
+        push(mnd, mtype_params)
+        return mnd
     }
     // R22B: generic type parameters `<T, U, ...>` between the fn name
     // and the parameter list: `fn map<T, U>(xs, f) { ... }`.
+    // R23A: now captured (4th slot on AST_FN_DECL) for the lightweight
+    // type-check pass. Codegen still ignores it.
+    let type_params = list_new()
     if par_peek_type() == TOK_LT {
-        par_skip_generic_params()
+        type_params = par_collect_generic_params()
     }
     par_expect(TOK_LPAREN)
     let pinfo = parse_param_list()
@@ -1476,7 +1584,9 @@ fn parse_fn() {
     par_skip_return_type()
     let body = parse_block()
     body = inject_defaults(body, defaults)
-    return ast_fn_decl(name, params, body)
+    let fnd = ast_fn_decl(name, params, body)
+    push(fnd, type_params)
+    return fnd
 }
 
 fn parse_return() {
@@ -1496,6 +1606,14 @@ fn parse_struct_decl() {
     par_expect(TOK_STRUCT)
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
+    // R23A: optional generic type parameters `<T, U, ...>` between the
+    // struct name and the body. Same pattern as R21A enums / R22B fns.
+    // Names captured for R23A.2 lightweight type-check pass; codegen
+    // ignores the third AST slot.
+    let type_params = list_new()
+    if par_peek_type() == TOK_LT {
+        type_params = par_collect_generic_params()
+    }
     par_expect(TOK_LBRACE)
     let fields = list_new()
     let struct_done = 0
@@ -1505,14 +1623,26 @@ fn parse_struct_decl() {
         } else {
             if par_peek_type() == TOK_COMMA {
                 par_advance()
+            } else { if par_peek_type() == TOK_SEMI {
+                // R23A: allow `;` between fields (the task spec spelling).
+                // Treat identically to `,`.
+                par_advance()
             } else {
                 let f = par_expect(TOK_IDENT)
                 push(fields, f[1])
-            }
+                // R23A: optional field-type annotation `field: T` (or
+                // `field: List<T>`). Parser-only — discarded at codegen.
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    par_skip_type()
+                }
+            } }
         }
     }
     par_expect(TOK_RBRACE)
-    return ast_struct_decl(name, fields)
+    let nd = ast_struct_decl(name, fields)
+    push(nd, type_params)
+    return nd
 }
 
 fn parse_match() {
@@ -2421,35 +2551,12 @@ fn parse_enum() {
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
     // R21A: generic type parameters `<T, E, ...>` on enum declarations.
-    // At codegen time these are erased (NOVA's runtime is dynamically
-    // typed via tagged values), so this is purely parser-level metadata:
-    // accept the syntax, validate identifiers, and discard. Future type
-    // checkers can re-read this from a per-enum side table once we
-    // store it; for now the goal is `enum Result<T, E>` and per-binding
-    // annotations like `Result<int, str>` to parse without errors.
+    // R23A: now captured (not discarded) so the lightweight type-check
+    // pass can read them. The list lives on the AST node's third slot;
+    // codegen ignores it.
+    let type_params = list_new()
     if par_peek_type() == TOK_LT {
-        par_advance()
-        if par_peek_type() == TOK_GT {
-            par_advance()
-        } else {
-            // First type param
-            par_expect(TOK_IDENT)
-            while par_peek_type() == TOK_COMMA {
-                par_advance()
-                if par_peek_type() == TOK_GT { break }
-                par_expect(TOK_IDENT)
-            }
-            // Closing `>`; allow `>>` if nested at outer level (rare
-            // for enum decls but consistent with par_skip_type).
-            let close_t = par_peek_type()
-            if close_t == TOK_GT {
-                par_advance()
-            } else { if close_t == TOK_SHR {
-                par_advance()
-            } else {
-                par_error("expected '>' to close enum type parameters")
-            } }
-        }
+        type_params = par_collect_generic_params()
     }
     par_expect(TOK_LBRACE)
     let variants = list_new()
@@ -2463,23 +2570,27 @@ fn parse_enum() {
             } else {
                 let v = par_expect(TOK_IDENT)
                 // R17A: sum-type payload. `Variant(int, str)` declares
-                // a variant with arity 2. Skip type identifiers — we
-                // don't yet enforce static types but the parser must
-                // consume the type list so the lexer position advances.
+                // a variant with arity 2. R23A: capture the per-arg
+                // type names (as [base, args] pairs) so the type-check
+                // pass can map e.g. `Ok(T)` -> "T" against the enum's
+                // type-param binding `<T, E>` at let-statement time.
                 let arity = 0
+                let payload_types = list_new()
                 if par_peek_type() == TOK_LPAREN {
                     par_advance()
                     if par_peek_type() == TOK_RPAREN {
                         par_advance()
                     } else {
                         arity = 1
-                        par_skip_type()
+                        let t1 = par_collect_type()
+                        if t1 != 0 { push(payload_types, t1) }
                         while par_peek_type() == TOK_COMMA {
                             par_advance()
                             if par_peek_type() == TOK_RPAREN {
                             } else {
                                 arity = arity + 1
-                                par_skip_type()
+                                let tn = par_collect_type()
+                                if tn != 0 { push(payload_types, tn) }
                             }
                         }
                         par_expect(TOK_RPAREN)
@@ -2488,12 +2599,15 @@ fn parse_enum() {
                 let vent = list_new()
                 push(vent, v[1])
                 push(vent, arity)
+                push(vent, payload_types)
                 push(variants, vent)
             }
         }
     }
     par_expect(TOK_RBRACE)
-    return ast_enum_decl(name, variants)
+    let nd = ast_enum_decl(name, variants)
+    push(nd, type_params)
+    return nd
 }
 
 fn parse_impl_block(decls) {
@@ -2528,6 +2642,256 @@ fn parse_impl_block(decls) {
     par_expect(TOK_RBRACE)
 }
 
+// R23A.2: lightweight type-check pass. Walks the AST after parsing,
+// builds a side table of enum decls (name + type-param names + per-
+// variant payload type-name lists), and for each `let x: Enum<T1,T2>
+// = Enum::Ctor(args)` site checks the static-literal type of each arg
+// against the variant's payload-type binding. Mismatches emit a single
+// `warning:` line to stdout — non-fatal, matches R17A's pattern.
+//
+// Conservative by design: we ONLY warn when the arg is a statically
+// obvious literal (int, str, list, bool, none). Free variables, fn
+// calls, and compound expressions are skipped to avoid false positives.
+
+let tc_enums = 0      // list of [name, type_params, variants]
+let tc_enum_count = 0
+
+fn tc_register_enums(decls) {
+    tc_enums = list_new()
+    tc_enum_count = 0
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_ENUM_DECL {
+            let entry = list_new()
+            push(entry, d[1])       // name
+            push(entry, d[2])       // variants ([[name, arity, payload_types?], ...])
+            // type_params on slot 3 (R23A); fall back to empty for legacy.
+            let tps = list_new()
+            if len(d) > 3 { tps = d[3] }
+            push(entry, tps)
+            push(tc_enums, entry)
+            tc_enum_count = tc_enum_count + 1
+        }
+        i = i + 1
+    }
+}
+
+fn tc_find_enum(name) {
+    let i = 0
+    while i < tc_enum_count {
+        if tc_enums[i][0] == name { return tc_enums[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+// Map a NOVA AST literal expression to its static "type name" or
+// empty string if not statically known. Used by the warn check.
+fn tc_literal_type(expr) {
+    if expr == 0 { return "" }
+    let t = ast_tag(expr)
+    if t == AST_INT_LIT { return "int" }
+    if t == AST_STR_LIT { return "str" }
+    if t == AST_FLOAT_LIT { return "float" }
+    if t == AST_BOOL_LIT { return "bool" }
+    if t == AST_NONE_LIT { return "none" }
+    if t == AST_LIST_LIT { return "list" }
+    if t == AST_MAP_LIT { return "map" }
+    // Unary minus on an int literal is still an int.
+    if t == AST_UNARY_OP {
+        let op = expr[1]
+        if op == "-" {
+            return tc_literal_type(expr[2])
+        }
+    }
+    // Everything else (idents, calls, field-access, enum_ctor, ...) is
+    // not statically known at this stage — return empty to skip.
+    return ""
+}
+
+// Resolve a type-name token to the canonical NOVA tag name. Treats
+// "string" as a synonym for "str" since both spellings appear in code.
+fn tc_canon_type(name) {
+    if name == "string" { return "str" }
+    if name == "Int" { return "int" }
+    if name == "Str" { return "str" }
+    if name == "String" { return "str" }
+    if name == "List" { return "list" }
+    if name == "Map" { return "map" }
+    if name == "Bool" { return "bool" }
+    if name == "Float" { return "float" }
+    return name
+}
+
+// Resolve a single payload-type slot (a [base, args] pair) against the
+// per-binding map `param_names -> bound_type_names`. Returns the
+// resolved canonical type name string, or "" if not resolvable.
+fn tc_resolve_type(payload_t, param_names, bound_types) {
+    if payload_t == 0 { return "" }
+    if type_of(payload_t) != 3 { return "" }
+    if len(payload_t) < 1 { return "" }
+    let base = payload_t[0]
+    // Is `base` one of the enum's type-params? If so, substitute.
+    let pi = 0
+    while pi < len(param_names) {
+        if param_names[pi] == base {
+            if pi < len(bound_types) {
+                return tc_canon_type(bound_types[pi])
+            }
+            return ""
+        }
+        pi = pi + 1
+    }
+    return tc_canon_type(base)
+}
+
+// Walk one AST_LET_STMT with a type annotation and a value that's an
+// AST_ENUM_CTOR. Emit warnings for any arg whose static-literal type
+// disagrees with the resolved payload-type binding.
+fn tc_check_let_enum_ctor(let_nd) {
+    let annot = 0
+    if len(let_nd) > 3 { annot = let_nd[3] }
+    if annot == 0 { return 0 }
+    if type_of(annot) != 3 { return 0 }
+    if len(annot) < 2 { return 0 }
+    let annot_base = annot[0]
+    let annot_args = annot[1]
+    let value = let_nd[2]
+    if value == 0 { return 0 }
+    if ast_tag(value) != AST_ENUM_CTOR { return 0 }
+    let ctor_enum = value[1]
+    if ctor_enum != annot_base { return 0 }
+    let ctor_variant = value[2]
+    let ctor_args = value[3]
+    let edef = tc_find_enum(annot_base)
+    if edef == 0 { return 0 }
+    let variants = edef[1]
+    let param_names = edef[2]
+    // Build bound_types: param_names[i] -> annot_args[i][0]
+    let bound_types = list_new()
+    let bi = 0
+    while bi < len(annot_args) {
+        let ta = annot_args[bi]
+        if type_of(ta) == 3 {
+            if len(ta) >= 1 { push(bound_types, ta[0]) } else { push(bound_types, "") }
+        } else {
+            push(bound_types, "")
+        }
+        bi = bi + 1
+    }
+    // Locate the matching variant entry.
+    let vi = 0
+    let payload_types = 0
+    while vi < len(variants) {
+        let vent = variants[vi]
+        if vent[0] == ctor_variant {
+            if len(vent) >= 3 { payload_types = vent[2] }
+            vi = len(variants) + 1
+        } else {
+            vi = vi + 1
+        }
+    }
+    if payload_types == 0 { return 0 }
+    let ai = 0
+    while ai < len(ctor_args) {
+        if ai < len(payload_types) {
+            let want = tc_resolve_type(payload_types[ai], param_names, bound_types)
+            let got = tc_literal_type(ctor_args[ai])
+            if want != "" {
+                if got != "" {
+                    if want != got {
+                        println("warning: type mismatch in " + ctor_enum + "::" + ctor_variant + " arg " + int_to_str(ai) + ": expected " + want + " but got " + got)
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// Walk one AST_CALL whose callee is a known generic fn name. We can
+// only check non-generic param types here (since fn-level inference
+// isn't yet implemented); the binding map is empty. So this just warns
+// when a fn's param-type annotation names a primitive type (int/str/
+// list/etc.) and the call literal disagrees.
+fn tc_check_call(call_nd) {
+    // Stub: fn-level annotations aren't yet captured (R22B erased them
+    // at parse time). Will be revisited in R23A.2 follow-up.
+    return 0
+}
+
+// Top-level: walk a list of statements and any nested blocks, calling
+// tc_check_let_enum_ctor at each AST_LET_STMT site.
+fn tc_walk_stmts(stmts) {
+    let i = 0
+    while i < len(stmts) {
+        tc_walk_stmt(stmts[i])
+        i = i + 1
+    }
+    return 0
+}
+
+fn tc_walk_stmt(nd) {
+    if nd == 0 { return 0 }
+    if type_of(nd) != 3 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_LET_STMT {
+        tc_check_let_enum_ctor(nd)
+        return 0
+    }
+    if t == AST_BLOCK {
+        tc_walk_stmts(nd[1])
+        return 0
+    }
+    if t == AST_IF_STMT {
+        if nd[2] != 0 { tc_walk_stmt(nd[2]) }
+        if nd[3] != 0 { tc_walk_stmt(nd[3]) }
+        return 0
+    }
+    if t == AST_WHILE_STMT {
+        if nd[2] != 0 { tc_walk_stmt(nd[2]) }
+        return 0
+    }
+    if t == AST_FOR_STMT {
+        if nd[3] != 0 { tc_walk_stmt(nd[3]) }
+        return 0
+    }
+    if t == AST_FOR_INDEXED {
+        if nd[4] != 0 { tc_walk_stmt(nd[4]) }
+        return 0
+    }
+    if t == AST_FN_DECL {
+        if nd[3] != 0 { tc_walk_stmt(nd[3]) }
+        return 0
+    }
+    if t == AST_METHOD_DECL {
+        if nd[4] != 0 { tc_walk_stmt(nd[4]) }
+        return 0
+    }
+    if t == AST_DO_WHILE {
+        if nd[1] != 0 { tc_walk_stmt(nd[1]) }
+        return 0
+    }
+    if t == AST_TRY_CATCH {
+        if nd[1] != 0 { tc_walk_stmt(nd[1]) }
+        if nd[2] != 0 { tc_walk_stmt(nd[2]) }
+        return 0
+    }
+    return 0
+}
+
+// R23A.2: entry point. Registers all enum decls, then walks every
+// top-level decl looking for AST_LET_STMT with a type annotation +
+// AST_ENUM_CTOR value, emitting warnings for arg-type mismatches.
+fn tc_check_program(prog) {
+    let decls = prog[1]
+    tc_register_enums(decls)
+    tc_walk_stmts(decls)
+    return 0
+}
+
 fn parse_program(tokens) {
     par_init(tokens)
     let decls = list_new()
@@ -2547,5 +2911,8 @@ fn parse_program(tokens) {
             }
         }
     }
-    return ast_program(decls)
+    let prog = ast_program(decls)
+    // R23A.2: lightweight type-check pass (warns, doesn't error).
+    tc_check_program(prog)
+    return prog
 }

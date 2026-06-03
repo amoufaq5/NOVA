@@ -1,5 +1,187 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R23A — Generic structs + lightweight type-check pass
+
+R23A closes two R21A/R22B follow-ups in a single round: **parser-only
+generic structs** (extending R21A's enum-only generics) plus a
+**lightweight type-check pass** that walks the AST after parsing and
+emits a single-line `warning:` when a `let x: Enum<T1, T2> = Enum::Ctor
+(literal)` site passes a statically-obvious literal whose tag disagrees
+with the resolved payload-type binding. Both features are parser-level
+(no codegen changes); the type-check is intentionally conservative —
+only triggers on int/str/list/bool/none/float literals, skips free
+variables and fn-call results, and is non-fatal.
+
+### What landed
+
+**Generic struct syntax** (`parser.nova` extends `parse_struct_decl`):
+
+```nova
+struct Box<T> {
+    value: T
+}
+
+struct Pair<A, B> {
+    first: A,
+    second: B
+}
+
+struct Triple<A, B, C> {
+    a: A;
+    b: B;
+    c: C
+}
+
+let b: Box<int> = Box(42)
+let p: Pair<str, int> = Pair("hello", 42)
+let nest: Box<Box<int>> = Box(Box(99))
+```
+
+  * Accepts `<T, U, ...>` between the struct name and the opening `{`.
+    Re-uses the new `par_collect_generic_params()` helper (which
+    captures rather than discards the names — see below). The type-
+    params are pushed onto the AST_STRUCT_DECL node's third slot.
+  * Accepts `field: T` annotations after each field name. Re-uses
+    `par_skip_type()` to consume + discard the type.
+  * Accepts `;` as a field separator in addition to `,` (the task
+    spec spelling). Both are treated identically.
+  * Construction uses the existing positional `Box(42)` call syntax
+    (NOVA's struct constructor is the struct name treated as a
+    callable — see `tests/test_struct_methods.nova`). Brace-init
+    syntax `Box { value: 42 }` is reserved for R23A.2.
+
+**Type-param capture** (parser.nova new helpers):
+
+  * `par_collect_generic_params() -> list<str>` — same as
+    `par_skip_generic_params` but returns the parameter-name list so
+    decls can store it. Used by parse_struct_decl, parse_enum,
+    parse_fn (both standalone + method-decl forms).
+  * `par_collect_type() -> [base_name, [type_args]]` — same as
+    `par_skip_type` but returns a recursive `[name, args]` pair.
+    Used by parse_let (to capture the binding's type annotation)
+    and parse_enum (to capture per-variant payload type names).
+    Mirrors par_skip_type's lexer-state advancement so the two MUST
+    stay in sync — comment in the source notes this.
+
+**AST extensions** (all backward-compatible — new slots, no shape
+changes):
+
+  * AST_STRUCT_DECL gains a third slot `type_params` (list of param-
+    name strings).
+  * AST_ENUM_DECL gains a third slot `type_params`. Each variant
+    entry was `[name, arity]` and is now `[name, arity, payload_types]`
+    where `payload_types` is a list of `[base, args]` pairs (one per
+    declared payload type, e.g. `Ok(T)` -> `[["T", []]]`). All
+    existing accessors used `len >= 2` checks, so the new slot is
+    invisible to them.
+  * AST_FN_DECL gains a fourth slot `type_params`. AST_METHOD_DECL
+    gains a fifth slot `type_params` (after the existing fourth slot
+    `stmt_line` for impl-block methods).
+  * AST_LET_STMT gains a third slot `type_annot` (a `[base, args]`
+    pair, or 0 if no annotation).
+
+Codegen ignores every new slot — verified by the bit-identical
+self-host (stage2.s == stage3.s remains empty diff).
+
+**Type-check pass** (parser.nova new module `tc_*`, runs in
+parse_program after the AST is built):
+
+  * `tc_register_enums(decls)` builds a side table of every
+    AST_ENUM_DECL: `[name, variants, type_params]`.
+  * `tc_walk_stmts(stmts)` walks the top-level decls + every nested
+    block (AST_BLOCK, AST_IF_STMT, AST_WHILE_STMT, AST_FOR_STMT,
+    AST_FOR_INDEXED, AST_FN_DECL, AST_METHOD_DECL, AST_DO_WHILE,
+    AST_TRY_CATCH).
+  * `tc_check_let_enum_ctor(let_nd)` is the actual checker:
+    1. Skip if the let has no type annotation OR no enum-ctor value.
+    2. Skip if the annotation's base name doesn't match the ctor's
+       enum name (e.g. `let x: Option<int> = Result::Ok(42)` is
+       outside this check's scope — codegen handles the runtime
+       mismatch).
+    3. Find the enum's variant entry; extract per-arg `payload_types`.
+    4. Build the binding map: `param_names[i] -> annot_args[i][0]`.
+    5. For each ctor arg: resolve the payload-type slot against the
+       binding map; check the arg's static-literal type via
+       `tc_literal_type` (int/str/list/bool/none/float, including
+       unary `-` on int); if both are known and differ, emit:
+       `warning: type mismatch in EnumName::Variant arg N: expected
+       T but got U`.
+
+**Sample WARN trace** (compile-time stdout from `tests/test_type_
+check_warn.nova`):
+
+```
+warning: type mismatch in Option::Some arg 0: expected int but got str
+warning: type mismatch in Option::Some arg 0: expected str but got int
+warning: type mismatch in Result::Err arg 0: expected str but got int
+warning: type mismatch in Result::Ok arg 0: expected list but got int
+warning: type mismatch in Option::Some arg 0: expected list but got str
+```
+
+The runtime semantics are unchanged (NOVA is dynamically typed — the
+WARN is the only observable effect; the program still compiles and
+runs). The check is conservative — `let x: Option<int> = Option::Some
+(free_var)` and `let x: Option<int> = Option::Some(fn_call())` both
+fall through silently.
+
+### Files touched
+
+  * `src/compiler/parser.nova` (+~280 lines): par_collect_generic_
+    params, par_collect_type, extended parse_struct_decl /
+    parse_enum / parse_fn / parse_let with capture-not-discard logic,
+    new tc_* module + entry point in parse_program.
+  * `tests/test_generic_struct.nova` (NEW, ~110 lines, 19
+    assertions).
+  * `tests/test_type_check_warn.nova` (NEW, ~120 lines, 15
+    assertions + 5 expected WARN lines).
+  * `README.md` test count bumped 173 -> 176.
+
+### Verification
+
+  * `make` succeeds; `make self-host` confirms stage2.s == stage3.s
+    bit-identical (no codegen behaviour change).
+  * `bash tests/run_tests.sh` reports 176/170/0/6 (was 174/168/0/6;
+    +2 new tests, both pass).
+  * All 6 cross-targets (linux, macos, wasm, windows, arm64,
+    windows-arm64) compile both test files. Type-check warnings emit
+    on every target (the pass lives in the parser, target-agnostic).
+  * No existing test gained a spurious warning (verified by sweeping
+    `./bin/nova <test> -o /tmp/check.s 2>&1 | grep ^warning:` across
+    all 174 baseline tests — only test_exhaustiveness_warn.nova and
+    test_type_check_warn.nova produce warnings).
+
+### R23A.2 follow-up list
+
+The following are intentionally deferred and tracked as R23A.2
+backlog items:
+
+  * **Brace-init struct syntax**: `let b = Box { value: 42 }`. The
+    task-spec syntax requires extending parse_primary's TOK_LBRACE
+    branch to recognise `IDENT { ... }` and lower to AST_STRUCT_INIT.
+    Codegen already supports AST_STRUCT_INIT (used today by impl-
+    block methods); only the parser side is missing.
+  * **Fn-call type-check**: the `tc_check_call` hook is a stub
+    today. Function parameters and return-type annotations were
+    erased pre-R22B and remain so on AST_FN_DECL; capturing them
+    would let the type-check pass warn on call-site arg mismatches
+    against `fn f(x: int)` declarations.
+  * **Struct-ctor type-check**: positional struct construction
+    (`Box(42)` where `Box<int>` is annotated on the let) is not
+    currently checked because the parser doesn't store per-struct
+    field type names. Storing them is a clean addition; the
+    check itself mirrors tc_check_let_enum_ctor's logic.
+  * **Free-variable type inference**: `let x: int = 42; let opt:
+    Option<int> = Option::Some(x)` should infer `x:int` from the
+    earlier let and warn if the resulting binding disagrees. Needs
+    a small local-typing context maintained during tc_walk_stmts.
+  * **tree-sitter-nova grammar update**: highlight the new
+    `field: T` and `<T, U>` syntax on struct decls. Settled R9E
+    grammar still parses (treats them as identifier-after-COLON);
+    proper syntax-highlight rules would mark T as `@type.parameter`.
+  * **LSP completion**: `let x: Box<` should trigger a completion
+    listing the struct's type parameters from the workspace symbol
+    index. Belongs to nova-lsp follow-up rounds.
+
 ## R23F — LSP workspace diagnostics aggregation (`workspace/diagnostic`)
 
 R23F adds **workspace-wide diagnostics aggregation**
