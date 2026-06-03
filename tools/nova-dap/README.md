@@ -7,11 +7,13 @@ turns gdb's async records back into DAP events.
 
 This is the **MVP** of `nova-dap`: source-level breakpoints (incl.
 conditional + data breakpoints / watchpoints + function breakpoints
-by name), step in / over / out, continue, stack traces, evaluate
-(watch / REPL / hover), and a single Locals scope per frame. The
-adapter itself does **no DWARF parsing** — gdb does. The NOVA
-compiler already emits a working `.debug_line` section on Linux ELF
-(see `DWARF_AUDIT.md` in the repo root and `make smoke-dwarf`).
+by name + instruction breakpoints by machine address), step in /
+over / out at line OR instruction granularity, continue, stack
+traces, evaluate (watch / REPL / hover), disassembly view, and a
+single Locals scope per frame. The adapter itself does **no DWARF
+parsing** — gdb does. The NOVA compiler already emits a working
+`.debug_line` section on Linux ELF (see `DWARF_AUDIT.md` in the
+repo root and `make smoke-dwarf`).
 
 ## What works
 
@@ -30,7 +32,9 @@ compiler already emits a working `.debug_line` section on Linux ELF
 | `evaluate`                | `-data-evaluate-expression --thread <id> --frame <level> "<expr>"`; result string decoded into `{result, type}` where type is `int` / `str` / `char` / `bool` / `ptr` / `raw`. Used for watch panel, REPL, and hover tooltips. |
 | `dataBreakpointInfo`      | Returns `{dataId, description, accessTypes: ["write", "readWrite"], canPersist: false}` for a named variable. `dataId` is a base64-encoded JSON envelope `{n, f?, v?}` carrying the variable name + frame id so `setDataBreakpoints` can round-trip it without server-side state. |
 | `setDataBreakpoints`      | Tears down prior watchpoints via `-break-delete <id>` (per id, so source breakpoints are preserved) and installs gdb hardware watchpoints via `-break-watch <expr>` (write), `-break-watch -r <expr>` (read), or `-break-watch -a <expr>` (rw). Watchpoint hits surface as `stopped` events with `reason: "data breakpoint"` and a description like `Variable 'counter' changed (write): 5 -> 6`. |
-| `continue` / `next` / `stepIn` / `stepOut` | `-exec-{continue,next,step,finish}` with `--thread <id>` when DAP carries `singleThread:true`, otherwise `--all`. |
+| `setInstructionBreakpoints` | Tears down prior instruction bps via `-break-delete <id>` (per id, so source-line / function / data breakpoints survive) and installs `-break-insert *0xADDR` per entry. Each entry carries `{instructionReference: "0xADDR", offset?, condition?}`; we add `offset` to the parsed address before the gdb call. Hits surface as `stopped` events with `reason: "instruction breakpoint"` and a description like `Stopped at instruction 0x401045`. |
+| `disassemble`             | `-data-disassemble -s <start> -e <end> -- 0` — disassembles a range of memory around `memoryReference`, returning `DisassembledInstruction[]` of length exactly `instructionCount` (padded with `??` placeholders if gdb returns fewer). `instructionOffset` and byte `offset` shift the start address (we approximate 4 bytes/insn for instruction offsets). |
+| `continue` / `next` / `stepIn` / `stepOut` | `-exec-{continue,next,step,finish}` with `--thread <id>` when DAP carries `singleThread:true`, otherwise `--all`. When `granularity: "instruction"` is supplied, `next` -> `-exec-next-instruction` and `stepIn` -> `-exec-step-instruction` so the IDE's disassembly view can advance the PC by exactly one machine instruction. (`stepOut` keeps `-exec-finish` regardless — gdb has no per-instruction finish variant.) |
 | `pause`                   | `-exec-interrupt --thread <id>` (or `--all`).     |
 | `disconnect` / `terminate`| `-gdb-exit` + reap child.                         |
 
@@ -75,15 +79,48 @@ Capabilities advertised:
   with `reason: "data breakpoint"`, `hitBreakpointIds: [<id>]`,
   and a `description` carrying the before / after values
   (`Variable 'counter' changed (write): 5 -> 6`).
+* `supportsSteppingGranularity: true`
+  — `next` / `stepIn` requests honour the DAP `granularity`
+  argument. `"statement"` (default) and `"line"` keep the existing
+  line-level stepping; `"instruction"` reroutes to gdb's
+  `-exec-step-instruction` / `-exec-next-instruction` so the PC
+  advances by exactly one machine instruction at a time. Each
+  `stopped` event carries `instructionPointerReference` (the PC,
+  taken from gdb's `frame.addr`) so the IDE can pin its
+  disassembly view to the current location.
+* `supportsDisassembleRequest: true`
+  — `disassemble({memoryReference, instructionOffset?,
+  instructionCount, offset?})` returns a `DisassembledInstruction[]`
+  array of length exactly `instructionCount`, driven by gdb's
+  `-data-disassemble`. Each instruction carries `address` +
+  `instruction` (mnemonic + operands) plus optional `symbol`
+  (function name) and `instructionBytes` (raw opcode hex). When
+  source-line info is available (mode 4/5), `location` + `line`
+  are populated so the IDE can anchor a source-line jump from the
+  disassembly view.
+* `supportsInstructionBreakpoints: true`
+  — `setInstructionBreakpoints` accepts a list of
+  `{instructionReference, offset?, condition?}` entries and
+  installs gdb breakpoints by machine address via
+  `-break-insert *0xADDR`. Used by the IDE's disassembly view when
+  the user clicks the breakpoint gutter next to a specific
+  instruction. Hits surface as `stopped` events with `reason:
+  "instruction breakpoint"`, `hitBreakpointIds: [<id>]`, and a
+  description like `Stopped at instruction 0x401045`.
 
 Events emitted:
 
 * `initialized`              — after `initialize` succeeds.
 * `stopped`                  — translated from gdb's `*stopped`
                                 async record. Carries `threadId`
-                                (from MI `thread-id`) and
+                                (from MI `thread-id`),
                                 `allThreadsStopped` (true iff MI
-                                `stopped-threads="all"`).
+                                `stopped-threads="all"`), and
+                                `instructionPointerReference` (the
+                                PC, taken from gdb's `frame.addr`,
+                                used by the IDE's disassembly view
+                                as the `memoryReference` anchor for
+                                follow-up `disassemble` requests).
                                 In non-stop mode, a stop on thread A
                                 does not affect thread B.
 * `continued`                — emitted on `*running,thread-id=...`
@@ -158,6 +195,17 @@ tools/nova-dap/
                                           vs pending), `FunctionBreakpointManager`
                                           + `describe_function_entry` description
                                           builder.
+    disassembly.py                       Instruction-level stepping +
+                                          disassembly view + instruction
+                                          breakpoints: memoryReference parser,
+                                          `-data-disassemble` command builder
+                                          + response parser, step-granularity
+                                          remapper (`-exec-step` ->
+                                          `-exec-step-instruction`),
+                                          `-break-insert *0xADDR` builder,
+                                          `InstructionBreakpointManager`,
+                                          `extract_instruction_pointer` PC
+                                          extractor.
   tests/
     dap_smoke.py                         end-to-end single-thread smoke test
     dap_multi_thread.py                  end-to-end multi-thread coordination test
@@ -165,6 +213,7 @@ tools/nova-dap/
     test_conditional_breakpoint.py       conditional `setBreakpoints` with `condition`
     test_data_breakpoints.py             data breakpoints / watchpoints (dataBreakpointInfo + setDataBreakpoints)
     test_function_breakpoints.py         function breakpoints by name (setFunctionBreakpoints)
+    test_instruction_stepping.py         instruction-level stepping + disassemble + setInstructionBreakpoints
     fixtures/multi_thread.c              pthread fixture (built on demand by the test)
 ```
 
@@ -286,7 +335,18 @@ python tools/nova-dap/tests/test_function_breakpoints.py
 #   NOVA integration:   ok (main main_id=1, greet_hit=True)
 ```
 
-All five tests have a pure-Python phase that runs anywhere (no gdb
+For instruction-level stepping + disassembly + instruction
+breakpoints:
+
+```sh
+python tools/nova-dap/tests/test_instruction_stepping.py
+# test_instruction_stepping: OK
+#   unit assertions:    125
+#   total assertions:   149
+#   NOVA integration:   ok (PC advance 18 bytes, disasm 8 insns) (24 extra checks)
+```
+
+All six tests have a pure-Python phase that runs anywhere (no gdb
 required) plus an end-to-end phase that SKIPs cleanly when `gdb` /
 `gcc` are missing.
 

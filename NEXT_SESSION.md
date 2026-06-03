@@ -1,5 +1,181 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R17F — DAP instruction-level stepping (21st DAP capability)
+
+R17F lights up the IDE feature most useful to systems-level NOVA
+debuggers: **instruction-level stepping**. A DAP client can now step
+the inferior one machine instruction at a time, view a disassembly
+panel anchored to the current PC, and set breakpoints at specific
+machine addresses. This is the 21st DAP capability (R14A's function
+breakpoints was the 20th, R11C's data breakpoints was the 19th,
+R10E's evaluate + conditional was the 18th, R7D's thread stepping
+was the 17th).
+
+### What landed
+
+**New module:** `tools/nova-dap/nova_dap/disassembly.py` (~370 lines):
+
+  - `parse_memory_reference(ref, offset)` — normalises a DAP
+    `memoryReference` + `instructionOffset` into a hex string gdb
+    can consume. Accepts `0xADDR` / decimal / bare-hex; rejects
+    malformed input; rejects negative resulting addresses. Uses a
+    4-byte-per-instruction approximation for the offset arithmetic
+    (exact on ARM64, conservative lower bound on x86-64).
+  - `build_disassemble_command(start, end, mode)` — composes
+    `-data-disassemble -s START -e END -- MODE`. Mode 0 (asm only)
+    is the default for the DAP flat-array shape; mode 2 includes
+    raw opcode bytes; mode 4/5 includes mixed source+asm (the
+    parser flattens those back to a linear array with `line` /
+    `location` populated per-insn).
+  - `parse_disassemble_response(fields)` — extracts a flat
+    `DisassembledInstruction[]` from gdb's reply. Handles both
+    mode-0 (flat) and mode-4 (nested `src_and_asm_line` wrapper)
+    shapes; an unparseable reply yields an empty list (no raise).
+  - `build_instruction_breakpoint_command(ref, offset, condition)`
+    — composes `-break-insert *0xADDR` (with `-c "<expr>"` for
+    conditional). The `*` prefix tells gdb's parser this is an
+    address, not a symbol. `offset` is a byte offset added to the
+    parsed reference before the gdb call.
+  - `is_instruction_granularity(g)` — DAP `granularity` predicate;
+    returns True only for the literal string `"instruction"`.
+    `"statement"` (default) and `"line"` map to source-level
+    stepping.
+  - `map_step_command(base, g)` — translates the base gdb-MI step
+    command into its instruction-level equivalent under
+    `granularity: "instruction"`. `-exec-step` ->
+    `-exec-step-instruction`; `-exec-next` ->
+    `-exec-next-instruction`; `-exec-finish` unchanged (gdb has
+    no per-instruction finish variant).
+  - `extract_instruction_pointer(fields)` — pulls the PC from a
+    gdb `*stopped` record's `frame.addr` field for DAP's
+    `instructionPointerReference`.
+  - `DisassembledInstruction` dataclass + `to_dap_dict()` method —
+    the typed value for a single decoded instruction; converts to
+    DAP camelCase wire shape on demand.
+  - `InstructionBreakpointRecord` /
+    `InstructionBreakpointManager` — thread-safe registry the
+    `Session` holds; indexed by gdb_id for `*stopped,bkptno=...`
+    routing to the `"Stopped at instruction <ref>"` description.
+
+**server.py changes:**
+
+  - `Session` gains
+    `instruction_breakpoints: InstructionBreakpointManager`.
+  - `handle_launch` resets the manager on relaunch (gdb forgets
+    every breakpoint when the inferior restarts).
+  - `_step` (the shared step helper) calls `map_step_command(mi,
+    args.get("granularity"))` so all three step handlers
+    automatically honour the granularity argument without
+    duplicating logic.
+  - `_handle_stopped`:
+      * Adds `instructionPointerReference` to every `stopped`
+        event body (from `frame.addr`) — best-effort, omitted
+        when no frame is present.
+      * Extends the bkptno-routing chain to recognise
+        instruction breakpoints: a `breakpoint-hit` whose bkptno
+        matches a registered instruction-bp upgrades the DAP
+        `reason` to `"instruction breakpoint"` and sets
+        `description` to `"Stopped at instruction <ref>"`.
+        Function-bp routing wins if the same id is in both
+        managers (shouldn't happen in practice since we only
+        register one or the other per gdb id).
+  - **New handler** `handle_set_instruction_breakpoints`:
+    complete-replacement semantics like
+    `setDataBreakpoints` / `setFunctionBreakpoints` — tears down
+    prior instruction bps via per-id `-break-delete`, then
+    installs each new entry via `build_instruction_breakpoint_command`.
+    Per-entry errors (malformed reference, gdb rejection)
+    surface as `verified: false` with a clear message; the
+    request as a whole still succeeds.
+  - **New handler** `handle_disassemble`: parses
+    `memoryReference` + `offset` + `instructionOffset` +
+    `instructionCount`, composes the gdb-MI command, parses the
+    reply, and returns exactly `instructionCount` entries
+    (padded with `??` placeholders if gdb returned fewer — so
+    DAP clients can rely on the array length).
+  - Capability flags flipped:
+    `supportsSteppingGranularity: true`,
+    `supportsDisassembleRequest: true`,
+    `supportsInstructionBreakpoints: true`.
+  - Two new HANDLERS entries: `setInstructionBreakpoints` and
+    `disassemble`. Handler count: 20 -> 22.
+
+### Verification
+
+  - **125 unit assertions** in
+    `tools/nova-dap/tests/test_instruction_stepping.py` covering:
+    memory-reference parsing (hex / decimal / offset / negative-
+    result rejection), disassemble command builder (modes 0-5
+    + invalid-mode rejection + empty-address rejection),
+    disassemble response parser (flat shape, empty, missing
+    field, mixed source+asm with line+file propagation),
+    `DisassembledInstruction.to_dap_dict` shape, granularity
+    predicate, step-command remapping (statement/line passthrough
+    + instruction remap + stepOut unchanged), instruction-bp
+    command builder (bare / offset / condition / rejection),
+    instruction-pointer extraction (from frame / missing frame
+    / non-dict frame), manager bookkeeping (register / lookup /
+    clear).
+  - **Handler tests with a stub bridge:** capability advertisement,
+    stepIn/next with `granularity: "instruction"` route to
+    instruction-stepping MI commands, stepIn without granularity
+    keeps line-level stepping, disassemble basic + short-response
+    padding + missing-ref rejection + zero-count + invalid-ref,
+    setInstructionBreakpoints basic + complete-replacement +
+    missing-ref rejection + not-launched, stopped-event carries
+    `instructionPointerReference`, stopped-event routes
+    `instruction breakpoint` reason for matching bkptno,
+    launch-clears-registry.
+  - **End-to-end** against the NOVA `hello_dwarf` binary: launches
+    the binary, sets a function bp on `main`, hits it (PC at
+    `0x40103e`), issues a `disassemble` request for 8 instructions
+    around the PC (gdb returns 8 valid x86-64 mnemonics with the
+    first at the PC), then steps 3 single instructions with
+    `granularity: "instruction"` and asserts the PC advances 18
+    bytes (avg ~6 bytes/insn, typical x86-64), then sets an
+    instruction breakpoint at the advanced PC and confirms
+    verified=true.
+  - **Total: 149 assertions, all pass** (125 unit + 24 NOVA-binary
+    integration).
+  - **Existing tests:** dap_smoke OK (5 locals at line 30),
+    dap_multi_thread OK (3 threads, per-thread step/pause/continue),
+    test_evaluate OK (100 asserts), test_conditional_breakpoint OK
+    (54 asserts), test_data_breakpoints OK (131 asserts),
+    test_function_breakpoints OK (138 asserts) — no regressions.
+
+### Capability tally
+
+DAP capabilities: **20 -> 21**. The full table is now: breakpoints,
+conditional breakpoints, function breakpoints, data breakpoints,
+**instruction breakpoints (NEW)**, step in/out/over at line OR
+instruction granularity (**granularity NEW**), continue, pause,
+stack traces, scopes, variables, evaluate (watch/REPL/hover),
+**disassembly view (NEW)**, threads, multi-thread coordination,
+exception breakpoints, configurationDone, launch, initialize,
+disconnect, terminate, output events.
+
+(The HANDLERS table grew by 2 — `setInstructionBreakpoints` and
+`disassemble` — but only the disassembly view is a wholly new
+capability; instruction breakpoints + stepping granularity are
+enhancements to existing requests.)
+
+### Files touched (R17F)
+
+  - `tools/nova-dap/nova_dap/server.py` (extended: import +
+    Session field + clear-on-launch + 3 capability flips +
+    instructionPointerReference on every stop + bkptno routing
+    extension + step granularity wire-through + 2 new handlers +
+    2 new HANDLERS routes + docstring updates)
+  - NEW `tools/nova-dap/nova_dap/disassembly.py` (~370 lines)
+  - NEW `tools/nova-dap/tests/test_instruction_stepping.py`
+    (~830 lines, 125 unit + 24 e2e assertions)
+  - `tools/nova-dap/README.md` (capability table, 4 capability
+    descriptions, layout, smoke-test list 20 -> 21)
+  - `README.md` (20 -> 21 capabilities)
+  - `NEXT_SESSION.md` (this section)
+
+---
+
 ## R16B — `match` expression block-body fix (close long-deferred gap)
 
 R16B closes a latent codegen bug in match-as-expression: arm bodies

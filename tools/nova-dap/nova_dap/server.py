@@ -29,6 +29,20 @@ Supported requests
                              ``stopped`` events with ``reason:
                              "function breakpoint"`` and a description
                              like ``"Entry to main"``.
+* ``setInstructionBreakpoints`` — installs gdb breakpoints by
+                             machine address via
+                             ``-break-insert *0xADDR``. Used by
+                             the IDE's disassembly view. Hits
+                             surface as ``stopped`` events with
+                             ``reason: "instruction breakpoint"``
+                             and a description like
+                             ``"Stopped at instruction 0x401045"``.
+* ``disassemble``         — ``-data-disassemble -s START -e END
+                             -- 0`` for a memory range. Returns
+                             ``DisassembledInstruction[]`` of
+                             length exactly ``instructionCount``
+                             (padded with ``"??"`` placeholders
+                             if gdb returns fewer).
 * ``configurationDone``   — runs the inferior (``-exec-run``).
 * ``threads``             — real multi-thread list from ``-thread-info``.
                              For single-thread programs this still
@@ -58,12 +72,18 @@ Supported requests
                              Watchpoint hits surface as ``stopped``
                              events with ``reason: "data breakpoint"``.
 * ``continue`` / ``next`` / ``stepIn`` / ``stepOut`` — exec controls,
-                             accepting DAP's ``threadId`` and
-                             ``singleThread`` arguments. When
-                             ``singleThread`` is true we pass
-                             ``--thread <id>`` to gdb so only that
-                             thread runs; otherwise gdb resumes the
-                             whole process.
+                             accepting DAP's ``threadId``,
+                             ``singleThread``, and ``granularity``
+                             arguments. When ``singleThread`` is
+                             true we pass ``--thread <id>`` to gdb
+                             so only that thread runs; otherwise
+                             gdb resumes the whole process. When
+                             ``granularity`` is ``"instruction"``,
+                             ``next`` / ``stepIn`` reroute to
+                             ``-exec-next-instruction`` /
+                             ``-exec-step-instruction`` so the PC
+                             advances by exactly one machine
+                             instruction at a time.
 * ``pause``               — interrupt one thread (or all) via
                              ``-exec-interrupt`` with the appropriate
                              ``--thread`` / ``--all`` flag.
@@ -131,6 +151,17 @@ from nova_dap.function_breakpoints import (
     describe_function_entry,
     is_unresolved_function_error,
     parse_function_breakpoint_response,
+)
+from nova_dap.disassembly import (
+    InstructionBreakpointManager,
+    InstructionBreakpointRecord,
+    build_disassemble_command,
+    build_instruction_breakpoint_command,
+    extract_instruction_pointer,
+    is_instruction_granularity,
+    map_step_command,
+    parse_disassemble_response,
+    parse_memory_reference,
 )
 
 
@@ -248,6 +279,14 @@ class Session:
     # every call tears down the previous set and reinstalls).
     function_breakpoints: FunctionBreakpointManager = field(
         default_factory=FunctionBreakpointManager
+    )
+    # Instruction breakpoint registry. See ``nova_dap.disassembly`` for
+    # the wire shape + gdb integration. Reset on every ``launch`` for
+    # the same reason as the other breakpoint registries (gdb forgets
+    # every breakpoint when the inferior restarts; otherwise stale
+    # gdb ids could route the wrong description on a subsequent stop).
+    instruction_breakpoints: InstructionBreakpointManager = field(
+        default_factory=InstructionBreakpointManager
     )
 
     def alloc_var_ref(self, frame_id: int) -> int:
@@ -451,6 +490,15 @@ def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
         "allThreadsStopped": all_stopped,
         "preserveFocusHint": False,
     }
+    # DAP ``instructionPointerReference`` — the PC at the stop site.
+    # We surface gdb's ``frame.addr`` so the DAP client can pin its
+    # disassembly view (and subsequent ``disassemble`` requests) to
+    # the exact instruction the inferior stopped at. Best-effort:
+    # some stop records (e.g. ``=thread-group-exited``) don't carry
+    # a frame, in which case we just omit the field.
+    ip_ref = extract_instruction_pointer(rec.fields)
+    if ip_ref is not None:
+        body["instructionPointerReference"] = ip_ref
     bkptno = rec.fields.get("bkptno")
     hit_id: Optional[int] = None
     if isinstance(bkptno, str) and bkptno.isdigit():
@@ -495,6 +543,19 @@ def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
         if fn_record is not None:
             body["reason"] = "function breakpoint"
             body["description"] = describe_function_entry(fn_record.name)
+        else:
+            # Instruction breakpoints share the same ``breakpoint-hit``
+            # gdb stop reason. If the bkptno matches a record in the
+            # instruction-bp manager, refine the DAP wire shape to
+            # ``reason: "instruction breakpoint"`` so the IDE can
+            # render the disassembly-panel indicator instead of a
+            # source-line gutter dot.
+            ibp_record = session.instruction_breakpoints.lookup_by_gdb_id(hit_id)
+            if ibp_record is not None:
+                body["reason"] = "instruction breakpoint"
+                body["description"] = (
+                    f"Stopped at instruction {ibp_record.instruction_reference}"
+                )
     send_event(session, "stopped", body)
 
 
@@ -627,6 +688,25 @@ def _capabilities() -> Dict[str, Any]:
         # ``handle_data_breakpoint_info`` and
         # ``handle_set_data_breakpoints``.
         "supportsDataBreakpoints": True,
+        # Instruction-level stepping: DAP ``next`` / ``stepIn`` /
+        # ``stepOut`` requests honour ``granularity: "instruction"``
+        # by routing to gdb's ``-exec-step-instruction`` /
+        # ``-exec-next-instruction`` MI commands. ``stopped`` events
+        # carry ``instructionPointerReference`` (the PC, taken from
+        # gdb's ``frame.addr`` field) so the DAP client can pin its
+        # disassembly view to the current location.
+        "supportsSteppingGranularity": True,
+        # Disassembly view: ``disassemble`` request returns
+        # ``DisassembledInstruction[]`` for a memory range, driven
+        # by gdb's ``-data-disassemble``. The IDE renders these in
+        # the disassembly panel with optional source-line mapping.
+        "supportsDisassembleRequest": True,
+        # Instruction breakpoints: set a breakpoint at a specific
+        # machine address via ``setInstructionBreakpoints`` ->
+        # gdb's ``-break-insert *0xADDR``. Used by the IDE's
+        # disassembly view when the user clicks a breakpoint
+        # gutter next to a specific instruction.
+        "supportsInstructionBreakpoints": True,
     }
 
 
@@ -680,6 +760,11 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     # reset or stale gdb ids will route the wrong "Entry to <fn>"
     # description on a subsequent breakpoint-hit stop.
     session.function_breakpoints.clear_all()
+    # And the same for instruction breakpoints (``-break-insert
+    # *0xADDR`` is just another flavour of breakpoint as far as gdb
+    # is concerned, so a relaunch invalidates the manager's gdb_id
+    # mappings).
+    session.instruction_breakpoints.clear_all()
 
     # Try to negotiate non-stop + mi-async so individual threads can
     # be paused / continued. If gdb rejects either (e.g. it's running
@@ -911,6 +996,282 @@ def handle_set_function_breakpoints(session: Session, req: Dict[str, Any]) -> No
             }
         out.append(entry)
     send_response(session, req, body={"breakpoints": out})
+
+
+def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``setInstructionBreakpoints`` request.
+
+    Replaces the active set of instruction breakpoints with the
+    supplied list. Each entry has
+    ``{instructionReference, offset?, condition?, hitCondition?}``;
+    we forward each to gdb via ``-break-insert *0xADDR`` (with
+    ``offset`` added to the parsed address) and record the assigned
+    breakpoint number so a later ``*stopped,bkptno=...`` can be
+    routed to the right ``"Stopped at instruction <ref>"``
+    description.
+
+    Behaviour notes:
+
+    * Complete-replacement semantics — every call tears down the
+      previously-installed instruction breakpoints via
+      ``-break-delete <id>`` (per id, so source-line breakpoints +
+      watchpoints + function breakpoints survive) and reinstalls
+      from scratch.
+    * References that gdb can't parse (malformed hex, negative
+      addresses) come back ``verified: false`` with a clear
+      ``message`` — the entry is reported but not active. Other
+      gdb errors (e.g. address not in any loaded module yet) get
+      the same shape; the DAP client can render them differently
+      based on the message.
+    * The ``hitCondition`` field is accepted but ignored — we
+      declare ``supportsHitConditionalBreakpoints: false`` so well-
+      behaved clients won't send it; we tolerate it for robustness.
+    """
+    args = req.get("arguments", {}) or {}
+    bridge = session.bridge
+    if bridge is None:
+        send_response(
+            session, req, success=False, message="not launched"
+        )
+        return
+    # Tear down any previously-installed instruction breakpoints. Use
+    # the per-id delete so other breakpoint kinds aren't affected.
+    for old_id in session.instruction_breakpoints.clear_all():
+        try:
+            bridge.command(f"-break-delete {old_id}", timeout=2.0)
+        except (TimeoutError, RuntimeError):
+            pass
+    raw_breakpoints = args.get("breakpoints") or []
+    if not isinstance(raw_breakpoints, list):
+        raw_breakpoints = []
+    out: List[Dict[str, Any]] = []
+    for bp in raw_breakpoints:
+        if not isinstance(bp, dict):
+            out.append({"verified": False, "message": "malformed breakpoint entry"})
+            continue
+        ref = bp.get("instructionReference")
+        if not isinstance(ref, str) or not ref.strip():
+            out.append(
+                {"verified": False, "message": "missing instructionReference"}
+            )
+            continue
+        offset_raw = bp.get("offset", 0)
+        try:
+            offset = int(offset_raw) if offset_raw is not None else 0
+        except (TypeError, ValueError):
+            offset = 0
+        condition = bp.get("condition")
+        if not isinstance(condition, str):
+            condition = None
+        elif not condition.strip():
+            condition = None
+        cmd = build_instruction_breakpoint_command(
+            ref, offset=offset, condition=condition
+        )
+        if cmd is None:
+            out.append(
+                {
+                    "verified": False,
+                    "message": f"invalid instructionReference: {ref!r}",
+                }
+            )
+            continue
+        try:
+            result = bridge.command(cmd, timeout=5.0)
+        except TimeoutError as exc:
+            out.append({"verified": False, "message": f"gdb timed out: {exc}"})
+            continue
+        except RuntimeError as exc:
+            out.append({"verified": False, "message": f"gdb error: {exc}"})
+            continue
+        if not result.ok:
+            out.append(
+                {
+                    "verified": False,
+                    "message": result.error_message
+                    or "could not set instruction breakpoint",
+                }
+            )
+            continue
+        bk = result.fields.get("bkpt")
+        bp_id: Optional[int] = None
+        addr_resolved: Optional[str] = None
+        if isinstance(bk, dict):
+            num = bk.get("number")
+            if isinstance(num, str) and num.isdigit():
+                bp_id = int(num)
+            elif isinstance(num, int):
+                bp_id = num
+            addr_resolved = bk.get("addr") if isinstance(bk.get("addr"), str) else None
+        if bp_id is None:
+            out.append(
+                {"verified": False, "message": "gdb returned no breakpoint id"}
+            )
+            continue
+        # gdb's <PENDING> address means the symbol / address hasn't
+        # resolved yet (e.g. a dlopen'd module). For machine addresses
+        # this is rare but possible if the address points into a not-
+        # yet-loaded shared library. We surface verified=true unless
+        # gdb specifically returned <PENDING>.
+        verified = bool(addr_resolved) and addr_resolved != "<PENDING>"
+        record = InstructionBreakpointRecord(
+            gdb_id=bp_id,
+            instruction_reference=ref,
+            offset=offset,
+            resolved_address=None,
+            condition=condition,
+        )
+        session.instruction_breakpoints.register(record)
+        entry: Dict[str, Any] = {"verified": verified, "id": bp_id}
+        if isinstance(addr_resolved, str):
+            entry["instructionReference"] = addr_resolved
+        out.append(entry)
+    send_response(session, req, body={"breakpoints": out})
+
+
+def handle_disassemble(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``disassemble`` request.
+
+    Args (per DAP spec):
+      * ``memoryReference`` (string, required) — opaque address
+        reference, typically a previously-issued
+        ``instructionPointerReference``. We accept any ``"0xADDR"``
+        / ``"ADDR"`` / decimal form.
+      * ``offset`` (int, optional) — byte offset from
+        ``memoryReference`` to start. Defaults to 0.
+      * ``instructionOffset`` (int, optional) — instruction-count
+        offset from ``memoryReference`` (negative means "before").
+        Defaults to 0.
+      * ``instructionCount`` (int, required) — number of instructions
+        to return.
+      * ``resolveSymbols`` (bool, optional) — whether to resolve
+        symbol names. We always return symbols if gdb provides them
+        (free at the MI layer).
+
+    Returns ``{instructions: DisassembledInstruction[]}``. If the
+    address range can't be disassembled (e.g. unmapped memory), we
+    return ``success: false`` with gdb's error message.
+
+    Per DAP, the IDE expects exactly ``instructionCount``
+    instructions; if gdb returns fewer (e.g. a short function), we
+    pad with ``{address, instruction: "??"}`` placeholders so the
+    client's array slicing stays predictable.
+    """
+    args = req.get("arguments", {}) or {}
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, success=False, message="not launched")
+        return
+    ref = args.get("memoryReference")
+    if not isinstance(ref, str) or not ref.strip():
+        send_response(
+            session,
+            req,
+            success=False,
+            message="disassemble requires 'memoryReference'",
+        )
+        return
+    # Byte offset (rare; DAP spec lets the client request
+    # disassembly at base+offset). We add it to the parsed address.
+    byte_offset_raw = args.get("offset", 0)
+    try:
+        byte_offset = int(byte_offset_raw) if byte_offset_raw is not None else 0
+    except (TypeError, ValueError):
+        byte_offset = 0
+    # Instruction-count offset: how many instructions before/after
+    # the anchor. We approximate via 4 bytes/insn (see
+    # ``parse_memory_reference``).
+    insn_offset_raw = args.get("instructionOffset", 0)
+    try:
+        insn_offset = int(insn_offset_raw) if insn_offset_raw is not None else 0
+    except (TypeError, ValueError):
+        insn_offset = 0
+    count_raw = args.get("instructionCount", 0)
+    try:
+        count = int(count_raw) if count_raw is not None else 0
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        send_response(session, req, body={"instructions": []})
+        return
+    # Compose the start address: parse the memory reference, apply
+    # the byte offset, then the (approximate) instruction offset.
+    start_addr = parse_memory_reference(ref, insn_offset)
+    if start_addr is None:
+        send_response(
+            session,
+            req,
+            success=False,
+            message=f"invalid memoryReference: {ref!r}",
+        )
+        return
+    # Apply byte offset to the start address.
+    start_int = int(start_addr, 16)
+    if byte_offset:
+        start_int = start_int + byte_offset
+    if start_int < 0:
+        send_response(
+            session,
+            req,
+            success=False,
+            message="resulting address is negative",
+        )
+        return
+    start_hex = f"0x{start_int:x}"
+    # End address: pad generously (15 bytes is the max x86-64 insn
+    # length, so 15 * count is an upper bound). gdb stops at the
+    # first instruction past ``-e END`` so over-padding is harmless.
+    end_int = start_int + max(count * 15, 64)
+    end_hex = f"0x{end_int:x}"
+    cmd = build_disassemble_command(start_hex, end_hex, mode=0)
+    if cmd is None:
+        send_response(
+            session,
+            req,
+            success=False,
+            message="could not compose disassemble command",
+        )
+        return
+    try:
+        result = bridge.command(cmd, timeout=5.0)
+    except TimeoutError as exc:
+        send_response(session, req, success=False, message=f"gdb timed out: {exc}")
+        return
+    except RuntimeError as exc:
+        send_response(session, req, success=False, message=f"gdb error: {exc}")
+        return
+    if not result.ok:
+        send_response(
+            session,
+            req,
+            success=False,
+            message=result.error_message or "disassemble failed",
+        )
+        return
+    parsed = parse_disassemble_response(result.fields)
+    # Truncate or pad to the requested count so the client's array
+    # slicing is predictable. DAP expects EXACTLY ``instructionCount``
+    # entries.
+    truncated = parsed[:count]
+    if len(truncated) < count:
+        # Pad with placeholder rows. Address advances by 4 bytes
+        # (same approximation as parse_memory_reference) so the IDE
+        # still has a monotonic address column.
+        last_addr = (
+            int(truncated[-1].address, 16) + 4
+            if truncated
+            else start_int + len(truncated) * 4
+        )
+        for i in range(count - len(truncated)):
+            from nova_dap.disassembly import DisassembledInstruction
+            truncated.append(
+                DisassembledInstruction(
+                    address=f"0x{last_addr + i * 4:x}",
+                    instruction="??",
+                )
+            )
+    body = {"instructions": [i.to_dap_dict() for i in truncated]}
+    send_response(session, req, body=body)
 
 
 def handle_set_exception_breakpoints(session: Session, req: Dict[str, Any]) -> None:
@@ -1476,6 +1837,14 @@ def _step(session: Session, req: Dict[str, Any], mi: str) -> None:
         return
     args = req.get("arguments", {}) or {}
     tid, single = _thread_args(session, args)
+    # ``granularity`` (per DAP spec 1.51) controls how far the step
+    # advances. ``"statement"`` (default) and ``"line"`` map to gdb's
+    # source-level stepping; ``"instruction"`` reroutes to the
+    # ``-exec-{next,step}-instruction`` MI commands so the IDE's
+    # disassembly view can advance the PC by exactly one machine
+    # instruction at a time. See ``nova_dap.disassembly.map_step_command``.
+    granularity = args.get("granularity")
+    base_mi = map_step_command(mi, granularity)
     # Step commands are intrinsically per-thread in DAP — they target a
     # specific thread id. In non-stop mode we route via ``--thread`` so
     # other threads keep running (or stay stopped) independently. In
@@ -1486,9 +1855,9 @@ def _step(session: Session, req: Dict[str, Any], mi: str) -> None:
     # step a single thread while keeping others paused without
     # non-stop).
     if session.non_stop and tid is not None:
-        cmd = f"{mi} --thread {tid}"
+        cmd = f"{base_mi} --thread {tid}"
     else:
-        cmd = mi
+        cmd = base_mi
     if tid is not None:
         session.mark_thread_running(tid, True)
     result = bridge.command(cmd)
@@ -1543,6 +1912,7 @@ HANDLERS = {
     "launch": handle_launch,
     "setBreakpoints": handle_set_breakpoints,
     "setFunctionBreakpoints": handle_set_function_breakpoints,
+    "setInstructionBreakpoints": handle_set_instruction_breakpoints,
     "setExceptionBreakpoints": handle_set_exception_breakpoints,
     "configurationDone": handle_configuration_done,
     "threads": handle_threads,
@@ -1552,6 +1922,7 @@ HANDLERS = {
     "evaluate": handle_evaluate,
     "dataBreakpointInfo": handle_data_breakpoint_info,
     "setDataBreakpoints": handle_set_data_breakpoints,
+    "disassemble": handle_disassemble,
     "continue": handle_continue,
     "next": handle_next,
     "stepIn": handle_step_in,
