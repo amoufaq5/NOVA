@@ -215,6 +215,38 @@ fn par_skip_type() {
     }
 }
 
+// R20A: disambiguate postfix `?` (Result-propagation) from the ternary
+// operator. After consuming an expression in parse_postfix and seeing a
+// `?`, the next token decides: if it can start a sub-expression (a
+// literal, identifier, opening paren, unary op, or `if`/`match`/`do`/
+// `try`/`fn` keyword), it's the ternary "then" expression and we leave
+// the `?` for parse_expr to handle. Otherwise — closer, binary op,
+// statement terminator, statement-keyword — it's Result propagation.
+fn par_q_is_try_propagate(next_type) {
+    if next_type == TOK_INT { return 0 }
+    if next_type == TOK_FLOAT { return 0 }
+    if next_type == TOK_STRING { return 0 }
+    if next_type == TOK_IDENT { return 0 }
+    if next_type == TOK_TRUE { return 0 }
+    if next_type == TOK_FALSE { return 0 }
+    if next_type == TOK_NONE { return 0 }
+    if next_type == TOK_LPAREN { return 0 }
+    if next_type == TOK_LBRACKET { return 0 }
+    if next_type == TOK_LBRACE { return 0 }
+    if next_type == TOK_BANG { return 0 }
+    if next_type == TOK_TILDE { return 0 }
+    if next_type == TOK_IF { return 0 }
+    if next_type == TOK_MATCH { return 0 }
+    if next_type == TOK_DO { return 0 }
+    if next_type == TOK_TRY { return 0 }
+    if next_type == TOK_FN { return 0 }
+    if next_type == TOK_AT { return 0 }
+    // TOK_MINUS / TOK_PLUS could be unary, but in `expr?+x` / `expr?-x`
+    // we resolve to Result propagation; explicit ternary should use
+    // parens around a unary then-expr (e.g. `cond ? (-1) : 1`).
+    return 1
+}
+
 // --- String Interpolation ---
 
 fn parse_interpolated_string(s) {
@@ -606,7 +638,18 @@ fn parse_postfix() {
                             let nf_tok = par_expect(TOK_IDENT)
                             expr = ast_null_access(expr, nf_tok[1])
                         } else {
-                            return expr
+                            // R20A: postfix `?` Result propagation. Distinguish
+                            // from the ternary operator by peeking at what
+                            // follows `?`. Ternary requires an expression-starting
+                            // token next (literal / ident / unary / `(` / etc.).
+                            // Anything else — closer, binary op, statement
+                            // terminator — means `?` is acting as Result `?`.
+                            if par_q_is_try_propagate(next_tok2[0]) == 1 {
+                                par_advance()
+                                expr = ast_try_propagate(expr)
+                            } else {
+                                return expr
+                            }
                         }
                     } else {
                         return expr

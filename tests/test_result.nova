@@ -1,0 +1,146 @@
+// R20A: stdlib Result<T, E> + postfix `?` propagation operator.
+//
+// Result is just an enum with two variants — the magic is the `?`
+// operator in parse_postfix + the AST_TRY_PROPAGATE lowering in
+// codegen. `expr?` evaluates expr to a tagged tuple `[tag, payload]`;
+// if tag == 0 (Ok) the expression's value is payload, otherwise the
+// enclosing function returns the whole tuple (the Err Result).
+//
+// Wire representation (R17A): Result::Ok(v) -> [0, v]
+//                              Result::Err(e) -> [1, e]
+
+enum Result {
+    Ok(int)
+    Err(str)
+}
+
+// --- Constructor + match round-trip still works (R17A baseline) ---
+
+let ok42 = Result::Ok(42)
+assert(ok42[0] == 0, "Result::Ok tag == 0")
+assert(ok42[1] == 42, "Result::Ok payload == 42")
+
+let err_bad = Result::Err("bad")
+assert(err_bad[0] == 1, "Result::Err tag == 1")
+assert(err_bad[1] == "bad", "Result::Err payload == bad")
+
+let mok = match Result::Ok(5) {
+    Result::Ok(v) => v
+    Result::Err(_) => 0
+}
+assert(mok == 5, "destructure Ok(5) returns 5")
+
+let merr = match Result::Err("nope") {
+    Result::Ok(v) => v
+    Result::Err(_) => 0 - 1
+}
+assert(merr == 0 - 1, "destructure Err returns -1")
+
+// --- The `?` operator: Ok unwraps to its payload ---
+
+fn unwrap_int(r) {
+    let n = r?
+    return n
+}
+
+let u = unwrap_int(Result::Ok(42))
+assert(u == 42, "Result::Ok(42)? evaluates to 42")
+
+let u2 = unwrap_int(Result::Ok(0 - 7))
+assert(u2 == 0 - 7, "Result::Ok(-7)? evaluates to -7")
+
+// --- The `?` operator: Err propagates ---
+// `bubble` calls `inner` which returns Result::Err. The `?` on the
+// result inside `bubble` should cause `bubble` to return the same Err
+// without ever reaching the trailing Result::Ok line.
+
+fn inner_err() {
+    return Result::Err("boom")
+}
+
+fn bubble() {
+    let v = inner_err()?
+    return Result::Ok(v + 1)
+}
+
+let bub = bubble()
+assert(bub[0] == 1, "bubble() returned Err (tag == 1)")
+assert(bub[1] == "boom", "bubble() Err payload is 'boom'")
+
+// --- Mixed: chain Ok-then-Err ---
+
+fn parse_pos(s) {
+    if s == "" { return Result::Err("empty") }
+    if s == "neg" { return Result::Err("negative") }
+    return Result::Ok(7)
+}
+
+fn add_two(a, b) {
+    let x = parse_pos(a)?
+    let y = parse_pos(b)?
+    return Result::Ok(x + y)
+}
+
+let both_ok = add_two("aa", "bb")
+assert(both_ok[0] == 0, "add_two(ok, ok) -> Ok tag")
+assert(both_ok[1] == 14, "add_two(ok, ok) -> 7 + 7 = 14")
+
+let first_err = add_two("", "bb")
+assert(first_err[0] == 1, "add_two(err, ok) -> Err tag")
+assert(first_err[1] == "empty", "first Err propagates payload 'empty'")
+
+let second_err = add_two("aa", "neg")
+assert(second_err[0] == 1, "add_two(ok, err) -> Err tag")
+assert(second_err[1] == "negative", "second Err propagates payload 'negative'")
+
+// --- `?` inside binary arithmetic expression ---
+
+fn doubled_plus_one(s) {
+    return Result::Ok(parse_pos(s)? + parse_pos(s)? + 1)
+}
+
+let dp = doubled_plus_one("aa")
+assert(dp[0] == 0, "doubled_plus_one Ok tag")
+assert(dp[1] == 15, "doubled_plus_one == 7 + 7 + 1 = 15")
+
+let dp_err = doubled_plus_one("")
+assert(dp_err[0] == 1, "doubled_plus_one short-circuits on first ?")
+assert(dp_err[1] == "empty", "doubled_plus_one returns the empty Err")
+
+// --- `?` doesn't collide with the ternary operator ---
+
+let tern = 1 == 1 ? 100 : 200
+assert(tern == 100, "ternary still works: true -> 100")
+
+let tern2 = 1 == 2 ? 100 : 200
+assert(tern2 == 200, "ternary still works: false -> 200")
+
+let nested = 1 > 2 ? 1 : 2 > 1 ? 5 : 0 - 1
+assert(nested == 5, "nested ternary still works")
+
+// --- `?` in match-arm body works ---
+
+fn arm_q(r) {
+    let out = match r {
+        Result::Ok(v) => v * 10
+        Result::Err(_) => 0
+    }
+    return out
+}
+
+assert(arm_q(Result::Ok(3)) == 30, "match-arm body * 10 works")
+assert(arm_q(Result::Err("x")) == 0, "match-arm Err -> 0")
+
+// --- Const-fold of Result::Ok(constant)? ---
+// At AST-fold time R20A recognises `Result::Ok(N)?` where N is an
+// AST_INT_LIT and lowers the whole thing to a single int. The result
+// must still be the constant, regardless of folding.
+
+fn const_fold_q() {
+    let x = Result::Ok(99)?
+    return x + 1
+}
+
+assert(const_fold_q() == 100, "Result::Ok(99)? folds + 1 == 100")
+
+println("All R20A Result + ? tests passed!")

@@ -73,6 +73,12 @@ let AST_IMPL_BLOCK = 64
 // where `tag_int` is the declaration-order index of the variant.
 let AST_ENUM_CTOR = 65
 let AST_ENUM_PATTERN = 66
+// R20A: postfix `?` Result propagation. `expr?` evaluates `expr` to a
+// tagged tuple `[tag, ...payload]`; when `tag == 0` (Ok) the node's
+// value is `payload[0]`, otherwise the enclosing function returns
+// `expr` unchanged (which IS the Err Result). The single child is the
+// inner expression being unwrapped.
+let AST_TRY_PROPAGATE = 67
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -607,6 +613,17 @@ fn ast_enum_pattern(enum_name, variant_name, binders) {
     push(n, enum_name)
     push(n, variant_name)
     push(n, binders)
+    return n
+}
+
+// R20A: postfix `?` Result-propagation. Wraps an expression whose value
+// is a Result-shaped tagged tuple. Codegen lowers to: evaluate inner;
+// if `value[0] == 0` (Ok) replace with `value[1]`; otherwise return the
+// whole `value` from the enclosing function (it IS the Err Result).
+fn ast_try_propagate(inner) {
+    let n = list_new()
+    push(n, AST_TRY_PROPAGATE)
+    push(n, inner)
     return n
 }
 

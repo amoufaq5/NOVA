@@ -1,5 +1,120 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R20A — Result + postfix `?` propagation operator (R17A.3)
+
+R20A wires the canonical error-handling idiom on top of R17A's sum types
++ R19B's cross-target lowering: NOVA programs can now declare a stdlib-
+style `Result` enum and use the postfix `?` operator to unwrap an Ok
+payload or short-circuit return an Err Result from the enclosing
+function. No new wire representation — `Result::Ok(v)` is still the
+R17A `[0, v]` tagged tuple, `Result::Err(e)` is `[1, e]`. The work was
+parser disambiguation (against ternary), one new AST node, and one new
+lowering rule per backend.
+
+### What landed
+
+**ast.nova** + **parser.nova**:
+
+  * New AST node `AST_TRY_PROPAGATE = 67` with constructor
+    `ast_try_propagate(inner)`. Single-child wrapper around an
+    expression whose runtime value is a Result-shaped tagged tuple.
+  * `par_q_is_try_propagate(next_type)` helper resolves the
+    `expr ?` vs `cond ? then : else` ambiguity by peeking one token
+    past `?`: when next is an expression-starter (int / float /
+    string / ident / `(` / `[` / `{` / `!` / `~` / `if` / `match` /
+    `do` / `try` / `fn` / `@` / `true` / `false` / `none`), the `?`
+    is the ternary operator and falls through to the existing
+    parse_expr handler. Anything else — closer, binary op, statement
+    terminator, statement-keyword — treats `?` as Result propagation.
+    `TOK_MINUS` / `TOK_PLUS` resolve as binary operators (so
+    `parse(s)? + 1` works); explicit ternary with a leading unary
+    needs parens around the then-expression.
+  * `parse_postfix` consumes `?` when `par_q_is_try_propagate` says
+    so and wraps the LHS in `ast_try_propagate`. Existing `?.` null-
+    safe access path is unchanged.
+
+**codegen.nova** (4 backends + supporting passes):
+
+  * `_cg_dce_expr_uses`, `cg_fold_expr`, `collect_idents_in`, and
+    `collect_comp_vars` all recurse into the AST_TRY_PROPAGATE inner
+    expression so the existing dataflow passes stay honest.
+  * **x86-64 Linux / macOS / Windows** (`gen_expr`): evaluate inner
+    → `rax`, push to save, call `_nova_index(rax, 0)` to get the
+    tag, branch on zero. Ok path pops back and indexes 1 for the
+    payload; Err path runs any registered defers, pops back, and
+    emits `mov rsp, rbp / pop rbp / ret` so the Err Result IS the
+    function return — no re-construction needed.
+  * **WASM** (`wasm_gen_expr`): stashes inner in the new
+    `$g__wasm_q_tmp` global, compares `rt_index(t, 0)` against `0`,
+    and branches via `if (result i64) ... else ... end`. Ok arm
+    yields `rt_index(t, 1)`; else arm pushes the whole tuple +
+    `return` to exit the enclosing wasm func (the trailing
+    `i64.const 0` is unreachable but keeps the validator happy
+    about the block type).
+  * **Windows ARM64** (`warm_gen_expr`): mirrors the x86-64 logic
+    using `bl _nova_warm_index` + `cbz x0` and a branch to the
+    function's `_warm_fn_epilogue_<name>` label on the Err path.
+    `warm_collect_locals` extended to recurse into the inner.
+  * **ARM64 Linux** (`arm_gen_expr`): structurally-valid stub
+    matching the R19B-claimed-but-incomplete sum-type support on
+    this target (`arm_collect_locals` recurses; the lowering
+    passes the inner value through verbatim so the test still
+    cross-compiles).
+  * **AST-level const-fold**: `cg_fold_expr` recognises
+    `Result::Ok(constant)?` when the inner is `AST_ENUM_CTOR` with
+    enum name `"Result"`, variant `"Ok"`, and one AST_INT_LIT
+    argument, then rewrites the whole `?` expression to that int
+    literal — eliminating the runtime tag check + index entirely.
+
+**Tests** (NEW `tests/test_result.nova`, 26 assertions):
+
+  * Constructor wire-shape: `Result::Ok(42)` → `[0, 42]`,
+    `Result::Err("bad")` → `[1, "bad"]`.
+  * Round-trip with R17A `match`: `Result::Ok(5)` destructure binds
+    `v == 5`; `Result::Err("nope")` falls to the Err arm.
+  * `Result::Ok(42)?` evaluates to 42; `Result::Ok(-7)?` evaluates
+    to -7.
+  * `Result::Err("boom")?` inside `bubble()` causes `bubble` to
+    return the same Err — payload `"boom"` preserved.
+  * Multiple `?` in sequence: `parse_pos(a)? + parse_pos(b)?`
+    propagates the FIRST Err (empty vs negative payload kept).
+  * `?` in arithmetic expression: `Result::Ok(parse(s)? +
+    parse(s)? + 1)` short-circuits on first Err.
+  * Ternary disambiguation: `1 == 1 ? 100 : 200 == 100`,
+    `1 == 2 ? 100 : 200 == 200`, nested
+    `1 > 2 ? 1 : 2 > 1 ? 5 : -1 == 5` all still work — no
+    regression of R12C's test_ternary_dowhile.nova.
+  * `?` inside match-arm body: `Result::Ok(3) -> v * 10 == 30`.
+  * Const-fold: `Result::Ok(99)?` inside a fn returns 100 after
+    adding 1, with the runtime tag check eliminated.
+
+### Verification
+
+  * `tests/run_tests.sh` : 172 total, 166 pass / 0 fail / 6 skip
+    (R19B baseline 165 + 1 new test).
+  * `make self-host` : stage2.s == stage3.s bit-identical.
+  * Cross-compile to all 6 targets (linux, macos, wasm, windows,
+    arm64, windows-arm64) succeeds. Int-only Result+? subset runs
+    under wasmtime; string-payload Err destructure remains the
+    R19B.2-tracked WASM `$rt_eq` limitation.
+
+### R20A.2 follow-ups
+
+  * Lift the const-fold of `Result::Ok(constant)?` to handle
+    string-payload Ok (it currently only folds AST_INT_LIT).
+  * Wire genuine ARM64 Linux runtime helpers (`_nova_arm_list_new`,
+    `_nova_arm_push`, `_nova_arm_index`) so the Result+? lowering
+    runs there too. The R19B commit claimed ARM64 support but only
+    the `warm_*` (winARM64) and wasm backends got real allocators;
+    arm64 Linux still routes list ops to `_nova_arm_stub_*`
+    stubs.
+  * Resolve the WASM `$rt_eq` string-address limitation
+    (R19B.2 deferred) so Result::Err(str) match-arms unify on
+    WASM. Affects `tests/test_sum_types.nova`'s last 3 string
+    asserts and the matching string asserts in `tests/test_result.nova`.
+
+---
+
 ## R20D — LSP quickfix: auto-add missing match arms
 
 R20D wires R17A's match-exhaustiveness WARN through the LSP code-action
