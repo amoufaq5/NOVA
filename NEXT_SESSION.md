@@ -1,5 +1,112 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R22B — Generic function signatures: `fn map<T, U>(xs: list<T>, f: T -> U) -> list<U>`
+
+R22B extends R21A's parser-only generics from enums to functions. Same
+zero-cost approach: NOVA's runtime is dynamically typed (tagged values),
+so type parameters on fns are documentation + light type-check;
+codegen does not need to monomorphize. The body executes against
+dynamic values regardless of the annotations.
+
+### What landed
+
+**parser.nova**:
+
+  * `parse_fn()` accepts an optional generic type parameter list
+    between the fn name and the parameter list: `fn map<T, U>(xs, f)
+    { ... }`. The same applies to method-decl form:
+    `fn Box.map<U>(self, f) { ... }`. The parameter list is
+    discarded — `ast_fn_decl(name, params, body)` and
+    `ast_method_decl(name, meth, params, body)` are unchanged.
+  * `par_skip_return_type()` (new helper) factors out the optional
+    return-type annotation after `)`. Accepts the legacy `: T`
+    spelling and the new Rust-like `-> T` spelling. Used by
+    `parse_fn`, the method-decl branch, and the lambda case in
+    `parse_unary`.
+  * `par_skip_type()` extended for function-type syntax `T -> U` in
+    parameter annotations like `f: T -> U`. After consuming the
+    input type `T`, if a thin arrow `-` then `>` follows, consume
+    both tokens and recurse to skip the result type. The lexer emits
+    `-` then `>` as two tokens (no dedicated `TOK_THINARROW`), so
+    we look ahead via `par_peek_at_type(1)`.
+  * `par_skip_generic_params()` (new helper) factors out the
+    `<T, U, ...>` parsing so the same code is used by `parse_fn`
+    (both standalone and method-decl branches). `parse_enum`'s
+    inline logic from R21A is left as-is to keep the R21A diff
+    untouched.
+
+**codegen.nova**: NO changes. Type parameters and return-type
+annotations are erased at the parser level, so the AST passed to
+codegen is identical to the no-annotation case. All six target
+lowerings continue to emit the same code.
+
+**Tests** (NEW `tests/test_generic_fn.nova`, 20 assertions):
+
+  * `fn identity<T>(x: T) -> T { return x }` compiles + runs on
+    int, str, negative int, list values — all preserve the
+    payload.
+  * `fn map<T, U>(xs, f)` compiles + runs; same generic decl
+    handles `int -> int` (doubling) and `int -> str` (stringify).
+  * Higher-order with function-type annotation:
+    `fn apply<T, U>(x: T, f: T -> U) -> U { return f(x) }` works.
+  * Three-parameter generic `fn first_of<A, B, C>(a, b, c) { return
+    a }` works for both int and str.
+  * Backward-compat: legacy `: int` return-type still compiles, and
+    plain fns without generics or annotations are unaffected.
+  * Generic fn + generic enum interplay:
+    `fn unwrap<T, E>(r: Result<T, E>) -> T { match r { ... } }`
+    works on both `Result<int, str>::Ok(42)` (returns 42) and
+    `Result<int, str>::Err("oops")` (default arm returns 0).
+  * Nested-generic type annotation on a generic fn:
+    `fn nested<T>(x: Result<Result<T, str>, str>) -> T { ... }`
+    parses and runs.
+
+### Verification
+
+  * `tests/run_tests.sh` : 174 total, 168 pass / 0 fail / 6 skip
+    (R21A baseline 173/167 + 1 new test).
+  * `make self-host` : stage2.s == stage3.s bit-identical
+    (parser-only change, deterministic codegen).
+  * R17A `tests/test_sum_types.nova` (27 asserts): PASS.
+  * R17A `tests/test_exhaustiveness.nova` (15 asserts): PASS.
+  * R20A `tests/test_result.nova` (26 asserts): PASS.
+  * R21A `tests/test_generic_enum.nova` (25 asserts): PASS.
+  * Type-annotations `tests/test_type_annotations.nova`: PASS
+    (legacy `fn add(a: int, b: int): int` still works).
+  * Cross-compile `tests/test_generic_fn.nova` to all 6 targets
+    succeeds: linux / macos / wasm / windows / arm64 /
+    windows-arm64. Linux binary runs and prints "All generic fn
+    tests passed!".
+
+### R22B.2 follow-ups
+
+  * Tree-sitter grammar update (`tools/tree-sitter-nova`) to
+    highlight `<T, U>` on fn decls and the new `-> T` return-type
+    syntax. The settled R9E grammar handles `<` as comparison and
+    `-` as subtraction; a generic-fn / return-type context would
+    need separate rules.
+  * Store type-parameter names on AST_FN_DECL as a fourth slot
+    `d[4] = type_params_list` (analogous to AST_ENUM_DECL future
+    slot). Codegen would still ignore them, but a future
+    type-checker could read them without re-parsing.
+  * Minimal type-check pass: when a generic fn is called, look at
+    the inferred binding of `T` from the first argument and WARN
+    if a subsequent argument annotated `T` is a different runtime
+    type. Mirrors R21A.2's enum-payload-type-check proposal.
+  * Generic struct syntax `struct Box<T> { value: T }` —
+    `parse_struct_decl` doesn't accept `<T>` yet. Same parser-only
+    pattern would apply; this was deferred from R21A.2.
+  * Where-clause syntax `fn map<T, U>(xs, f) where T: Comparable
+    { ... }` for future trait bounds. The runtime doesn't have
+    traits today (dispatch is dynamic on tagged values), so this
+    would also be a documentation-level annotation initially.
+  * `par_skip_type` currently consumes only one `T -> U` chain.
+    `T -> U -> V` (right-associative function-type) recurses
+    naturally because `par_skip_type` calls itself on the tail,
+    but the spec / docs should note this.
+
+---
+
 ## R21A — Generic enum payload types: `Result<T, E>` truly parametric
 
 R21A closes the "fixed payload types" gap from R17A: the same enum

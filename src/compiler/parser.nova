@@ -218,6 +218,18 @@ fn par_skip_type() {
             par_advance()
         }
     }
+    // R22B: function-type syntax `T -> U` for parameters like
+    // `f: T -> U`. After consuming the input type `T`, if we see a
+    // thin arrow (`-` then `>`), consume it and recurse to skip the
+    // result type `U`. The two-token `->` pattern is recognised here
+    // because the lexer doesn't emit a dedicated TOK_THINARROW.
+    if par_peek_type() == TOK_MINUS {
+        if par_peek_at_type(1) == TOK_GT {
+            par_advance()
+            par_advance()
+            par_skip_type()
+        }
+    }
 }
 
 // R20A: disambiguate postfix `?` (Result-propagation) from the ternary
@@ -517,10 +529,7 @@ fn parse_primary() {
                 let params = pinfo[0]
                 let defaults = pinfo[1]
                 par_expect(TOK_RPAREN)
-                if par_peek_type() == TOK_COLON {
-                    par_advance()
-                    par_skip_type()
-                }
+                par_skip_return_type()
                 let body = parse_block()
                 body = inject_defaults(body, defaults)
                 let lname = "_lambda_" + int_to_str(par_lambda_count)
@@ -1373,6 +1382,63 @@ fn inject_defaults(body, defaults) {
     return ast_block(new_stmts)
 }
 
+// R22B: parser-only generic type parameter list after a fn or enum
+// name, e.g. `fn map<T, U>(...)` or `enum Result<T, E>`. NOVA's runtime
+// is dynamically typed (tagged values), so type parameters are erased
+// at codegen — we just accept the syntax and discard. Returns nothing;
+// caller decides whether to even look at the `<`.
+fn par_skip_generic_params() {
+    par_advance()  // consume the opening `<`
+    if par_peek_type() == TOK_GT {
+        par_advance()
+        return 0
+    }
+    if par_peek_type() == TOK_SHR {
+        // Empty params closed by `>>` — rare/weird; treat as one close
+        // and let par_skip_type's TOK_SHR handling close the outer.
+        par_advance()
+        return 0
+    }
+    par_expect(TOK_IDENT)
+    while par_peek_type() == TOK_COMMA {
+        par_advance()
+        if par_peek_type() == TOK_GT { break }
+        par_expect(TOK_IDENT)
+    }
+    let close_t = par_peek_type()
+    if close_t == TOK_GT {
+        par_advance()
+    } else { if close_t == TOK_SHR {
+        // Tight nested close — the outer level closes via TOK_SHR;
+        // caller must compensate (used only for enum decls today).
+        par_advance()
+    } else {
+        par_error("expected '>' to close generic type parameters")
+    } }
+    return 0
+}
+
+// R22B: optional return-type annotation after a function's parameter
+// list. Accepts `: T` (legacy syntax) or `-> T` (Rust-like). Both are
+// purely parser-level metadata — discarded after par_skip_type.
+fn par_skip_return_type() {
+    let t = par_peek_type()
+    if t == TOK_COLON {
+        par_advance()
+        par_skip_type()
+        return 0
+    }
+    if t == TOK_MINUS {
+        if par_peek_at_type(1) == TOK_GT {
+            par_advance()
+            par_advance()
+            par_skip_type()
+            return 0
+        }
+    }
+    return 0
+}
+
 fn parse_fn() {
     par_expect(TOK_FN)
     let name_tok = par_expect(TOK_IDENT)
@@ -1381,18 +1447,25 @@ fn parse_fn() {
         par_advance()
         let mtok = par_expect(TOK_IDENT)
         let meth = mtok[1]
+        // R22B: method decls also accept generic type parameters,
+        // e.g. `fn Box.map<U>(self, f) { ... }`. Parser-only.
+        if par_peek_type() == TOK_LT {
+            par_skip_generic_params()
+        }
         par_expect(TOK_LPAREN)
         let pinfo = parse_param_list()
         let params = pinfo[0]
         let defaults = pinfo[1]
         par_expect(TOK_RPAREN)
-        if par_peek_type() == TOK_COLON {
-            par_advance()
-            par_skip_type()
-        }
+        par_skip_return_type()
         let body = parse_block()
         body = inject_defaults(body, defaults)
         return ast_method_decl(name, meth, params, body)
+    }
+    // R22B: generic type parameters `<T, U, ...>` between the fn name
+    // and the parameter list: `fn map<T, U>(xs, f) { ... }`.
+    if par_peek_type() == TOK_LT {
+        par_skip_generic_params()
     }
     par_expect(TOK_LPAREN)
     let pinfo = parse_param_list()
@@ -1400,10 +1473,7 @@ fn parse_fn() {
     let defaults = pinfo[1]
     let rest_name = pinfo[2]
     par_expect(TOK_RPAREN)
-    if par_peek_type() == TOK_COLON {
-        par_advance()
-        par_skip_type()
-    }
+    par_skip_return_type()
     let body = parse_block()
     body = inject_defaults(body, defaults)
     return ast_fn_decl(name, params, body)
