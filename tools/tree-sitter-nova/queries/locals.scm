@@ -88,6 +88,18 @@
 (struct_field
   name: (identifier) @local.definition.field)
 
+; R25A: struct destructure pattern fields. The shorthand form
+; `let Point { x, y } = p` introduces both `x` and `y` as locals; the
+; explicit-binder form `let Point { x: px, y: py } = p` binds `px` /
+; `py`. We treat the binder identifier as the definition.
+(struct_pattern_field
+  pattern: (identifier) @local.definition.var)
+
+; Shorthand-only field — no explicit pattern, just `name` alone.
+(struct_pattern_field
+  name: (identifier) @local.definition.var
+  !pattern)
+
 ; enum variants — declaration-scoped constructor definitions.
 (enum_variant
   name: (identifier) @local.definition.constant)

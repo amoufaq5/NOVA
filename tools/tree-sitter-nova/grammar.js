@@ -28,6 +28,19 @@
  * separator `;`, `break/continue if`, if-as-expression, match guards,
  * `is T` patterns, and trailing commas everywhere.
  *
+ * R26B extensions:
+ *   * R25A brace-init struct construction `Point { x: 1, y: 2 }`,
+ *     including the shorthand form `Point { x, y }`, nested brace-init
+ *     in lists and other brace-inits, and the field-access chain
+ *     `Point { x: 1, y: 2 }.x`.
+ *   * R25A destructure patterns in `let` bindings (`let Point { x, y }
+ *     = p`) and match arms (`match v { Point { x: 0, y: 0 } => ... }`),
+ *     including partial destructure with `..` rest, wildcard `_` fields,
+ *     literal-valued fields, and binder fields.
+ *   * R26A struct update-syntax `Point { x: 1, ..base }` — forward-
+ *     compatible grammar support (the compiler's strict parser owns
+ *     "at most one base" / "field coverage" enforcement).
+ *
  * The grammar intentionally accepts more than the compiler's strict
  * recursive-descent parser — tree-sitter is a tolerant CST builder used
  * by editors for syntax highlighting, structural search, code-folding,
@@ -112,6 +125,18 @@ module.exports = grammar({
     // context) and an `if_expression` (expression context). Same surface
     // syntax; GLR picks based on whether the result is being consumed.
     [$.if_statement, $.if_expression],
+    // R25A: inside a match arm, `IDENT { x, y }` could be either a
+    // struct_pattern (shorthand-binder destructure) or a struct_init
+    // expression that happens to contain shorthand fields. The arm's
+    // `=>` token disambiguates; GLR keeps both alive until it sees it.
+    [$.struct_pattern_field, $.field_init],
+    // R25A: in `for x in xs { ... }` and `while cond { ... }`, the
+    // identifier+brace pair could be a struct_init (xs{...}) or a
+    // separate identifier + body block. We declare the conflict so
+    // GLR keeps both parses alive — for_statement / while_statement
+    // need the block, so struct_init falls away naturally.
+    [$._expression, $.struct_init_expression],
+    [$.struct_pattern, $.struct_init_expression],
   ],
 
   rules: {
@@ -390,6 +415,15 @@ module.exports = grammar({
           '=',
           field('value', $._expression),
         ),
+        // R25A: `let Point { x: px, y: py } = p` — struct destructure
+        // pattern at let head. Dynamic precedence picks this over the
+        // single-name reading when the identifier is followed by a
+        // `{` and field-init-like contents.
+        prec.dynamic(20, seq(
+          field('pattern', $.struct_pattern),
+          '=',
+          field('value', $._expression),
+        )),
       ),
       optional(';'),
     ),
@@ -408,6 +442,44 @@ module.exports = grammar({
       '...',
       optional(field('name', $.identifier)),
     ),
+
+    // R25A: struct destructure pattern `Point { x: px, y: py }` or
+    // shorthand `Point { x, y }`. Used at let head, match arm head, or
+    // nested inside other patterns. A trailing `..` denotes "rest of
+    // fields ignored" (partial destructure). The leading type is a bare
+    // identifier — generic forms are out of scope for the same reason
+    // as struct_init_expression (lexer can't disambiguate `<` cheaply).
+    struct_pattern: $ => prec.dynamic(20, seq(
+      field('type', $.identifier),
+      '{',
+      optional($.struct_pattern_field_list),
+      '}',
+    )),
+
+    struct_pattern_field_list: $ => seq(
+      choice($.struct_pattern_field, $.rest_field_pattern),
+      repeat(seq(',', choice($.struct_pattern_field, $.rest_field_pattern))),
+      optional(','),
+    ),
+
+    // Each pattern-field is either:
+    //   * `name: pattern`  — explicit binder (pattern can be a literal
+    //     constant for match arms, or an identifier binder).
+    //   * `name`           — shorthand: binds field to a local of the
+    //     same name.
+    struct_pattern_field: $ => choice(
+      seq(
+        field('name', $.identifier),
+        ':',
+        field('pattern', choice($._expression, $.wildcard_pattern)),
+      ),
+      field('name', $.identifier),
+    ),
+
+    // `..` rest pattern: matches and discards the remaining fields.
+    // Distinct from list_pattern's `...rest` because struct destructure
+    // doesn't bind a name to the leftovers.
+    rest_field_pattern: $ => '..',
 
     // Comma-separated list of expressions, used as the RHS of multi-
     // binding let and multi-assign.
@@ -591,6 +663,9 @@ module.exports = grammar({
       $.match_expression,
       $.lambda_expression,
       $.call_expression,
+      // R25A: `Point { x: 1, y: 2 }` brace-init. Sits at call-level
+      // precedence so `Point { x: 1 }.x` field-access chains work.
+      $.struct_init_expression,
       $.index_expression,
       $.slice_expression,
       $.field_expression,
@@ -657,6 +732,11 @@ module.exports = grammar({
       // R17A destructure pattern: `Option::Some(v)`, `Shape::Rect(w, h)`,
       // `Tree::Leaf(x)`.
       $.variant_pattern,
+      // R25A: `Point { x: 0, y: 0 }`, `Point { x, y }`,
+      // `Point { x: 7, y: _ }`. Sits at higher dynamic precedence than
+      // the generic `_expression` fallback so a `Type { ... }` arm
+      // resolves to struct_pattern, not struct_init_expression.
+      $.struct_pattern,
       // Other patterns: bare literal / identifier / path constructor
       // with no binders. We re-use the expression rule so number/string
       // literals and `Option::None` (no parens) all parse as patterns.
@@ -822,6 +902,55 @@ module.exports = grammar({
       ':',
       field('value', $._expression),
     )),
+
+    // R25A: brace-init struct construction `Foo { field: val, ... }`.
+    // The type prefix is a bare identifier (`Point`, `Box`). Tree-sitter
+    // cannot disambiguate the generic form `Box<int> { value: 42 }`
+    // from the binary-comparison expression `a < b` without an external
+    // scanner — the `<` token would force LR conflict resolution. The
+    // compiler's strict parser handles the generic case; editor-side
+    // syntax highlighting on the generic form will see two adjacent
+    // exprs (a binary_expression `Box < int` and a map_literal
+    // `{ value: 42 }`) which still highlight reasonably.
+    //
+    // We use *dynamic* precedence rather than static prec(PREC.call),
+    // so the parser doesn't commit to struct_init too early. In contexts
+    // like `for x in xs { ... }`, both parses (xs as identifier + block,
+    // or xs as struct_init prefix) run in parallel; whichever completes
+    // a valid statement parse wins.
+    struct_init_expression: $ => prec.dynamic(5, seq(
+      field('type', $.identifier),
+      '{',
+      optional($.field_init_list),
+      '}',
+    )),
+
+    field_init_list: $ => seq(
+      choice($.field_init, $.struct_update_base),
+      repeat(seq(',', choice($.field_init, $.struct_update_base))),
+      optional(','),
+    ),
+
+    field_init: $ => choice(
+      seq(
+        field('name', $.identifier),
+        ':',
+        field('value', $._expression),
+      ),
+      // R25A shorthand: `Point { x, y }` is sugar for `Point { x: x, y: y }`.
+      // We capture the same `name` field so editor highlights and the LSP
+      // see consistent CST shape.
+      field('name', $.identifier),
+    ),
+
+    // R26A: struct update-syntax base — `Foo { f: 1, ..base }`. The
+    // remaining fields are taken from `base`. Grammar-side support is
+    // forward-compatible with R25A brace-init; the compiler's strict
+    // parser enforces "at most one base" and the field-coverage rules.
+    struct_update_base: $ => seq(
+      '..',
+      field('base', $._expression),
+    ),
 
     index_expression: $ => prec(PREC.index, seq(
       field('object', $._expression),

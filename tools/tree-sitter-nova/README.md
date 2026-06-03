@@ -17,8 +17,8 @@ The grammar produces a concrete syntax tree (CST) directly usable by:
 
 This grammar handles every everyday NOVA construct plus the
 declarative cognitive-DSL surface used by `mind`/`soul`/`system`
-examples. The R24B revision extends R9E's baseline with all the R17A–
-R23A syntax additions:
+examples. The R26B revision extends R24B's R17A–R23A coverage with
+the R25A brace-init struct construction and destructure patterns:
 
 | Construct                       | Status          |
 | ------------------------------- | --------------- |
@@ -41,6 +41,13 @@ R23A syntax additions:
 | `name: Type` type annotations (params + let + const) | full |
 | `import "path.nova"`            | full            |
 | `struct Name<T, U> { f: T; g: U }` | full (R23A)  |
+| `Foo { field: val, ... }` brace-init | full (R25A) |
+| `Foo { field }` brace-init shorthand | full (R25A) |
+| `let Foo { f: a, g: b } = expr` destructure | full (R25A) |
+| `let Foo { f, g } = expr` destructure shorthand | full (R25A) |
+| `let Foo { f, .. } = expr` partial destructure | full (R25A) |
+| `match v { Foo { f: 0, g: _ } => ... }` struct-pattern arm | full (R25A) |
+| `Foo { f: a, ..base }` struct update-syntax | full (R26A, grammar-only) |
 | `enum Name<T, U> { Variant(T) }` | full (R17A + R21A) |
 | `Type::Variant(payload)` constructor / match destructure | full (R17A) |
 | `expr?` Result-propagation operator | full (R20A) |
@@ -69,19 +76,21 @@ R23A syntax additions:
 | Flow operators `~> <~ =>> <<~ ~~> <=> \|~>` | full (cognitive DSL) |
 | `mind`/`soul`/`system { sections... }` declarations | partial |
 
-Empirically, the grammar parses **240 / 244 (~98.4%)** of the canonical
+Empirically, the grammar parses **242 / 247 (~98.0%)** of the canonical
 NOVA sample programs (`tests/*.nova` + `examples/*.nova`) with **0
 ERROR / 0 MISSING** nodes — including all R17A enum sum-type tests,
 R20A `?` propagation tests, R21A generic enum tests, R22B generic fn
-tests, R23A generic struct tests, every `_demo.nova` cognitive example
-(`active_inference_demo`, `causal_library_demo`, `predictive_coding`,
-`hdc_demo`, `sdr_demo`, `soul_demo`, `system_syntax_demo`), the WASI
-round-trip, `concurrency.nova`, `game_of_life.nova`, `brainfuck.nova`,
-and `showcase.nova` (with `${expr}` interpolation).
+tests, R23A generic struct tests, R25A brace-init + destructure tests
+(`test_struct_brace_init.nova`, `test_struct_destructure.nova`), every
+`_demo.nova` cognitive example (`active_inference_demo`,
+`causal_library_demo`, `predictive_coding`, `hdc_demo`, `sdr_demo`,
+`soul_demo`, `system_syntax_demo`), the WASI round-trip,
+`concurrency.nova`, `game_of_life.nova`, `brainfuck.nova`, and
+`showcase.nova` (with `${expr}` interpolation).
 
 ### Out of scope
 
-The remaining four files use surface syntax we intentionally defer to
+The remaining five files use surface syntax we intentionally defer to
 a follow-up revision:
 
 - `examples/basic_mind.nova` — uses a freeform `mind { memory NAME(args)
@@ -99,8 +108,16 @@ a follow-up revision:
   `value is T` as a binary type-check expression without an external
   scanner. Workaround: write the match arm body as a block
   (`{ "integer" }`) to make the arm terminus explicit.
+- `tests/test_struct_update_syntax.nova` (R26A) — uses the generic
+  brace-init form `Box<int> { ..bi }`. The `<` token forces an LR
+  conflict with `a < b` binary comparison that GLR cannot resolve
+  without an external scanner. The bare-identifier brace-init form
+  (`Box { value: 42 }`, `Box { ..bi }`) parses cleanly; only the
+  explicit `<TypeArgs>` annotation is OOS. Tree-sitter sees the
+  generic prefix as a binary chain `Box < int > { ... }` (map literal),
+  which still highlights reasonably even if not as a struct_init node.
 
-These four files require either an external scanner or a token-level
+These five files require either an external scanner or a token-level
 redesign that the editor experience does not need today.
 
 ## Build
@@ -109,7 +126,7 @@ redesign that the editor experience does not need today.
 cd tools/tree-sitter-nova
 npm install                           # installs tree-sitter-cli
 npx tree-sitter generate              # writes src/parser.c
-npx tree-sitter test                  # 89 corpus tests should pass
+npx tree-sitter test                  # 108 corpus tests should pass
 npx tree-sitter parse path/to.nova    # print the CST for a file
 ```
 

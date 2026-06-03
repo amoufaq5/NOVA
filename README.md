@@ -295,7 +295,13 @@ There is no implicit entry point. Execution begins at the first top-level statem
   `impl Type { fn ... }`, `fn Type.method(self, ...)`,
   if-as-expression, match guards, power `**`, flow operators
   `~> <~ =>> <<~ ~~> <=> |~>`, and `mind`/`soul`/`system` cognitive
-  declarations. **89 corpus tests pass**, **240 / 244 (98.4%)**
+  declarations. R26B adds R25A brace-init + destructure (struct
+  init expressions `Point { x: 1, y: 2 }`, shorthand `Point { x, y }`,
+  let-binding destructure `let Point { x, y } = p`, partial
+  destructure `let Point { x: a, .. } = p`, match-arm struct patterns
+  `Point { x: 0, y: _ } => ...`) plus forward-compatible R26A update-
+  syntax (`Point { x: 1, ..base }`). **108 corpus tests pass** (89
+  baseline + 10 brace-init + 9 destructure), **242 / 247 (98.0%)**
   of `tests/*.nova` + `examples/*.nova` parse with 0 ERROR / 0
   MISSING nodes. `highlights.scm` + `folds.scm` + `locals.scm`
   queries; drop-in support for Neovim, Helix, Emacs, Zed

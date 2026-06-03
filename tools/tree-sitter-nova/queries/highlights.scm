@@ -89,6 +89,19 @@
 (struct_field name: (identifier) @property)
 (field_expression field: (identifier) @property)
 
+; R25A: brace-init struct construction `Point { x: 1, y: 2 }`.
+; The leading type is a constructor-style type reference; field names
+; highlight as properties (shorthand-binder form drops the value half).
+(struct_init_expression type: (identifier) @type)
+(field_init name: (identifier) @property)
+
+; R25A: struct destructure pattern `let Point { x, y } = p`,
+; `match v { Point { x: 0, y: 0 } => ... }`. Type highlights as type;
+; field names as properties; rest-pattern `..` as a punctuation special.
+(struct_pattern type: (identifier) @type)
+(struct_pattern_field name: (identifier) @property)
+(rest_field_pattern) @punctuation.special
+
 ; Type parameters
 (type_parameter name: (identifier) @type.parameter)
 

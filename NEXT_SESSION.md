@@ -1,5 +1,105 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R26B — tree-sitter grammar refresh (R25A brace-init + destructure)
+
+**Status: complete** — extends R24B's R17A–R23A coverage with the
+R25A struct brace-init expression (`Point { x: 1, y: 2 }`) and
+struct destructure pattern (`let Point { x, y } = p`,
+`match v { Point { x: 0, y: 0 } => ... }`). Also adds forward-
+compatible grammar support for R26A's struct update-syntax
+(`Point { x: 1, ..base }`).
+
+### Grammar additions
+
+- NEW rule `struct_init_expression` — `IDENT { field_init_list }`.
+  Field inits are either `name: expr` (explicit) or `name` alone
+  (shorthand: sugar for `name: name`). Empty `Foo {}` accepted.
+- NEW rule `struct_pattern` — `IDENT { struct_pattern_field_list }`.
+  Pattern fields are either `name: pattern` (literal / binder /
+  wildcard), `name` alone (shorthand), or `..` (rest_field_pattern).
+- NEW rule `struct_update_base` — `..base_expr` inside field_init_list,
+  for R26A's update-syntax.
+- NEW field choice in `let_decl`: `let struct_pattern = expr` joins
+  the existing single-name + multi-name + list-pattern alternatives.
+- `_pattern` (match arms) extended to include `struct_pattern`.
+
+### Disambiguation
+
+The fundamental tension: `xs { ... }` in `for x in xs { print(x) }`
+could be a struct_init (`xs` as struct name, `{ ... }` as field
+body) or a separate identifier + body block. We resolve this with:
+
+- *Dynamic* precedence on `struct_init_expression` (5) rather than
+  static precedence — the parser doesn't commit to struct_init too
+  early. The for_statement / while_statement / if_statement rules
+  require a block AFTER the condition, so the GLR fork that picks
+  struct_init dies when no body block follows.
+- Explicit conflicts `[_expression, struct_init_expression]` and
+  `[struct_pattern, struct_init_expression]` so GLR keeps both
+  parses alive.
+- `struct_pattern` at higher dynamic precedence (20) than struct_init
+  so a match arm `Foo { x: 0 } =>` resolves to pattern, not init.
+
+### Out of scope
+
+- Generic-typed brace-init `Box<int> { value: 42 }` — the `<` token
+  collides with `a < b` binary comparison. Without an external
+  scanner, GLR cannot disambiguate. Bare-identifier form
+  (`Box { value: 42 }`) works fine; explicit `<TypeArgs>` is
+  documented OOS in `tools/tree-sitter-nova/README.md`.
+
+### Tests
+
+- NEW `tools/tree-sitter-nova/test/corpus/r25_brace_init.txt` —
+  10 corpus tests covering single / multi-field, swap-order,
+  string values, list nesting, brace-init nesting, method body,
+  field-access chain, empty `Foo {}`, trailing comma.
+- NEW `tools/tree-sitter-nova/test/corpus/r25_struct_destructure.txt`
+  — 9 corpus tests covering let destructure (explicit / shorthand
+  / partial `..`), and match arms (literal / binder / mixed /
+  wildcard `_` / shorthand).
+
+### Verification
+
+- `tree-sitter test` → 108 / 108 passing (was 89 in R24B).
+- Parse-everything sweep over `tests/*.nova` + `examples/*.nova` →
+  242 / 247 clean (R24B baseline: 240 / 244). The R25A files
+  `test_struct_brace_init.nova` + `test_struct_destructure.nova`
+  parse cleanly. The 5 OOS files are documented in README.md.
+- highlights.scm captures: `struct_init_expression.type` →
+  `@type`, `field_init.name` → `@property`, `struct_pattern.type`
+  → `@type`, `struct_pattern_field.name` → `@property`,
+  `rest_field_pattern` → `@punctuation.special`.
+
+### Files touched (R26B)
+
+- MODIFIED: `tools/tree-sitter-nova/grammar.js` (struct_init_expression,
+  struct_pattern, struct_update_base, _pattern, let_decl, conflicts)
+- NEW: `tools/tree-sitter-nova/test/corpus/r25_brace_init.txt` (10 tests)
+- NEW: `tools/tree-sitter-nova/test/corpus/r25_struct_destructure.txt` (9 tests)
+- MODIFIED: `tools/tree-sitter-nova/queries/highlights.scm` (R25A captures)
+- MODIFIED: `tools/tree-sitter-nova/queries/locals.scm` (R25A pattern bindings)
+- MODIFIED: `tools/tree-sitter-nova/README.md` (R26B coverage update)
+- MODIFIED: `NEXT_SESSION.md` + `README.md` (this entry)
+
+### Untouched by R26B
+
+- No `src/compiler/*` touched (R26A owns update-syntax codegen).
+- No `tools/nova-lsp/`, `tools/nova-dap/` touched (R26D owns LSP).
+- No CrossEngin files touched.
+
+### R26B follow-ups (deferred)
+
+- External scanner for generic-typed brace-init `Box<int> { ... }`
+  — would need a custom C scanner that peeks past `>` to detect `{
+  IDENT :` lookahead before deciding `<` is a generic bracket vs
+  comparison. Not blocking for editor UX.
+- Highlight `..base` source identifier inside struct_update_base
+  as `@variable` reference (currently captured by the generic
+  identifier-reference fallback).
+
+---
+
 ## R26A — struct update-syntax `Point { x: 10, ..p }` (field-spread)
 
 **Status: complete** — `Foo { field: val, ..base }` lowers to a
