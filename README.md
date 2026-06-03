@@ -1089,6 +1089,17 @@ pattern vs scalar oracle).
 
 See [docs/LANGUAGE_REFERENCE.md](docs/LANGUAGE_REFERENCE.md) for the complete language reference.
 
+## Architecture
+
+For the compiler pipeline, the runtime layout, the six cross-target
+backends, the SIMD / LSP / DAP / tree-sitter capability inventories,
+the self-hosting stage chain, and a per-module catalog cross-
+referenced to commit history, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+That document is the layout index — the per-target audits
+(`WIN32_AUDIT.md`, `MACOS_AUDIT.md`, `WASM_AUDIT.md`,
+`MOBILE_AUDIT.md`, `SIMD_AUDIT.md`, `GPU_AUDIT.md`,
+`DWARF_AUDIT.md`) are the deep-dives.
+
 ## Stability & Versioning
 
 Effective 2026-05-30 (commit `ac692f7`), NOVA tracks a real semver line.

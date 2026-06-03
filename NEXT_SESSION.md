@@ -1,5 +1,70 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R25D — Architecture documentation refresh + module catalog
+
+**Status: complete -- new `ARCHITECTURE.md` documents the layout-and-
+orientation guide for the NOVA self-hosting compiler and runtime.
+Sections: 30-second view + ASCII top-level diagram, top-level
+repository layout, `src/` tree, compiler pipeline (lex → parse →
+type-check → IR → regalloc → codegen → per-target lowering with the
+~28k-line breakdown per file), cross-target backends (6 targets: Linux
+x86-64, Win x86-64, macOS, ARM64-Linux, Win ARM64, WASM with sample
+lowering matrix for a single integer add), language features by round
+(R17A enums → R20A `?` op → R21A generic enums → R22B generic fns →
+R23A generic structs → R24A fn-call type-check, plus the v1.0..v4.2
+foundational era), SIMD primitives cross-target matrix (R11D i32x8,
+R14B u8 SAD, R18A byte mul-acc; x86-64 / ARM64 / WASM lowering for
+each), runtime (40 modules), cognitive layer (`src/core/` 20 modules +
+`src/mind/` 5 modules + `src/cognitive/` 10 modules + `src/agent/`
+4 modules + `src/tooling/` 4 modules), IDE tooling (LSP 17+
+capabilities, DAP 21 capabilities, tree-sitter R24B), self-hosting
+stage chain with the `stage2.s == stage3.s` fixed-point invariant,
+tests + benchmarks, and CrossEngin cross-references (which NOVA
+features each CE module relies on). The full module catalog at the
+end pins every module to its introducing round + commit SHA. Cross-
+links to `STABILITY_AUDIT.md`, `COMPAT.md`, `NOVA_BUG_THRESHOLD.md`,
+`WIN32_AUDIT.md`, `MACOS_AUDIT.md`, `WASM_AUDIT.md`, `MOBILE_AUDIT.md`,
+`SIMD_AUDIT.md`, `GPU_AUDIT.md`, `DWARF_AUDIT.md`, `INSTALL.md`.
+README.md updated with an `Architecture` section linking to
+`ARCHITECTURE.md`.**
+
+### What R25D delivers
+
+1. **New file** -- `ARCHITECTURE.md` (~1,059 lines, ~6,063 words,
+   17 top-level sections, ASCII diagrams for top-level pipeline /
+   self-hosting chain / cross-target lowering).
+2. **Catalog of every NOVA module** with round-introduced + commit
+   SHA, grouped by subsystem (compiler, runtime, core cognitive
+   primitives, mind systems, cognitive computational primitives,
+   agent layer, tooling layer, IDE tooling).
+3. **README.md updated** -- added an `Architecture` section above the
+   `Stability & Versioning` section linking to `ARCHITECTURE.md` and
+   the per-target audit deep-dives.
+4. **Companion CrossEngin architecture** -- see
+   `/home/user/Crossengin-demo/ARCHITECTURE.md`, cross-referenced
+   from this file's §13 (`CrossEngin consumes which NOVA features?`).
+
+### Files touched (R25D)
+
+- NEW: `ARCHITECTURE.md`
+- MODIFIED: `README.md` (one section added above `Stability & Versioning`)
+- MODIFIED: `NEXT_SESSION.md` (this entry)
+
+### Untouched by R25D (per-agent ownership rules)
+
+- No `src/compiler/*.nova`, `src/runtime/*.nova`, `src/core/*.nova`,
+  `src/mind/*.nova`, `src/cognitive/*.nova`, `src/agent/*.nova`,
+  `src/tooling/*.nova` touched
+- No tests touched
+- No audit docs touched (WIN32_AUDIT, MACOS_AUDIT, WASM_AUDIT,
+  MOBILE_AUDIT, SIMD_AUDIT, GPU_AUDIT, DWARF_AUDIT, STABILITY_AUDIT,
+  NOVA_BUG_THRESHOLD, COMPAT, INSTALL — referenced from
+  ARCHITECTURE.md, never edited)
+- No `tools/nova-lsp/`, `tools/nova-dap/`, `tools/tree-sitter-nova/`
+  modules touched
+
+---
+
 ## R25F — LSP inline-variable refactor (third IDE refactor)
 
 R25F adds the classic third IDE refactor — **inline variable** — to
