@@ -102,6 +102,10 @@ from nova_lsp.hover_docs import (
 )
 from nova_lsp.imports import FileCache, find_definition, walk_imports
 from nova_lsp.inlay_hints import compute_inlay_hints
+from nova_lsp.inline_variable import (
+    KIND_REFACTOR_INLINE,
+    build_inline_action,
+)
 from nova_lsp.rename_workspace import (
     build_workspace_edit,
     classify_symbol,
@@ -1507,6 +1511,16 @@ def handle_code_action(
         extract = _build_extract_action(doc, rng)
         if extract:
             actions.append(extract)
+    if _allowed(KIND_REFACTOR_INLINE):
+        # Inline-variable refactor (R25F). Detects a ``let x = expr``
+        # under the cursor and offers to replace every use of ``x``
+        # in the enclosing fn body with the parenthesised RHS,
+        # removing the let. Refuses on reassignment, closure capture,
+        # or cross-fn use; surfaces a duplicate-evaluation warning
+        # in the title when the RHS looks side-effecting.
+        inline = build_inline_action(doc.uri, doc.text, rng)
+        if inline:
+            actions.append(inline)
     if _allowed(KIND_SOURCE_ORGANIZE_IMPORTS):
         oi = _build_organize_imports_action(doc)
         if oi:
@@ -2198,6 +2212,7 @@ def server_capabilities() -> Dict[str, Any]:
         "codeActionProvider": {
             "codeActionKinds": [
                 KIND_REFACTOR_EXTRACT,
+                KIND_REFACTOR_INLINE,
                 KIND_SOURCE_ORGANIZE_IMPORTS,
                 KIND_SOURCE_ORGANIZE_FNS,
                 KIND_QUICKFIX,

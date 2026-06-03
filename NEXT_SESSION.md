@@ -1,5 +1,152 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R25F — LSP inline-variable refactor (third IDE refactor)
+
+R25F adds the classic third IDE refactor — **inline variable** — to
+the LSP code-action menu, alongside R21F's extract-function, R9C's
+rename-across-imports, and R20D's exhaustiveness quickfix.
+
+**Semantics.** Given a `let x = <expr>` binding under the cursor,
+replace every use of `x` in the binding's enclosing fn scope with
+the parenthesised `(<expr>)` and remove the let. The wrapped form
+preserves precedence even when inlining into arithmetic contexts —
+`let x = 1 + 2; let y = x * 3` becomes `let y = (1 + 2) * 3`, not
+the precedence-broken `let y = 1 + 2 * 3`.
+
+**Refusal cases (analyse_scope returns None — no action surfaced):**
+
+  * `let` declared at top-level (outside any fn body)
+  * `let` is reassigned later in the scope (`x = ...`)
+  * `let` is captured by an inner closure (nested `fn` declaration
+    that references `name`)
+
+**Warning cases (action surfaced with a `(warning: ...)` suffix):**
+
+  * RHS contains a call-shape (`ident(`) AND there are multiple
+    uses — duplicating the call would change semantics if the call
+    has side effects
+  * RHS contains a call-shape AND there's a single use — still
+    flagged so the user understands the call moves to the use site
+
+### What landed
+
+**nova_lsp/inline_variable.py** (NEW, ~480 lines):
+
+  * `find_let_at(uri, position, doc_text) -> LetBinding | None`
+    locates the binding by line; supports `let x = rhs`,
+    `let x: type = rhs`, and rhs-with-trailing-comment forms.
+    Rejects empty-RHS lets (`let x =`) and out-of-bounds positions.
+  * `analyze_scope(binding, doc_text) -> InlineInfo | None` walks
+    the enclosing fn body from the binding line down, recording
+    every read-only use site and refusing on reassignment or
+    closure capture. String literals + `//`/`#`/`--` line comments
+    are masked before identifier scanning so a `"x"` inside a
+    string isn't mistaken for a use.
+  * `detect_side_effects(expr_text) -> bool` conservatively flags
+    any RHS containing an identifier-immediately-followed-by-`(`
+    pattern as a call. NOVA keywords (`if`, `while`) inside parens
+    are excluded so `if(cond)` isn't a false positive; pure paren
+    grouping (`(a + b) * c`) is also excluded because the `(` is
+    preceded by whitespace, not an identifier char.
+  * `build_inline_edit(info, doc_text)` emits a multi-range
+    `WorkspaceEdit`: one TextEdit per use site (replacing the
+    identifier range with the wrapped `(rhs)`), plus one TextEdit
+    that removes the let line (including its trailing newline so
+    the file doesn't gain a blank line).
+  * `build_inline_action(uri, doc_text, range)` is the top-level
+    entry point — composes the three above and returns a
+    `CodeAction` with title `Inline variable \`x\`` (or with a
+    `(warning: ...)` suffix on side-effecting RHS, or
+    `(unused)` when zero uses).
+
+**nova_lsp/server.py** (extend handle_code_action):
+
+  * Import `KIND_REFACTOR_INLINE` + `build_inline_action`.
+  * Add `_allowed(KIND_REFACTOR_INLINE)` branch in `handle_code_action`
+    that calls `build_inline_action(doc.uri, doc.text, rng)` and
+    appends the result when non-None.
+  * Advertise `refactor.inline` in `server_capabilities()`'s
+    `codeActionProvider.codeActionKinds` list. (LSP capability count
+    is unchanged — still 17 — because `codeActionProvider` already
+    existed; we just added a new kind to its kinds-list.)
+
+### Verification
+
+`tools/nova-lsp/tests/test_inline_variable.py` adds **66 assertions**
+across 34 tests covering:
+
+  * `find_let_at` happy paths: simple let, type-annotated let,
+    compound RHS, trailing comment.
+  * `find_let_at` rejections: non-let line, OOB position, empty RHS.
+  * `analyze_scope` happy paths: single use, multiple uses (3 found),
+    zero uses (unused let still inlineable), local-to-one-fn (uses
+    in other fns excluded), string-literal exclusion.
+  * `analyze_scope` rejections: reassignment, top-level binding,
+    closure capture by nested fn.
+  * `detect_side_effects`: function call detection,
+    pure-expression baseline, grouped-paren false-positive guard,
+    keyword-paren exclusion.
+  * `build_inline_edit`: single-use replacement with `let` removal,
+    three-use scenario (all three replaced with the same wrapped
+    RHS), compound-RHS parenthesisation (precedence preservation),
+    `WorkspaceEdit` shape (3 ranged edits for 2 uses + 1 removal),
+    chained-let inlining (`let y = (1 + 2) * 3`).
+  * `build_inline_action` composed: returns None on non-let,
+    returns None on reassignment, title surfaces the variable name,
+    side-effect warning suffix on multi-use call, no warning on
+    pure RHS.
+  * Server-level integration through `dispatch`: full round trip,
+    capability advertised in `initialize` response, action absent
+    on non-let line, action absent for reassigned let, `only`
+    filter respects `refactor.inline`.
+
+All other LSP test suites still pass:
+
+```
+test_call_hierarchy: OK (75 assertions)
+test_code_lens: OK (64 assertions)
+test_document_symbols: OK (65 assertions)
+test_exhaustiveness_fix: OK (96 assertions)
+test_extract_function: OK (66 assertions)
+test_folding_ranges: OK (43 assertions)
+test_hover_docs: OK (55 assertions)
+test_inlay_hints: OK (66 assertions)
+test_inline_variable: OK (66 assertions)
+test_rename_workspace: OK (101 assertions)
+test_semantic_tokens: OK (119 assertions)
+test_type_completion: OK (59 assertions)
+test_type_hierarchy: OK (88 assertions)
+test_workspace_diagnostics: OK (55 assertions)
+test_workspace_symbols: OK (52 assertions)
+```
+
+Plus `code_action_smoke`, `completion_smoke`,
+`definition_cross_file_smoke`, `references_smoke`, `rename_smoke`
+all `OK`.
+
+**Real-file integration** on `tests/test_add.nova`:
+
+  Before (cursor on line 6 — `let x = add(3, 4)`):
+  ```nova
+  fn add(a, b) { return a + b }
+  fn main() {
+      let x = add(3, 4)
+      print_int(x)
+  }
+  ```
+
+  After "Inline variable `x` (warning: side-effecting expression)":
+  ```nova
+  fn add(a, b) { return a + b }
+  fn main() {
+      print_int((add(3, 4)))
+  }
+  ```
+
+The let line is gone, the use is replaced by `(add(3, 4))`, and the
+title carries the duplicate-evaluation warning because the RHS is a
+function call.
+
 ## R24B — tree-sitter grammar refresh (R17A–R23A coverage)
 
 R24B extends `tools/tree-sitter-nova/` from R9E's 41-test baseline to

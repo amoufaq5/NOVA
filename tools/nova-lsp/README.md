@@ -20,7 +20,7 @@ for the install hook.
 | `textDocument/completion`           | yes (R24E adds *type-aware* layer on top of the legacy builtins + fn/let scan: cursor after `Name::` returns the variants of enum `Name`; cursor after `var.` returns the fields of `var`'s struct type; cursor after `let x: ` / `: ` in a fn-param list / `Box<` returns every enum + struct + alias name from the import graph and workspace plus the built-in primitives. Falls back to the legacy text-based list when no trigger applies. Triggers still advertised: `.` and `(`.) |
 | `textDocument/rename`               | yes (workspace-wide for top-level fn/let/const/type, single-buffer for locals + params) |
 | `textDocument/references`           | yes (regex scan, open docs + transitively imported files) |
-| `textDocument/codeAction`           | yes (extract function via a dedicated `extract_function.py` analysis pipeline, organize imports, sort fn declarations, plus a `quickfix` for R17A's exhaustiveness WARN that auto-adds stub arms for missing variants) |
+| `textDocument/codeAction`           | yes (extract function via a dedicated `extract_function.py` analysis pipeline, **inline variable** via R25F's `inline_variable.py` that replaces every use of a `let x = expr` binding with the parenthesised `(expr)` and removes the let — refuses on reassignment + closure capture, warns on side-effecting RHS that would duplicate calls across uses, organize imports, sort fn declarations, plus a `quickfix` for R17A's exhaustiveness WARN that auto-adds stub arms for missing variants) |
 | `textDocument/definition`           | yes (intra-file + follows `import "..."` transitively) |
 | `workspace/symbol`                  | yes (fuzzy name search across every indexed `.nova` file) |
 | `textDocument/semanticTokens/full`  | yes (variable / function / type / namespace / keyword / string / number / comment / parameter / constant with declaration / readonly / static modifiers) |
@@ -130,7 +130,7 @@ invalidation keeps repeat lookups O(1) when nothing has changed on disk;
 open buffers feed their live text in via a `text_overrides` map so
 unsaved edits beat stale on-disk content.
 
-Code actions surface four refactorings via the VS Code lightbulb menu:
+Code actions surface five refactorings via the VS Code lightbulb menu:
 
 * **Extract to function `extracted_N`** (`refactor.extract`) — only
   shown when the selection covers a multi-statement block (≥2
@@ -154,6 +154,30 @@ Code actions surface four refactorings via the VS Code lightbulb menu:
   lightbulb stays clean of no-op extracts. Variables WRITTEN inside
   the selection and read AFTER it are not yet propagated as return
   values (tracked as R21F.2).
+* **Inline variable `x`** (`refactor.inline`) — only shown when the
+  cursor sits on a `let NAME = RHS` line inside a `fn` body. The
+  R25F implementation lives in `nova_lsp/inline_variable.py` with
+  four small pieces: `find_let_at(uri, position, doc_text)` locates
+  the binding under the cursor (matched by line so any column on
+  the let line works — VS Code's "Cmd+." popup positions the cursor
+  anywhere on the line); `analyze_scope(binding, doc_text)` finds
+  the enclosing fn body and scans for use sites — refusing the
+  inline on reassignment (`x = ...` after the let), top-level
+  bindings, or closure capture (use inside a nested `fn`);
+  `detect_side_effects(rhs)` flags RHS expressions containing a
+  call-shape (`ident(`) so the action title can warn about
+  duplicate evaluation; `build_inline_edit(info, doc_text)`
+  packages every use site as a parenthesised-RHS substitution plus
+  a let-line removal into a `WorkspaceEdit` (multi-range, not
+  full-document-replace, so VS Code's undo stack records one
+  granular change). The wrapped `(rhs)` form preserves precedence
+  when inlining into arithmetic contexts (e.g. `let y = x * 3` with
+  `x = 1 + 2` becomes `let y = (1 + 2) * 3` not the precedence-
+  broken `let y = 1 + 2 * 3`). Action titles surface the variable
+  name and a `(warning: ...)` suffix when the RHS is side-effecting
+  and would duplicate the call across multiple uses. Unused lets
+  still get the action (titled `Inline variable \`x\` (unused)`)
+  so the lightbulb doubles as a quick remove-this-let cleanup.
 * **Organize imports** (`source.organizeImports`) — sorts the top-of-file
   `import "..."` block alphabetically and groups it: `std/` first,
   then `../src/`, then `../../tests/`, others last. Blank lines
@@ -175,7 +199,7 @@ Code actions surface four refactorings via the VS Code lightbulb menu:
   `Circle + Triangle` gets `Shape::Rect(_, _) => /* TODO */`
   inserted between the existing arms and the closing brace.
 
-All four return `WorkspaceEdit`s in the `{"changes": {uri: TextEdit[]}}`
+All five return `WorkspaceEdit`s in the `{"changes": {uri: TextEdit[]}}`
 shape, which VS Code applies in-place without diff reconciliation. The
 quickfix's diagnostic is round-tripped on the `CodeAction.diagnostics`
 field so the editor highlights the squiggle as fixable in the gutter.
