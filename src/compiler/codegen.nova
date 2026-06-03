@@ -680,6 +680,116 @@ fn collect_comp_vars(expr) {
         collect_comp_vars(expr[2])
         return 0
     }
+    // match/if/try can appear in expression position (RHS of let, fn-call
+    // arg, etc.). Their arm bodies may declare locals via `let` — those
+    // need a stack slot in the enclosing function's frame or the local
+    // offset assigned by local_offset() falls outside the prologue's
+    // `sub rsp, N`. Recurse into the bodies so collect_locals registers
+    // them. Same trick as AST_DO_EXPR above.
+    if tag == AST_MATCH_STMT {
+        collect_comp_vars(expr[1])
+        let arms = expr[2]
+        let ai = 0
+        while ai < len(arms) {
+            let arm = arms[ai]
+            let body = arm[2]
+            if body == 0 {
+            } else {
+                let btag = ast_tag(body)
+                if btag == AST_BLOCK {
+                    collect_locals(body)
+                } else { if btag == AST_EXPR_STMT {
+                    collect_comp_vars(body[1])
+                } else {
+                    collect_locals(body)
+                } }
+            }
+            ai = ai + 1
+        }
+        return 0
+    }
+    if tag == AST_IF_STMT {
+        collect_comp_vars(expr[1])
+        if expr[2] == 0 {
+        } else {
+            collect_locals(expr[2])
+        }
+        if expr[3] == 0 {
+        } else {
+            collect_locals(expr[3])
+        }
+        return 0
+    }
+    if tag == AST_TRY_CATCH {
+        if expr[1] == 0 {
+        } else {
+            collect_locals(expr[1])
+        }
+        if expr[2] == 0 {
+        } else {
+            collect_locals(expr[2])
+        }
+        // catch-error variable binding lives at expr[3]; register it.
+        if len(expr) > 3 {
+            let cev = expr[3]
+            if cev == 0 {
+            } else { if cev == "" {
+            } else {
+                if is_global(cev) == 0 {
+                    push(cg_locals, cev)
+                    cg_local_count = cg_local_count + 1
+                }
+            } }
+        }
+        return 0
+    }
+    if tag == AST_BLOCK {
+        collect_locals(expr)
+        return 0
+    }
+    if tag == AST_TERNARY {
+        collect_comp_vars(expr[1])
+        collect_comp_vars(expr[2])
+        collect_comp_vars(expr[3])
+        return 0
+    }
+    if tag == AST_AND_EXPR {
+        collect_comp_vars(expr[1])
+        collect_comp_vars(expr[2])
+        return 0
+    }
+    if tag == AST_OR_EXPR {
+        collect_comp_vars(expr[1])
+        collect_comp_vars(expr[2])
+        return 0
+    }
+    if tag == AST_NULLISH {
+        collect_comp_vars(expr[1])
+        collect_comp_vars(expr[2])
+        return 0
+    }
+    if tag == AST_UNARY_OP {
+        collect_comp_vars(expr[2])
+        return 0
+    }
+    if tag == AST_LIST_LIT {
+        let lelts = expr[1]
+        let li = 0
+        while li < len(lelts) {
+            collect_comp_vars(lelts[li])
+            li = li + 1
+        }
+        return 0
+    }
+    if tag == AST_INDEX_EXPR {
+        collect_comp_vars(expr[1])
+        collect_comp_vars(expr[2])
+        return 0
+    }
+    if tag == AST_FIELD_ACCESS {
+        collect_comp_vars(expr[1])
+        return 0
+    }
     return 0
 }
 
@@ -5122,6 +5232,31 @@ fn arm_collect_locals(nd) {
         arm_collect_locals(nd[2])
         return 0
     }
+    if t == AST_MATCH_STMT {
+        // Walk the discriminant and each arm body so let-bindings inside
+        // match arms (including match-as-expression) get a stack slot in
+        // the enclosing function frame. Without this, AArch64 codegen
+        // emits offsets that fall outside `sub sp, sp, #N`.
+        arm_collect_locals(nd[1])
+        let arms = nd[2]
+        let ai = 0
+        while ai < len(arms) {
+            let arm = arms[ai]
+            arm_collect_locals(arm[2])
+            ai = ai + 1
+        }
+        return 0
+    }
+    if t == AST_TRY_CATCH {
+        arm_collect_locals(nd[1])
+        arm_collect_locals(nd[2])
+        return 0
+    }
+    if t == AST_DO_WHILE {
+        arm_collect_locals(nd[1])
+        arm_collect_locals(nd[2])
+        return 0
+    }
     if t == AST_RETURN_STMT { arm_collect_locals(nd[1]); return 0 }
     if t == AST_EXPR_STMT { arm_collect_locals(nd[1]); return 0 }
     if t == AST_ASSIGN_STMT { arm_collect_locals(nd[2]); return 0 }
@@ -6112,6 +6247,29 @@ fn warm_collect_locals(nd) {
         return 0
     }
     if t == AST_WHILE_STMT {
+        warm_collect_locals(nd[1])
+        warm_collect_locals(nd[2])
+        return 0
+    }
+    if t == AST_MATCH_STMT {
+        // Same shape as arm_collect_locals — walk arms so let-bindings
+        // inside match-as-expression arm bodies get reserved stack space.
+        warm_collect_locals(nd[1])
+        let arms = nd[2]
+        let ai = 0
+        while ai < len(arms) {
+            let arm = arms[ai]
+            warm_collect_locals(arm[2])
+            ai = ai + 1
+        }
+        return 0
+    }
+    if t == AST_TRY_CATCH {
+        warm_collect_locals(nd[1])
+        warm_collect_locals(nd[2])
+        return 0
+    }
+    if t == AST_DO_WHILE {
         warm_collect_locals(nd[1])
         warm_collect_locals(nd[2])
         return 0
@@ -8045,6 +8203,20 @@ fn wasm_collect_locals(nd) {
     if tag == AST_TRY_CATCH {
         wasm_collect_locals(nd[1])
         wasm_collect_locals(nd[2])
+    }
+    if tag == AST_MATCH_STMT {
+        // Walk match arms so let-bindings inside match-as-expression arm
+        // bodies get a wasm local declared at function top. Without this
+        // wasm_gen_let assigns to a local that was never declared and
+        // wat2wasm rejects the module.
+        wasm_collect_locals(nd[1])
+        let m_arms = nd[2]
+        let mai = 0
+        while mai < len(m_arms) {
+            let m_arm = m_arms[mai]
+            wasm_collect_locals(m_arm[2])
+            mai = mai + 1
+        }
     }
     if tag == AST_FOR_INDEXED {
         let iname = nd[1]

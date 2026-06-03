@@ -72,7 +72,7 @@ make
 # Compile and run a program
 make run FILE=examples/hello.nova
 
-# Run all 163 tests (157 pass, 6 skip — see tests/run_tests.sh)
+# Run all 167 tests (161 pass, 6 skip — see tests/run_tests.sh)
 make test-all
 
 # Verify self-hosting (stage2.s == stage3.s)
@@ -206,7 +206,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - `if` / `else if` / `else`, `unless`, `guard` clauses
 - `while`, `until`, `do..while`, `loop`
 - `for item in list`, `for i, item in list`, `for i in range(n)`, `for i in 0..10`, `for i in 0..=10`
-- `match` expressions with literal patterns, guards, and wildcard default
+- `match` expressions with literal patterns, guards, and wildcard default; returns a value when used in expression position (RHS of `let`, function call argument, arithmetic operand), including block-body arms with inner `let` bindings
 - `try` / `catch` / `finally` with cross-function throw
 - `defer` statements for cleanup
 - Labeled loops with `break` and `continue` (`@outer`)
@@ -705,7 +705,7 @@ src/agent/                 Agent systems                             2,151 lines
   preprocess.nova            Corpus ingestion and canonicalization (v4.1)
 src/pkg/pkg.nova           Package manager                            487 lines
 examples/                  31 example programs                       3,125 lines
-tests/                     160 test programs                        10,416 lines
+tests/                     161 test programs                        10,416 lines
 ```
 
 **Total: ~68,000 lines of Nova + 106,045 lines of bootstrap assembly.**
@@ -764,7 +764,7 @@ That's it. No C compiler. No package manager. No downloads.
 ```bash
 make                # Build bin/nova
 make self-host      # Verify self-hosting (stage2.s == stage3.s)
-make test-all       # Run all 163 tests (157 pass, 6 skip)
+make test-all       # Run all 167 tests (161 pass, 6 skip)
 make run FILE=path  # Compile and run a .nova file
 make examples       # Build and run all 29 examples
 make agent          # Run the cognitive agent
@@ -1074,7 +1074,7 @@ To get started:
 1. Read the code -- start with `src/compiler/compiler.nova` (entry point, 547 lines) and work outward
 2. Make your changes
 3. Run `make self-host` to verify the compiler can still compile itself
-4. Run `make test-all` to check for regressions (157 of 163 tests should pass, 6 skip)
+4. Run `make test-all` to check for regressions (161 of 167 tests should pass, 6 skip)
 
 The cognitive architecture lives in `src/core/` (types, soul, system) and `src/mind/` (systems). The runtime is in `src/runtime/`. The agent systems (cognitive LLM, RAG) are in `src/agent/`. The 31 examples in `examples/` demonstrate most language features.
 

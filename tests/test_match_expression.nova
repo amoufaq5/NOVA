@@ -1,0 +1,215 @@
+// test_match_expression — match used in expression context.
+//
+// R16B closed the long-deferred gap where `let x = match v { ... }` worked
+// for single-expression arm bodies but mis-allocated stack slots when arm
+// bodies opened a block with their own `let` bindings (the bodies' locals
+// were never registered with the function prologue, so the prologue's
+// `sub rsp, N` was too small and the block's writes landed outside the
+// frame, corrupting whatever push slot the match expression used to spill
+// its discriminant). Re-checks the live cases plus the previously broken
+// block-body case.
+
+fn main() {
+    // --- Basic literal arms ---
+    let x1 = match 1 {
+        1 => 10
+        2 => 20
+        _ => 99
+    }
+    assert(x1 == 10)
+
+    let x2 = match 2 {
+        1 => 10
+        2 => 20
+        _ => 99
+    }
+    assert(x2 == 20)
+
+    // Wildcard catch-all
+    let x3 = match 7 {
+        1 => 10
+        2 => 20
+        _ => 99
+    }
+    assert(x3 == 99)
+
+    // No matching arm + no wildcard returns 0
+    let x4 = match 99 {
+        1 => 10
+        2 => 20
+    }
+    assert(x4 == 0)
+
+    // --- String result type ---
+    let flag = 0
+    let s1 = match flag {
+        0 => "off"
+        _ => "on"
+    }
+    assert(s1 == "off")
+
+    flag = 1
+    let s2 = match flag {
+        0 => "off"
+        _ => "on"
+    }
+    assert(s2 == "on")
+
+    // --- String discriminant ---
+    let s3 = match "hello" {
+        "hi" => 1
+        "hello" => 2
+        _ => 0
+    }
+    assert(s3 == 2)
+
+    // --- Nested match (outer arm body is another match expression) ---
+    let outer = 1
+    let inner = 2
+    let y1 = match outer {
+        1 => match inner {
+            2 => 20
+            _ => 0
+        }
+        _ => 99
+    }
+    assert(y1 == 20)
+
+    // Nested match where outer falls through to wildcard
+    let y2 = match 99 {
+        1 => match inner {
+            2 => 20
+            _ => 0
+        }
+        _ => match inner {
+            2 => 200
+            _ => 100
+        }
+    }
+    assert(y2 == 200)
+
+    // --- Match in function-call argument ---
+    // println exercises the codegen path where match-expr feeds a syscall
+    // argument register without going through a let-binding.
+    println(match 0 {
+        0 => "zero"
+        _ => "non-zero"
+    })
+
+    // --- Match in arithmetic context ---
+    let a1 = match 1 {
+        1 => 100
+        _ => 0
+    } + match 2 {
+        2 => 25
+        _ => 0
+    }
+    assert(a1 == 125)
+
+    let a2 = match 1 {
+        1 => 100
+        _ => 0
+    } * 3
+    assert(a2 == 300)
+
+    // --- Match in comparison ---
+    let b1 = match 5 {
+        5 => 1
+        _ => 0
+    } == 1
+    assert(b1)
+
+    // --- Block-body arm with let-bindings (the R16B fix) ---
+    let bx1 = match 1 {
+        1 => {
+            let a = 10
+            let b = 5
+            a + b
+        }
+        _ => 0
+    }
+    assert(bx1 == 15)
+
+    // Block body that doesn't take this arm — locals still need to be
+    // reserved so the other arms' code generation doesn't trample them.
+    let bx2 = match 2 {
+        1 => {
+            let a = 10
+            let b = 5
+            a + b
+        }
+        _ => 999
+    }
+    assert(bx2 == 999)
+
+    // Block body in second arm with let
+    let bx3 = match 2 {
+        1 => 0
+        _ => {
+            let c = 7
+            let d = 8
+            c * d
+        }
+    }
+    assert(bx3 == 56)
+
+    // --- Two consecutive let-match-expr (the original failing pattern) ---
+    let cx1 = match 1 {
+        1 => {
+            let p = 1
+            let q = 2
+            p + q
+        }
+        _ => 0
+    }
+    assert(cx1 == 3)
+
+    let cx2 = match 2 {
+        1 => "one"
+        2 => "two"
+        _ => "?"
+    }
+    assert(cx2 == "two")
+
+    // --- if-as-expression with let bindings inside block (same fix
+    // since the function-prologue's frame size also covers if-arm locals).
+    let ifx = if 1 == 1 {
+        let aa = 10
+        let bb = 5
+        aa + bb
+    } else {
+        0
+    }
+    assert(ifx == 15)
+
+    // --- Match value passed as function argument with non-zero arms ---
+    let mret = match 3 {
+        3 => 42
+        _ => 0
+    }
+    assert(mret == 42)
+
+    // --- Type pattern in expression-position match ---
+    let tx = match 42 {
+        is int => "int"
+        _ => "other"
+    }
+    assert(tx == "int")
+
+    // --- Guard in expression-position match ---
+    let gx = match 10 {
+        10 if 10 > 0 => "positive ten"
+        _ => "other"
+    }
+    assert(gx == "positive ten")
+
+    // Guard that fails falls through to next arm
+    let gy = match 10 {
+        10 if 10 < 0 => "should not match"
+        _ => "fell through"
+    }
+    assert(gy == "fell through")
+
+    println("PASS")
+}
+main()

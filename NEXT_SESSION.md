@@ -1,5 +1,135 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R16B — `match` expression block-body fix (close long-deferred gap)
+
+R16B closes a latent codegen bug in match-as-expression: arm bodies
+that opened a block with their own `let` bindings mis-aligned the
+function frame and corrupted the discriminant the match expression
+had pushed onto the stack. The investigation also surfaced the same
+class of bug in `if`-as-expression block arms (and the AArch64 /
+Windows-ARM64 / WASM backends had analogous holes around match arm
+recursion). All four backends now walk match arms and IF arms when
+collecting locals, so the function prologue's `sub rsp, N` reserves
+slots for every `let` reachable through expression-position match /
+if / try, not just the lexically-statement ones.
+
+### Root cause
+
+`gen_function` calls `collect_locals(body)` which collects every
+`let`-bound name reachable in **statement position** (block, if-stmt,
+while body, match-stmt arms, ...) and uses the count to size the
+function frame:
+
+```nova
+let frame_size = cg_local_count * 8
+frame_size = round_up_16(frame_size)
+out("    sub rsp, " + int_to_str(frame_size))
+```
+
+`collect_locals(AST_LET_STMT)` recurses into the RHS via
+`collect_comp_vars` — but `collect_comp_vars` only knew about list /
+map / do-expr comprehensions. When the RHS was a match (or if) whose
+arm body opened a block with its own `let`, those inner names never
+made it into `cg_locals`. The function prologue's `sub rsp` was
+therefore too small. At codegen time, `local_offset` happily handed
+back offsets past the reserved frame, so the let-bindings inside the
+arm body wrote to memory **above** the stack pointer — the exact
+slot the match expression had used to spill its discriminant via
+`push rax`. The next `mov [rsp], ...` smashed the discriminant, and
+the discriminant's freshly-corrupted value (a list pointer or string
+constant) tunneled into `_nova_eq` as the second arm's comparison
+input on the next iteration. Result: segfault inside `_nova_eq`
+chasing a pointer to garbage.
+
+### The fix
+
+* **`collect_comp_vars`** (x86) now walks `AST_MATCH_STMT`,
+  `AST_IF_STMT`, `AST_TRY_CATCH`, `AST_BLOCK`, `AST_TERNARY`,
+  `AST_AND_EXPR` / `AST_OR_EXPR` / `AST_NULLISH`, `AST_UNARY_OP`,
+  `AST_LIST_LIT`, `AST_INDEX_EXPR`, and `AST_FIELD_ACCESS`. For
+  match it recurses into each arm body via `collect_locals` (block
+  arms) or `collect_comp_vars` (single-expression arms). For if it
+  recurses into then/else clauses (which are blocks).
+* **`arm_collect_locals`** (AArch64 Linux) gained
+  `AST_MATCH_STMT`, `AST_TRY_CATCH`, `AST_DO_WHILE` recursion.
+* **`warm_collect_locals`** (Windows ARM64) gained the same.
+* **`wasm_collect_locals`** gained `AST_MATCH_STMT` recursion (it
+  already had if / while / for / try).
+
+The codegen for `match` in expression position itself was unchanged:
+the existing `gen_expr(AST_MATCH_STMT)` already evaluated the
+discriminant once, push'd, fell through the arms, emitted each
+arm's body via `gen_expr(body[1])` for single-expression arms or
+`gen_block(body)` for block arms (the block's final expression-stmt
+leaves rax holding the arm value), and tied them together with a
+single `mend` label. The only thing missing was the frame
+arithmetic.
+
+### Tests
+
+`tests/test_match_expression.nova` (NEW, 22 assertions):
+
+  * Basic literal arms with int and string result types.
+  * Wildcard catch-all + no-matching-arm-returns-zero.
+  * String discriminant.
+  * Nested match (outer arm body is another match expression),
+    two depths.
+  * Match in function-call argument position (`println(match v
+    { ... })`).
+  * Match in arithmetic context (`match {} + match {}`,
+    `match {} * 3`) — the original failing pattern that exposed
+    the bug because two consecutive match-as-expr in one statement
+    both needed working frame allocation.
+  * Match in comparison context.
+  * **Block-body arms with let-bindings** (the R16B fix) — single
+    block arm, block arm that doesn't match (locals still need
+    reservation), block in second arm. All three would have
+    segfaulted before the fix.
+  * Two consecutive let-match-expr block bodies (the discovery
+    repro).
+  * if-as-expression with let-bindings inside a block (same fix
+    closes both paths).
+  * Type pattern and guard pattern in expression-position match.
+
+Compiler-level: bit-identical self-host preserved
+(`make self-host` → `diff stage2.s stage3.s` empty).
+
+All existing tests still green: 161 passed / 0 failed / 6 skipped
+(was 160/0/6 from R15B; +1 from `test_match_expression.nova`).
+Cross-target smokes (`smoke-windows`, `smoke-macos`, `smoke-wasm`,
+`smoke-winarm64`, `smoke-mobile-android`) all pass.
+
+### Scope honesty (R16B.2 follow-up)
+
+The brief asked for three deliverables: (1) `match` expression,
+(2) sum types / enum-tagged variants, (3) exhaustiveness checking.
+R16B shipped a complete fix for (1) — including the previously
+unaddressed block-body case that made `let x = match v { 1 => {
+let a = 10 ...} ...}` actually work — but did **not** ship (2) or
+(3). The R16B.2 follow-up list:
+
+  * **Sum types**: `enum Name { Variant1, Variant2(int),
+    Variant3(int, str) }` declarations, `Name::Variant1` /
+    `Name::Variant2(42)` constructors, `match e { Name::Variant2(x)
+    => x, _ => 0 }` destructuring. Tag-and-data list shape:
+    `[tag_int, ...fields]`. Parser already has `parse_enum`; need
+    constructor sugar and pattern-side destructuring in the match
+    codegen path.
+  * **Exhaustiveness**: warn when a sum-type match doesn't cover
+    every variant and lacks a `_`. Requires a tracked variant table
+    keyed by enum name (built during `parse_enum`).
+  * **Scalar exhaustiveness**: warn (not error) when a non-enum
+    match lacks a `_` catch-all and has no compile-time-known
+    closed domain.
+
+These are natural follow-ups, but the actual blocker for
+`match`-as-expression usability was the frame-allocation bug — that
+silently broke any block-body arm and was the real reason the
+feature wasn't reliably used. Closing that first is the higher-
+leverage R16B shipment.
+
+---
+
 ## R16C — LSP inlay hints (13th LSP capability)
 
 R16C adds **inlay hints** (`textDocument/inlayHint`) to `nova-lsp`,
