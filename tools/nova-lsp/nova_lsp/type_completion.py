@@ -74,6 +74,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from nova_lsp.imports import FileCache, walk_imports
+from nova_lsp.struct_field_completion import (
+    compute_struct_field_completions,
+)
 from nova_lsp.type_hierarchy import (
     EnumVariant,
     KIND_ENUM,
@@ -619,11 +622,8 @@ def compute_type_aware_completions(
     line_no = int(position.get("line", 0))
     character = int(position.get("character", 0))
     lines = doc_text.splitlines()
-    if not (0 <= line_no < len(lines)):
-        return None
-    line_text = lines[line_no]
-    info = detect_trigger(line_text, character)
-    if info.kind == TRIGGER_NONE:
+    # ``len(lines)`` is a legal cursor line for an empty trailing line.
+    if not (0 <= line_no <= len(lines)):
         return None
 
     decls = collect_type_decls(
@@ -631,6 +631,24 @@ def compute_type_aware_completions(
         workspace_index=workspace_index,
         text_overrides=text_overrides,
     )
+
+    # R26D: brace-init field completion runs FIRST since `Point { x:
+    # 10, |` is multi-line capable -- the regular line-local triggers
+    # (`Name::`, `var.`, etc.) wouldn't see anything to fire on after
+    # the user presses Enter inside the brace body.
+    brace_init = compute_struct_field_completions(
+        uri, position, doc_text, decls
+    )
+    if brace_init is not None:
+        return brace_init
+
+    # Line-local triggers operate on the current line text.
+    if line_no >= len(lines):
+        return None
+    line_text = lines[line_no]
+    info = detect_trigger(line_text, character)
+    if info.kind == TRIGGER_NONE:
+        return None
 
     if info.kind == TRIGGER_ENUM_VARIANT:
         return _variant_completions(info.payload, decls)

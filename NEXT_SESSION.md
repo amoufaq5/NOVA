@@ -141,6 +141,149 @@ let q = Point { x: 100, ..compute() }    // compute() called once
 
 ---
 
+## R26D — LSP struct brace-init field completion (R25A.2 #4 follow-up)
+
+**Status: complete** — `Point { ` and partially-typed
+`Point { x: 10, ` now drive a focused completion list of the
+remaining un-typed field names from `struct Point`'s declaration.
+Builds on R24E's type-aware completion pipeline (`Option::` → variants,
+`box.` → fields) by adding a brace-init context that runs BEFORE the
+line-local triggers.
+
+### Trigger examples
+
+```nova
+struct Point { x: int, y: int }
+struct Triple { a: int, b: int, c: int }
+
+let p = Point { |              // → x, y
+let p = Point { x: 10, |       // → y (x excluded)
+let p = Point { x: 10, y: 20, | // → []
+let t = Triple { |             // → a, b, c, .. (spread on ≥3)
+
+let p = Point {
+    x: 10,
+    |                           // multi-line: → y
+}
+```
+
+### Detection
+
+The trigger is detected by scanning BACKWARDS from the cursor through
+the masked document text (comments + strings stripped):
+
+  * Track `{` / `}` depth so nested init bodies (`Outer { inner:
+    Inner { … }, …`) pick the innermost struct.
+  * When a `{` lands at depth 0, look at the preceding text for an
+    `[A-Z][A-Za-z0-9_]*` token (optionally followed by a
+    one-level `<…>` generic args group). If found, that's our
+    struct name; otherwise the `{` is a block expr — return None
+    and fall through to R24E's line-local triggers.
+  * Statement boundaries (`;` at depth 0) and unclosed paren / square
+    bracket abort the scan — brace-inits start at the LHS of an
+    expression, not inside an argument list.
+
+The line-local triggers (R24E) only work on `line_text[:character]`,
+so they'd miss multi-line init bodies after the user presses Enter.
+R26D's backward scan handles that case correctly.
+
+### Implementation
+
+- NEW: `tools/nova-lsp/nova_lsp/struct_field_completion.py`
+  - `is_brace_init_context(line_no, character, doc_text)` — returns
+    `_BraceInitContext(struct_name, open_lb_line, open_lb_col)` or
+    `None`.
+  - `get_already_specified_fields(line_no, character, doc_text,
+    open_lb_line, open_lb_col)` — scans forward from the opening `{`
+    to the cursor, collecting every `name:` at relative depth 0.
+    Nested brace-inits don't bleed their fields into the outer
+    list.
+  - `compute_field_completions(struct_name, already_specified,
+    decls, doc_text="")` — looks up the struct decl, scans fields,
+    filters out already-specified names, returns CompletionItems.
+    Adds a `..base` spread suggestion when ≥3 fields remain
+    (anticipates R26A landing; harmless today — parser may reject
+    it on commit).
+  - `compute_struct_field_completions(uri, position, doc_text,
+    decls)` — top-level helper called by the pipeline.
+  - `scan_struct_fields(text, decl)` — fixed-up version of the
+    R24E scanner; handles SINGLE-LINE struct bodies (e.g.
+    `struct Point { x: int, y: int }`) which the original scanner
+    accidentally returned empty on (brace counter terminated before
+    field extraction ran). Kept as a local copy so this module
+    stays standalone; the R24E version still serves its existing
+    callers.
+- MODIFIED: `tools/nova-lsp/nova_lsp/type_completion.py`
+  - `compute_type_aware_completions` calls `compute_struct_field_completions`
+    FIRST. If it returns a list (focused result), that's the
+    response. If it returns `None`, fall through to R24E's
+    line-local triggers (`Name::`, `var.`, `let x: `, `Box<`).
+  - Cursor-line bounds check loosened to accept
+    `line_no == len(lines)` so multi-line brace bodies whose
+    cursor sits on an empty trailing line still get scanned.
+
+### Tests
+
+- NEW: `tools/nova-lsp/tests/test_struct_field_completion.py`
+  — 54 assertions covering:
+  - Trigger detection: single-line, multi-line, generic struct,
+    nested-inner-wins, lowercase IDENT rejected, in-string ignored,
+    in-comment ignored, statement-boundary abort.
+  - Already-specified harvest: empty body, single field, two
+    fields, multi-line, nested-init exclusion.
+  - Completion synthesis: full list, partial exclusion, all-
+    specified empty, three-field with spread, unknown struct
+    empty, generic `Box`.
+  - Top-level helper: None outside ctx, fields inside, partial
+    exclusion through the helper, empty all-specified.
+  - Cross-file: via `import "types.nova"` AND via workspace index
+    without import.
+  - Server wire (`dispatch`): `textDocument/completion` returns
+    focused `x, y` list, partial returns `y` only, no-ctx falls
+    back to generic builtins (`println` still present), capability
+    count unchanged at 16 providers + 1 sync key.
+  - Integration on `tests/test_struct_brace_init.nova`: `Box {`
+    → `value`, `Point {` → `x, y`.
+- All existing LSP tests still pass (15 capability test modules +
+  R20D quickfix + R21F extract-fn + R23F workspace-diag + R24E
+  type-completion + R25F inline-variable). Total ~1132 LSP
+  assertions across the suite (+54 from R26D).
+
+### Files touched (R26D)
+
+- NEW: `tools/nova-lsp/nova_lsp/struct_field_completion.py`
+- MODIFIED: `tools/nova-lsp/nova_lsp/type_completion.py` (hook into
+  completion pipeline; bounds-check fix)
+- NEW: `tools/nova-lsp/tests/test_struct_field_completion.py`
+  (54 assertions)
+- MODIFIED: `tools/nova-lsp/README.md` (completion row expanded)
+- MODIFIED: `README.md` (LSP bullet expanded for R26D)
+- MODIFIED: `NEXT_SESSION.md` (this entry)
+
+### Untouched by R26D
+
+- No `src/compiler/*` touched (R26A owns it)
+- No `tools/tree-sitter-nova/*` touched (R26B owns it)
+- No other LSP modules touched (settled — READ only)
+- No DAP / packaging files touched (settled)
+- No CrossEngin files touched
+
+### R26D.2 follow-ups (deferred)
+
+- Field-type-aware value completions: after `Point { x: ` suggest
+  ints (e.g. `0`, vars of type `int`), after `Box<str> { value: `
+  suggest strings. Requires a richer type tracker than today's
+  textual scan.
+- Sub-pattern aware completion inside destructure patterns: in
+  `let Point { x: |` (cursor after the inner `:`) suggest binder
+  names rather than field names. Currently `x` still surfaces but
+  the user is naming a binder, not a field.
+- Snippet-style insertion: `Point { x: ${1}, y: ${2} }` rather
+  than just `x: `. Needs LSP `InsertTextFormat: 2` (Snippet)
+  surfaced through the response, plus a snippet-aware client.
+
+---
+
 ## R25A — struct brace-init syntax + struct destructure pattern
 
 **Status: complete** — `Foo { field: val, ... }` brace-init and the
