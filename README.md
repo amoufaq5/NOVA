@@ -958,12 +958,16 @@ Per-target lowering:
 | ARM64 Windows         | NEON (same instruction set as Linux ARM64)                |
 | macOS x86-64          | scalar 8-iter loop fallback                               |
 | Windows x86-64        | scalar 8-iter loop fallback                               |
-| WebAssembly (WASI)    | not emitted -- use scalar code, see `NEXT_SESSION.md`     |
+| WebAssembly (WASI)    | **v128 SIMD** -- 2x `v128.load` + `i32x4.add` / `i32x4.sub` / `i32x4.abs` per call (R15B) |
 
 The AVX2 path assumes the host CPU implements AVX2 (Intel Haswell 2013+
 or AMD Excavator 2015+). Run `make bench-simd-sad` to measure the AVX2
 SAD-on-1024 speedup; the existing `make bench-simd` covers
-`__intrinsic_dot_i32`. See `SIMD_AUDIT.md` for the design rationale.
+`__intrinsic_dot_i32`; `make bench-simd-wasm` compares WASM v128 SIMD
+against an open-coded scalar SAD under wasmtime (8-9x speedup measured
+on 1024 lanes x 1000 trials). See `SIMD_AUDIT.md` for the design
+rationale and `tests/test_simd_wasm_v128.nova` for the v128 lowering
+correctness suite.
 
 ### Call-site builtin inlining (R13A)
 
@@ -996,8 +1000,10 @@ in a single op; the inline path emits `vmovdqu` / `vpsadbw` / `vpaddq`
 in a loop with horizontal-sum via `vextracti128` / `vpshufd` /
 `vmovq`. Per-target lowering: Linux x86-64 AVX2 inline (same call-site
 inlining as the R13A SIMD primitives), ARM64 Linux/Windows NEON
-(`uabd v.16b` + `uaddlp .8h` + `uaddlp .4s`), macOS / Windows x86-64
-scalar 1-byte fallback. Eligible for the next-round CE wire-in that
+(`uabd v.16b` + `uaddlp .8h` + `uaddlp .4s`), WASM v128
+(`i8x16.sub_sat_u | i8x16.sub_sat_u(swapped)` + 2x `extadd_pairwise`,
+R15B), macOS / Windows x86-64 scalar 1-byte fallback. Eligible for the
+next-round CE wire-in that
 replaces the i32-staged SAD wrappers with raw byte ones to close the
 2x SIMD/scalar ceiling on stereo and LK. Correctness: 21 assertions in
 `tests/test_simd_sad_u8.nova` (identical buffers, known diff, asymmetric

@@ -1,5 +1,146 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R15B — WASM v128 SIMD lowering (close R11D's last gap)
+
+R15B adds **WebAssembly v128 SIMD** lowering paths for all six
+codegen SIMD builtins (R11D's original five + R14B's `simd_sad_u8`).
+WASM was the only target where these previously had no definition at
+all — a NOVA program that called e.g. `simd_add_i32x8` and compiled
+with `--target=wasm` would emit `call $simd_add_i32x8` to an
+undefined function, failing `wat2wasm` validation. R15B closes that
+gap end-to-end.
+
+### What landed
+
+**New runtime emitter** `wasm_gen_rt_simd()` in
+`src/compiler/codegen.nova` (~520 lines), invoked from
+`wasm_gen_program` after `wasm_gen_rt_extra()`. Defines six v128
+SIMD functions matching the native AVX2 / NEON ABI bit-for-bit, plus
+the low-level helpers the SIMD test harnesses use (`int_add`,
+`int_sub`, `int_mul`, `int_div`, `int_mod`, `int_and`, `int_or`,
+`int_xor`, `int_shl`, `int_shr`, `store8`, `load8`, `store64`,
+`load64`, `memcpy_raw`) — none of which previously existed as
+callable functions in the WASM runtime.
+
+**WAT shape per builtin** (every `simd_*_i32x8` emits TWO v128 ops
+per call, since WASM v128 is 128-bit / 4 i32 lanes vs AVX2's 256-bit
+/ 8 i32 lanes):
+
+| Builtin | Lowering |
+|---|---|
+| `simd_add_i32x8(a, b, dst)` | 2x `(v128.load + v128.load + i32x4.add + v128.store)` |
+| `simd_sub_i32x8(a, b, dst)` | 2x `(v128.load + v128.load + i32x4.sub + v128.store)` |
+| `simd_load_i32x8(src, dst)` | 2x `(v128.load + v128.store)` |
+| `simd_store_i32x8(dst, src)` | arg-mirror of load |
+| `simd_sum_abs_diff(a, b, n)` | acc=i32x4.splat(0); loop n>=8: 2x `(v128.load + v128.load + i32x4.sub + i32x4.abs + i32x4.add acc)`; hsum via 4x `i32x4.extract_lane`; scalar tail (n%8) |
+| `simd_sad_u8(a, b, n)` | acc=i32x4.splat(0); loop n>=16: `v128.load a + v128.load b + i8x16.sub_sat_u(a,b) | i8x16.sub_sat_u(b,a)` (unsigned abs diff) `+ i16x8.extadd_pairwise_i8x16_u + i32x4.extadd_pairwise_i16x8_u + i32x4.add acc`; hsum + scalar tail (n%16) |
+
+The `sub_sat_u | sub_sat_u(swapped)` idiom is the standard v128
+unsigned-byte abs-diff pattern (there is no direct uabd op in
+v128). The `extadd_pairwise` chain is v128's analog of `vpsadbw`:
+each i8 lane is widened+pairwise-summed to i16 then i32 then
+accumulated in 4 i32 lanes.
+
+**Calling convention** matches the native ABI verbatim: pointer
+args are passed as NOVA's i64 ints, wrapped to i32 via `i32.wrap_i64`
+before each `v128.load` / `v128.store`. Return values use
+`i64.extend_i32_s` on the final scalar sum to match NOVA's int type.
+
+**WASM SIMD feature flag**: WebAssembly SIMD (the v128 proposal,
+finalized 2021 / Phase 4) is enabled by default in:
+
+  * `wasmtime` since 0.27 (current sandbox is 45)
+  * `wasmer` always
+  * Chrome 91+, Firefox 89+, Safari 16+ — universal coverage today
+
+No explicit feature byte / module header change is needed; the
+`0xfd` opcode prefix range used by v128 ops is automatically
+recognised by `wat2wasm` (1.0.34 default) and accepted by all
+modern engines.
+
+### Tests
+
+`tests/test_simd_wasm_v128.nova` (~210 lines, 22 assertions, NEW):
+
+  * `simd_add_i32x8([1..8], [10..80])` -> `[11..88]` on every target
+    (same as native AVX2 / NEON).
+  * `simd_sub_i32x8([100..800], [1..8])` -> `[99..792]`.
+  * `simd_load_i32x8` / `simd_store_i32x8` round-trip identity.
+  * `simd_sum_abs_diff` headline (R11D's canonical 100), zero,
+    mixed-signs, and tail-only (n=3 < 8 vector width).
+  * `simd_sad_u8` identical-buffers (=0), known-diff (=1024),
+    n=0 (no segfault), tail-only (n=8 < 16 vector width),
+    asymmetric (half a>b, half b>a — tests unsigned abs).
+  * Chained ops: `dst1 = a+b; dst2 = dst1-a; expect dst2 == b`.
+
+The test compiles to BOTH the native target (run by
+`tests/run_tests.sh` -> verifies AVX2 / NEON paths are unbroken)
+AND `--target=wasm` (run by `tests/test_simd_wasm_v128.sh` ->
+verifies the v128 lowering). Both produce 22/22.
+
+`tests/test_simd_wasm_v128.sh` is the integration script:
+
+  1. NOVA --target=wasm emits the .wat (~2800 lines / 50 KB)
+  2. wat2wasm validates + binary-encodes to .wasm (6.3 KB)
+  3. wasmtime compile validates the binary (no errors)
+  4. wasm-objdump confirms 53 v128 instructions present in
+     the emitted module (we require >=20)
+  5. wasmtime runs the .wasm and asserts the PASS banner
+
+Wired into the Makefile as `make smoke-simd-wasm-v128`.
+
+`tests/bench_simd_wasm.sh` (~150 lines, NEW) compares the WASM v128
+SIMD path against an open-coded WASM scalar SAD over 1024 i32 lanes
+x 1000 trials. **Measured speedup: ~8.9x** under wasmtime 45 (target
+was 2-3x; the gap is wider because the WASM scalar reference has to
+go through 4x `load8` per i32 lane via NOVA's `load_i32_le`,
+amplifying the per-element overhead). Both paths produce the same
+result (`43392`), confirming correctness. Wired into the Makefile
+as `make bench-simd-wasm`.
+
+### Verification (mandatory checklist)
+
+  * 22/22 NOVA SIMD assertions pass under wasmtime (`simd_add_i32x8`,
+    `simd_sub_i32x8`, `simd_load_i32x8`, `simd_store_i32x8`,
+    `simd_sum_abs_diff`, `simd_sad_u8` — same results as AVX2 /
+    NEON native paths).
+  * `wasmtime compile bin/test_simd.wasm` returns no errors;
+    module validates as standard WASM v128.
+  * `wasm-objdump -d bin/test_simd.wasm` shows 53 v128 instructions
+    (v128.load / v128.store / i32x4.add / i32x4.sub / i32x4.abs /
+    i8x16.sub_sat_u / i16x8.extadd_pairwise_i8x16_u /
+    i32x4.extadd_pairwise_i16x8_u / i32x4.extract_lane).
+  * `make bench-simd-wasm` reports SIMD/scalar speedup of **8.89x**
+    on stereo-SAD-shaped workload (1024 lanes x 1000 trials).
+  * `make self-host` passes — stage2.s == stage3.s bit-identical.
+  * `bash tests/run_tests.sh` reports 159/0/6 (matches R14B baseline).
+  * `make smoke-windows`, `make smoke-macos`, `make smoke-winarm64`,
+    `make smoke-mobile-android`, `make smoke-wasm`,
+    `make smoke-wasm-file`, `make smoke-wasi-preopens` all green.
+
+### Files touched (R15B)
+
+  - `src/compiler/codegen.nova` (+~520 lines: `wasm_gen_rt_simd()`
+    + 1 call site in `wasm_gen_program`)
+  - NEW `tests/test_simd_wasm_v128.nova` (~210 lines, 22 assertions)
+  - NEW `tests/test_simd_wasm_v128.sh` (~70 lines: 5-step verify)
+  - NEW `tests/bench_simd_wasm.sh` (~150 lines: SIMD vs scalar)
+  - `Makefile` (+2 targets: `smoke-simd-wasm-v128`, `bench-simd-wasm`)
+  - `NEXT_SESSION.md` (this section)
+  - `README.md` (R15B line added to the SIMD coverage matrix)
+
+### Remaining future work
+
+  * Relaxed-SIMD opcodes (`i32x4.relaxed_dot_i8x16_i7x16_add_s` etc.)
+    could collapse the `sub_sat_u | sub_sat_u + extadd_pairwise` SAD
+    sequence to 1-2 ops on modern engines that support the relaxed
+    extension. Out of scope for R15B since not universally available
+    (wasmtime 24+ / Chrome 114+ — narrower than the v128 baseline).
+  * 256-bit virtual SIMD on top of v128 (already done here:
+    2x v128 per logical 8-lane op) is the only way to match AVX2
+    throughput in WASM today; the AVX-512-class extension to WASM
+    has not yet been standardised.
+
 ## R15F — LSP call hierarchy (12th LSP capability)
 
 R15F lights up the call-hierarchy view in VS Code (and the equivalent

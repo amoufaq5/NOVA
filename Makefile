@@ -17,7 +17,7 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf bench-simd bench-simd-sad bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf smoke-simd-wasm-v128 bench-simd bench-simd-sad bench-simd-wasm bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all
 
 all: bin/nova
 
@@ -449,6 +449,22 @@ bench-simd: bin/nova examples/bench_dot_i32.nova
 # fallback) intrinsic. Prints scalar/SIMD averages over 200 trials.
 bench-simd-sad: bin/nova
 	@bash tests/bench_simd.sh
+
+# R15B: WASM v128 SIMD vs WASM scalar microbench.
+# Compiles two NOVA programs (one calling simd_sum_abs_diff, one
+# open-coding the scalar SAD loop) to --target=wasm, converts to .wasm
+# via wat2wasm, runs both under wasmtime, and reports the speedup ratio.
+# Also confirms wasm-objdump sees v128 instructions in the SIMD binary.
+# Skips cleanly if wat2wasm / wasmtime aren't installed.
+bench-simd-wasm: bin/nova
+	@bash tests/bench_simd_wasm.sh
+
+# R15B: WASM v128 SIMD correctness integration test.
+# Compiles tests/test_simd_wasm_v128.nova with --target=wasm, validates
+# via wat2wasm + wasmtime, and runs end-to-end. The same NOVA source
+# also runs under run_tests.sh in native mode (AVX2 / NEON paths).
+smoke-simd-wasm-v128: bin/nova
+	@bash tests/test_simd_wasm_v128.sh
 
 # Build + run the int_* scalar-builtin microbench.
 # Compares NOVA's smart `+` / `*` (which dispatch through PTR_THRESHOLD)
