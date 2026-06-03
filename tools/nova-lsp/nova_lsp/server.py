@@ -26,6 +26,9 @@ using only the Python standard library. Supports:
       `callHierarchy/incomingCalls` + `callHierarchy/outgoingCalls`
       (caller / callee navigation rendered as a tree in the editor;
       reuses R8C's workspace symbol index + R9C's reference scanner)
+    * `textDocument/inlayHint` (parameter-name ghost text at call
+      sites + literal-RHS type hints on `let` bindings; reuses R5F's
+      `find_definition` to resolve the called fn's declared params)
 
 Run with::
 
@@ -59,6 +62,7 @@ from nova_lsp.hover_docs import (
     render_hover_markdown,
 )
 from nova_lsp.imports import FileCache, find_definition, walk_imports
+from nova_lsp.inlay_hints import compute_inlay_hints
 from nova_lsp.rename_workspace import (
     build_workspace_edit,
     classify_symbol,
@@ -1816,6 +1820,52 @@ def handle_outgoing_calls(
 
 
 # ---------------------------------------------------------------------------
+# Inlay hints — `textDocument/inlayHint`.
+#
+# Renders parameter-name ghost text inline at function call sites so a
+# reader can tell which positional argument maps to which declared
+# parameter without jumping to the definition. Also emits literal-RHS
+# type hints on `let x = <literal>` bindings.
+#
+# Callee resolution shares R5F's `find_definition` over the import
+# graph + R8C's workspace symbol index for sibling files outside the
+# graph; builtins (no source location) yield no hint. See
+# `inlay_hints.py` for the argument-position parsing details.
+# ---------------------------------------------------------------------------
+
+
+def handle_inlay_hints(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return InlayHint[] for the viewport `range` in `params.textDocument`.
+
+    Warms the workspace symbol index (so cross-file callee resolution
+    sees sibling fns outside the import graph) before delegating to
+    `inlay_hints.compute_inlay_hints`.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    doc = state.documents.get(uri)
+    if not doc:
+        return []
+    rng = params.get("range") or None
+    # Warm the workspace index so callee resolution can fall back to
+    # sibling files. Cheap once warm (lazy crawl is gated by
+    # `_crawled_roots`).
+    if state.root_path:
+        state.workspace_symbols.index_workspace_root(state.root_path)
+    for d in state.documents.values():
+        _refresh_workspace_symbols_for_doc(state, d)
+    return compute_inlay_hints(
+        uri=doc.uri,
+        range_=rng,
+        doc_text=doc.text,
+        file_cache=state.file_cache,
+        workspace_index=state.workspace_symbols,
+        text_overrides=_text_overrides(state),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher.
 # ---------------------------------------------------------------------------
 
@@ -1861,6 +1911,7 @@ def server_capabilities() -> Dict[str, Any]:
             "full": True,
         },
         "callHierarchyProvider": True,
+        "inlayHintProvider": {"resolveProvider": False},
         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
     }
 
@@ -2001,6 +2052,10 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "callHierarchy/outgoingCalls":
         result = handle_outgoing_calls(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/inlayHint":
+        result = handle_inlay_hints(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 

@@ -534,7 +534,8 @@ def test_capability_count_unchanged() -> None:
     caps = server_capabilities()
     # Hover is an enhancement to the existing `hoverProvider`, NOT a
     # new capability. The expected key set grows only when a new LSP
-    # capability is wired up (e.g. R15F added `callHierarchyProvider`).
+    # capability is wired up (e.g. R15F added `callHierarchyProvider`,
+    # R16C added `inlayHintProvider`).
     # `semanticTokensProvider` advertises both /full and /range under a
     # single provider key.
     expected_keys = {
@@ -548,6 +549,7 @@ def test_capability_count_unchanged() -> None:
         "workspaceSymbolProvider",
         "semanticTokensProvider",
         "callHierarchyProvider",
+        "inlayHintProvider",
         "diagnosticProvider",
     }
     assert_eq(set(caps.keys()), expected_keys,

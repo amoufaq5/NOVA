@@ -1,5 +1,122 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R16C — LSP inlay hints (13th LSP capability)
+
+R16C adds **inlay hints** (`textDocument/inlayHint`) to `nova-lsp`,
+taking the capability count from 12 -> 13. Inlay hints render
+parameter names as dimmed ghost text inline at function call sites
+so a reader can tell which positional argument maps to which
+declared parameter without jumping to the definition. Type-kind
+hints on `let x = <literal>` bindings are also emitted as a bonus.
+
+### What landed
+
+**New module** `tools/nova-lsp/nova_lsp/inlay_hints.py` (~440 lines)
+exposing `compute_inlay_hints(uri, range, doc_text, file_cache,
+workspace_index, text_overrides) -> InlayHint[]`. The resolver
+shares R5F's `find_definition` over the transitive import graph and
+falls back to R8C's `WorkspaceSymbolIndex` for sibling files
+outside the graph; open-buffer text overrides on-disk content so
+unsaved edits to the declarer's parameter list reflect immediately
+in caller hints. A per-document callee cache (`callee -> params`)
+keeps popular helpers like `out` and `_cg_ht_set` from re-walking
+the workspace once per call.
+
+**Server wiring**: `server.py` imports `compute_inlay_hints`, adds
+the `handle_inlay_hints` handler (warms the workspace index +
+buffer overrides, then delegates), advertises
+`"inlayHintProvider": {"resolveProvider": False}` in
+`server_capabilities()`, and dispatches `textDocument/inlayHint`.
+
+**Parsing pieces**:
+
+  * `_FN_DEF_RE` -> mirrors `imports._FN_DEF_RE` but captures the
+    parameter list so `_split_param_names` can extract bare names
+    (stripping `mut` modifiers and `= default` suffixes).
+  * `_mask_comments_and_strings` -> same column-preserving scrubber
+    used by `call_hierarchy` and `rename_workspace`; ensures
+    `// foo(99)` doesn't trigger hints.
+  * `_walk_args(lines, open_line, open_char)` -> paren/bracket-depth
+    aware argument-list walker. Returns one `_ArgPosition` per top-
+    level argument with `(line, char, raw_text)`. Multi-line calls
+    are anchored at the first non-whitespace position of each
+    argument expression; commas inside strings or nested
+    parens/brackets do not split arguments. Returns `None` when the
+    closing `)` is never found.
+  * `_has_explicit_name_label` -> detects existing `name: value`
+    syntax so we don't double-label named arguments.
+  * `_infer_literal_type` -> sniffs int / float / str / bool / nil
+    literal RHSs for the `let` type-hint bonus path. Returns `None`
+    on anything more complex (no fake type inference).
+  * `_resolve_callee_params` -> import graph first, workspace index
+    fallback. Builtins (`println`, `len`, ...) silently yield `None`
+    -> no hints, no crash.
+
+**Hint shape per LSP spec**:
+```json
+{ "position": {"line": N, "character": M},
+  "label": "param_name:",
+  "kind": 2,
+  "paddingLeft": false, "paddingRight": true }
+```
+The `paddingRight: true` flag draws a single-space gap between the
+hint and the source so `data:input` renders as `data: input`.
+
+### Tests
+
+`tools/nova-lsp/tests/test_inlay_hints.py` (NEW, 65 assertions):
+
+  * `_split_param_names`: bare params, defaults stripped, `mut`
+    prefix stripped, empty list edge case.
+  * `_walk_args`: single-line, nested call, multi-line argument
+    list, no-args, string with comma (commas inside strings don't
+    split), unclosed-paren bailout.
+  * `_has_explicit_name_label`: positive (`foo:`), negative (bare
+    ident, number), path-separator (`::` ignored).
+  * `_infer_literal_type`: decimal/hex int, float, string, bool,
+    nil, and explicit `None` returns for arithmetic / call /
+    identifier RHSs.
+  * `compute_inlay_hints` end-to-end with a tiny workspace:
+      - Two-arg call, three-arg call, nested call (3 hints),
+        mismatched-arg-count (hints capped), builtin callee (no
+        crash, no hints), literal args still annotated, named arg
+        skipped, range-filter applied, workspace-index fallback,
+        type hint on `let x = 5` / `let s = "hi"`, keyword-`(`
+        ignored (`if foo(x)` -> one hint, not two), call-in-comment
+        ignored.
+  * Server-level wire smoke through `dispatch`:
+    `inlayHintProvider` advertised in capabilities; the
+    `textDocument/inlayHint` request returns the expected shape.
+  * Integration against `/home/user/NOVA/src/compiler/codegen.nova`:
+    A viewport on lines 7500..7510 catches the calls
+    `_cg_ht_add(cg_fns_ht, mfn_name)` and
+    `_cg_ht_set(cg_fn_modules, mfn_name, cg_source_file)` and emits
+    five hints with labels `{"ht:", "name:", "ht:", "key:", "val:"}`
+    -- exactly matching the declared parameter names for those two
+    fns. Confirms the workspace-index fallback resolves real
+    NOVA helpers without an `import` connection.
+
+All 12 prior LSP tests still pass (75 + 55 + 101 + 119 + 52 +
+smoke). The `test_hover_docs.py` capability-set assertion was
+extended to include `inlayHintProvider` so it tracks the new
+capability (same pattern R15F used for `callHierarchyProvider`).
+
+### Capability count
+
+| Round | LSP capability added                  |
+| ----- | ------------------------------------- |
+| (pre) | sync, hover, completion, definition, references, rename, code action |
+| R8C   | workspace symbols                     |
+| R13C  | semantic tokens (`/full` + `/range`)  |
+| R14C  | hover docs (enhancement, not a new capability) |
+| R15F  | call hierarchy (prepare / incoming / outgoing) |
+| R16C  | **inlay hints**                       |
+
+Total: 13 advertised provider keys (plus `hoverProvider` whose
+behavior was enriched by R14C without changing the wire schema).
+
+---
+
 ## R15B — WASM v128 SIMD lowering (close R11D's last gap)
 
 R15B adds **WebAssembly v128 SIMD** lowering paths for all six

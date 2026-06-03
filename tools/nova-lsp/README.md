@@ -27,6 +27,7 @@ for the install hook.
 | `textDocument/prepareCallHierarchy` | yes (resolves cursor to a `CallHierarchyItem` for a top-level `fn`; cross-file via imports + workspace index) |
 | `callHierarchy/incomingCalls`       | yes (every `name(` call site across the workspace, grouped by enclosing top-level fn) |
 | `callHierarchy/outgoingCalls`       | yes (every top-level fn called inside the source body, resolved via imports + workspace index; builtins elided) |
+| `textDocument/inlayHint`            | yes (parameter-name ghost text at call sites + literal-RHS type hints on `let` bindings; viewport-range filtered, callee resolved via imports + workspace index, builtins elided) |
 
 Hover scans the open document and every `import "..."` it transitively
 references for `fn name(args)` and `let X = ...` definitions, plus the
@@ -217,6 +218,33 @@ are omitted from outgoing calls because they have no navigable source
 location. Recursion is preserved in both directions — `fib` calling
 itself shows up under both incoming and outgoing.
 
+Inlay hints (`textDocument/inlayHint`) render parameter-name ghost
+text inline at call sites so a reader can tell which positional
+argument maps to which declared parameter without jumping to the
+definition. For a call like `process(input, true, 42)` where the
+declaration is `fn process(data, verbose, count) {...}`, the editor
+draws three dimmed labels — `data:`, `verbose:`, `count:` — at each
+argument's starting column. Callee resolution shares R5F's
+`find_definition` over the transitive import graph, falling back to
+R8C's workspace symbol index for sibling files outside the graph;
+builtins (`println`, `len`, ...) and other unresolved names produce
+no hints rather than guessing. The argument-position parser tracks
+paren / bracket depth so nested calls (`foo(bar(c), d)`) and
+multi-line argument lists are handled correctly; commas inside
+strings or comments are masked out so a quoted `","` doesn't split
+arguments. Variadic / mismatched arg counts cap the hint count at
+`min(args, params)` so we never label an argument with the wrong
+parameter. Hints are filtered to the requested viewport `range`
+(start-inclusive, end-exclusive) so the wire payload stays small on
+big files. Explicitly named arguments (`foo(y: 2)`) are skipped to
+avoid the redundant double-label. A bonus pass adds Type-kind hints
+on `let x = <literal>` bindings — integer / float / string / bool /
+nil literals expand to `: int` / `: float` / `: str` / `: bool` /
+`: nil` directly after the name token. Anything more complex than a
+clean single-literal RHS (arithmetic, function calls, identifier
+references) is left unannotated since type-inferring those would
+require a real type checker.
+
 Diagnostics are produced by writing the buffer to a tempfile and running
 `nova --check <tempfile>`. The server falls back to `nova <tempfile> -o
 /dev/null` if `--check` is not recognised by the installed compiler.
@@ -248,9 +276,10 @@ python tools/nova-lsp/tests/test_rename_workspace.py
 python tools/nova-lsp/tests/test_semantic_tokens.py
 python tools/nova-lsp/tests/test_hover_docs.py
 python tools/nova-lsp/tests/test_call_hierarchy.py
+python tools/nova-lsp/tests/test_inlay_hints.py
 ```
 
-The ten `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The eleven `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
 ~10 ms each (the workspace-symbol + workspace-rename + call-hierarchy
@@ -307,6 +336,7 @@ tools/nova-lsp/
     semantic_tokens.py      # semantic-tokens classifier + delta encoder
     hover_docs.py           # `///` doc-comment extractor for hover
     call_hierarchy.py       # prepare / incoming / outgoing call resolver
+    inlay_hints.py          # parameter-name + literal-type inlay hints
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -319,4 +349,5 @@ tools/nova-lsp/
     test_semantic_tokens.py
     test_hover_docs.py
     test_call_hierarchy.py
+    test_inlay_hints.py
 ```
