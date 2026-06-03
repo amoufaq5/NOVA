@@ -15,6 +15,7 @@ for the install hook.
 | `textDocument/didSave`              | yes    |
 | `textDocument/didClose`             | yes    |
 | `textDocument/publishDiagnostics`   | yes (runs `nova --check`) |
+| `workspace/diagnostic`              | yes (R23F — pull-model aggregation of every diagnostic marker across every indexed file + open buffer into a single panel feed; content-hash `resultId` for incremental `kind: "unchanged"` vs `kind: "full"` reports; enhances the existing `diagnosticProvider` capability — `workspaceDiagnostics: true` on the same provider object rather than a new top-level provider, so the LSP capability count stays at 17) |
 | `textDocument/hover`                | yes (signatures from imports + `///` doc comments rendered as markdown) |
 | `textDocument/completion`           | yes (builtins + fn/let scan, triggers on `.` and `(`) |
 | `textDocument/rename`               | yes (workspace-wide for top-level fn/let/const/type, single-buffer for locals + params) |

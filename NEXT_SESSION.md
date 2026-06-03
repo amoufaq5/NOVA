@@ -1,5 +1,128 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R23F — LSP workspace diagnostics aggregation (`workspace/diagnostic`)
+
+R23F adds **workspace-wide diagnostics aggregation**
+(`workspace/diagnostic`, LSP 3.17) to `nova-lsp`. Diagnostics today
+flow per-file via the `publishDiagnostics` notification — the panel
+can only show markers for files the user has opened. R23F flips
+the model: the editor pulls a single workspace report containing
+every diagnostic marker across every indexed file + open buffer,
+feeding the unified PROBLEMS panel even for files the user has not
+visited.
+
+This enhancement keeps the LSP capability count at 17 — the
+existing `diagnosticProvider` capability gains a new
+`workspaceDiagnostics: true` flag rather than introducing a new
+top-level provider, mirroring how the LSP spec layers
+workspace/diagnostic on the same provider object as
+textDocument/diagnostic.
+
+### What landed
+
+**New module** `tools/nova-lsp/nova_lsp/workspace_diagnostics.py`
+(~310 lines) exposing:
+
+  * `compute_workspace_diagnostics(file_cache, workspace_index,
+    diagnostic_runner, *, document_overrides, document_versions,
+    previous_result_ids) -> WorkspaceDiagnosticReport` — the main
+    entry point. Walks every file in the workspace index plus every
+    open buffer URI, runs the diagnostic engine on each, and returns
+    the LSP 3.17 wire shape `{items:
+    WorkspaceDocumentDiagnosticReport[]}` directly.
+  * `compute_result_id(text) -> str` — sha1 of file content. Used
+    as the per-file `resultId` so the protocol stays stateless:
+    the server doesn't need a session table of result IDs, only the
+    current file text.
+  * `enumerate_workspace_files(workspace_index,
+    document_overrides) -> List[str]` — union of indexed paths +
+    open-buffer paths, sorted/deduped. Open buffers not yet in the
+    index (unsaved scratch files) still feed the panel.
+  * `build_file_report(ctx, diagnostic_runner) -> dict` — produces
+    one WorkspaceDocumentDiagnosticReport. If the supplied
+    `previous_result_id` matches the current content hash, returns
+    `{"kind": "unchanged", "resultId", "uri", "version"}` and
+    skips the engine entirely. Otherwise runs the engine and
+    returns `{"kind": "full", "resultId", "uri", "version",
+    "items"}` with a fresh items payload.
+  * `parse_previous_result_ids(raw)` — converts the wire-shape
+    `[{uri, value}, ...]` list into a `{uri: value}` dict for O(1)
+    lookup. Malformed entries are filtered out so a misbehaving
+    client can't crash the server.
+  * `DiagnosticRunner = Callable[[str, str], List[Dict]]` —
+    pluggable diagnostic engine type. Production wires this to a
+    closure around `run_compiler_check` (shells out to
+    `nova --check`); tests inject deterministic stubs.
+
+**Server wiring**: `server.py` imports
+`compute_workspace_diagnostics` + `parse_previous_result_ids`,
+adds `handle_workspace_diagnostic`, registers the route
+`workspace/diagnostic -> handle_workspace_diagnostic` in
+`dispatch`, and flips `diagnosticProvider.workspaceDiagnostics`
+from `false` to `true` in `server_capabilities`. The handler
+synthesises `document_overrides` / `document_versions` from
+`state.documents`, lazy-crawls the workspace root on first
+request (so the panel has content even before the user has
+issued a workspace/symbol query), and wraps `run_compiler_check`
+in a path-aware adapter that re-uses the existing tempfile +
+`nova --check` flow.
+
+### Incremental support
+
+The client may send `previousResultIds: [{uri, value}, ...]`
+carried forward from the previous response. For each file:
+
+  * **content hash matches** — return `kind: "unchanged"` with the
+    SAME resultId. Saves the engine invocation AND the items
+    payload bytes; the client keeps its cached diagnostics.
+  * **content hash differs (file changed)** — run the engine,
+    return `kind: "full"` with fresh items + a new resultId.
+  * **no previousResultId for that URI** — first time we've seen
+    this file, return `kind: "full"`.
+
+Content hashing is sha1 over the raw text bytes — deterministic
+and short enough to live in a JSON-RPC payload. Two files with
+byte-identical content share the same resultId even when they
+live at different paths, which is fine: each per-file report is
+keyed by URI on the wire.
+
+### Test coverage
+
+**New test** `tools/nova-lsp/tests/test_workspace_diagnostics.py`
+runs **55 assertions** across:
+
+  * `compute_result_id` determinism + difference for different text.
+  * `parse_previous_result_ids`: None / empty / well-formed /
+    malformed inputs.
+  * `enumerate_workspace_files`: empty workspace, indexed-only,
+    open-override-only, both unioned.
+  * `build_file_report`: full when no prev id; unchanged when prev
+    id matches (proven by a runner that throws if called);
+    full-with-new-id when prev id is stale.
+  * `compute_workspace_diagnostics` end-to-end: empty -> empty;
+    single-file clean -> 1 empty item; single-file with
+    exhaustiveness WARN -> 1 item with 1 diagnostic carrying the
+    R17A "non-exhaustive match on Shape (missing: Rect)" message;
+    multi-file (3 files, 2 with diagnostics, 1 clean) -> 3 items
+    with correct distribution.
+  * Incremental: matching previousResultIds -> all unchanged;
+    one file changed (via `document_overrides`) -> that file
+    returns full with fresh diagnostic, others stay unchanged.
+  * All four severities (error, warning, info, hint) round-trip
+    through the report unchanged.
+  * Open-buffer overrides authoritative over disk content.
+  * Server-level wire smoke through `dispatch` for
+    `workspace/diagnostic` + the enhanced
+    `diagnosticProvider.workspaceDiagnostics: true` capability.
+  * Integration on `src/` (the real NOVA codebase) — walks 92 files
+    and confirms every indexed file appears in the workspace
+    report exactly once.
+
+All existing LSP tests (call hierarchy, code lens, document
+symbols, exhaustiveness fix, extract function, folding ranges,
+hover docs, inlay hints, rename workspace, semantic tokens,
+type hierarchy, workspace symbols) and smoke tests still pass.
+
 ## R22C — LSP folding ranges + document symbols (16th + 17th capabilities)
 
 R22C adds **folding ranges** (`textDocument/foldingRange`) and

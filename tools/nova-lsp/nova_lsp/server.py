@@ -48,6 +48,12 @@ using only the Python standard library. Supports:
       editor sidebar — hierarchical `DocumentSymbol[]` with each
       top-level fn / let / const / type / enum / struct as a node, and
       enum variants / struct fields nested as children)
+    * `workspace/diagnostic` (pull-model workspace-wide diagnostic
+      aggregation per LSP 3.17 — single panel feed of all diagnostic
+      markers across every indexed file + open buffer, with
+      content-hash `resultId` for incremental `kind: "unchanged"` vs
+      `kind: "full"` reports; enhances the existing diagnostic
+      capability rather than adding a top-level provider)
 
 Run with::
 
@@ -106,6 +112,10 @@ from nova_lsp.type_hierarchy import (
     prepare_type_hierarchy,
     subtypes,
     supertypes,
+)
+from nova_lsp.workspace_diagnostics import (
+    compute_workspace_diagnostics,
+    parse_previous_result_ids,
 )
 from nova_lsp.workspace_symbols import (
     SYMBOL_KIND_CONSTANT,
@@ -474,6 +484,67 @@ def publish_diagnostics(state: ServerState, doc: Document, out_stream) -> None:
             "method": "textDocument/publishDiagnostics",
             "params": {"uri": doc.uri, "diagnostics": diagnostics},
         },
+    )
+
+
+def _workspace_diagnostic_runner(state: ServerState):
+    """Build a closure that runs the per-file diagnostic engine.
+
+    The workspace_diagnostics module is intentionally decoupled from
+    the server's compiler-shelling logic so its unit tests can inject
+    deterministic stubs. This adapter ties it back into the live
+    `nova --check` flow at runtime by wrapping `run_compiler_check`
+    in a path-aware shim.
+    """
+    def runner(path: str, text: str):
+        # `run_compiler_check` works in terms of a Document so it can
+        # write the buffer text to a tempfile and run the compiler over
+        # it. Re-using that path (rather than reading `path` from disk)
+        # is intentional -- it lets the workspace check see unsaved
+        # buffer edits without round-tripping through the filesystem.
+        doc = Document(uri=path_to_uri(path), text=text)
+        return run_compiler_check(state, doc)
+    return runner
+
+
+def handle_workspace_diagnostic(
+    state: ServerState, params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Handler for `workspace/diagnostic`.
+
+    Walks every file in the workspace symbol index plus every open
+    document buffer, running the diagnostic engine on each. Returns
+    a WorkspaceDiagnosticReport in the LSP 3.17 wire shape:
+    `{items: WorkspaceDocumentDiagnosticReport[]}`.
+
+    Incremental support: the client may pass
+    `previousResultIds: [{uri, value}, ...]`. Files whose current
+    content hash matches the previousResultId return
+    `kind: "unchanged"` (saving the client + server an item payload);
+    the rest get a fresh `kind: "full"` report.
+
+    Lazy crawl: the index is warmed up exactly once -- if no files
+    have been indexed yet (e.g. the client requests
+    workspace/diagnostic before any workspace/symbol query), we walk
+    the workspace root on the spot so the panel has something to
+    show on the very first request.
+    """
+    if state.root_path:
+        # Warm the index on first request so the panel isn't empty
+        # before the user has run a workspace/symbol query.
+        state.workspace_symbols.index_workspace_root(state.root_path)
+
+    document_overrides = {uri: doc.text for uri, doc in state.documents.items()}
+    document_versions = {uri: doc.version for uri, doc in state.documents.items()}
+    prev_ids = parse_previous_result_ids(params.get("previousResultIds"))
+
+    return compute_workspace_diagnostics(
+        file_cache=state.file_cache,
+        workspace_index=state.workspace_symbols,
+        diagnostic_runner=_workspace_diagnostic_runner(state),
+        document_overrides=document_overrides,
+        document_versions=document_versions,
+        previous_result_ids=prev_ids,
     )
 
 
@@ -2105,7 +2176,16 @@ def server_capabilities() -> Dict[str, Any]:
         "typeHierarchyProvider": True,
         "foldingRangeProvider": True,
         "documentSymbolProvider": True,
-        "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
+        "diagnosticProvider": {
+            "interFileDependencies": False,
+            # workspace/diagnostic: returns one WorkspaceDocumentDiagnosticReport
+            # per indexed file, driven by `compute_workspace_diagnostics`.
+            # Incremental support via `previousResultIds` -- files whose
+            # content hash matches the previousResultId return
+            # `kind: "unchanged"`, the rest return `kind: "full"` with a
+            # fresh items + resultId payload.
+            "workspaceDiagnostics": True,
+        },
     }
 
 
@@ -2277,6 +2357,10 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "textDocument/documentSymbol":
         result = handle_document_symbol(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "workspace/diagnostic":
+        result = handle_workspace_diagnostic(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 
