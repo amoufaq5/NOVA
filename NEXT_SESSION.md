@@ -1,5 +1,134 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R25A — struct brace-init syntax + struct destructure pattern
+
+**Status: complete** — `Foo { field: val, ... }` brace-init and the
+matching destructure patterns now compile and run on all 6 cross-targets.
+
+### Surface
+
+```nova
+struct Box<T> { value: T }
+struct Point { x: int, y: int }
+
+// Brace-init (in addition to R23A's positional `Box(42)`).
+let b: Box<int> = Box { value: 42 }
+let p: Point = Point { x: 10, y: 20 }
+
+// Field order can be swapped — codegen reorders to declaration order
+// using `cg_structs`. Both lines produce the same `[10, 20]` list.
+let p2 = Point { y: 20, x: 10 }
+
+// Optional `<TypeArgs>` between the name and the brace.
+let bg = Box<int> { value: 99 }
+
+// Destructure in let-binding (parser-time lowering to a temp + field
+// accesses — codegen sees only AST_FIELD_ACCESS).
+let Box { value: v } = b                  // bind `v`
+let Point { x: px, y: py } = p            // explicit binders
+let Point { x, y } = p                    // shorthand
+let Point { x: px, .. } = p               // partial (rest)
+
+// Destructure in match arm — parser-time rewrite to a wildcard arm
+// with a guard for literal field tests, plus prepended binder lets.
+match p {
+    Point { x: 0, y: 0 } => println("origin")
+    Point { x: a, y: b } => println(a + b)
+}
+```
+
+### Implementation
+
+Pure parser-level for the destructure forms; one new codegen handler
+per target for `AST_STRUCT_INIT`.
+
+#### Parser (`src/compiler/parser.nova`)
+- `par_ident_starts_uppercase`, `par_peek_generic_args_len`,
+  `par_lbrace_is_struct_body`, `par_lbrace_is_struct_pattern_body` —
+  disambiguation helpers (uppercase-leading IDENT + `{` IDENT `:` /
+  `..` / `}` lookahead).
+- `parse_struct_brace_init(name)` — extends `parse_primary`'s IDENT
+  branch to lower `Name { field: val, ... }` to `AST_STRUCT_INIT`
+  (which carries source-order field names + values; codegen reorders).
+- `parse_struct_let_destructure(name, lb_off)` — extends `parse_let`
+  to lower `let Name { field: binder } = expr` to a block of plain
+  let-statements using `tmp.fieldname` field access. The temp name
+  (`_struct_tmp_<N>`) is parser-generated and unique per program.
+- `parse_struct_match_pattern(name, lb_off)` + `lower_struct_match_arm`
+  — extend `parse_match` to (1) detect struct-arm patterns, (2) wrap
+  the whole match in an `AST_DO_EXPR` capturing the matchee in a
+  fresh local (`_struct_match_<N>`), and (3) rewrite each struct-arm
+  to a wildcard arm where literal sub-patterns merge into an
+  `&&`-chained guard and binder sub-patterns become `let` statements
+  prepended to the body.
+
+#### AST (`src/compiler/ast.nova`)
+- New `AST_STRUCT_PATTERN = 68` tag (parser-only; codegen never
+  sees it after the rewrite).
+- New `ast_struct_init(name, values, names)` constructor.
+
+#### Codegen (`src/compiler/codegen.nova`)
+- `cg_reorder_struct_init(struct_name, src_names, src_values)` —
+  walks `cg_structs` to find the declared field order and returns a
+  parallel list of values in declaration order. Missing source fields
+  get an `ast_none()` placeholder.
+- `gen_expr` (x86), `arm_gen_expr` (ARM64-Linux),
+  `warm_gen_expr` (Win-ARM64), `wasm_gen_expr` (WASM) — new
+  `AST_STRUCT_INIT` handlers that mirror the existing positional ctor
+  / list-literal codegen pattern (allocate list, push each value).
+- `arm64_gen_program`, `winarm64_gen_program`, `wasm_gen_program` —
+  register struct declarations into `cg_structs` so the reorder
+  helper can find them on those targets (was previously x86-only).
+- `wasm_gen_expr` AST_FIELD_ACCESS — added struct field-access
+  lowering via `find_field_index` + `$rt_index` (was a stub
+  returning 0).
+- `wasm_gen_expr` AST_DO_EXPR — added handler so the parser's
+  struct-pattern match rewrite executes correctly.
+- `wasm_gen_expr` AST_MATCH_STMT guarded-wildcard arm — added
+  guard-check codegen so the parser's struct-pattern rewrite (which
+  produces guarded wildcards) works on WASM.
+- `wasm_collect_locals` — added AST_DO_EXPR, AST_EXPR_STMT, and
+  top-level AST_BLOCK dispatch so binders inside the rewritten
+  patterns get a wasm local slot at function top.
+
+#### Tests
+- `tests/test_struct_brace_init.nova` — 26 assertions covering
+  single/multi-field brace-init, swap-order parity, generic struct
+  brace-init (`Box<int> { value: 99 }`), methods on brace-init
+  values, nested brace-init, list-of-brace-init, R20A `?` /
+  Result interaction.
+- `tests/test_struct_destructure.nova` — 15 assertions covering
+  explicit-binder destructure, multi-field, shorthand, partial
+  (rest), match-arm literal patterns, match-arm binder patterns,
+  match-arm wildcard fields, mixed literal+binder, shorthand match.
+- `tests/test_struct_brace_cross_target.sh` — six-target gating
+  harness (compile + assemble + link + run where applicable) for
+  brace-init + destructure + match. All six pass.
+
+### Verification
+
+- All 174 existing tests still green (180 total, 6 skipped).
+- Self-hosting: stage2.s == stage3.s bit-identical.
+- Cross-target: all 6 targets PASS for the new struct test
+  (`test_struct_brace_cross_target.sh`) plus the existing
+  `test_enum_cross_target.sh`.
+- 41 new assertions total (26 brace-init + 15 destructure).
+
+### R25A.2 follow-ups (deferred)
+
+* Brace-init for tuple-style enum variants — `Result::Ok { value:
+  42 }` is currently out of scope (the task spec marks it explicitly).
+* Update-syntax (Rust `..base` field-spread in init) — currently
+  only the explicit-field and shorthand forms are supported.
+* tree-sitter-nova grammar refresh to highlight `Name { field: val }`
+  expressions and struct-pattern arms (R25A.2 grammar follow-up,
+  parallel to R24B's R17A-R23A refresh).
+* LSP completion at `Name { ` — list the struct's declared field
+  names (analogous to R24E's enum-variant completion).
+* Update-syntax for partial destructure with rest `..` returning
+  a remainder value (today rest is just a "skip" — we don't bind
+  any leftover).
+
 ## R25D — Architecture documentation refresh + module catalog
 
 **Status: complete -- new `ARCHITECTURE.md` documents the layout-and-

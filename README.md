@@ -279,7 +279,12 @@ There is no implicit entry point. Execution begins at the first top-level statem
   Result-propagation operator, R21A generic enums `<T, U>`, R22B
   generic fns `<T, U>(p: T) -> U` and function-type `T -> U`
   parameter annotations, R23A generic structs + semicolon-separated
-  fields, named-argument calls `f(name: value)`, `#` / `--` line
+  fields, R25A struct brace-init `Foo { field: val, ... }` with
+  source-order to declaration-order reordering + destructure patterns
+  `let Foo { field: binder } = x` (parser-time lowering) and
+  match-arm struct patterns `Foo { x: 0, y: _ } => body` (parser-time
+  rewrite to a wildcard-with-guard plus prepended binder lets), named-
+  argument calls `f(name: value)`, `#` / `--` line
   comments, `not`/`and`/`or` keyword operators, `is` / `in` / `not
   in` type and membership operators, `..` / `..=` ranges, `|>`
   pipe, `??` nullish coalescing + `??=`, octal `0o755`, `const`

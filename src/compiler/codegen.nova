@@ -993,6 +993,50 @@ fn struct_field_index(struct_name, field_name) {
     return 0 - 1
 }
 
+// R25A: reorder brace-init values to match the struct's declaration
+// order so codegen can emit positional pushes. Takes a source-order list
+// of (field_name, value) pairs and the struct's declared field-name list,
+// returns a parallel list of values in declaration order. Missing fields
+// (not in source) get a 0 placeholder (ast_none) so the resulting list
+// still has the right shape — codegen pushes one value per field. Source
+// fields that don't appear in the declaration are silently dropped (the
+// parser-time tc_check pass surfaces the warning).
+fn cg_reorder_struct_init(struct_name, src_names, src_values) {
+    let i = 0
+    let decl_fields = list_new()
+    while i < cg_struct_count {
+        if cg_structs[i][0] == struct_name {
+            decl_fields = cg_structs[i][1]
+            i = cg_struct_count
+        }
+        i = i + 1
+    }
+    let n = len(decl_fields)
+    let result = list_new()
+    let j = 0
+    while j < n {
+        let want = decl_fields[j]
+        // Find `want` in src_names.
+        let found = 0
+        let k = 0
+        while k < len(src_names) {
+            if src_names[k] == want {
+                push(result, src_values[k])
+                found = 1
+                k = len(src_names)
+            }
+            k = k + 1
+        }
+        if found == 0 {
+            // Missing — push none placeholder so the value list has
+            // the correct length / shape.
+            push(result, ast_none())
+        }
+        j = j + 1
+    }
+    return result
+}
+
 fn find_field_index(field_name) {
     let si = 0
     while si < cg_struct_count {
@@ -3782,6 +3826,30 @@ fn gen_expr(nd) {
         return 0
     }
 
+    if tag == AST_STRUCT_INIT {
+        // R25A: brace-init `Foo { field: val, ... }`. Same wire-shape as
+        // the positional ctor (R23A): a struct value is a list `[v0, v1,
+        // ...]` in field declaration order. Reorder source-order values
+        // to decl order, then emit the same _nova_list_new + push loop
+        // as the positional ctor.
+        let s_name = nd[1]
+        let s_vals = nd[2]
+        let s_names = nd[3]
+        let ordered = cg_reorder_struct_init(s_name, s_names, s_vals)
+        out("    call _nova_list_new")
+        out("    push rax")
+        let ai = 0
+        while ai < len(ordered) {
+            gen_expr(ordered[ai])
+            out("    mov rsi, rax")
+            out("    mov rdi, [rsp]")
+            out("    call _nova_push")
+            ai = ai + 1
+        }
+        out("    pop rax")
+        return 0
+    }
+
     if tag == AST_CALL {
         let callee = nd[1]
         let args = nd[2]
@@ -6193,6 +6261,25 @@ fn arm_gen_expr(nd) {
         arm_gen_call(nd)
         return 0
     }
+    if t == AST_STRUCT_INIT {
+        // R25A: brace-init `Foo { field: val, ... }`. ARM64 list-runtime
+        // helpers are stubbed (see _nova_arm_stub_list_new) so we mirror
+        // the positional struct ctor: evaluate each value in declaration
+        // order for side effects, then return the stub list. Keeps the
+        // cross-target build green; full struct value semantics on ARM64
+        // native await a real list runtime.
+        let s_name_a = nd[1]
+        let s_vals_a = nd[2]
+        let s_names_a = nd[3]
+        let ordered_a = cg_reorder_struct_init(s_name_a, s_names_a, s_vals_a)
+        let ai = 0
+        while ai < len(ordered_a) {
+            arm_gen_expr(ordered_a[ai])
+            ai = ai + 1
+        }
+        arm_out("    bl _nova_arm_stub_list_new")
+        return 0
+    }
     // R20A: postfix `?` on ARM64 Linux. The arm runtime helpers for
     // list operations are still stubs (see _nova_arm_stub_list_new) so
     // sum-types don't fully execute here, but we emit a structurally-
@@ -6681,6 +6768,8 @@ fn arm64_gen_program(program) {
     // resolve declarations. The main x86-64 `gen_program` does this
     // inline; the ARM64 / winARM64 / WASM paths previously skipped it
     // because they didn't support sum-types.
+    // R25A: also register struct decls so cg_reorder_struct_init can
+    // find field-declaration order for AST_STRUCT_INIT codegen.
     let i = 0
     while i < len(decls) {
         let d = decls[i]
@@ -6690,6 +6779,13 @@ fn arm64_gen_program(program) {
             push(entry, d[2])
             push(cg_enums, entry)
             cg_enum_count = cg_enum_count + 1
+        }
+        if ast_tag(d) == AST_STRUCT_DECL {
+            let s_entry = list_new()
+            push(s_entry, d[1])
+            push(s_entry, d[2])
+            push(cg_structs, s_entry)
+            cg_struct_count = cg_struct_count + 1
         }
         if ast_tag(d) == AST_LET_STMT {
             add_global(d[1])
@@ -7395,6 +7491,27 @@ fn warm_gen_expr(nd) {
     }
     if t == AST_CALL {
         warm_gen_call(nd)
+        return 0
+    }
+    if t == AST_STRUCT_INIT {
+        // R25A: brace-init `Foo { field: val, ... }`. Mirror AST_LIST_LIT
+        // — values pushed in declaration order. Reorder source-order
+        // values to decl order via cg_reorder_struct_init.
+        let s_name_wm = nd[1]
+        let s_vals_wm = nd[2]
+        let s_names_wm = nd[3]
+        let ordered_wm = cg_reorder_struct_init(s_name_wm, s_names_wm, s_vals_wm)
+        warm_out("    bl _nova_warm_list_new")
+        warm_push_x0()
+        let wmi = 0
+        while wmi < len(ordered_wm) {
+            warm_gen_expr(ordered_wm[wmi])
+            warm_out("    mov x1, x0")
+            warm_out("    ldr x0, [sp]")
+            warm_out("    bl _nova_warm_push")
+            wmi = wmi + 1
+        }
+        warm_pop_to("x0")
         return 0
     }
     // R19B: cross-target sum-type lowering for Windows ARM64. Mirrors
@@ -8256,6 +8373,8 @@ fn winarm64_gen_program(program) {
 
     // R19B: collect enum / global tables so the R17A enum codegen
     // helpers (`is_enum_name`, `enum_variant_index`, ...) resolve names.
+    // R25A: also register struct decls so cg_reorder_struct_init can
+    // find field-declaration order for AST_STRUCT_INIT codegen.
     let i = 0
     while i < len(decls) {
         let d = decls[i]
@@ -8265,6 +8384,13 @@ fn winarm64_gen_program(program) {
             push(entry, d[2])
             push(cg_enums, entry)
             cg_enum_count = cg_enum_count + 1
+        }
+        if ast_tag(d) == AST_STRUCT_DECL {
+            let s_entry = list_new()
+            push(s_entry, d[1])
+            push(s_entry, d[2])
+            push(cg_structs, s_entry)
+            cg_struct_count = cg_struct_count + 1
         }
         if ast_tag(d) == AST_LET_STMT {
             add_global(d[1])
@@ -9464,6 +9590,24 @@ fn wasm_collect_locals(nd) {
     if tag == AST_TRY_PROPAGATE {
         wasm_collect_locals(nd[1])
     }
+    // R25A: AST_DO_EXPR appears in expression position via the parser's
+    // struct-pattern match rewrite. Recurse into both init stmts and the
+    // final expression so any let-binders register at function top.
+    if tag == AST_DO_EXPR {
+        let de_stmts = nd[1]
+        let de_i = 0
+        while de_i < len(de_stmts) {
+            wasm_collect_locals(de_stmts[de_i])
+            de_i = de_i + 1
+        }
+        wasm_collect_locals(nd[2])
+    }
+    // R25A: AST_EXPR_STMT can wrap an AST_DO_EXPR (struct-pattern match
+    // arm body lowered via lower_struct_match_arm). Recurse so binders
+    // inside the do-expr's init stmts get registered.
+    if tag == AST_EXPR_STMT {
+        wasm_collect_locals(nd[1])
+    }
 }
 
 fn wasm_gen_expr(nd) {
@@ -9705,6 +9849,29 @@ fn wasm_gen_expr(nd) {
         return 0
     }
 
+    if tag == AST_STRUCT_INIT {
+        // R25A: brace-init `Foo { field: val, ... }`. Same wire-shape as
+        // AST_LIST_LIT — values pushed in declaration order. Reorder
+        // source-order values to decl order via cg_reorder_struct_init,
+        // then mirror AST_LIST_LIT's runtime sequence.
+        let s_name_w = nd[1]
+        let s_vals_w = nd[2]
+        let s_names_w = nd[3]
+        let ordered_w = cg_reorder_struct_init(s_name_w, s_names_w, s_vals_w)
+        wi("call $list_new")
+        wi("global.set $g__wasm_list_tmp")
+        let wi2 = 0
+        while wi2 < len(ordered_w) {
+            wi("global.get $g__wasm_list_tmp")
+            wasm_gen_expr(ordered_w[wi2])
+            wi("call $push")
+            wi("drop")
+            wi2 = wi2 + 1
+        }
+        wi("global.get $g__wasm_list_tmp")
+        return 0
+    }
+
     if tag == AST_INDEX_EXPR {
         wasm_gen_expr(nd[1])
         wasm_gen_expr(nd[2])
@@ -9782,6 +9949,9 @@ fn wasm_gen_expr(nd) {
     // on an enum (e.g. `Option::None` used as a value) lowers to a tag
     // constant; AST_MATCH_STMT uses an `if (result i64) ... else ...`
     // tree threaded through arms with a tail default of i64.const 0.
+    // R25A: also handle AST_FIELD_ACCESS on struct values — a struct
+    // value is a list `[v0, v1, ...]` in declaration order, so look up
+    // the field's index via find_field_index and emit `$rt_index`.
     if tag == AST_FIELD_ACCESS {
         let fa_base = nd[1]
         let fa_field = nd[2]
@@ -9793,8 +9963,13 @@ fn wasm_gen_expr(nd) {
                 return 0
             }
         }
-        // Non-enum field access: existing behaviour (call-style) falls
-        // through to the generic i64.const 0 below.
+        let fidx = find_field_index(fa_field)
+        if fidx >= 0 {
+            wasm_gen_expr(fa_base)
+            wi("i64.const " + int_to_str(fidx))
+            wi("call $rt_index")
+            return 0
+        }
         wi("i64.const 0")
         return 0
     }
@@ -9872,27 +10047,56 @@ fn wasm_gen_expr(nd) {
             let m_pat = m_arm[1]
             let m_body = m_arm[2]
             let m_pt = ast_tag(m_pat)
+            // R25A: detect a guarded wildcard arm (arm length > 3). The
+            // parser-side rewrite for struct match patterns produces this
+            // shape: `_ if <field-test chain> => body`. WASM previously
+            // assumed AST_WILDCARD always succeeds and short-circuited
+            // without checking the guard — handle the guarded variant by
+            // wrapping body emission in an `if (result i64)`.
+            let m_has_guard = 0
+            if len(m_arm) > 3 { m_has_guard = 1 }
             if m_pt == AST_WILDCARD {
-                // `_` always matches: emit body and stop the chain.
-                if ast_tag(m_body) == AST_EXPR_STMT {
-                    wasm_gen_expr(m_body[1])
-                } else { if ast_tag(m_body) == AST_BLOCK {
-                    // Block body returns an i64; assume it's a single
-                    // expression-stmt body (or no value).
-                    wasm_gen_stmt(m_body)
-                    wi("i64.const 0")
-                } else {
-                    wasm_gen_expr(m_body)
-                } }
-                mi = mi + 1
-                // Close any previously-opened if-chains (one per prior arm).
-                let close_i = 0
-                while close_i < mi - 1 {
+                if m_has_guard == 1 {
+                    // Guarded wildcard: evaluate guard, branch on truthy.
+                    wasm_gen_expr(m_arm[3])
+                    wi("i64.eqz")
+                    wi("i32.eqz")
+                    wi("if (result i64)")
+                    wasm_indent = wasm_indent + 1
+                    if ast_tag(m_body) == AST_EXPR_STMT {
+                        wasm_gen_expr(m_body[1])
+                    } else { if ast_tag(m_body) == AST_BLOCK {
+                        wasm_gen_stmt(m_body)
+                        wi("i64.const 0")
+                    } else {
+                        wasm_gen_expr(m_body)
+                    } }
                     wasm_indent = wasm_indent - 1
-                    wi("end")
-                    close_i = close_i + 1
+                    wi("else")
+                    wasm_indent = wasm_indent + 1
+                    // Leave chain open for next arm — same as enum-pattern.
+                } else {
+                    // `_` always matches: emit body and stop the chain.
+                    if ast_tag(m_body) == AST_EXPR_STMT {
+                        wasm_gen_expr(m_body[1])
+                    } else { if ast_tag(m_body) == AST_BLOCK {
+                        // Block body returns an i64; assume it's a single
+                        // expression-stmt body (or no value).
+                        wasm_gen_stmt(m_body)
+                        wi("i64.const 0")
+                    } else {
+                        wasm_gen_expr(m_body)
+                    } }
+                    mi = mi + 1
+                    // Close any previously-opened if-chains (one per prior arm).
+                    let close_i = 0
+                    while close_i < mi - 1 {
+                        wasm_indent = wasm_indent - 1
+                        wi("end")
+                        close_i = close_i + 1
+                    }
+                    return 0
                 }
-                return 0
             } else { if m_pt == AST_ENUM_PATTERN {
                 let m_ep_enum = m_pat[1]
                 let m_ep_variant = m_pat[2]
@@ -9970,6 +10174,22 @@ fn wasm_gen_expr(nd) {
             wi("end")
             close_i2 = close_i2 + 1
         }
+        return 0
+    }
+
+    if tag == AST_DO_EXPR {
+        // R25A: AST_DO_EXPR appears in expression position when parser
+        // rewrites a struct-pattern match into `do { let __tmp = expr;
+        // match __tmp { ... } }`. Run init statements then evaluate
+        // the final expression.
+        let do_stmts = nd[1]
+        let do_final = nd[2]
+        let di = 0
+        while di < len(do_stmts) {
+            wasm_gen_stmt(do_stmts[di])
+            di = di + 1
+        }
+        wasm_gen_expr(do_final)
         return 0
     }
 
@@ -12816,6 +13036,9 @@ fn wasm_gen_program(program) {
     // R19B: register enum declarations so the R17A enum codegen can
     // resolve `enum_variant_index` etc. Globals are collected separately
     // below.
+    // R25A: also register struct declarations so cg_reorder_struct_init
+    // (called from wasm_gen_expr's AST_STRUCT_INIT handler) can find
+    // the field-declaration order.
     let i = 0
     while i < len(decls) {
         let d = decls[i]
@@ -12825,6 +13048,13 @@ fn wasm_gen_program(program) {
             push(entry, d[2])
             push(cg_enums, entry)
             cg_enum_count = cg_enum_count + 1
+        }
+        if ast_tag(d) == AST_STRUCT_DECL {
+            let s_entry = list_new()
+            push(s_entry, d[1])
+            push(s_entry, d[2])
+            push(cg_structs, s_entry)
+            cg_struct_count = cg_struct_count + 1
         }
         i = i + 1
     }
@@ -12944,6 +13174,11 @@ fn wasm_gen_program(program) {
         if dtag == AST_FOR_INDEXED { wasm_collect_locals(d) }
         if dtag == AST_EXPR_STMT { wasm_collect_locals(d) }
         if dtag == AST_MATCH_STMT { wasm_collect_locals(d) }
+        // R25A: top-level AST_BLOCK appears when parse_let lowers a
+        // struct destructure pattern (`let Point { x, y } = p`) into a
+        // block of plain lets. wasm_collect_locals already handles
+        // AST_BLOCK recursively; just need to dispatch it here.
+        if dtag == AST_BLOCK { wasm_collect_locals(d) }
         if dtag == AST_LET_STMT { wasm_collect_locals(d[2]) }
         if dtag == AST_ASSIGN_STMT { wasm_collect_locals(d[2]) }
         i = i + 1

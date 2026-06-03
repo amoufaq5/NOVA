@@ -79,6 +79,16 @@ let AST_ENUM_PATTERN = 66
 // `expr` unchanged (which IS the Err Result). The single child is the
 // inner expression being unwrapped.
 let AST_TRY_PROPAGATE = 67
+// R25A: struct field-pattern used in match arms only
+// (`Point { x: 0, y: a } => ...`). Wire shape:
+//   [tag, struct_name, field_names, sub_patterns, has_rest]
+// where each sub_patterns[i] is either AST_IDENT (binder), AST_WILDCARD
+// (skip), or a literal expression node tested for equality at the arm's
+// dispatch site. parse_match rewrites the surrounding `match` into a
+// block `{ let _struct_match_N = expr; match _struct_match_N { ... } }`
+// where each AST_STRUCT_PATTERN arm becomes a guarded wildcard arm —
+// codegen never sees AST_STRUCT_PATTERN directly.
+let AST_STRUCT_PATTERN = 68
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -624,6 +634,24 @@ fn ast_try_propagate(inner) {
     let n = list_new()
     push(n, AST_TRY_PROPAGATE)
     push(n, inner)
+    return n
+}
+
+// R25A: brace-init struct construction `Foo { field: val, ... }`. Wire
+// representation matches the existing positional ctor (`Foo(val)`): a
+// struct value is `[v0, v1, ...]` in declaration order. The parser-emitted
+// node carries values in source order plus the parallel list of field
+// names; codegen reorders to declaration order using cg_structs.
+//   nd[0] = AST_STRUCT_INIT (tag 27)
+//   nd[1] = struct_name (string)
+//   nd[2] = source-order value expressions (list)
+//   nd[3] = source-order field names (list, parallel to nd[2])
+fn ast_struct_init(name, values, names) {
+    let n = list_new()
+    push(n, AST_STRUCT_INIT)
+    push(n, name)
+    push(n, values)
+    push(n, names)
     return n
 }
 

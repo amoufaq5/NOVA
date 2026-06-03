@@ -10,6 +10,12 @@ let par_lambdas = 0
 let par_consts = 0
 let par_no_is = 0
 let par_source = ""
+// R25A: monotonic counter for parser-generated temp names used by struct
+// brace destructure (let) and match-arm struct patterns. Names of the
+// form `_struct_tmp_<N>` and `_struct_match_<N>` are guaranteed unique
+// across the program and unlikely to collide with user idents (leading
+// underscore + the `_struct_` token).
+let par_struct_tmp_count = 0
 
 fn par_init(tokens) {
     par_tokens = tokens
@@ -18,6 +24,7 @@ fn par_init(tokens) {
     par_lambda_count = 0
     par_lambdas = list_new()
     par_consts = list_new()
+    par_struct_tmp_count = 0
 }
 
 fn par_set_source(src) {
@@ -264,6 +271,106 @@ fn par_q_is_try_propagate(next_type) {
     return 1
 }
 
+// R25A: returns 1 iff the identifier name starts with an uppercase
+// letter (ASCII A-Z, 65..90). Used to disambiguate `Name { field: val }`
+// (struct brace-init) from `name { stmt }` (block expression / map
+// literal) at the IDENT branch of parse_primary. Struct names are
+// conventionally capitalised throughout the NOVA self-host source, so
+// the uppercase-first heuristic is safe in practice and avoids needing
+// a fully-built struct registry at parse time (which forward-references
+// would break anyway).
+fn par_ident_starts_uppercase(name) {
+    if name == "" { return 0 }
+    let c = char_at(name, 0)
+    if c >= 65 {
+        if c <= 90 { return 1 }
+    }
+    return 0
+}
+
+// R25A: peek forward across an optional `<...>` generic-type-args block
+// starting at par_pos. Returns the number of tokens consumed (0 if the
+// next token is not `<`, otherwise the count of tokens covered by the
+// balanced `<...>` block). Does NOT advance par_pos — caller uses the
+// returned count via par_pos += skip_n to commit, or discards to back
+// out. Treats `>>` (TOK_SHR) as TWO closing `>` per par_skip_type.
+fn par_peek_generic_args_len() {
+    if par_peek_type() != TOK_LT { return 0 }
+    let depth = 1
+    let p = par_pos + 1
+    while p < par_count {
+        let tk = par_tokens[p]
+        if tk == 0 { return 0 }
+        let tt = tk[0]
+        if tt == TOK_LT { depth = depth + 1 }
+        if tt == TOK_GT {
+            depth = depth - 1
+            if depth <= 0 { return p - par_pos + 1 }
+        }
+        if tt == TOK_SHR {
+            depth = depth - 2
+            if depth <= 0 { return p - par_pos + 1 }
+        }
+        if tt == TOK_EOF { return 0 }
+        // Tokens that obviously aren't part of a type-args block break
+        // the scan early (statement terminator / brace). This keeps the
+        // heuristic conservative: if anything weird shows up we bail.
+        if tt == TOK_SEMI { return 0 }
+        if tt == TOK_LBRACE { return 0 }
+        if tt == TOK_RBRACE { return 0 }
+        p = p + 1
+    }
+    return 0
+}
+
+// R25A: returns 1 iff what follows par_pos looks like a struct brace-
+// init body — `{` followed by `IDENT :` (the unambiguous field-name
+// signature) or `..` / `...` (rest pattern, match-arm path only).
+//
+// Notably we deliberately REJECT the empty body `{ }` here: an empty
+// brace can equally be an if-body / match-arm body / parse_block /
+// block statement (e.g. `if cond == TOK_RBRACE { }`). User code that
+// wants an empty struct value can still use the positional ctor `Foo()`
+// (R23A); the brace-init form requires at least one explicit field.
+//
+// `lbrace_offset` is the offset from par_pos to the opening `{` —
+// 0 if the `{` is the very next token, positive when generic args
+// intervene (Box<int> { value: 42 }).
+fn par_lbrace_is_struct_body(lbrace_offset) {
+    if par_peek_at_type(lbrace_offset) != TOK_LBRACE { return 0 }
+    let after = lbrace_offset + 1
+    let tt = par_peek_at_type(after)
+    if tt == TOK_DOTDOT { return 1 }
+    if tt == TOK_ELLIPSIS { return 1 }
+    if tt == TOK_IDENT {
+        // Need to peek across the IDENT to see if the next token is `:`.
+        if par_peek_at_type(after + 1) == TOK_COLON { return 1 }
+    }
+    return 0
+}
+
+// R25A: same as par_lbrace_is_struct_body but ALSO accepts the
+// shorthand binder syntax `IDENT ,` / `IDENT }` and the empty body
+// `{ }`. Used only in statement-position destructure paths (parse_let,
+// parse_match) where the `let Name {` / `Name { ... } =>` prefix has
+// already disambiguated against block expressions.
+fn par_lbrace_is_struct_pattern_body(lbrace_offset) {
+    if par_peek_at_type(lbrace_offset) != TOK_LBRACE { return 0 }
+    let after = lbrace_offset + 1
+    let tt = par_peek_at_type(after)
+    if tt == TOK_RBRACE { return 1 }
+    if tt == TOK_DOTDOT { return 1 }
+    if tt == TOK_ELLIPSIS { return 1 }
+    if tt == TOK_IDENT {
+        let after_id = par_peek_at_type(after + 1)
+        if after_id == TOK_COLON { return 1 }
+        if after_id == TOK_COMMA { return 1 }
+        if after_id == TOK_RBRACE { return 1 }
+        if after_id == TOK_SEMI { return 1 }
+    }
+    return 0
+}
+
 // --- String Interpolation ---
 
 fn parse_interpolated_string(s) {
@@ -422,6 +529,30 @@ fn parse_primary() {
                 }
             }
             return ast_enum_ctor(tok[1], vtok[1], ctor_args)
+        }
+        // R25A: struct brace-init `Name { field: val, ... }`. Gated by
+        // (1) name starts with an uppercase letter (struct/enum naming
+        // convention) and (2) the next token sequence looks like a
+        // struct body — either `{` directly or `<TypeArgs> {`. The
+        // inner body must start with `}`, `..`, or `IDENT :` to avoid
+        // grabbing a stray block / map literal. Lowered to AST_STRUCT_INIT
+        // carrying source-order values + field names; codegen reorders
+        // to declaration order.
+        if par_ident_starts_uppercase(tok[1]) == 1 {
+            let lb_off = 0
+            if par_peek_type() == TOK_LT {
+                let gen_n = par_peek_generic_args_len()
+                if gen_n > 0 { lb_off = gen_n }
+            }
+            if par_lbrace_is_struct_body(lb_off) == 1 {
+                // Commit: consume the `<TypeArgs>` block if any.
+                let skipped = 0
+                while skipped < lb_off {
+                    par_advance()
+                    skipped = skipped + 1
+                }
+                return parse_struct_brace_init(tok[1])
+            }
         }
         return ast_ident(tok[1])
     }
@@ -1246,6 +1377,35 @@ fn parse_let() {
         }
         return ast_destructure_rest(dnames, drest, dvalue)
     }
+    // R25A: struct destructure pattern in let-bindings:
+    //   let Point { x: px, y: py } = p
+    //   let Point { x, y } = p                  (shorthand)
+    //   let Point { x: px, .. } = p             (partial)
+    // Detected by an uppercase-leading IDENT followed by `{` (optionally
+    // with `<TypeArgs>` between). Lowered at parse time to a block that
+    // (1) caches the RHS in a fresh temp, then (2) binds each named field
+    // via `.field` access — codegen already handles AST_FIELD_ACCESS via
+    // struct_field_index, so no codegen changes needed.
+    if par_peek_type() == TOK_IDENT {
+        let peek_tok = par_peek()
+        if peek_tok != 0 {
+            let peek_name = peek_tok[1]
+            if par_ident_starts_uppercase(peek_name) == 1 {
+                let lb_off2 = 1
+                if par_peek_at_type(1) == TOK_LT {
+                    // Skip past `<TypeArgs>` to find `{`.
+                    let saved_pos = par_pos
+                    par_advance() // consume IDENT temporarily
+                    let gen2 = par_peek_generic_args_len()
+                    par_pos = saved_pos
+                    if gen2 > 0 { lb_off2 = 1 + gen2 }
+                }
+                if par_lbrace_is_struct_pattern_body(lb_off2) == 1 {
+                    return parse_struct_let_destructure(peek_name, lb_off2)
+                }
+            }
+        }
+    }
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
     // R23A: capture the type annotation (was: par_skip_type which
@@ -1695,17 +1855,194 @@ fn parse_struct_decl() {
     return nd
 }
 
+// R25A: brace-init body `{ field: val, ... }`. Caller (parse_primary)
+// has already consumed the struct name, any `<TypeArgs>` block, and is
+// positioned on the opening `{`. Returns an AST_STRUCT_INIT node with
+// source-order field names + values; codegen reorders to declaration
+// order using cg_structs.
+fn parse_struct_brace_init(name) {
+    par_expect(TOK_LBRACE)
+    let field_names = list_new()
+    let field_values = list_new()
+    let init_done = 0
+    while init_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            init_done = 1
+        } else {
+            if par_peek_type() == TOK_COMMA {
+                par_advance()
+            } else { if par_peek_type() == TOK_SEMI {
+                par_advance()
+            } else {
+                let fname_tok = par_expect(TOK_IDENT)
+                par_expect(TOK_COLON)
+                let fval = parse_expr()
+                push(field_names, fname_tok[1])
+                push(field_values, fval)
+            } }
+        }
+    }
+    par_expect(TOK_RBRACE)
+    return ast_struct_init(name, field_values, field_names)
+}
+
+// R25A: parser-time lowering of struct destructure in let-bindings.
+// Caller (parse_let) has identified an uppercase IDENT followed by
+// `{ IDENT : ... }` or `{ IDENT , ... }` or `{ }`. `lb_off` is the
+// offset from par_pos to the opening `{` (1 if no generic args, larger
+// when `<TypeArgs>` intervenes).
+//
+// Supported pattern shapes (each entry is one comma-separated item):
+//   * `field`               (shorthand: binds local `field` to value.field)
+//   * `field: binder`       (binds local `binder` to value.field)
+//   * `field: literal`      (NOT supported in let context — patterns with
+//                            literal field tests only make sense in match
+//                            arms; emitting a deferred runtime check here
+//                            would complicate the lowering. Such forms
+//                            error out.)
+//   * `..`  or  `...`       (rest: skip remaining fields silently)
+//
+// Lowering: emit a block containing
+//     let _struct_tmp_N = <rhs>
+//     let f1 = _struct_tmp_N.field1
+//     let f2 = _struct_tmp_N.field2
+//     ...
+// AST_FIELD_ACCESS resolves at codegen time via struct_field_index.
+fn parse_struct_let_destructure(struct_name, lb_off) {
+    // Consume the struct name token.
+    par_advance()
+    // Consume `<TypeArgs>` if present — `lb_off - 1` tokens between
+    // the IDENT and the `{`.
+    let skip_n = lb_off - 1
+    let si = 0
+    while si < skip_n {
+        par_advance()
+        si = si + 1
+    }
+    par_expect(TOK_LBRACE)
+    let names_src = list_new()
+    let binders = list_new()
+    let dest_done = 0
+    while dest_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            dest_done = 1
+        } else {
+            if par_peek_type() == TOK_COMMA {
+                par_advance()
+            } else { if par_peek_type() == TOK_SEMI {
+                par_advance()
+            } else { if par_peek_type() == TOK_DOTDOT {
+                // Rest pattern — skip remaining fields. Consume the
+                // `..` and let the closing `}` end the loop.
+                par_advance()
+            } else { if par_peek_type() == TOK_ELLIPSIS {
+                par_advance()
+            } else {
+                let fn_tok = par_expect(TOK_IDENT)
+                let fname = fn_tok[1]
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    // Binder may be `_` (skip) or an IDENT (bind).
+                    if par_peek_type() == TOK_UNDERSCORE {
+                        par_advance()
+                        push(names_src, fname)
+                        push(binders, "_")
+                    } else {
+                        let b_tok = par_expect(TOK_IDENT)
+                        push(names_src, fname)
+                        push(binders, b_tok[1])
+                    }
+                } else {
+                    // Shorthand: `field` binds to `field`.
+                    push(names_src, fname)
+                    push(binders, fname)
+                }
+            } } } }
+        }
+    }
+    par_expect(TOK_RBRACE)
+    par_expect(TOK_EQ)
+    let rhs = parse_expr()
+
+    // Build the lowered block: cache rhs in a fresh temp, then bind
+    // each field via AST_FIELD_ACCESS.
+    let tmp_name = "_struct_tmp_" + int_to_str(par_struct_tmp_count)
+    par_struct_tmp_count = par_struct_tmp_count + 1
+    let stmts = list_new()
+    let tmp_let = ast_let(tmp_name, rhs)
+    // Push placeholder type annotation slot so AST_LET_STMT length is
+    // consistent with the normal parse_let output (codegen reads it).
+    push(tmp_let, 0)
+    push(stmts, tmp_let)
+    let bi = 0
+    while bi < len(names_src) {
+        let bind_name = binders[bi]
+        if bind_name == "_" {
+        } else {
+            let fa = ast_field_access(ast_ident(tmp_name), names_src[bi])
+            let bl = ast_let(bind_name, fa)
+            push(bl, 0)
+            push(stmts, bl)
+        }
+        bi = bi + 1
+    }
+    let _unused_sn = struct_name
+    return ast_block(stmts)
+}
+
 fn parse_match() {
     par_expect(TOK_MATCH)
     let expr = parse_expr()
     par_expect(TOK_LBRACE)
     let arms = list_new()
+    // R25A: if any arm has a struct pattern, we wrap the entire match in
+    // a block that caches the matchee in a fresh local so the struct
+    // pattern's field tests / binders can reference it by name. Allocate
+    // the tempname up-front (used only if at least one struct pattern is
+    // seen). par_struct_tmp_count is bumped lazily so non-struct matches
+    // don't waste an id.
+    let match_tmp_name = ""
+    let saw_struct_pat = 0
     while par_peek_type() != TOK_RBRACE {
         if par_peek_type() == TOK_EOF {
             par_error("unexpected end of file in match expression (missing closing '}')")
         }
         // Parse pattern
         let pattern = 0
+        // R25A: struct field-pattern detection lives BEFORE the
+        // ::Variant fallthrough — both start with TOK_IDENT, but the
+        // struct form has `Name {` (or `Name<T> {`) ahead. Falls
+        // through to the existing enum-pattern path if not a struct
+        // pattern.
+        let consumed_pat = 0
+        if par_peek_type() == TOK_IDENT {
+            let pk_tok = par_peek()
+            if pk_tok != 0 {
+                let pk_name = pk_tok[1]
+                if par_ident_starts_uppercase(pk_name) == 1 {
+                    let lb_offm = 1
+                    if par_peek_at_type(1) == TOK_LT {
+                        let saved_p = par_pos
+                        par_advance()
+                        let gnm = par_peek_generic_args_len()
+                        par_pos = saved_p
+                        if gnm > 0 { lb_offm = 1 + gnm }
+                    }
+                    if par_lbrace_is_struct_pattern_body(lb_offm) == 1 {
+                        // It's a struct pattern. Lazy-init the captured
+                        // matchee name on first sight.
+                        if saw_struct_pat == 0 {
+                            match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                            par_struct_tmp_count = par_struct_tmp_count + 1
+                            saw_struct_pat = 1
+                        }
+                        pattern = parse_struct_match_pattern(pk_name, lb_offm)
+                        consumed_pat = 1
+                    }
+                }
+            }
+        }
+        if consumed_pat == 0 {
         if par_peek_type() == TOK_UNDERSCORE {
             par_advance()
             pattern = ast_wildcard()
@@ -1776,6 +2113,7 @@ fn parse_match() {
                 pattern = parse_expr()
             }
         } }
+        }
         let mg = 0
         if par_peek_type() == TOK_IF {
             par_advance()
@@ -1800,7 +2138,214 @@ fn parse_match() {
         push(arms, arm)
     }
     par_expect(TOK_RBRACE)
+    // R25A: if any arm carried a struct pattern, rewrite the entire
+    // match into a `{ let _struct_match_N = expr; match _struct_match_N
+    // { rewritten arms } }` block. Each struct-pattern arm becomes a
+    // wildcard arm with an optional guard (for literal field tests) and
+    // a body prepended with `let binder = _struct_match_N.field` for
+    // every binder. Result: only AST node shapes the existing codegen
+    // already handles (no new codegen cases).
+    if saw_struct_pat == 1 {
+        let new_arms = list_new()
+        let ai = 0
+        while ai < len(arms) {
+            let arm0 = arms[ai]
+            let pat0 = arm0[1]
+            let body0 = arm0[2]
+            let old_guard = 0
+            if len(arm0) > 3 { old_guard = arm0[3] }
+            if ast_tag(pat0) == AST_STRUCT_PATTERN {
+                let lower_pair = lower_struct_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, lower_pair)
+            } else {
+                push(new_arms, arm0)
+            }
+            ai = ai + 1
+        }
+        let inner_match = ast_match(ast_ident(match_tmp_name), new_arms)
+        // Wrap as AST_DO_EXPR so the rewritten match remains usable in
+        // expression position (e.g. `let x = match ... { Point { ... } }`).
+        // AST_DO_EXPR semantics: run init_stmts, then evaluate final_expr
+        // and return its value. The cache_let goes in init_stmts; the
+        // inner match is the final expression.
+        let init_stmts = list_new()
+        let cache_let = ast_let(match_tmp_name, expr)
+        push(cache_let, 0)
+        push(init_stmts, cache_let)
+        return ast_do_expr(init_stmts, inner_match)
+    }
     return ast_match(expr, arms)
+}
+
+// R25A: struct match-arm pattern body parser. Caller (parse_match) has
+// identified an uppercase IDENT followed by `{ ... }` (optionally with
+// `<TypeArgs>` between). Builds and returns an AST_STRUCT_PATTERN node:
+//   [AST_STRUCT_PATTERN, struct_name, field_names, sub_patterns]
+// where sub_patterns[i] is one of:
+//   * AST_IDENT (binder; ident name binds to that field's value)
+//   * AST_WILDCARD (skip)
+//   * a literal AST node (AST_INT_LIT, AST_STR_LIT, AST_BOOL_LIT,
+//     AST_NONE_LIT, unary-minus on int) — codegen emits an equality test
+// The match wrapper later (parse_match) translates this node into a
+// guarded wildcard arm referencing the captured matchee tempname.
+fn parse_struct_match_pattern(struct_name, lb_off) {
+    par_advance()
+    let skip_n = lb_off - 1
+    let si = 0
+    while si < skip_n {
+        par_advance()
+        si = si + 1
+    }
+    par_expect(TOK_LBRACE)
+    let field_names = list_new()
+    let sub_patterns = list_new()
+    let has_rest = 0
+    let mpat_done = 0
+    while mpat_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            mpat_done = 1
+        } else {
+            if par_peek_type() == TOK_COMMA {
+                par_advance()
+            } else { if par_peek_type() == TOK_SEMI {
+                par_advance()
+            } else { if par_peek_type() == TOK_DOTDOT {
+                par_advance()
+                has_rest = 1
+            } else { if par_peek_type() == TOK_ELLIPSIS {
+                par_advance()
+                has_rest = 1
+            } else {
+                let fnk_tok = par_expect(TOK_IDENT)
+                let fnk = fnk_tok[1]
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    // Sub-pattern may be: `_`, an IDENT (binder), or a
+                    // literal expr (int / str / bool / none / unary-minus
+                    // on int). Use parse_expr but disallow the broader
+                    // `is X` form by setting par_no_is.
+                    if par_peek_type() == TOK_UNDERSCORE {
+                        par_advance()
+                        push(field_names, fnk)
+                        push(sub_patterns, ast_wildcard())
+                    } else {
+                        let old_no_is = par_no_is
+                        par_no_is = 1
+                        let sub = parse_expr()
+                        par_no_is = old_no_is
+                        push(field_names, fnk)
+                        push(sub_patterns, sub)
+                    }
+                } else {
+                    // Shorthand: `field` binds local `field`.
+                    push(field_names, fnk)
+                    push(sub_patterns, ast_ident(fnk))
+                }
+            } } } }
+        }
+    }
+    par_expect(TOK_RBRACE)
+    let nd = list_new()
+    push(nd, AST_STRUCT_PATTERN)
+    push(nd, struct_name)
+    push(nd, field_names)
+    push(nd, sub_patterns)
+    push(nd, has_rest)
+    return nd
+}
+
+// R25A: lower a `Name { f: pat, ... } => body` arm into a wildcard arm
+// referencing `tmp_name`. Each literal sub-pattern contributes to a
+// guard `tmp_name.field == lit && ...` (AND-merged with any user guard).
+// Each binder sub-pattern contributes a `let binder = tmp_name.field`
+// statement prepended to the body. Returns an AST_MATCH_ARM list shaped
+// like the regular parse_match output: `[arm_tag, wildcard, body, guard?]`.
+fn lower_struct_match_arm(tmp_name, struct_pat, body, user_guard) {
+    let field_names = struct_pat[2]
+    let sub_patterns = struct_pat[3]
+    let prep_stmts = list_new()
+    let guard_expr = user_guard
+    let ki = 0
+    while ki < len(field_names) {
+        let fnm = field_names[ki]
+        let sub = sub_patterns[ki]
+        let st = ast_tag(sub)
+        let field_acc = ast_field_access(ast_ident(tmp_name), fnm)
+        if st == AST_IDENT {
+            // Binder: bind local name to field value.
+            let bnm = sub[1]
+            if bnm == "_" {
+            } else {
+                let blet = ast_let(bnm, field_acc)
+                push(blet, 0)
+                push(prep_stmts, blet)
+            }
+        } else { if st == AST_WILDCARD {
+            // Skip — wildcard sub-pattern.
+        } else {
+            // Treat as literal equality test: tmp.field == sub.
+            let eq_node = ast_binop("==", field_acc, sub)
+            if guard_expr == 0 {
+                guard_expr = eq_node
+            } else {
+                guard_expr = ast_and(guard_expr, eq_node)
+            }
+        } }
+        ki = ki + 1
+    }
+    // Body lowering strategy depends on the original arm body shape:
+    //   * `=> expr`  body is AST_EXPR_STMT(expr) — lower to
+    //                  AST_EXPR_STMT(AST_DO_EXPR(prep_stmts, expr))
+    //                so the match arm still produces `expr`'s value.
+    //   * `=> { ... }` body is AST_BLOCK — preserve as AST_BLOCK with
+    //                  prep_stmts prepended; statement-position match
+    //                  arms don't need to produce a value.
+    let new_arm_body = 0
+    if body == 0 {
+        new_arm_body = ast_block(prep_stmts)
+    } else {
+        let bt = ast_tag(body)
+        if bt == AST_EXPR_STMT {
+            // Build AST_DO_EXPR(prep_stmts, expr) wrapped in AST_EXPR_STMT
+            // so the arm body remains a statement-shaped node but
+            // evaluates to the expr's value when codegen treats the arm
+            // body as an expression (typical for `=> expr` arms used in
+            // expression-position matches).
+            let do_e = ast_do_expr(prep_stmts, body[1])
+            new_arm_body = ast_expr_stmt(do_e)
+        } else { if bt == AST_BLOCK {
+            // Statement-block body: prepend prep_stmts to its stmts.
+            let new_body_stmts = list_new()
+            let pi = 0
+            while pi < len(prep_stmts) {
+                push(new_body_stmts, prep_stmts[pi])
+                pi = pi + 1
+            }
+            let bs = body[1]
+            let bj = 0
+            while bj < len(bs) {
+                push(new_body_stmts, bs[bj])
+                bj = bj + 1
+            }
+            new_arm_body = ast_block(new_body_stmts)
+        } else {
+            // Other body kinds — just prepend as a block.
+            let new_body_stmts2 = list_new()
+            let pi2 = 0
+            while pi2 < len(prep_stmts) {
+                push(new_body_stmts2, prep_stmts[pi2])
+                pi2 = pi2 + 1
+            }
+            push(new_body_stmts2, body)
+            new_arm_body = ast_block(new_body_stmts2)
+        } }
+    }
+    let arm = ast_match_arm(ast_wildcard(), new_arm_body)
+    if guard_expr == 0 {
+    } else {
+        push(arm, guard_expr)
+    }
+    return arm
 }
 
 fn parse_try() {
