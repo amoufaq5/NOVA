@@ -222,7 +222,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - Maps (hash maps) with literal syntax and iteration
 - Sets
 - Structs with dot-notation field access and method-style calls
-- Enums with variant access (`Op.Add`) — and R17A sum types with payloads (`enum Option { Some(int) None }`, `Option::Some(42)`) plus destructuring match arms (`Option::Some(n) => n`) and compile-time exhaustiveness WARN
+- Enums with variant access (`Op.Add`) — and R17A sum types with payloads (`enum Option { Some(int) None }`, `Option::Some(42)`) plus destructuring match arms (`Option::Some(n) => n`) and compile-time exhaustiveness WARN — R19B extends sum-type lowering to all 6 targets (Linux x86-64, macOS x86-64, Windows x86-64, ARM64-Linux, Windows ARM64, WASM)
 - Destructuring assignment and rest patterns
 - Fixed-point floats (`3.14` stored as `3140`, scale 1000)
 - Hex (`0xFF`), octal (`0o777`), binary (`0b1010`), numeric separators (`1_000_000`)

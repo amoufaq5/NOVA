@@ -6600,7 +6600,28 @@ fn arm64_gen_program(program) {
 
     let decls = program[1]
 
+    // R19B: collect enum / struct / global tables so the R17A enum
+    // codegen helpers (`is_enum_name`, `enum_variant_index`, etc.) can
+    // resolve declarations. The main x86-64 `gen_program` does this
+    // inline; the ARM64 / winARM64 / WASM paths previously skipped it
+    // because they didn't support sum-types.
     let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_ENUM_DECL {
+            let entry = list_new()
+            push(entry, d[1])
+            push(entry, d[2])
+            push(cg_enums, entry)
+            cg_enum_count = cg_enum_count + 1
+        }
+        if ast_tag(d) == AST_LET_STMT {
+            add_global(d[1])
+        }
+        i = i + 1
+    }
+
+    i = 0
     while i < len(decls) {
         let d = decls[i]
         if ast_tag(d) == AST_FN_DECL {
@@ -7299,6 +7320,153 @@ fn warm_gen_expr(nd) {
         warm_gen_call(nd)
         return 0
     }
+    // R19B: cross-target sum-type lowering for Windows ARM64. Mirrors
+    // the ARM64 Linux path exactly — the enum wire representation
+    // (heap list `[tag, ...fields]`) and the AArch64 instruction set
+    // are unchanged; only the runtime helper prefix differs
+    // (`_nova_warm_*` vs `_nova_arm_*`).
+    if t == AST_LIST_LIT {
+        let llelems = nd[1]
+        warm_out("    bl _nova_warm_list_new")
+        warm_push_x0()
+        let llei = 0
+        while llei < len(llelems) {
+            warm_gen_expr(llelems[llei])
+            warm_out("    mov x1, x0")
+            warm_out("    ldr x0, [sp]")
+            warm_out("    bl _nova_warm_push")
+            llei = llei + 1
+        }
+        warm_pop_to("x0")
+        return 0
+    }
+    if t == AST_INDEX_EXPR {
+        warm_gen_expr(nd[1])
+        warm_push_x0()
+        warm_gen_expr(nd[2])
+        warm_out("    mov x1, x0")
+        warm_pop_to("x0")
+        warm_out("    bl _nova_warm_index")
+        return 0
+    }
+    if t == AST_FIELD_ACCESS {
+        let fa_base = nd[1]
+        let fa_field = nd[2]
+        if ast_tag(fa_base) == AST_IDENT {
+            let fa_base_name = fa_base[1]
+            if is_enum_name(fa_base_name) == 1 {
+                let fa_vidx = enum_variant_index(fa_base_name, fa_field)
+                warm_emit_load_imm("x0", fa_vidx)
+                return 0
+            }
+        }
+        warm_out("    // winarm64: AST_FIELD_ACCESS on non-enum not supported")
+        warm_out("    mov x0, #0")
+        return 0
+    }
+    if t == AST_ENUM_CTOR {
+        let ec_enum = nd[1]
+        let ec_variant = nd[2]
+        let ec_args = nd[3]
+        let ec_tag = enum_variant_index(ec_enum, ec_variant)
+        warm_out("    bl _nova_warm_list_new")
+        warm_push_x0()
+        warm_emit_load_imm("x1", ec_tag)
+        warm_out("    ldr x0, [sp]")
+        warm_out("    bl _nova_warm_push")
+        let eci = 0
+        while eci < len(ec_args) {
+            warm_gen_expr(ec_args[eci])
+            warm_out("    mov x1, x0")
+            warm_out("    ldr x0, [sp]")
+            warm_out("    bl _nova_warm_push")
+            eci = eci + 1
+        }
+        warm_pop_to("x0")
+        return 0
+    }
+    if t == AST_MATCH_STMT {
+        let m_disc = nd[1]
+        let m_arms = nd[2]
+        let m_end = warm_new_label()
+        warm_gen_expr(m_disc)
+        warm_push_x0()
+        let mi = 0
+        while mi < len(m_arms) {
+            let m_arm = m_arms[mi]
+            let m_pat = m_arm[1]
+            let m_body = m_arm[2]
+            let m_pt = ast_tag(m_pat)
+            if m_pt == AST_WILDCARD {
+                warm_out("    add sp, sp, #16")
+                if ast_tag(m_body) == AST_EXPR_STMT {
+                    warm_gen_expr(m_body[1])
+                } else { if ast_tag(m_body) == AST_BLOCK {
+                    warm_gen_stmt(m_body)
+                } else {
+                    warm_gen_expr(m_body)
+                } }
+                warm_out("    b " + m_end)
+            } else { if m_pt == AST_ENUM_PATTERN {
+                let m_next = warm_new_label()
+                let m_ep_enum = m_pat[1]
+                let m_ep_variant = m_pat[2]
+                let m_ep_binders = m_pat[3]
+                let m_ep_tag = enum_variant_index(m_ep_enum, m_ep_variant)
+                warm_out("    ldr x0, [sp]")
+                warm_out("    mov x1, #0")
+                warm_out("    bl _nova_warm_index")
+                warm_emit_load_imm("x1", m_ep_tag)
+                warm_out("    cmp x0, x1")
+                warm_out("    b.ne " + m_next)
+                let m_ebi = 0
+                while m_ebi < len(m_ep_binders) {
+                    let m_bname = m_ep_binders[m_ebi]
+                    if m_bname == "_" {
+                    } else {
+                        warm_out("    ldr x0, [sp]")
+                        warm_emit_load_imm("x1", m_ebi + 1)
+                        warm_out("    bl _nova_warm_index")
+                        let m_boff = warm_local_off(m_bname)
+                        warm_out("    str x0, [x29, #-" + int_to_str(m_boff) + "]")
+                    }
+                    m_ebi = m_ebi + 1
+                }
+                warm_out("    add sp, sp, #16")
+                if ast_tag(m_body) == AST_EXPR_STMT {
+                    warm_gen_expr(m_body[1])
+                } else { if ast_tag(m_body) == AST_BLOCK {
+                    warm_gen_stmt(m_body)
+                } else {
+                    warm_gen_expr(m_body)
+                } }
+                warm_out("    b " + m_end)
+                warm_label(m_next)
+            } else {
+                let m_next2 = warm_new_label()
+                warm_gen_expr(m_pat)
+                warm_out("    mov x1, x0")
+                warm_out("    ldr x0, [sp]")
+                warm_out("    cmp x0, x1")
+                warm_out("    b.ne " + m_next2)
+                warm_out("    add sp, sp, #16")
+                if ast_tag(m_body) == AST_EXPR_STMT {
+                    warm_gen_expr(m_body[1])
+                } else { if ast_tag(m_body) == AST_BLOCK {
+                    warm_gen_stmt(m_body)
+                } else {
+                    warm_gen_expr(m_body)
+                } }
+                warm_out("    b " + m_end)
+                warm_label(m_next2)
+            } }
+            mi = mi + 1
+        }
+        warm_out("    add sp, sp, #16")
+        warm_out("    mov x0, #0")
+        warm_label(m_end)
+        return 0
+    }
     warm_out("    // unsupported winarm64 expression tag " + int_to_str(t))
     warm_out("    mov x0, #0")
     return 0
@@ -7388,6 +7556,10 @@ fn warm_gen_stmt(nd) {
         if len(warm_continue_label) > 0 {
             warm_out("    b " + warm_continue_label)
         }
+        return 0
+    }
+    if t == AST_MATCH_STMT {
+        warm_gen_expr(nd)
         return 0
     }
     warm_out("    // unsupported winarm64 stmt tag " + int_to_str(t))
@@ -7546,9 +7718,213 @@ fn warm_emit_runtime() {
     warm_out("    ldp x29, x30, [sp], #16")
     warm_out("    ret")
 
-    warm_emit_stub("_nova_warm_stub_list_new", "winarm64: list_new not yet supported")
-    warm_emit_stub("_nova_warm_stub_push", "winarm64: push not yet supported")
-    warm_emit_stub("_nova_warm_stub_len", "winarm64: len not yet supported")
+    // R19B: real list runtime on Windows ARM64 (R17A.2 cross-target enum
+    // codegen). Same layout as ARM64 Linux: header { sentinel=-1, len,
+    // cap, data_ptr } / 8-byte slot data. Allocator bumps a 4 MiB static
+    // BSS arena (no VirtualAlloc — keeps the import set restricted to
+    // the existing KERNEL32 .def used by `make smoke-winarm64`).
+
+    // ---- _nova_warm_alloc(x0=size) -> ptr (x0) ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_alloc")
+    warm_out("    stp x29, x30, [sp, #-32]!")
+    warm_out("    mov x29, sp")
+    warm_out("    str x19, [sp, #16]")
+    warm_out("    mov x19, x0")                    // x19 = aligned-up size
+    warm_out("    add x19, x19, #15")
+    warm_out("    and x19, x19, #-16")
+    warm_out("    adrp x0, _nova_warm_heap_ptr")
+    warm_out("    add x0, x0, :lo12:_nova_warm_heap_ptr")
+    warm_out("    ldr x1, [x0]")                   // current ptr
+    warm_out("    cbnz x1, .Lwarm_alloc_have_heap")
+    // First call: point heap_ptr at the start of the static arena.
+    warm_out("    adrp x1, _nova_warm_heap_arena")
+    warm_out("    add x1, x1, :lo12:_nova_warm_heap_arena")
+    warm_out("    movz x2, #0, lsl #0")
+    warm_out("    movk x2, #64, lsl #16")          // 64 * 65536 = 4 MiB
+    warm_out("    add x2, x1, x2")
+    warm_out("    adrp x0, _nova_warm_heap_end")
+    warm_out("    add x0, x0, :lo12:_nova_warm_heap_end")
+    warm_out("    str x2, [x0]")
+    warm_out("    adrp x0, _nova_warm_heap_ptr")
+    warm_out("    add x0, x0, :lo12:_nova_warm_heap_ptr")
+    warm_out("    str x1, [x0]")
+    warm_label(".Lwarm_alloc_have_heap")
+    warm_out("    adrp x0, _nova_warm_heap_ptr")
+    warm_out("    add x0, x0, :lo12:_nova_warm_heap_ptr")
+    warm_out("    ldr x1, [x0]")
+    warm_out("    add x2, x1, x19")
+    warm_out("    adrp x3, _nova_warm_heap_end")
+    warm_out("    add x3, x3, :lo12:_nova_warm_heap_end")
+    warm_out("    ldr x4, [x3]")
+    warm_out("    cmp x2, x4")
+    warm_out("    b.gt .Lwarm_alloc_fail")
+    warm_out("    adrp x0, _nova_warm_heap_ptr")
+    warm_out("    add x0, x0, :lo12:_nova_warm_heap_ptr")
+    warm_out("    str x2, [x0]")
+    warm_out("    mov x0, x1")
+    warm_out("    ldr x19, [sp, #16]")
+    warm_out("    ldp x29, x30, [sp], #32")
+    warm_out("    ret")
+    warm_label(".Lwarm_alloc_fail")
+    warm_out("    mov w0, #1")
+    warm_call_import("__imp_ExitProcess")
+
+    // ---- _nova_warm_list_new ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_list_new")
+    warm_out("    stp x29, x30, [sp, #-32]!")
+    warm_out("    mov x29, sp")
+    warm_out("    str x19, [sp, #16]")
+    warm_out("    mov x0, #32")
+    warm_out("    bl _nova_warm_alloc")
+    warm_out("    mov x19, x0")
+    warm_out("    mov x1, #-1")
+    warm_out("    str x1, [x19]")
+    warm_out("    str xzr, [x19, #8]")
+    warm_out("    mov x1, #16")
+    warm_out("    str x1, [x19, #16]")
+    warm_out("    mov x0, #128")
+    warm_out("    bl _nova_warm_alloc")
+    warm_out("    str x0, [x19, #24]")
+    warm_out("    mov x0, x19")
+    warm_out("    ldr x19, [sp, #16]")
+    warm_out("    ldp x29, x30, [sp], #32")
+    warm_out("    ret")
+
+    // ---- _nova_warm_push(list=x0, val=x1) -> list ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_push")
+    warm_out("    stp x29, x30, [sp, #-48]!")
+    warm_out("    mov x29, sp")
+    warm_out("    str x19, [sp, #16]")
+    warm_out("    str x20, [sp, #24]")
+    warm_out("    str x21, [sp, #32]")
+    warm_out("    mov x19, x0")
+    warm_out("    mov x20, x1")
+    warm_out("    ldr x2, [x19, #8]")
+    warm_out("    ldr x3, [x19, #16]")
+    warm_out("    cmp x2, x3")
+    warm_out("    b.lt .Lwarm_push_ok")
+    warm_out("    lsl x21, x3, #1")
+    warm_out("    str x21, [x19, #16]")
+    warm_out("    lsl x0, x21, #3")
+    warm_out("    bl _nova_warm_alloc")
+    warm_out("    mov x4, x0")
+    warm_out("    ldr x5, [x19, #24]")
+    warm_out("    ldr x6, [x19, #8]")
+    warm_out("    mov x7, #0")
+    warm_label(".Lwarm_push_copy")
+    warm_out("    cmp x7, x6")
+    warm_out("    b.ge .Lwarm_push_copy_done")
+    warm_out("    ldr x8, [x5, x7, lsl #3]")
+    warm_out("    str x8, [x4, x7, lsl #3]")
+    warm_out("    add x7, x7, #1")
+    warm_out("    b .Lwarm_push_copy")
+    warm_label(".Lwarm_push_copy_done")
+    warm_out("    str x4, [x19, #24]")
+    warm_label(".Lwarm_push_ok")
+    warm_out("    ldr x2, [x19, #8]")
+    warm_out("    ldr x3, [x19, #24]")
+    warm_out("    str x20, [x3, x2, lsl #3]")
+    warm_out("    add x2, x2, #1")
+    warm_out("    str x2, [x19, #8]")
+    warm_out("    mov x0, x19")
+    warm_out("    ldr x21, [sp, #32]")
+    warm_out("    ldr x20, [sp, #24]")
+    warm_out("    ldr x19, [sp, #16]")
+    warm_out("    ldp x29, x30, [sp], #48")
+    warm_out("    ret")
+
+    // ---- _nova_warm_index(list=x0, idx=x1) -> value ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_index")
+    warm_out("    ldr x2, [x0]")
+    warm_out("    cmn x2, #1")
+    warm_out("    b.ne .Lwarm_index_str")
+    warm_out("    tst x1, x1")
+    warm_out("    b.ge .Lwarm_index_list_pos")
+    warm_out("    ldr x3, [x0, #8]")
+    warm_out("    add x1, x1, x3")
+    warm_label(".Lwarm_index_list_pos")
+    warm_out("    ldr x3, [x0, #24]")
+    warm_out("    ldr x0, [x3, x1, lsl #3]")
+    warm_out("    ret")
+    warm_label(".Lwarm_index_str")
+    warm_out("    ldrb w0, [x0, x1]")
+    warm_out("    ret")
+
+    // ---- _nova_warm_len(x0) -> count ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_len")
+    warm_out("    cbz x0, .Lwarm_len_zero")
+    warm_out("    ldr x1, [x0]")
+    warm_out("    cmn x1, #1")
+    warm_out("    b.ne .Lwarm_len_str")
+    warm_out("    ldr x0, [x0, #8]")
+    warm_out("    ret")
+    warm_label(".Lwarm_len_str")
+    warm_out("    b _nova_warm_strlen")
+    warm_label(".Lwarm_len_zero")
+    warm_out("    mov x0, #0")
+    warm_out("    ret")
+
+    // ---- _nova_warm_assert(cond=x0, msg=x1) ----
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_assert")
+    warm_out("    cbnz x0, .Lwarm_assert_ok")
+    warm_out("    stp x29, x30, [sp, #-32]!")
+    warm_out("    mov x29, sp")
+    warm_out("    str x19, [sp, #16]")
+    warm_out("    mov x19, x1")
+    warm_out("    adrp x0, _warm_assert_prefix")
+    warm_out("    add x0, x0, :lo12:_warm_assert_prefix")
+    warm_out("    bl _nova_warm_print")
+    warm_out("    cbz x19, .Lwarm_assert_no_msg")
+    warm_out("    mov x0, x19")
+    warm_out("    bl _nova_warm_println")
+    warm_out("    b .Lwarm_assert_exit")
+    warm_label(".Lwarm_assert_no_msg")
+    warm_out("    adrp x0, _warm_assert_blank")
+    warm_out("    add x0, x0, :lo12:_warm_assert_blank")
+    warm_out("    bl _nova_warm_println")
+    warm_label(".Lwarm_assert_exit")
+    warm_out("    mov w0, #1")
+    warm_call_import("__imp_ExitProcess")
+    warm_label(".Lwarm_assert_ok")
+    warm_out("    ret")
+
+    // ---- BSS for the bump allocator ----
+    // 4 MiB static arena holds the entire list heap; sized for the R17A
+    // enum / match tests + small NOVA programs. PE32+ .bss is uninit so
+    // the file-on-disk doesn't carry the 4 MiB.
+    warm_out("")
+    warm_out(".section .bss,\"bw\"")
+    warm_out(".p2align 3")
+    warm_label("_nova_warm_heap_ptr")
+    warm_out("    .quad 0")
+    warm_label("_nova_warm_heap_end")
+    warm_out("    .quad 0")
+    warm_label("_nova_warm_heap_arena")
+    warm_out("    .skip 4194304")
+    warm_out(".section .text,\"xr\"")
+
+    // ---- RODATA strings for assert messages ----
+    warm_out("")
+    warm_out(".section .rdata,\"dr\"")
+    warm_out(".p2align 3")
+    warm_label("_warm_assert_prefix")
+    warm_out("    .asciz " + DQ + "ASSERT FAILED: " + DQ)
+    warm_label("_warm_assert_blank")
+    warm_out("    .asciz " + DQ + "(no message)" + DQ)
+    warm_out(".section .text,\"xr\"")
+
     warm_emit_stub("_nova_warm_stub_read_file", "winarm64: read_file not yet supported")
     warm_emit_stub("_nova_warm_stub_write_file", "winarm64: write_file not yet supported")
 
@@ -7780,7 +8156,25 @@ fn winarm64_gen_program(program) {
 
     let decls = program[1]
 
+    // R19B: collect enum / global tables so the R17A enum codegen
+    // helpers (`is_enum_name`, `enum_variant_index`, ...) resolve names.
     let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_ENUM_DECL {
+            let entry = list_new()
+            push(entry, d[1])
+            push(entry, d[2])
+            push(cg_enums, entry)
+            cg_enum_count = cg_enum_count + 1
+        }
+        if ast_tag(d) == AST_LET_STMT {
+            add_global(d[1])
+        }
+        i = i + 1
+    }
+
+    i = 0
     while i < len(decls) {
         let d = decls[i]
         if ast_tag(d) == AST_FN_DECL {
@@ -8863,6 +9257,12 @@ fn wasm_collect_locals(nd) {
                 push(wasm_local_map, vname)
             }
         }
+        // R19B: recurse into the let body so AST_ENUM_PATTERN binders
+        // inside `let x = match { Enum::V(y) => y }` get registered too.
+        wasm_collect_locals(nd[2])
+    }
+    if tag == AST_ASSIGN_STMT {
+        wasm_collect_locals(nd[2])
     }
     if tag == AST_BLOCK {
         let stmts = nd[1]
@@ -8909,11 +9309,35 @@ fn wasm_collect_locals(nd) {
         // bodies get a wasm local declared at function top. Without this
         // wasm_gen_let assigns to a local that was never declared and
         // wat2wasm rejects the module.
+        //
+        // R19B: also register binders from AST_ENUM_PATTERN arms so they
+        // get a local declared at function top.
         wasm_collect_locals(nd[1])
         let m_arms = nd[2]
         let mai = 0
         while mai < len(m_arms) {
             let m_arm = m_arms[mai]
+            let m_pat = m_arm[1]
+            if ast_tag(m_pat) == AST_ENUM_PATTERN {
+                let m_binders = m_pat[3]
+                let mbi = 0
+                while mbi < len(m_binders) {
+                    let mbn = m_binders[mbi]
+                    if mbn == "_" {
+                    } else {
+                        if wasm_is_global(mbn) == 0 {
+                            let mb_exists = 0
+                            let mk = 0
+                            while mk < len(wasm_local_map) {
+                                if wasm_local_map[mk] == mbn { mb_exists = 1 }
+                                mk = mk + 1
+                            }
+                            if mb_exists == 0 { push(wasm_local_map, mbn) }
+                        }
+                    }
+                    mbi = mbi + 1
+                }
+            }
             wasm_collect_locals(m_arm[2])
             mai = mai + 1
         }
@@ -9248,6 +9672,170 @@ fn wasm_gen_expr(nd) {
         return 0
     }
 
+    // R19B: cross-target sum-type lowering for WASM. The enum value is
+    // a heap-allocated list `[tag, ...fields]` — same wire layout as the
+    // native paths — and we use the existing `$list_new`, `$push`,
+    // `$rt_index` runtime helpers from wasm_gen_rt_core. AST_FIELD_ACCESS
+    // on an enum (e.g. `Option::None` used as a value) lowers to a tag
+    // constant; AST_MATCH_STMT uses an `if (result i64) ... else ...`
+    // tree threaded through arms with a tail default of i64.const 0.
+    if tag == AST_FIELD_ACCESS {
+        let fa_base = nd[1]
+        let fa_field = nd[2]
+        if ast_tag(fa_base) == AST_IDENT {
+            let fa_base_name = fa_base[1]
+            if is_enum_name(fa_base_name) == 1 {
+                let fa_vidx = enum_variant_index(fa_base_name, fa_field)
+                wi("i64.const " + int_to_str(fa_vidx))
+                return 0
+            }
+        }
+        // Non-enum field access: existing behaviour (call-style) falls
+        // through to the generic i64.const 0 below.
+        wi("i64.const 0")
+        return 0
+    }
+    if tag == AST_ENUM_CTOR {
+        let ec_enum = nd[1]
+        let ec_variant = nd[2]
+        let ec_args = nd[3]
+        let ec_tag = enum_variant_index(ec_enum, ec_variant)
+        wi("call $list_new")
+        wi("global.set $g__wasm_list_tmp")
+        // Push the tag.
+        wi("global.get $g__wasm_list_tmp")
+        wi("i64.const " + int_to_str(ec_tag))
+        wi("call $push")
+        wi("drop")
+        // Push each field value in declaration order.
+        let eci = 0
+        while eci < len(ec_args) {
+            wi("global.get $g__wasm_list_tmp")
+            wasm_gen_expr(ec_args[eci])
+            wi("call $push")
+            wi("drop")
+            eci = eci + 1
+        }
+        wi("global.get $g__wasm_list_tmp")
+        return 0
+    }
+    if tag == AST_MATCH_STMT {
+        let m_disc = nd[1]
+        let m_arms = nd[2]
+        // Evaluate the discriminant exactly once; save into a scratch
+        // global. Each arm's tag check then re-reads that global.
+        wasm_gen_expr(m_disc)
+        wi("global.set $g__wasm_match_disc")
+        // Build a chain of `if/else` blocks. The result of the chain is
+        // the body of the matched arm (or 0 if no arm matched, matching
+        // the x86-64 fall-through semantics).
+        let mi = 0
+        while mi < len(m_arms) {
+            let m_arm = m_arms[mi]
+            let m_pat = m_arm[1]
+            let m_body = m_arm[2]
+            let m_pt = ast_tag(m_pat)
+            if m_pt == AST_WILDCARD {
+                // `_` always matches: emit body and stop the chain.
+                if ast_tag(m_body) == AST_EXPR_STMT {
+                    wasm_gen_expr(m_body[1])
+                } else { if ast_tag(m_body) == AST_BLOCK {
+                    // Block body returns an i64; assume it's a single
+                    // expression-stmt body (or no value).
+                    wasm_gen_stmt(m_body)
+                    wi("i64.const 0")
+                } else {
+                    wasm_gen_expr(m_body)
+                } }
+                mi = mi + 1
+                // Close any previously-opened if-chains (one per prior arm).
+                let close_i = 0
+                while close_i < mi - 1 {
+                    wasm_indent = wasm_indent - 1
+                    wi("end")
+                    close_i = close_i + 1
+                }
+                return 0
+            } else { if m_pt == AST_ENUM_PATTERN {
+                let m_ep_enum = m_pat[1]
+                let m_ep_variant = m_pat[2]
+                let m_ep_binders = m_pat[3]
+                let m_ep_tag = enum_variant_index(m_ep_enum, m_ep_variant)
+                // Tag check: rt_index(disc, 0) == tag ?
+                wi("global.get $g__wasm_match_disc")
+                wi("i64.const 0")
+                wi("call $rt_index")
+                wi("i64.const " + int_to_str(m_ep_tag))
+                wi("call $rt_eq")
+                wi("i64.eqz")
+                wi("i32.eqz")
+                wi("if (result i64)")
+                wasm_indent = wasm_indent + 1
+                // Bind each binder to disc[1+i].
+                let m_ebi = 0
+                while m_ebi < len(m_ep_binders) {
+                    let m_bname = m_ep_binders[m_ebi]
+                    if m_bname == "_" {
+                    } else {
+                        wi("global.get $g__wasm_match_disc")
+                        wi("i64.const " + int_to_str(m_ebi + 1))
+                        wi("call $rt_index")
+                        if wasm_is_global(m_bname) == 1 {
+                            wi("global.set $g_" + m_bname)
+                        } else {
+                            wi("local.set $" + m_bname)
+                        }
+                    }
+                    m_ebi = m_ebi + 1
+                }
+                if ast_tag(m_body) == AST_EXPR_STMT {
+                    wasm_gen_expr(m_body[1])
+                } else { if ast_tag(m_body) == AST_BLOCK {
+                    wasm_gen_stmt(m_body)
+                    wi("i64.const 0")
+                } else {
+                    wasm_gen_expr(m_body)
+                } }
+                wasm_indent = wasm_indent - 1
+                wi("else")
+                wasm_indent = wasm_indent + 1
+                // Fall through to next arm — leave indent open for chain.
+            } else {
+                // Generic value pattern.
+                wi("global.get $g__wasm_match_disc")
+                wasm_gen_expr(m_pat)
+                wi("call $rt_eq")
+                wi("i64.eqz")
+                wi("i32.eqz")
+                wi("if (result i64)")
+                wasm_indent = wasm_indent + 1
+                if ast_tag(m_body) == AST_EXPR_STMT {
+                    wasm_gen_expr(m_body[1])
+                } else { if ast_tag(m_body) == AST_BLOCK {
+                    wasm_gen_stmt(m_body)
+                    wi("i64.const 0")
+                } else {
+                    wasm_gen_expr(m_body)
+                } }
+                wasm_indent = wasm_indent - 1
+                wi("else")
+                wasm_indent = wasm_indent + 1
+            } }
+            mi = mi + 1
+        }
+        // Default branch (no arm matched): yield 0.
+        wi("i64.const 0")
+        // Close every `if (result i64) ... else ...` we opened (one per
+        // non-wildcard arm).
+        let close_i2 = 0
+        while close_i2 < len(m_arms) {
+            wasm_indent = wasm_indent - 1
+            wi("end")
+            close_i2 = close_i2 + 1
+        }
+        return 0
+    }
+
     wi("i64.const 0")
     return 0
 }
@@ -9423,6 +10011,14 @@ fn wasm_gen_stmt(nd) {
         return 0
     }
     if tag == AST_METHOD_DECL {
+        return 0
+    }
+    if tag == AST_MATCH_STMT {
+        // R19B: statement-position match. Reuse the expression form and
+        // drop the result (mirrors AST_EXPR_STMT but the body of the
+        // chosen arm itself may have already produced no value).
+        wasm_gen_expr(nd)
+        wi("drop")
         return 0
     }
 
@@ -12080,8 +12676,24 @@ fn wasm_gen_program(program) {
     wasm_fn_names = list_new()
     wasm_block_depth = 0
 
-    // Collect globals
+    // R19B: register enum declarations so the R17A enum codegen can
+    // resolve `enum_variant_index` etc. Globals are collected separately
+    // below.
     let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_ENUM_DECL {
+            let entry = list_new()
+            push(entry, d[1])
+            push(entry, d[2])
+            push(cg_enums, entry)
+            cg_enum_count = cg_enum_count + 1
+        }
+        i = i + 1
+    }
+
+    // Collect globals
+    i = 0
     while i < len(decls) {
         let d = decls[i]
         if ast_tag(d) == AST_LET_STMT {
@@ -12142,6 +12754,9 @@ fn wasm_gen_program(program) {
     // not calling len() on strings.
     out("  (global $heap_ptr (mut i64) (i64.const 1114112))")
     out("  (global $g__wasm_list_tmp (mut i64) (i64.const 0))")
+    // R19B: scratch for the AST_MATCH_STMT discriminant (R17A.2 enum
+    // codegen). Each match nests reads/writes only inside one arm chain.
+    out("  (global $g__wasm_match_disc (mut i64) (i64.const 0))")
     i = 0
     while i < cg_global_count {
         out("  (global $g_" + cg_globals[i] + " (mut i64) (i64.const 0))")
@@ -12171,6 +12786,12 @@ fn wasm_gen_program(program) {
     wasm_indent = 2
 
     // Collect top-level locals
+    //
+    // R19B: also walk top-level AST_MATCH_STMT / AST_LET_STMT bodies so
+    // AST_ENUM_PATTERN binders inside top-level match arms get registered
+    // as locals. Top-level `let` names are still globals (set above by
+    // add_global), but binders introduced by `match` aren't, so they need
+    // a slot in the start function.
     wasm_local_map = list_new()
     i = 0
     while i < len(decls) {
@@ -12182,6 +12803,9 @@ fn wasm_gen_program(program) {
         if dtag == AST_DO_WHILE { wasm_collect_locals(d) }
         if dtag == AST_FOR_INDEXED { wasm_collect_locals(d) }
         if dtag == AST_EXPR_STMT { wasm_collect_locals(d) }
+        if dtag == AST_MATCH_STMT { wasm_collect_locals(d) }
+        if dtag == AST_LET_STMT { wasm_collect_locals(d[2]) }
+        if dtag == AST_ASSIGN_STMT { wasm_collect_locals(d[2]) }
         i = i + 1
     }
 

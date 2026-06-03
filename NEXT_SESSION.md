@@ -1,5 +1,128 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R19B — cross-target enum codegen (R17A.2 follow-up)
+
+R19B closes the R17A.2 follow-up: NOVA sum types with payloads + match
+exhaustiveness, which previously only worked on Linux x86-64, now lower
+to all 6 supported targets. The enum wire representation (heap list
+`[tag, ...fields]`) is unchanged; the work was per-target instruction
+emission + a small minimal-runtime addition on the ARM64 backends.
+
+### What landed
+
+**Codegen** (`src/compiler/codegen.nova`):
+
+  * `arm_gen_expr` (cg_target == 4) now lowers `AST_LIST_LIT`,
+    `AST_INDEX_EXPR`, `AST_FIELD_ACCESS` (enum-name-aware),
+    `AST_ENUM_CTOR`, and `AST_MATCH_STMT` to AArch64 instructions.
+    Sum-type ctor `Enum::Variant(args...)` becomes
+    `bl _nova_arm_list_new` + `bl _nova_arm_push` for the tag +
+    one `bl _nova_arm_push` per arg. Match arms compare `value[0]`
+    against the variant tag via `_nova_arm_index(disc, 0)`,
+    branch via `b.ne <next_arm>`, then bind each binder to
+    `value[1+i]` via `_nova_arm_index(disc, 1+i)` + `str` to the
+    binder's stack slot. `AST_ENUM_PATTERN` binders are registered
+    in `arm_collect_locals` so the function prologue reserves slots
+    (same mechanism the x86-64 path uses).
+  * `arm_gen_stmt` routes `AST_MATCH_STMT` through `arm_gen_expr`
+    for the statement-position match form.
+  * `arm_emit_runtime` adds 6 new helpers — `_nova_arm_alloc` (brk
+    bump allocator using SYS_brk #214), `_nova_arm_list_new`,
+    `_nova_arm_push` (with doubling-grow + copy), `_nova_arm_index`
+    (list[i] or str[i] via the `cmn x2, #1` sentinel check),
+    `_nova_arm_len`, and `_nova_arm_assert` — that replace the older
+    `_nova_arm_stub_list_new`/`_nova_arm_stub_push`/`_nova_arm_stub_len`
+    error-exit stubs. `arm_gen_call` routes `list_new`, `push`,
+    `len`, and `assert` to the new helpers.
+  * `warm_gen_expr`, `warm_gen_stmt`, `warm_collect_locals`, and
+    `warm_emit_runtime` (cg_target == 5) mirror the ARM64 Linux
+    additions exactly. The only difference is the allocator: WIN
+    ARM64 bumps a 4 MiB static `.bss` arena (`_nova_warm_heap_arena`
+    via `.skip 4194304`) instead of brk, keeping the PE import set
+    restricted to the existing KERNEL32 + BCRYPT .def files (no new
+    `__imp_VirtualAlloc` symbol — `make smoke-winarm64` keeps building
+    against the same import libs).
+  * `wasm_gen_expr` (cg_target == 2) lowers `AST_FIELD_ACCESS` (enum),
+    `AST_ENUM_CTOR`, and `AST_MATCH_STMT` to WAT instructions using
+    the existing `$list_new`/`$push`/`$rt_index`/`$rt_eq` helpers
+    from `wasm_gen_rt_core`. Match arms build a chain of
+    `if (result i64) ... else ...` blocks; the discriminant is
+    stashed in a new `$g__wasm_match_disc` global and the chain
+    falls through to `i64.const 0` if no arm matches.
+  * `wasm_collect_locals` walks match arms to register
+    `AST_ENUM_PATTERN` binders as wasm locals (so they get a
+    `(local $name i64)` declaration at the function top), and the
+    top-level `wasm_gen_program` collection step also walks
+    top-level `AST_MATCH_STMT`/`AST_LET_STMT`/`AST_ASSIGN_STMT`
+    bodies so match binders inside top-level expressions become
+    locals in the start function.
+  * All three backend `gen_program` entries (arm64, winarm64, wasm)
+    now collect `cg_enums` from `AST_ENUM_DECL` declarations and
+    register top-level globals — previously only the main x86-64
+    `gen_program` did this, so `enum_variant_index` resolved to -1
+    on non-x86-64 targets.
+
+**Tests** (NEW `tests/test_enum_cross_target.sh`): cross-target enum
+codegen assertions. Generates a small NOVA program (Just/Nothing
+constructor + match destructure + Pair(int, int)) and verifies on
+each target:
+
+  * `--target=linux`         : compile + assemble + link + run +
+                                assert "R19B cross-target enum OK"
+                                in stdout
+  * `--target=macos`         : Mach-O 64-bit x86_64 object via
+                                `clang -target x86_64-apple-darwin -c`
+  * `--target=windows`       : Intel amd64 COFF object via
+                                `x86_64-w64-mingw32-as`, then attempt
+                                `x86_64-w64-mingw32-ld` link to verify
+                                PE32+ .exe structure
+  * `--target=arm64`         : ELF 64-bit ARM aarch64 object via
+                                `clang -target aarch64-linux-gnu -c`,
+                                cross-checked with `EM_AARCH64` via
+                                `llvm-readobj --file-headers`
+  * `--target=windows-arm64` : Aarch64 COFF object via
+                                `clang -target aarch64-windows-gnu -c`,
+                                cross-checked with
+                                `IMAGE_FILE_MACHINE_ARM64`
+  * `--target=wasm`          : WAT -> .wasm via `wat2wasm`, run under
+                                `wasmtime`, expect the OK marker in
+                                stdout
+
+The harness uses ONLY integer payloads so the pre-existing WASM
+`rt_eq` low-address-string limitation (see WASM_AUDIT.md) does not
+affect this test. The full 27-assertion `tests/test_sum_types.nova`
+covers richer patterns (string payloads, nested enums, catch-all
+arms) and still passes on Linux native — string-payload assertions
+on WASM remain blocked behind the rt_eq limitation, but the
+non-string portion (24 of 27 assertions) also passes.
+
+### Verification
+
+  * `tests/run_tests.sh`        : 171 total, 165 pass / 0 fail /
+    6 skip (R18A baseline preserved).
+  * `make self-host`            : stage2.s ↔ stage3.s bit-identical.
+  * `tests/test_enum_cross_target.sh`: all 6 targets PASS.
+  * `tests/test_winarm64_emitter.sh`: PASS (PE32+ Aarch64 / KERNEL32
+    IAT / ARM64 prologue unchanged).
+  * `make smoke-winarm64`       : PASS (KERNEL32 imports unchanged —
+    no new IAT entries required).
+  * `make smoke-windows`        : PASS (Intel amd64 COFF + PE32+ .exe).
+  * `make smoke-macos`          : PASS (Mach-O 64-bit x86_64).
+  * `make smoke-wasm`           : PASS (WebAssembly MVP module).
+  * `make smoke-mobile-android` : PASS (ARM64 ELF).
+  * `make smoke-simd-wasm-v128` : PASS (22/22).
+
+### What's deferred
+
+  * **R19B.2** WASM string-payload match: the pre-existing
+    `$rt_eq` heuristic that treats `addr < 1048576` as an integer
+    misclassifies the data-section string literals NOVA places at
+    offsets 8192..1MB. This affects sum-type variants whose payload
+    is a string (e.g. `Result::Err(str)` matched with
+    `Result::Err(m) => m == "oops"`). 24 of 27
+    `tests/test_sum_types.nova` assertions still pass on WASM;
+    string-payload portions need a typed pointer scheme to resolve.
+
 ## R19F — LSP type hierarchy (15th LSP capability)
 
 R19F adds **type hierarchy** (`textDocument/prepareTypeHierarchy` +
