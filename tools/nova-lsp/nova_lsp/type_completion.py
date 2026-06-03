@@ -73,6 +73,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from nova_lsp.base_spread_completion import (
+    compute_base_spread_completions,
+)
 from nova_lsp.imports import FileCache, walk_imports
 from nova_lsp.struct_field_completion import (
     compute_struct_field_completions,
@@ -632,7 +635,18 @@ def compute_type_aware_completions(
         text_overrides=text_overrides,
     )
 
-    # R26D: brace-init field completion runs FIRST since `Point { x:
+    # R26A.2: base-spread completion runs FIRST inside the brace-init
+    # dispatch since the cursor after ``Point { ..|`` would ALSO match
+    # R26D's `is_brace_init_context` (which only checks for being inside
+    # a brace body). The spread position needs the in-scope value list,
+    # not the remaining field list.
+    base_spread = compute_base_spread_completions(
+        uri, position, doc_text, decls
+    )
+    if base_spread is not None:
+        return base_spread
+
+    # R26D: brace-init field completion runs next since `Point { x:
     # 10, |` is multi-line capable -- the regular line-local triggers
     # (`Name::`, `var.`, etc.) wouldn't see anything to fire on after
     # the user presses Enter inside the brace body.

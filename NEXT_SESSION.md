@@ -1,5 +1,202 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R27D — LSP base-spread completion (R26A.2 follow-up to R26D)
+
+**Status: complete** — `Point { ..|` and `Point { x: 10, ..|`
+now drive a focused completion list of in-scope variables whose
+type matches the struct being constructed. Builds on R26D's
+brace-init field completion (R25A.2 #4 follow-up) and slots in
+BEFORE the field-position trigger in the dispatch chain.
+
+### Trigger examples
+
+```nova
+struct Point { x: int, y: int }
+struct Box { value: int }
+
+fn main() {
+    let p1: Point = Point { x: 1, y: 2 }
+    let p2 = Point(3, 4)
+    let b = Box { value: 99 }
+
+    // Cursor at `Point { ..|` returns p1 + p2 (Box value excluded).
+    let q1 = Point { ..|
+
+    // Cursor at `Point { x: 10, ..|` -- override list doesn't affect
+    // the base candidate set.
+    let q2 = Point { x: 10, ..|
+
+    // Self-reference filtered: `q3` itself isn't suggested.
+    let q3: Point = Point { ..|
+
+    // Box context returns the Box value (b), not p1 / p2.
+    let bcopy = Box { ..|
+}
+```
+
+### Detection
+
+The trigger is detected in two phases, both using R26D's masked-text
+helpers (comments + strings stripped):
+
+  1. **Brace-init context** — R26D's `_find_enclosing_brace_init`
+     scans backwards from the cursor for the enclosing `Name {` at
+     relative depth zero. Same statement-boundary aborts and
+     nested-init handling as R26D.
+  2. **`..` token verification** — walk back over trailing whitespace
+     from the cursor; the last non-space chars before the cursor
+     must be `..` (two dots), and that `..` must sit at outer-level
+     depth (depth 0 relative to the brace body). A nested
+     `Inner { ..q }` doesn't trigger when the cursor is at the OUTER
+     `Outer { Inner { ..q }, ..|` position because the outer scan
+     still finds two dots at outer depth.
+
+Both checks must pass; the spread trigger fires before R26D's field
+trigger so `Point { ..|` doesn't accidentally return field names.
+
+### Scope walk
+
+The enclosing fn is found by walking the document top-down, tracking
+brace depth, and stacking each `fn NAME(` decl. The most recent fn
+whose body-open `{` is still unclosed at the cursor wins. When the
+cursor isn't inside any fn body the walk falls back to top-level
+scope (the whole document) — so a top-level `let p = Point {...}`
+is still offered for a top-level `let q = Point { ..|` line.
+
+Within the chosen scope, four binding forms are harvested:
+
+  - `let NAME: TYPE = ...`            — annotation (highest signal)
+  - `let NAME = TYPE(...)`            — constructor inference
+  - `let NAME = TYPE { ... }`         — brace-init form
+  - `fn (NAME: TYPE, ...)` parameter  — only when `fn` appears on
+                                         the same line, to avoid
+                                         matching struct field rows
+                                         (`x: int,` inside a struct)
+
+The cursor's own line is skipped from the walk so a self-referential
+let binding (`let q = Point { ..|`) doesn't suggest `q`. Generic
+suffixes are stripped from the binding's type name (`Point<int>` →
+`Point`).
+
+### Implementation
+
+- NEW: `tools/nova-lsp/nova_lsp/base_spread_completion.py`
+  - `is_base_spread_context(uri, position, doc_text)` — returns
+    `_BaseSpreadContext(struct_name, open_lb_line, open_lb_col)` or
+    `None`. Re-uses R26D's `_find_enclosing_brace_init` +
+    `_mask_full_text` helpers so the masking semantics stay
+    consistent across modules.
+  - `find_in_scope_struct_values(uri, position, struct_name,
+    doc_text, decls)` — walks the enclosing fn (or top-level
+    scope), harvests every typed binding, filters by `type_name ==
+    struct_name`, deduplicates by name (later-wins for let-shadow),
+    returns CompletionItems with `kind = Variable (6)`,
+    `detail = "name: StructName"`.
+  - `compute_base_spread_completions(uri, position, doc_text,
+    decls)` — top-level helper called by the type-completion
+    pipeline. Returns `None` when the trigger doesn't apply;
+    returns `[]` when the trigger fires but the struct isn't
+    declared anywhere visible (focused-no-match — caller does NOT
+    mix in the generic fallback).
+- MODIFIED: `tools/nova-lsp/nova_lsp/type_completion.py`
+  - `compute_type_aware_completions` now calls
+    `compute_base_spread_completions` BEFORE
+    `compute_struct_field_completions`. Both routines look at the
+    same `Name { ... }` body but the spread trigger needs the
+    in-scope value list, not the remaining field list. Order
+    matters because `..|` ALSO satisfies R26D's
+    `is_brace_init_context` (just being inside a brace body), so
+    R26D would otherwise return field names there.
+
+### Tests
+
+- NEW: `tools/nova-lsp/tests/test_base_spread_completion.py`
+  — 41 assertions covering:
+  - Trigger detection: cursor after `..` simple, after `..` with
+    field-override (`Point { x: 10, ..|`), cursor inside brace
+    without dots (None), cursor outside brace (None), trailing
+    space between `..` and cursor still triggers, single dot does
+    NOT trigger.
+  - Scope harvest per binding form: annotation, constructor
+    inference, brace-init, fn parameter; type filtering; empty
+    when no match; self-reference excluded; top-level (no
+    enclosing fn) bindings visible; generic-struct annotation
+    `let p: Point<int> = ...`.
+  - Top-level helper: None outside ctx, None inside brace
+    without dots, list inside spread ctx, unknown struct returns
+    `[]`, field-override + dots still works, type filtering with
+    2 Point + 1 Box returns 2 Point values.
+  - CompletionItem shape: label / kind=Variable(6) / detail /
+    insertText all present.
+  - Server wire (`dispatch`): `textDocument/completion` returns
+    `[p]` for `Point { ..|`, `[p]` for `Point { x: 10, ..|`,
+    empty list when no in-scope match, falls through to R26D's
+    field completion for `Point { |` (no dots), capability count
+    unchanged at 16 providers + 1 sync key.
+  - Routing: `compute_type_aware_completions` routes through the
+    base-spread helper FIRST when the cursor sits at `Name { ..|`
+    (rather than falling through to R26D).
+- All existing LSP test files still pass (17 test modules total,
+  including the 16 capability test modules + R26D's
+  `test_struct_field_completion.py`). 41 new assertions on top of
+  the ~1186 pre-existing LSP assertions.
+
+### Verification
+
+- `python3 tools/nova-lsp/tests/test_base_spread_completion.py`
+  → OK (41 assertions).
+- All 17 LSP test files (`test_*.py`) green: call_hierarchy 75 +
+  code_lens 64 + document_symbols 65 + exhaustiveness_fix 96 +
+  extract_function 66 + folding_ranges 43 + hover_docs 55 +
+  inlay_hints 66 + inline_variable 66 + rename_workspace 101 +
+  semantic_tokens 119 + struct_field_completion 54 +
+  type_completion 59 + type_hierarchy 88 + workspace_diagnostics
+  55 + workspace_symbols 52 + base_spread_completion 41.
+- All 5 smoke tests (`*_smoke.py`) green.
+- Capability count remains at 16 (15 providers + 1
+  textDocumentSync sync key); no new top-level capability.
+
+### Files touched (R27D)
+
+- NEW: `tools/nova-lsp/nova_lsp/base_spread_completion.py`
+- MODIFIED: `tools/nova-lsp/nova_lsp/type_completion.py` (one
+  new import + one new dispatch step before the R26D step)
+- NEW: `tools/nova-lsp/tests/test_base_spread_completion.py`
+  (41 assertions)
+- MODIFIED: `tools/nova-lsp/README.md` (completion row expanded)
+- MODIFIED: `README.md` (LSP bullet expanded for R26A.2)
+- MODIFIED: `NEXT_SESSION.md` (this entry)
+
+### Untouched by R27D
+
+- No `src/compiler/*` touched (R27A owns it)
+- No prior LSP modules touched beyond the type_completion dispatch
+  hook (R5F/R8C/R9C/R13C/R14C/R15F/R16C/R18F/R19F/R20D/R21F/R22C/
+  R23F/R24E/R25F/R26D modules read only)
+- No DAP / tree-sitter / packaging files touched (settled)
+- No CrossEngin files touched
+
+### R27D.2 follow-ups (deferred)
+
+- Cross-file in-scope value walk: today the binding harvest only
+  walks the current document. A `Point` value imported via
+  `import "shared.nova"` won't be offered. Doing this correctly
+  needs a workspace-wide value index alongside the existing type
+  index — out of scope for the editor-UX feature.
+- Snippet-style insertion: `..${1:base}` so the user lands on a
+  placeholder ready to type. Needs LSP `InsertTextFormat: 2`
+  surfaced through the response, plus a snippet-aware client.
+- Struct method receiver as a base: a method `fn Point.shift(self,
+  dx, dy) { Point { ..self } }` could suggest `self` for the
+  `..|` position. Today we don't track `self`'s type through the
+  method-decl header. Would need a richer scope walk.
+- Type-aware ranking: if the user has multiple Point values in
+  scope, sort by the most recently mutated / referenced one rather
+  than declaration order. Needs usage tracking the LSP doesn't
+  do today.
+
+---
+
 ## R26B — tree-sitter grammar refresh (R25A brace-init + destructure)
 
 **Status: complete** — extends R24B's R17A–R23A coverage with the
