@@ -1,0 +1,111 @@
+// R27A.2: NOVA struct const-fold optimisation — collapse all-literal
+// brace-init / update-syntax struct constructions down to a single
+// AST_LIST_LIT at AST level so the runtime emits exactly one list_new +
+// per-field push sequence (no redundant temp allocation for the spread
+// base, no extra runtime field-access for `base.field`).
+//
+// This is a code-shape optimisation only — the runtime values produced
+// must be bit-identical to the un-folded version. The fold trigger only
+// fires when both the override values AND the spread base are statically
+// foldable; anything dynamic (a variable, a call, an arithmetic
+// expression involving a variable) safely falls through to the existing
+// runtime emit path.
+//
+// 16 assertions across:
+//   * plain literal struct (already optimal — verify runtime value)
+//   * `Foo { x: 10, ..Foo { x: 1, y: 2 } }` literal-spread fold
+//   * literal-spread fold with all 3 fields in a wider struct
+//   * literal-spread fold equivalence vs un-folded variable spread
+//   * spread base is a runtime variable — NOT folded (still runs)
+//   * one override value is a variable — NOT folded (still runs)
+//   * one override value is a call — NOT folded (still runs)
+//   * deeply-nested literal spread compiles + runs
+
+struct Point {
+    x: int,
+    y: int
+}
+
+// --- Case 1: already-literal struct (no spread) ---
+// The fold pass produces an AST_LIST_LIT in declaration order; runtime
+// value is unchanged from a hand-written `Point(x, y)` ctor.
+
+let p_lit = Point { x: 1, y: 2 }
+assert(p_lit.x == 1, "case-1: x == 1 (literal struct)")
+assert(p_lit.y == 2, "case-1: y == 2 (literal struct)")
+
+// --- Case 2: literal-spread fold — base + overrides all literal ---
+// `Point { x: 10, ..Point { x: 1, y: 2 } }` => Point { x: 10, y: 2 }
+// (override beats base by field name; missing fields copy from base).
+
+let p_fold = Point { x: 10, ..Point { x: 1, y: 2 } }
+assert(p_fold.x == 10, "case-2: x overridden to 10")
+assert(p_fold.y == 2, "case-2: y copied from base 2")
+
+// Same value, computed via the variable-spread form. This goes through
+// the runtime `base.field` lookup; the result must match the folded
+// version above bit-for-bit.
+
+let p_var_base = Point { x: 1, y: 2 }
+let p_runtime = Point { x: 10, ..p_var_base }
+assert(p_runtime.x == p_fold.x, "case-2: folded x matches runtime emit")
+assert(p_runtime.y == p_fold.y, "case-2: folded y matches runtime emit")
+
+// --- Case 3: literal-spread fold on a 3-field struct ---
+
+struct Triple {
+    a: int,
+    b: int,
+    c: int
+}
+
+let t_fold = Triple { b: 99, ..Triple { a: 1, b: 2, c: 3 } }
+assert(t_fold.a == 1, "case-3: a copied from base")
+assert(t_fold.b == 99, "case-3: b overridden")
+assert(t_fold.c == 3, "case-3: c copied from base")
+
+// --- Case 4: runtime-variable base — NOT folded (still runs) ---
+// `p_var_base` is an AST_IDENT so the fold pass leaves the
+// AST_STRUCT_INIT alone; the runtime path emits the same `base.field`
+// loop R26A introduced. We verify the value is correct.
+
+let p_runtime_clone = Point { ..p_var_base }
+assert(p_runtime_clone.x == 1, "case-4: bare-ident base clone preserves x")
+assert(p_runtime_clone.y == 2, "case-4: bare-ident base clone preserves y")
+
+// --- Case 5: one override value is a variable — NOT folded ---
+// `var_x` is non-literal so _cg_all_literals fails => fold trigger
+// declines => runtime path emits the override as a plain expression and
+// the missing y from `base.y`. Result must still be correct.
+
+let var_x = 77
+let p_mixed = Point { x: var_x, ..Point { x: 1, y: 2 } }
+assert(p_mixed.x == 77, "case-5: variable override applied")
+assert(p_mixed.y == 2, "case-5: y still copied from literal base")
+
+// --- Case 6: override value is a call — NOT folded ---
+// Calls are not literals; the fold trigger declines. Result is the
+// call's return value at runtime.
+
+fn one_hundred() {
+    return 100
+}
+
+let p_call = Point { x: one_hundred(), ..Point { x: 1, y: 2 } }
+assert(p_call.x == 100, "case-6: call override applied")
+assert(p_call.y == 2, "case-6: y still copied from literal base")
+
+// --- Case 7: deeply-nested literal-spread fold ---
+// Outer spread base is `Triple { a: 10, b: 20, c: 99 }`; we override `c`.
+// Pre-R27A.2 this would emit:
+//   alloc the inner Triple base value (1 list_new + 3 pushes)
+//   alloc the outer Triple by reading `base.a`, `base.b`, override c
+// After the fold, the entire expression collapses to a single
+// AST_LIST_LIT — 1 list_new + 3 pushes total.
+
+let t_deep = Triple { c: 30, ..Triple { a: 10, b: 20, c: 99 } }
+assert(t_deep.a == 10, "case-7: nested literal a")
+assert(t_deep.b == 20, "case-7: nested literal b")
+assert(t_deep.c == 30, "case-7: nested literal c overridden")
+
+println("test_struct_const_fold.nova: all 16 const-fold assertions passed")

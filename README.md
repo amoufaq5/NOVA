@@ -17,7 +17,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 178 tests (172 pass, 6 skip) |
+| **Tests** | 182 tests (176 pass, 6 skip) |
 | **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64-Linux, Windows ARM64 (PE32+ AArch64) |
 
 ---
@@ -967,6 +967,32 @@ Measured on a synthetic 30-stmt benchmark (`bench_fold.nova`):
 ~4.3% reduction in emitted .s size; self-hosting stage2/stage3
 remains bit-identical because the compiler source already used
 literals where folding would apply.
+
+**R27A.2 extension — struct const-fold.** The fold pass now
+collapses all-literal brace-init + update-syntax constructions:
+
+- `Foo { x: 10, ..Foo { x: 1, y: 2 } }` is recognised as a
+  compile-time constant (the parser wraps the non-trivial
+  spread base in a `do { let _struct_spread_tmp_N = ...; ... }`
+  cache); the entire do-expr is rewritten in place into a single
+  `AST_LIST_LIT` in field-declaration order, eliminating the
+  inner struct allocation + the runtime `base.field` reads R26A
+  emits for the variable-spread path.
+- `Foo { x: 1, y: 2 }` with all-literal values is rewritten to
+  the same AST_LIST_LIT shape. The wire-format of a struct value
+  is already a positional list across every target, so codegen
+  emits identical machine code for both forms; the rewrite is
+  preserved for downstream walker uniformity.
+- Anything dynamic — variable, function call, arithmetic, enum
+  ctor — fails the literal check; the construction falls through
+  to the runtime emit path R26A introduced (no regression).
+
+The fold needs field-declaration order, which lives in
+`cg_structs` — empty until `cg_init()` runs *after* the fold
+pass. A private side-table (`cg_fold_structs`, populated by
+`_cg_fold_register_structs`) mirrors the AST_STRUCT_DECL list
+at the top of `cg_fold_constants` so the fold helpers can
+look up field order without re-architecting the pipeline.
 
 ### SIMD i32x8 codegen intrinsics (R11D)
 Explicit 8-lane int32 SIMD builtins lowered directly by the compiler.

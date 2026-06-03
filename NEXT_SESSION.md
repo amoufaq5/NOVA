@@ -1,5 +1,109 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R27A.2 — NOVA struct const-fold optimisation (R26A.2 follow-up to R26A)
+
+**Status: complete** — the AST-level constant-folding pass (R12E)
+now collapses all-literal `Foo { x: 10, ..Foo { x: 1, y: 2 } }`
+constructions down to a single AST_LIST_LIT in field-declaration
+order so the runtime emits exactly one `_nova_list_new` + per-field
+push sequence (no temp allocation for the spread base, no runtime
+`base.field` lookup).
+
+### Fold trigger
+
+The trigger fires only when both sides are statically known:
+
+  - Outer override values: every entry of `nd[2]` is a primitive
+    literal (int / bool / str / float / none — same definition as
+    R12E's existing `_cg_fold_eval`).
+  - Spread base: the parser-emitted do-expr wrapper hides the
+    non-trivial base in a fresh `_struct_spread_tmp_N` local. We
+    pattern-match the wrapper shape and require its let-RHS to be
+    an AST_STRUCT_INIT (no base) over the same struct name with
+    all-literal values.
+
+Anything dynamic — a variable reference, a function call, an
+arithmetic expression, an enum ctor — fails the literal check and
+the entire construction falls through to the runtime emit path
+R26A introduced (one alloc for the base + one for the override
+overlay).
+
+### What's rewritten
+
+Two collapse points, mutated in place so any parent pointer stays
+valid:
+
+  - **AST_STRUCT_INIT (no base, all-literal values)** — rewritten
+    to AST_LIST_LIT in field-declaration order. The wire-shape is
+    already a positional list `[v0, v1, ...]` across every target
+    (x86-64, ARM64-Linux, Win-ARM64, WASM), so codegen accepts the
+    rewrite transparently — the four backends emit the same per-
+    field push sequence for both AST_STRUCT_INIT and AST_LIST_LIT.
+  - **AST_DO_EXPR (struct-update wrapper)** — when the wrapper's
+    let-RHS is an all-literal AST_STRUCT_INIT and the final-expr
+    AST_STRUCT_INIT has all-literal overrides over the same
+    struct, the entire do-expr collapses to a single AST_LIST_LIT
+    whose elements are the merged value list (override beats base
+    by field name; missing fields fall back to the base; if neither
+    supplies the field — only possible with partial bases — the
+    slot gets `ast_none()`, mirroring `cg_reorder_struct_init`'s
+    fallback).
+
+### Side-table
+
+`cg_fold_constants` runs upstream of `cg_init()` so `cg_structs`
+is still empty when the fold pass needs field-declaration order.
+We mirror the AST_STRUCT_DECL list into a private side-table
+(`cg_fold_structs`, populated by `_cg_fold_register_structs`)
+once at the start of each fold invocation; the fold helpers query
+it via a linear scan (`_cg_fold_find_struct`). Struct count is
+small enough that a hash table would be over-engineering.
+
+### Order of traversal
+
+The do-expr wrapper pattern is detected PRE-ORDER, before the
+walker recurses into the let-RHS. Post-order traversal would
+fold the inner AST_STRUCT_INIT to an AST_LIST_LIT first, losing
+the field-name list the spread merge needs. Pre-order check +
+early-return means a successful wrapper fold short-circuits the
+recursion. Non-matching shapes (plain `do { stmts; expr }`
+blocks, mid-list spreads, chained updates whose base is itself a
+do-expr) fall through to the existing recursion.
+
+### Verification
+
+  - **tests/test_struct_const_fold.nova** — 16 new assertions
+    covering the trigger axes:
+    - literal-only struct (no spread) — value preserved.
+    - literal-spread fold on a 2-field and 3-field struct.
+    - folded vs runtime-variable-spread bit-for-bit equivalence.
+    - bare-IDENT base spread (`..p` where `p` is a runtime var)
+      — NOT folded; verifies the value is still correct.
+    - variable override value (`x: var_x`) — NOT folded.
+    - call override value (`x: one_hundred()`) — NOT folded.
+    - deeply-nested literal spread — folded successfully.
+  - **make test-all**: 176/0/6 (was 175/0/6, +1 new test file).
+  - **make self-host**: stage2.s == stage3.s bit-identical.
+  - **tests/test_struct_update_cross_target.sh**: all 6 targets
+    (linux / macos / windows / arm64 / windows-arm64 / wasm) still
+    pass.
+  - Microbench (`Point { x: 10, ..Point { x: 1, y: 2 } }`):
+    `_nova_list_new` call count drops from 26 (with --no-opt) to
+    25 (with the new fold). The user-level alloc count for that
+    expression is the difference — one fewer struct allocation.
+
+### Files touched
+
+  - `src/compiler/codegen.nova` — new helpers
+    (`_cg_replace_with_list_lit`, `_cg_fold_register_structs`,
+    `_cg_fold_find_struct`, `_cg_is_literal_value`,
+    `_cg_all_literals`, `_cg_try_fold_struct_init`,
+    `_cg_try_fold_struct_update_do`), modified AST_STRUCT_INIT +
+    AST_DO_EXPR branches in `cg_fold_expr`, side-table
+    registration call at the top of `cg_fold_constants`.
+  - `tests/test_struct_const_fold.nova` — NEW (16 assertions).
+  - `NEXT_SESSION.md`, `README.md` — round notes.
+
 ## R27D — LSP base-spread completion (R26A.2 follow-up to R26D)
 
 **Status: complete** — `Point { ..|` and `Point { x: 10, ..|`

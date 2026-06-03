@@ -2402,6 +2402,226 @@ fn _cg_replace_with_int(nd, value) {
     return nd
 }
 
+// R27A.2 (this round): replace a node's contents with an AST_LIST_LIT
+// carrying `elements`. Mutates in place so any parent pointer to nd
+// continues to address the rewritten node. Used by the struct const-fold
+// optimisation to collapse `Foo { x: 10, ..Foo { x: 1, y: 2 } }` (and the
+// parser-emitted do-expr wrapper that caches non-trivial spread bases)
+// down to a single literal list — same wire-shape as the runtime-emitted
+// struct value `[v0, v1, ...]` in field declaration order.
+fn _cg_replace_with_list_lit(nd, elements) {
+    while len(nd) > 0 {
+        pop(nd)
+    }
+    push(nd, AST_LIST_LIT)
+    push(nd, elements)
+    return nd
+}
+
+// ---- R27A.2 NOVA struct const-fold side-table ----
+//
+// The fold pass runs upstream of cg_init() so cg_structs is empty at this
+// point. We mirror the (name, fields) entries here so the fold pass can
+// recover field-declaration order when collapsing an all-literal
+// AST_STRUCT_INIT (or the parser-emitted spread do-expr) down to an
+// AST_LIST_LIT. Built once at the start of cg_fold_constants from the
+// program's AST_STRUCT_DECL nodes; cleared on each invocation.
+let cg_fold_structs = 0
+let cg_fold_struct_count = 0
+
+fn _cg_fold_register_structs(program) {
+    cg_fold_structs = list_new()
+    cg_fold_struct_count = 0
+    if program == 0 { return 0 }
+    let decls = program[1]
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_STRUCT_DECL {
+            let entry = list_new()
+            push(entry, d[1])   // name
+            push(entry, d[2])   // declaration-order field name list
+            push(cg_fold_structs, entry)
+            cg_fold_struct_count = cg_fold_struct_count + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Returns the declaration-order field-name list for `name`, or 0 if no
+// such struct has been registered. Linear scan — struct count is small
+// (a few dozen even in the self-host build) so a hash table would be
+// over-engineering.
+fn _cg_fold_find_struct(name) {
+    let i = 0
+    while i < cg_fold_struct_count {
+        if cg_fold_structs[i][0] == name {
+            return cg_fold_structs[i][1]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Returns 1 iff `nd` is a primitive literal node — int / bool / str /
+// float / none. Identifiers, calls, list/struct/lambda/etc. are NOT
+// literals for this pass: only ground constants safely commute through
+// the merge step. We don't recurse into list/map literals (whose elements
+// might be arbitrary expressions) — conservatively skipping nested
+// containers keeps the fold safe.
+fn _cg_is_literal_value(nd) {
+    if nd == 0 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_INT_LIT { return 1 }
+    if t == AST_BOOL_LIT { return 1 }
+    if t == AST_STR_LIT { return 1 }
+    if t == AST_FLOAT_LIT { return 1 }
+    if t == AST_NONE_LIT { return 1 }
+    return 0
+}
+
+// All entries of a value-list are literals (per _cg_is_literal_value).
+// Empty list returns 1 (trivially all-literal).
+fn _cg_all_literals(values) {
+    let i = 0
+    while i < len(values) {
+        if _cg_is_literal_value(values[i]) == 0 { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// Try to collapse an all-literal AST_STRUCT_INIT (no spread base) into a
+// synthetic AST_LIST_LIT in field-declaration order. Mutates nd in place
+// and returns 1 on success, 0 otherwise. Skipped silently when the struct
+// hasn't been registered (e.g. external type) so the unchanged AST falls
+// through to the existing runtime emit path.
+//
+// Conditions:
+//   * nd[4] is zero / absent (no `..base` spread)
+//   * every value in nd[2] is a primitive literal
+//   * the struct name is registered in cg_fold_structs
+//
+// Effect: produce a new list `[v0, v1, ...]` in decl order; fields not
+// supplied by the source get an ast_none() placeholder (mirrors the
+// codegen-time cg_reorder_struct_init behaviour for partial inits). The
+// caller is responsible for invoking this only on AST_STRUCT_INIT nodes.
+fn _cg_try_fold_struct_init(nd) {
+    if len(nd) > 4 {
+        if nd[4] != 0 { return 0 }
+    }
+    let src_vals = nd[2]
+    let src_names = nd[3]
+    if _cg_all_literals(src_vals) == 0 { return 0 }
+    let decl_fields = _cg_fold_find_struct(nd[1])
+    if decl_fields == 0 { return 0 }
+    let n = len(decl_fields)
+    let ordered = list_new()
+    let j = 0
+    while j < n {
+        let want = decl_fields[j]
+        let found = 0
+        let k = 0
+        while k < len(src_names) {
+            if src_names[k] == want {
+                push(ordered, src_vals[k])
+                found = 1
+                k = len(src_names)
+            }
+            k = k + 1
+        }
+        if found == 0 {
+            push(ordered, ast_none())
+        }
+        j = j + 1
+    }
+    _cg_replace_with_list_lit(nd, ordered)
+    return 1
+}
+
+// Try to collapse the parser-emitted struct-update do-expr wrapper into a
+// single AST_LIST_LIT. The parser shape for a non-trivial spread base is:
+//
+//     do {
+//         let _struct_spread_tmp_N = <base_expr>
+//         <AST_STRUCT_INIT with override values and base = ident(tmp)>
+//     }
+//
+// When both <base_expr> is itself an AST_STRUCT_INIT with all-literal
+// fields AND every override value is a literal, the entire construction
+// is a compile-time constant. We materialise the merged value list in
+// field-declaration order (override beats base by field name) and
+// rewrite the do-expr in place. Mutates nd and returns 1 on success.
+fn _cg_try_fold_struct_update_do(nd) {
+    let ds = nd[1]
+    if len(ds) != 1 { return 0 }
+    let s = ds[0]
+    if ast_tag(s) != AST_LET_STMT { return 0 }
+    let tmp_name = s[1]
+    if starts_with(tmp_name, "_struct_spread_tmp_") == 0 { return 0 }
+    let base_init = s[2]
+    if base_init == 0 { return 0 }
+    if ast_tag(base_init) != AST_STRUCT_INIT { return 0 }
+    // The base itself must not have its own spread (no chained
+    // un-collapsed update). When base_init has nd[4] != 0 we bail out
+    // and let later iterations handle it (currently single-pass).
+    if len(base_init) > 4 {
+        if base_init[4] != 0 { return 0 }
+    }
+    let final_init = nd[2]
+    if final_init == 0 { return 0 }
+    if ast_tag(final_init) != AST_STRUCT_INIT { return 0 }
+    if len(final_init) <= 4 { return 0 }
+    let ref = final_init[4]
+    if ref == 0 { return 0 }
+    if ast_tag(ref) != AST_IDENT { return 0 }
+    if ref[1] != tmp_name { return 0 }
+    if final_init[1] != base_init[1] { return 0 }
+    // Both sides must be all-literal: the base supplies every field by
+    // construction, the overrides supply a subset.
+    if _cg_all_literals(base_init[2]) == 0 { return 0 }
+    if _cg_all_literals(final_init[2]) == 0 { return 0 }
+    let decl_fields = _cg_fold_find_struct(final_init[1])
+    if decl_fields == 0 { return 0 }
+    let n = len(decl_fields)
+    let ordered = list_new()
+    let j = 0
+    while j < n {
+        let want = decl_fields[j]
+        // Override wins by field name.
+        let found = 0
+        let k = 0
+        while k < len(final_init[3]) {
+            if final_init[3][k] == want {
+                push(ordered, final_init[2][k])
+                found = 1
+                k = len(final_init[3])
+            }
+            k = k + 1
+        }
+        if found == 0 {
+            // Look up in the base.
+            let bk = 0
+            while bk < len(base_init[3]) {
+                if base_init[3][bk] == want {
+                    push(ordered, base_init[2][bk])
+                    found = 1
+                    bk = len(base_init[3])
+                }
+                bk = bk + 1
+            }
+        }
+        if found == 0 {
+            // Neither side supplied — same fallback as cg_reorder_struct_init.
+            push(ordered, ast_none())
+        }
+        j = j + 1
+    }
+    _cg_replace_with_list_lit(nd, ordered)
+    return 1
+}
+
 // Try to evaluate an AST node as an integer constant.
 // Returns the integer value or FOLD_SENTINEL if not foldable.
 // Recursively folds sub-expressions as a side effect.
@@ -2610,6 +2830,14 @@ fn cg_fold_expr(nd) {
         if len(nd) > 4 {
             if nd[4] != 0 { cg_fold_expr(nd[4]) }
         }
+        // R27A.2: collapse all-literal struct-init (no spread base) into
+        // a synthetic AST_LIST_LIT in field-declaration order. Wire-shape
+        // matches the runtime-emitted struct value across every target
+        // (the four codegens push the same per-field sequence for both
+        // AST_STRUCT_INIT and AST_LIST_LIT), so the rewrite is
+        // transparent. Mutation is in place so any parent pointer to nd
+        // stays valid; ast_tag(nd) reports AST_LIST_LIT after the fold.
+        _cg_try_fold_struct_init(nd)
         return nd
     }
     if tag == AST_LAMBDA {
@@ -2626,6 +2854,24 @@ fn cg_fold_expr(nd) {
         return nd
     }
     if tag == AST_DO_EXPR {
+        // R27A.2: detect the parser-emitted struct-update wrapper FIRST
+        // (pre-order), before recursing into the let-RHS. The wrapper
+        // shape is:
+        //
+        //     do { let _struct_spread_tmp_N = <BaseInit>; <OverrideInit> }
+        //
+        // When both BaseInit and OverrideInit are all-literal struct
+        // inits over the same struct type, collapse the do-expr down to
+        // a single AST_LIST_LIT. Pre-order checking matters: a post-order
+        // pass would first fold the inner AST_STRUCT_INIT (which has no
+        // base) into an AST_LIST_LIT, losing the field-name list that
+        // the spread merge needs. By checking the outer wrapper first
+        // and folding directly, we keep the inner StructInit metadata in
+        // hand. If the wrapper matches and folds, we return early —
+        // ast_tag(nd) is now AST_LIST_LIT.
+        if _cg_try_fold_struct_update_do(nd) == 1 {
+            return nd
+        }
         let ds = nd[1]
         let i = 0
         while i < len(ds) {
@@ -2808,9 +3054,15 @@ fn cg_fold_stmt(nd) {
 
 // Top-level constant-folding entry point. Walks every declaration in the
 // program AST and folds every expression in place.
+//
+// R27A.2: before traversing, mirror the program's AST_STRUCT_DECL nodes
+// into cg_fold_structs so the struct-init / struct-update folds can
+// recover field-declaration order. Runs upstream of cg_init() so we
+// cannot reuse cg_structs (still empty at this point).
 fn cg_fold_constants(program) {
     if cg_no_opt == 1 { return program }
     if program == 0 { return program }
+    _cg_fold_register_structs(program)
     let decls = program[1]
     let i = 0
     while i < len(decls) {
