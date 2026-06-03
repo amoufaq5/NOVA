@@ -19,7 +19,7 @@ for the install hook.
 | `textDocument/completion`           | yes (builtins + fn/let scan, triggers on `.` and `(`) |
 | `textDocument/rename`               | yes (workspace-wide for top-level fn/let/const/type, single-buffer for locals + params) |
 | `textDocument/references`           | yes (regex scan, open docs + transitively imported files) |
-| `textDocument/codeAction`           | yes (extract function, organize imports, sort fn declarations) |
+| `textDocument/codeAction`           | yes (extract function, organize imports, sort fn declarations, plus a `quickfix` for R17A's exhaustiveness WARN that auto-adds stub arms for missing variants) |
 | `textDocument/definition`           | yes (intra-file + follows `import "..."` transitively) |
 | `workspace/symbol`                  | yes (fuzzy name search across every indexed `.nova` file) |
 | `textDocument/semanticTokens/full`  | yes (variable / function / type / namespace / keyword / string / number / comment / parameter / constant with declaration / readonly / static modifiers) |
@@ -127,7 +127,7 @@ invalidation keeps repeat lookups O(1) when nothing has changed on disk;
 open buffers feed their live text in via a `text_overrides` map so
 unsaved edits beat stale on-disk content.
 
-Code actions surface three refactorings via the VS Code lightbulb menu:
+Code actions surface four refactorings via the VS Code lightbulb menu:
 
 * **Extract to function `extracted_N`** (`refactor.extract`) — only
   shown when the selection covers a multi-statement block inside a `fn`
@@ -142,9 +142,24 @@ Code actions surface three refactorings via the VS Code lightbulb menu:
 * **Sort top-level functions** (`source.organizeFns`) — sorts every
   top-level `fn` declaration by name, preserving each declaration's
   leading doc-comment block.
+* **Add missing match arms** (`quickfix`) — only shown when the client
+  forwards R17A's `non-exhaustive match on E (missing: V1, V2)` WARN
+  in `context.diagnostics`. The server resolves the enum's variants
+  (same file, transitively imported file, or sibling indexed by the
+  workspace symbol index), subtracts the variants already covered by
+  existing arms, and inserts a stub arm for each remaining variant
+  with `_` placeholders matching the variant's payload arity. The
+  insertion lands just above the existing `_` catch-all when one is
+  present; otherwise just above the closing `}` of the match. Each
+  generated arm body is `/* TODO */` so the user sees an obvious
+  spot to fill in. Example: a match on `Shape` that only covers
+  `Circle + Triangle` gets `Shape::Rect(_, _) => /* TODO */`
+  inserted between the existing arms and the closing brace.
 
-All three return `WorkspaceEdit`s in the `{"changes": {uri: TextEdit[]}}`
-shape, which VS Code applies in-place without diff reconciliation.
+All four return `WorkspaceEdit`s in the `{"changes": {uri: TextEdit[]}}`
+shape, which VS Code applies in-place without diff reconciliation. The
+quickfix's diagnostic is round-tripped on the `CodeAction.diagnostics`
+field so the editor highlights the squiggle as fixable in the gutter.
 
 Semantic tokens (`textDocument/semanticTokens/full` + `/range`) drive
 rich syntax highlighting beyond TextMate regex scopes. Each identifier
@@ -345,9 +360,10 @@ python tools/nova-lsp/tests/test_call_hierarchy.py
 python tools/nova-lsp/tests/test_inlay_hints.py
 python tools/nova-lsp/tests/test_code_lens.py
 python tools/nova-lsp/tests/test_type_hierarchy.py
+python tools/nova-lsp/tests/test_exhaustiveness_fix.py
 ```
 
-The thirteen `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The fourteen `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
 ~10 ms each (the workspace-symbol + workspace-rename + call-hierarchy
@@ -407,6 +423,7 @@ tools/nova-lsp/
     inlay_hints.py          # parameter-name + literal-type inlay hints
     code_lens.py            # reference-count annotations above decls
     type_hierarchy.py       # prepare / supertypes / subtypes resolver
+    exhaustiveness_fix.py   # quickfix: auto-add missing match arms
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -422,4 +439,5 @@ tools/nova-lsp/
     test_inlay_hints.py
     test_code_lens.py
     test_type_hierarchy.py
+    test_exhaustiveness_fix.py
 ```

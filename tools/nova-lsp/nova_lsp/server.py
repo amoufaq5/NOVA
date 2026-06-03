@@ -14,7 +14,9 @@ using only the Python standard library. Supports:
     * `textDocument/references` (regex-based occurrence scan over the
       transitive import graph)
     * `textDocument/codeAction` (extract function, organize imports,
-      sort top-level fn declarations)
+      sort top-level fn declarations, plus a `quickfix` action that
+      auto-adds missing match arms when R17A's exhaustiveness WARN
+      fires on a non-exhaustive match)
     * `workspace/symbol` (fuzzy name search across all indexed `.nova`
       files; index is warmed incrementally on didOpen/didChange and
       lazily crawls the workspace root on first query)
@@ -66,6 +68,10 @@ from nova_lsp.call_hierarchy import (
     prepare_call_hierarchy,
 )
 from nova_lsp.code_lens import compute_code_lenses, resolve_code_lens
+from nova_lsp.exhaustiveness_fix import (
+    KIND_QUICKFIX,
+    build_exhaustiveness_code_actions,
+)
 from nova_lsp.hover_docs import (
     extract_doc_comment,
     extract_doc_comment_from_text,
@@ -1529,6 +1535,7 @@ def handle_code_action(
     }
     context = params.get("context") or {}
     only = context.get("only")  # list[str] | None
+    diagnostics = context.get("diagnostics") or []
 
     def _allowed(kind: str) -> bool:
         if not only:
@@ -1550,6 +1557,34 @@ def handle_code_action(
         sf = _build_sort_fns_action(doc)
         if sf:
             actions.append(sf)
+    # R20D: exhaustiveness quick-fix. Driven by the diagnostics list
+    # the client forwards in `context.diagnostics` — we look for
+    # R17A's "non-exhaustive match on E (missing: V1, V2)" WARN and
+    # emit one action per repairable match. The action is a
+    # WorkspaceEdit that inserts stub arms for each missing variant
+    # just above the catch-all (or the closing `}` when no catch-all).
+    if _allowed(KIND_QUICKFIX) and diagnostics:
+        # Warm the workspace symbol index so a cross-file enum decl
+        # (declared in shapes.nova, matched in main.nova) is found
+        # even when no `import "..."` exists yet — same warming dance
+        # the call/type hierarchy handlers use. Cheap once warm.
+        if state.root_path:
+            state.workspace_symbols.index_workspace_root(state.root_path)
+        for d in state.documents.values():
+            _refresh_workspace_symbols_for_doc(state, d)
+        start_path = uri_to_path(doc.uri)
+        if start_path:
+            start_path = os.path.abspath(start_path)
+        ex_actions = build_exhaustiveness_code_actions(
+            uri=doc.uri,
+            doc_text=doc.text,
+            diagnostics=diagnostics,
+            file_cache=state.file_cache,
+            workspace_index=state.workspace_symbols,
+            text_overrides=_text_overrides(state),
+            start_path=start_path,
+        )
+        actions.extend(ex_actions)
 
     return actions
 
@@ -2141,6 +2176,7 @@ def server_capabilities() -> Dict[str, Any]:
                 KIND_REFACTOR_EXTRACT,
                 KIND_SOURCE_ORGANIZE_IMPORTS,
                 KIND_SOURCE_ORGANIZE_FNS,
+                KIND_QUICKFIX,
             ],
         },
         "workspaceSymbolProvider": {"resolveProvider": False},

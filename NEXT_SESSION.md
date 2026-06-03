@@ -1,5 +1,161 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R20D — LSP quickfix: auto-add missing match arms
+
+R20D wires R17A's match-exhaustiveness WARN through the LSP code-action
+pipeline. When the editor receives a `non-exhaustive match on E
+(missing: V1, V2)` diagnostic from `nova --check`, the lightbulb now
+offers an **"Add missing match arms"** quickfix that inserts a stub
+arm for each missing variant — with `_` placeholders matching the
+variant's payload arity — directly into the match expression. This
+is the matching IDE convenience for R17A's exhaustiveness check that
+shipped in commit `41f0332`.
+
+### What landed
+
+**nova-lsp** (`tools/nova-lsp/nova_lsp/exhaustiveness_fix.py`, NEW):
+
+  * `parse_exhaustiveness_diagnostic(message)` — pulls the enum name
+    and the missing-variant list out of R17A's WARN string format
+    (`non-exhaustive match on Shape (missing: Rect, Triangle)`).
+    Defensive: strips an optional leading `warning:` prefix so the
+    same regex works on either the LSP-cleaned message or the raw
+    stderr line some clients forward.
+  * `find_match_at(doc_text, line)` — locates the smallest
+    `match ... { ... }` block whose head sits at or near the
+    diagnostic line. Walks the document for every `match` keyword,
+    counts brace depth across lines (with string + comment masking)
+    to find the matching close, and picks the innermost containing
+    block. Returns a `MatchExprInfo` with arm boundaries, the
+    catch-all line (if any), and the indent used by sibling arms.
+  * `resolve_enum_decl(name, start_path, file_cache, ...)` — finds
+    the enum's declaration via R5F's `walk_imports` (so an enum
+    declared in `shapes.nova` and matched in `main.nova` is found
+    through the import graph) with fallback to R8C's workspace
+    symbol index for sibling files outside the import graph. Reuses
+    R15F's `scan_enum_variants` so payload arity (`Some(int)` -> 1,
+    `Rect(int, int)` -> 2, `Triangle(int, int, int)` -> 3) round-
+    trips into the generated stubs.
+  * `collect_covered_variants(match_info, enum_name)` — walks the
+    arms of the match and harvests every `EnumName::Variant` head
+    (also accepts the legacy `.` form). Catch-alls and literal
+    patterns don't contribute to the covered set.
+  * `infer_missing_variants(...)` — set-difference between the
+    declared variants and the covered set, using R17A's WARN list as
+    a tiebreaker when the AST scan is ambiguous. Returns variants in
+    declaration order so generated arms match R17A's variant tag
+    ordering.
+  * `build_arm_text(enum, variant, indent)` — renders one stub arm:
+    bare `Enum::Variant` for nullary variants, `Enum::Variant(_)` for
+    arity 1, `Enum::Variant(_, _)` for arity 2, etc. Body is always
+    `/* TODO */` so the user sees an obvious fill-me-in spot.
+  * `compute_insertion_point(match_info, doc_text)` — when the match
+    has a `_ =>` catch-all the insertion lands one line above it (so
+    the catch-all stays last); otherwise it lands just above the
+    closing `}` of the match. Both return a zero-width
+    `(line, 0)` position so existing text is pushed down, not
+    overwritten.
+  * `build_workspace_edit(uri, doc_text, match_info, ...)` — packages
+    the generated arms into a `WorkspaceEdit` in the `{"changes":
+    {uri: [TextEdit]}}` shape the rest of the LSP already uses.
+  * `build_exhaustiveness_code_actions(uri, doc_text, diagnostics,
+    file_cache, ...)` — the top-level entry. Walks the diagnostics
+    list, filters for exhaustiveness WARNs, dedupes by match block
+    (a single match producing multiple identical fixes is
+    consolidated), and returns one `CodeAction` per repairable match.
+    Each action carries the originating diagnostic in its
+    `diagnostics` field so VS Code can highlight the squiggle as
+    fixable in the gutter.
+
+**nova-lsp** (`tools/nova-lsp/nova_lsp/server.py`):
+
+  * `handle_code_action` now also picks `context.diagnostics` out of
+    the request and forwards them to `build_exhaustiveness_code_actions`
+    when the new `quickfix` CodeActionKind is allowed by the
+    `context.only` filter. Warms the workspace symbol index before
+    dispatching so cross-file enum resolution sees siblings outside
+    the import graph (mirrors the dance the call/type-hierarchy and
+    code-lens handlers already do).
+  * `server_capabilities` advertises `"quickfix"` alongside the three
+    existing CodeActionKinds (`refactor.extract`,
+    `source.organizeImports`, `source.organizeFns`). LSP capability
+    count stays at 15 — this enhances the existing code-action
+    capability rather than adding a new one.
+
+**Tests** (NEW `tools/nova-lsp/tests/test_exhaustiveness_fix.py`,
+96 assertions):
+
+  * `parse_exhaustiveness_diagnostic`: simple WARN, multi-variant
+    WARN, `warning:`-prefixed WARN, unrelated diagnostic, empty
+    string.
+  * `find_match_at`: head-line resolution, catch-all line tracking,
+    no-match-in-buffer case.
+  * `resolve_enum_decl`: same file, cross-file via import, cross-file
+    via workspace index, missing-enum case.
+  * `collect_covered_variants`: single arm, multiple arms with
+    payload binders.
+  * `infer_missing_variants`: Option with only Some -> [None],
+    Shape with Circle+Triangle -> [Rect], decl-order preservation.
+  * `build_arm_text`: nullary, arity 1, arity 2, arity 3, custom
+    indents (2-space, tab).
+  * `build_arms_block`: newline joining for multiple arms.
+  * `compute_insertion_point`: no-catch-all -> close brace, with
+    catch-all -> catch-all line.
+  * `build_workspace_edit`: shape validation (changes key, single
+    TextEdit, zero-width range, TODO present, trailing newline).
+  * Integration scenarios: Option missing None, Shape missing Rect
+    (verifies `Rect(_, _)` arity-2 placeholders), Result missing Err,
+    no-warn-no-action, unrelated-diag-no-action,
+    insert-before-catch-all (verifies positional ordering),
+    cross-file enum (Op declared in `ops.nova`, matched in
+    `main.nova` via `import`).
+  * Server-level wire tests: capability advertisement, full dispatch
+    round trip, `context.only=['refactor.extract']` filters out the
+    quickfix, `context.only=['quickfix']` keeps only the quickfix,
+    existing code actions (organize imports, sort fns) unaffected
+    when no diagnostics are forwarded.
+
+All 14 LSP test suites still pass — none of the existing handlers
+(hover, completion, definition, rename, references, semantic
+tokens, call hierarchy, inlay hints, code lens, type hierarchy)
+were touched.
+
+### Example
+
+Given a match expression missing one of `Option`'s two variants:
+
+```nova
+enum Option { Some(int)  None }
+fn unwrap(o) {
+    match o {
+        Option::Some(v) => v
+    }
+}
+```
+
+`nova --check` emits:
+
+```
+warning: non-exhaustive match on Option (missing: None)
+```
+
+The LSP forwards that as a `Diagnostic` to the client. When the user
+clicks the lightbulb on the squiggle, the **"Add missing match arms"**
+quickfix inserts:
+
+```
+        Option::None => /* TODO */
+```
+
+just above the closing `}`. The same flow with a `Shape` enum
+missing the `Rect(int, int)` variant inserts
+`Shape::Rect(_, _) => /* TODO */` with two underscore placeholders
+matching the payload arity. With a `_ =>` catch-all already present
+the new arms are inserted above the catch-all so it stays the last
+branch.
+
+---
+
 ## R19B — cross-target enum codegen (R17A.2 follow-up)
 
 R19B closes the R17A.2 follow-up: NOVA sum types with payloads + match
