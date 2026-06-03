@@ -1,5 +1,103 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R21A — Generic enum payload types: `Result<T, E>` truly parametric
+
+R21A closes the "fixed payload types" gap from R17A: the same enum
+declaration can now hold any payload value at construction. Before
+R21A, `enum Result { Ok(int) Err(str) }` fixed the payload at the
+declaration; to use a `Result` whose Ok carries a `list`, you would
+have had to declare a separate enum. NOVA's runtime is dynamically
+typed (everything is a tagged value), so generic type parameters on
+enums are a **zero-cost, parser-only** feature: accept the syntax,
+validate identifiers, then erase at codegen.
+
+### What landed
+
+**parser.nova**:
+
+  * `parse_enum()` accepts optional generic type parameters between
+    the enum name and the body: `enum Result<T, E> { ... }`. The
+    parser reads identifier tokens separated by commas, then expects
+    `>` to close. The parameter list is discarded (no AST slot
+    change — `ast_enum_decl(name, variants)` is unchanged).
+  * `par_skip_type()` extended: when scanning a type annotation like
+    `Result<Result<int, str>, str>`, the tight nested `>>` lexes as
+    `TOK_SHR` (token 48). The depth tracker now decrements by 2 on
+    `TOK_SHR` so the outer generic closes correctly, plus uses
+    `depth <= 0` instead of `depth == 0` to handle the overshoot
+    case where the outer level closes via `TOK_SHR`.
+  * Type annotations like `let a: Result<int, str> = ...` already
+    worked via the existing `par_skip_type` (it accepted `<...>`
+    after a type identifier from R17A onward); R21A just makes that
+    path complete by also handling `>>`.
+
+**codegen.nova**: NO changes. Type parameters are erased at the
+parser level, so `cg_enums` still stores `[name, variants]` exactly
+as before. All six target lowerings (x86-64 Linux/macOS/Windows,
+ARM64 Linux, Windows ARM64, WASM) continue to emit the same code.
+
+**Tests** (NEW `tests/test_generic_enum.nova`, 25 assertions):
+
+  * Declare `enum Result<T, E> { Ok(T) Err(E) }`; construct
+    `Result::Ok(42)` and verify wire shape `[0, 42]`.
+  * Two instantiations with different concrete types from the SAME
+    enum decl: `let a: Result<int, str> = Result::Ok(42)` and
+    `let b: Result<list, int> = Result::Err(-1)` both compile + run.
+  * String payload via `Result<str, str>::Ok("hello")` round-trips.
+  * List payload via `Result<list, int>::Ok(lst)` round-trips with
+    `len(payload) == 2`.
+  * Match on generic enum: arm destructure binds payload correctly
+    on both `Ok` and `Err` arms.
+  * R20A `?` operator on generic Result: `parse_num(s)?` still
+    unwraps Ok and propagates Err identically.
+  * Tight-nested generic type annotation
+    `Result<Result<int, str>, str>` parses and compiles.
+  * Three-parameter generic enum
+    `enum Triple<A, B, C> { First(A) Second(B) Third(C) }` works.
+  * Generic enum with nullary variant `enum Pair<T, U> { Left(T)
+    Right(U) Empty }`: `Pair::Empty` lowers to a 1-slot tuple
+    `[2]`.
+
+### Verification
+
+  * `tests/run_tests.sh` : 173 total, 167 pass / 0 fail / 6 skip
+    (R20A baseline 172/166 + 1 new test).
+  * `make self-host` : stage2.s == stage3.s bit-identical
+    (parser-only change, deterministic).
+  * R17A `tests/test_sum_types.nova` (27 asserts): PASS.
+  * R17A `tests/test_exhaustiveness.nova` (15 asserts): PASS.
+  * R20A `tests/test_result.nova` (26 asserts): PASS.
+  * Cross-compile to all 6 targets succeeds with a generic-enum
+    program: linux/macos/wasm/windows/arm64/windows-arm64 all
+    produce expected machine code. The linux binary runs and
+    prints "R21A cross-target generic enum OK"; same under
+    wasmtime for WASM.
+
+### R21A.2 follow-ups
+
+  * Minimal type-check pass: when an enum variant constructor is
+    called (e.g., `Result::Ok(42)`), look at the surrounding type
+    annotation `Result<int, str>` and WARN at compile time if the
+    argument's literal type doesn't match the generic parameter
+    binding. Mirrors R17A's exhaustiveness WARN pattern.
+  * Store type-parameter names on AST_ENUM_DECL as a third slot
+    `d[3] = type_params_list`. Codegen still ignores them, but a
+    later type-checker can read them without re-parsing.
+  * Generic function syntax `fn map<T, U>(x: T, f: fn(T) -> U)`
+    — currently rejected by parse_fn. R21A skipped this scope; the
+    enum case was the most-requested.
+  * Generic struct syntax `struct Box<T> { value: T }` — same as
+    above; parse_struct_decl doesn't accept `<T>` yet.
+  * Tree-sitter grammar update (`tools/tree-sitter-nova`) to
+    highlight `<T, E>` on enum decls and type annotations. The
+    settled R9E grammar handles `<` as comparison; a generic-type
+    context would need a separate rule.
+  * Better error message when the closing `>` is missing on an
+    enum decl: currently `par_error("expected '>' to close enum
+    type parameters")` is acceptable but lacks a caret position.
+
+---
+
 ## R20A — Result + postfix `?` propagation operator (R17A.3)
 
 R20A wires the canonical error-handling idiom on top of R17A's sum types

@@ -206,10 +206,15 @@ fn par_skip_type() {
             let tt = par_peek_type()
             if tt == TOK_LT { depth = depth + 1 }
             if tt == TOK_GT { depth = depth - 1 }
+            // R21A: tight nested generics produce TOK_SHR (`>>`) which
+            // closes two levels at once. `Box<Box<int>>` lexes as
+            // `Box`, `<`, `Box`, `<`, `int`, `>>` — without splitting,
+            // we'd think depth is 1 at the end.
+            if tt == TOK_SHR { depth = depth - 2 }
             if tt == TOK_EOF {
                 par_error("unexpected end of file in type annotation")
             }
-            if depth == 0 { tdone = 1 }
+            if depth <= 0 { tdone = 1 }
             par_advance()
         }
     }
@@ -2345,6 +2350,37 @@ fn parse_enum() {
     par_expect(TOK_ENUM)
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
+    // R21A: generic type parameters `<T, E, ...>` on enum declarations.
+    // At codegen time these are erased (NOVA's runtime is dynamically
+    // typed via tagged values), so this is purely parser-level metadata:
+    // accept the syntax, validate identifiers, and discard. Future type
+    // checkers can re-read this from a per-enum side table once we
+    // store it; for now the goal is `enum Result<T, E>` and per-binding
+    // annotations like `Result<int, str>` to parse without errors.
+    if par_peek_type() == TOK_LT {
+        par_advance()
+        if par_peek_type() == TOK_GT {
+            par_advance()
+        } else {
+            // First type param
+            par_expect(TOK_IDENT)
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_GT { break }
+                par_expect(TOK_IDENT)
+            }
+            // Closing `>`; allow `>>` if nested at outer level (rare
+            // for enum decls but consistent with par_skip_type).
+            let close_t = par_peek_type()
+            if close_t == TOK_GT {
+                par_advance()
+            } else { if close_t == TOK_SHR {
+                par_advance()
+            } else {
+                par_error("expected '>' to close enum type parameters")
+            } }
+        }
+    }
     par_expect(TOK_LBRACE)
     let variants = list_new()
     let enum_done = 0
