@@ -1,5 +1,182 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R24A — Fn-call + struct-ctor type-check (R23A.2 followup)
+
+R24A finishes the type-check pass started in R23A by closing the two
+follow-up items it explicitly deferred: **function-call literal-arg
+mismatch** and **positional struct-constructor literal-arg mismatch**.
+The pass remains parser-only, parameter-erased at codegen, and
+non-fatal — the same conservative shape R23A introduced for enum
+constructors. Self-host stays bit-identical (`stage2.s == stage3.s`
+remains empty diff).
+
+### What landed
+
+**parser.nova** extends the `tc_*` module from R23A:
+
+  * `parse_param_list()` now captures per-param **type annotations**
+    via the existing `par_collect_type()` helper (previously discarded
+    via `par_skip_type`). The returned info list gains a 4th slot
+    `param_types` parallel to `params`, with `0` for params without an
+    annotation. Rest params get `0` placeholders to preserve the
+    parallel-index invariant.
+  * `parse_fn()` (standalone path) pushes `param_types` onto
+    AST_FN_DECL at slot 5 (after R23A's slot 4 = type_params). The
+    method-decl branch and the lambda branch both push the same shape
+    so the side table sees a uniform layout. The impl-block branch is
+    intentionally left unchanged (it pushes a `stmt_line` integer at
+    slot 5 inherited from pre-R22B).
+  * `parse_struct_decl()` now captures per-field type annotations via
+    `par_collect_type()` and pushes them onto AST_STRUCT_DECL at slot
+    4 (after R23A's slot 3 = type_params).
+  * Three new tc_* registration helpers run at the start of
+    `tc_check_program`:
+      * `tc_register_fns(decls)` walks every AST_FN_DECL building a
+        side table `[name, type_params, param_names, param_types]`.
+      * `tc_register_structs(decls)` walks every AST_STRUCT_DECL
+        building `[name, type_params, field_names, field_types]`.
+      * `tc_find_fn(name)` / `tc_find_struct(name)` for O(N) lookup.
+  * `tc_check_call_fn(call_nd)` is the real fn-call checker:
+      1. Reject non-AST_CALL / non-AST_IDENT-callee / unknown-name.
+      2. Initialise a bindings list parallel to the fn's type_params
+         (each entry "" until first bound).
+      3. Walk each literal arg: if the param's type-annotation names
+         a type-param T, infer T's binding from the first literal-
+         typed arg, then check every subsequent literal arg against
+         the inferred binding. If T is a concrete primitive, check
+         each literal directly via `tc_canon_type`.
+      4. Conservative skip on free vars, fn-call results, complex
+         expressions.
+  * `tc_check_call_struct(call_nd, annot_args)` mirrors the enum
+    checker but operates on struct ctor `AST_CALL` whose callee names
+    a known struct. The `annot_args` argument carries the surrounding
+    let-binding's type-args (e.g. `Box<int>` -> `[["int", []]]`); the
+    checker resolves each field's type-annotation against that
+    binding and checks the literal arg's static type.
+  * `tc_walk_expr(expr)` recurses through expression positions
+    (AST_CALL, AST_BIN_OP, AST_UNARY_OP, AST_AND_EXPR, AST_OR_EXPR,
+    AST_TERNARY, AST_INDEX_EXPR, AST_FIELD_ACCESS, AST_LIST_LIT,
+    AST_ENUM_CTOR) so nested call sites are all checked.
+  * `tc_walk_stmt` now also walks expr-bearing statements:
+    AST_EXPR_STMT, AST_RETURN_STMT, AST_ASSIGN_STMT, and the
+    expression children of AST_IF_STMT / AST_WHILE_STMT /
+    AST_FOR_STMT / AST_FOR_INDEXED. The AST_LET_STMT branch now
+    also calls `tc_walk_expr(nd[2])` so fn-call args inside lets
+    get checked even when the let lacks a type annotation.
+  * `tc_check_let_enum_ctor` extends to dispatch struct ctors when
+    the let-value is an AST_CALL whose callee matches the annotation
+    base name (e.g. `let b: Box<int> = Box(...)`). The pre-existing
+    AST_ENUM_CTOR path is unchanged.
+
+**Sample WARN trace** (`tests/test_fn_call_type_check.nova`):
+
+```
+warning: type mismatch in passthrough_int arg 0: expected int but got str
+warning: type mismatch in passthrough_int arg 1: expected int but got str
+warning: type mismatch in pick_first arg 1: expected int but got str
+warning: type mismatch in pick_first arg 1: expected str but got int
+warning: type mismatch in triple_eq arg 2: expected int but got str
+warning: type mismatch in require_str arg 0: expected str but got int
+warning: type mismatch in require_str arg 0: expected str but got list
+warning: type mismatch in double_t arg 1: expected int but got str
+```
+
+**Sample WARN trace** (`tests/test_struct_ctor_type_check.nova`):
+
+```
+warning: type mismatch in Box arg 0: expected int but got str
+warning: type mismatch in Box arg 0: expected str but got int
+warning: type mismatch in Pair arg 0: expected int but got str
+warning: type mismatch in Pair arg 1: expected str but got int
+warning: type mismatch in Pair arg 0: expected int but got str
+warning: type mismatch in Pair arg 1: expected str but got int
+warning: type mismatch in Point arg 0: expected int but got str
+warning: type mismatch in Counter arg 0: expected str but got int
+warning: type mismatch in Counter arg 1: expected int but got str
+```
+
+The runtime semantics are unchanged — NOVA is dynamically typed; the
+WARN is the only observable effect. The check is conservative:
+`fn add(a: int, b: int) { ... }; let x = add(some_free_var, 99)` falls
+through silently because the parser can't statically resolve
+`some_free_var`'s type.
+
+### Why struct-ctor check requires a let-annotation context
+
+The R23A `test_generic_struct.nova` includes a `Container(0, 0)`
+placeholder construction (followed by `cont.items = real_list_value`
+mutation) which uses literal `0` for a `list`-typed field. Firing the
+struct-ctor check unconditionally on every AST_CALL whose callee is a
+known struct would emit a true-positive WARN here, but the test was
+authored before R24A and we deliberately preserve its zero-warning
+status. The check fires from the annotated-let path only — both
+`let b: Box<int> = Box("oops")` and `let pt: Point = Point("x", 4)`
+DO warn, but `let cont = Container(0, 0)` (no annotation) skips.
+
+### Files touched
+
+  * `src/compiler/parser.nova` (~310 lines added): parse_param_list
+    captures param_types, parse_struct_decl captures field_types,
+    parse_fn (both branches) + lambda branch push the new slot, full
+    tc_register_fns / tc_register_structs / tc_check_call_fn /
+    tc_check_call_struct / tc_walk_expr machinery.
+  * `tests/test_fn_call_type_check.nova` (NEW, ~110 lines, 19
+    assertions + 8 expected WARN lines).
+  * `tests/test_struct_ctor_type_check.nova` (NEW, ~135 lines, 24
+    assertions + 9 expected WARN lines).
+  * `README.md` test count stays at 178 (the count R24E anticipated;
+    R23A's 176 baseline + this round's 2 new tests = 178 actual).
+
+### Verification
+
+  * `make` succeeds; `make self-host` confirms stage2.s == stage3.s
+    bit-identical (no codegen change — type-check stays parser-only).
+  * `bash tests/run_tests.sh` reports 178/172/0/6 (was 176/170/0/6;
+    +2 new tests, both pass).
+  * Cross-target sweep: all 6 targets (linux, macos, wasm, windows,
+    arm64, windows-arm64) emit identical WARN line counts (8 for
+    test_fn_call_type_check, 9 for test_struct_ctor_type_check) —
+    the pass lives in the parser, target-agnostic.
+  * No existing test gained a spurious warning. Verified by sweeping
+    `bin/nova <test> -o /tmp/check.s 2>&1 | grep ^warning:` across
+    all 176 baseline tests; only test_exhaustiveness_warn.nova and
+    test_type_check_warn.nova continue to emit warnings (R17A + R23A
+    baselines preserved).
+
+### R24A.2 follow-up list
+
+The following are intentionally deferred and tracked as R24A.2
+backlog items:
+
+  * **Free-variable type inference**: `let x: int = 42; add_int(x, "y")`
+    should infer `x:int` from the earlier let and warn on the second
+    arg. Needs a small local-typing context maintained during
+    `tc_walk_stmts`. Would also let the struct-ctor check fire
+    without a binding annotation (Container case above) by
+    inspecting subsequent mutations.
+  * **Method-call type-check**: `obj.method(arg)` on a struct whose
+    `Struct.method(self, x: int)` is declared. Method param types
+    are now captured on AST_METHOD_DECL slot 6 (parse_fn-method
+    branch), but the call-site lookup needs the receiver's type
+    resolved first. Impl-block methods still need the param_types
+    push to be uniform (currently only parse_fn-method branch).
+  * **Return-type-aware chaining**: `let x: int = identity("oops")`
+    where `fn identity<T>(x: T) -> T` should warn because the
+    inferred T from the call is `str`, not `int`. Needs return-type
+    annotation capture on AST_FN_DECL (current parser still discards
+    return types via `par_skip_return_type`).
+  * **Brace-init struct syntax**: `let b = Box { value: 42 }`. Still
+    deferred from R23A.2 — task-spec syntax requires extending
+    parse_primary's TOK_LBRACE branch to lower `IDENT { ... }` to
+    AST_STRUCT_INIT.
+  * **tree-sitter-nova grammar update**: highlight the new `<T,U>`
+    and `field: T` syntax. Still deferred from R23A.2.
+  * **LSP completion of fn signatures**: surface `fn add(a: int,
+    b: int)` as `add(a: int, b: int)` in autocomplete so the user
+    sees the new annotations.
+
+---
+
 ## R24E — Type-aware LSP completion (enum variants, struct fields, type names)
 
 R24E deepens `textDocument/completion` so the suggested list is

@@ -1,0 +1,151 @@
+// R24A: lightweight type-check pass extended from R23A's enum-ctor
+// case to positional struct constructors. NOVA structs are constructed
+// via positional call syntax `Box(42)`, parsed as an AST_CALL whose
+// callee is the struct name. When the surrounding let-binding carries
+// a type annotation matching the struct name (e.g. `let b: Box<int>
+// = Box(42)`), the parser resolves the struct's per-field type
+// annotations against the binding and warns on any literal arg whose
+// static type disagrees.
+//
+// Conservative by design: triggers only when:
+//   1. The let-binding has a type annotation matching the struct
+//      name (so the binding context is unambiguous).
+//   2. The constructor arg at slot i is a statically-obvious literal
+//      (int / str / list / bool / none / float, with unary `-`).
+//   3. The struct's field at slot i has a resolvable type annotation
+//      (either a generic type-param bound by the binding, or a
+//      concrete primitive type).
+//
+// Free variables, fn-call results, complex expressions, and absent
+// annotations all skip silently to avoid false positives. NOVA's
+// runtime is dynamically typed, so the WARN is the only externally
+// visible effect — the program still compiles and runs.
+
+// --- Single-type-param struct ---
+
+struct Box<T> {
+    value: T
+}
+
+// Case 1: matching int — no warn.
+let b1: Box<int> = Box(42)
+assert(b1.value == 42, "Box<int>(42).value == 42")
+
+// Case 2: matching str — no warn.
+let b2: Box<str> = Box("hello")
+assert(b2.value == "hello", "Box<str>(\"hello\").value == \"hello\"")
+
+// Case 3: matching list — no warn.
+let b3: Box<list> = Box([1, 2, 3])
+assert(len(b3.value) == 3, "Box<list>([1,2,3]).value len == 3")
+
+// Case 4: int expected, str provided — WARN.
+let b4: Box<int> = Box("not an int")
+assert(b4.value == "not an int", "Box<int>(\"str\") runtime preserved")
+
+// Case 5: str expected, int provided — WARN.
+let b5: Box<str> = Box(99)
+assert(b5.value == 99, "Box<str>(99) runtime preserved")
+
+// Case 6: free variable — SKIPPED, no warn.
+let some_int = 5
+let b6: Box<int> = Box(some_int)
+assert(b6.value == 5, "Box<int>(free var) accepted silently")
+
+// --- Multi-type-param struct ---
+
+struct Pair<A, B> {
+    first: A,
+    second: B
+}
+
+// Case 7: matching int, str — no warn.
+let p1: Pair<int, str> = Pair(42, "hello")
+assert(p1.first == 42, "Pair<int,str>.first == 42")
+assert(p1.second == "hello", "Pair<int,str>.second == \"hello\"")
+
+// Case 8: first arg mismatched — WARN.
+let p2: Pair<int, str> = Pair("oops", "world")
+assert(p2.first == "oops", "Pair<int,str>(str, str) preserved")
+
+// Case 9: second arg mismatched — WARN.
+let p3: Pair<int, str> = Pair(42, 99)
+assert(p3.second == 99, "Pair<int,str>(int, int) preserved")
+
+// Case 10: both args mismatched — 2 WARNs.
+let p4: Pair<int, str> = Pair("a", 1)
+assert(p4.first == "a", "Pair<int,str>(str, int) first preserved")
+assert(p4.second == 1, "Pair<int,str>(str, int) second preserved")
+
+// --- Concrete-typed struct fields (no generics) ---
+
+struct Point {
+    x: int,
+    y: int
+}
+
+// Case 11: matching ints — no warn.
+let pt1: Point = Point(3, 4)
+assert(pt1.x == 3, "Point(3, 4).x == 3")
+assert(pt1.y == 4, "Point(3, 4).y == 4")
+
+// Case 12: str provided for int field — WARN.
+let pt2: Point = Point("three", 4)
+assert(pt2.x == "three", "Point(str, int).x preserved")
+
+// --- Mixed: one generic + one concrete field ---
+
+struct Counter<T> {
+    value: T,
+    count: int
+}
+
+// Case 13: matching T=str, count int — no warn.
+let c1: Counter<str> = Counter("widgets", 7)
+assert(c1.value == "widgets", "Counter<str>.value")
+assert(c1.count == 7, "Counter<str>.count")
+
+// Case 14: T=str but value int — WARN.
+let c2: Counter<str> = Counter(99, 7)
+assert(c2.value == 99, "Counter<str>(int, int).value preserved")
+
+// Case 15: T=int but count str — WARN on count.
+let c3: Counter<int> = Counter(42, "seven")
+assert(c3.count == "seven", "Counter<int>(int, str).count preserved")
+
+// --- Backward compat: untyped struct fields, no annotation — no warn ---
+
+struct PlainPoint {
+    x,
+    y
+}
+
+let pp1 = PlainPoint(1, "two")
+assert(pp1.x == 1, "PlainPoint.x")
+assert(pp1.y == "two", "PlainPoint.y")
+
+// --- No annotation on the binding — struct-ctor check skipped ---
+
+let b_noannot = Box(42)
+assert(b_noannot.value == 42, "Box(42) without annotation: no warn")
+
+let b_noannot_str = Box("hi")
+assert(b_noannot_str.value == "hi", "Box(\"hi\") without annotation: no warn")
+
+// --- Mismatched struct-name annotation vs ctor — skipped ---
+
+// `let x: Box<int> = Pair(1, "x")` would conflict on names; our
+// checker scopes to matching names only.
+
+// --- Nested generic struct ---
+
+let nest: Box<Box<int>> = Box(Box(99))
+assert(nest.value.value == 99, "Box<Box<int>> nested OK")
+
+// The inner Box(99) is NOT in a let-binding context (it's an arg
+// to the outer Box ctor), so it skips. The outer Box's annotation
+// is Box<Box<int>> -> the field type T resolves to "Box", and the
+// inner Box(99) is an AST_CALL — not a literal — so conservative
+// skip applies.
+
+println("test_struct_ctor_type_check.nova: all assertions passed (9 WARN lines expected)")

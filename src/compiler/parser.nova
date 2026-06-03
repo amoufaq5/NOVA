@@ -528,6 +528,8 @@ fn parse_primary() {
                 let pinfo = parse_param_list()
                 let params = pinfo[0]
                 let defaults = pinfo[1]
+                let lam_ptypes = list_new()
+                if len(pinfo) > 3 { lam_ptypes = pinfo[3] }
                 par_expect(TOK_RPAREN)
                 par_skip_return_type()
                 let body = parse_block()
@@ -535,6 +537,10 @@ fn parse_primary() {
                 let lname = "_lambda_" + int_to_str(par_lambda_count)
                 par_lambda_count = par_lambda_count + 1
                 let fn_node = ast_fn_decl(lname, params, body)
+                // R24A: 4th slot = type_params (empty for lambdas);
+                //        5th slot = param_types (parallel to params).
+                push(fn_node, list_new())
+                push(fn_node, lam_ptypes)
                 push(par_lambdas, fn_node)
                 return ast_lambda(lname, params, body)
             }
@@ -1294,11 +1300,18 @@ fn parse_param_list() {
     let defaults = list_new()
     let has_rest = 0
     let rest_name = ""
+    // R24A: param-type annotations (parallel to `params`, one entry per
+    // param). Each entry is either a `[base_name, [type_args]]` pair (the
+    // shape returned by par_collect_type) OR 0 when the param has no
+    // annotation. Used by the lightweight type-check pass to warn on
+    // literal-arg mismatches at call sites. Codegen ignores this slot.
+    let param_types = list_new()
     if par_peek_type() == TOK_RPAREN {
         let result = list_new()
         push(result, params)
         push(result, defaults)
         push(result, rest_name)
+        push(result, param_types)
         return result
     }
     if par_peek_type() == TOK_ELLIPSIS {
@@ -1306,18 +1319,24 @@ fn parse_param_list() {
         let rt = par_expect(TOK_IDENT)
         rest_name = rt[1]
         push(params, rest_name)
+        // Rest params have no scalar type; push 0 placeholder so the
+        // parallel-index invariant holds with `params`.
+        push(param_types, 0)
         let result = list_new()
         push(result, params)
         push(result, defaults)
         push(result, rest_name)
+        push(result, param_types)
         return result
     }
     let p = par_expect(TOK_IDENT)
     push(params, p[1])
+    let pt1 = 0
     if par_peek_type() == TOK_COLON {
         par_advance()
-        par_skip_type()
+        pt1 = par_collect_type()
     }
+    push(param_types, pt1)
     if par_peek_type() == TOK_EQ {
         par_advance()
         let dv = parse_expr()
@@ -1334,18 +1353,22 @@ fn parse_param_list() {
             let rt = par_expect(TOK_IDENT)
             rest_name = rt[1]
             push(params, rest_name)
+            push(param_types, 0)
             let result = list_new()
             push(result, params)
             push(result, defaults)
             push(result, rest_name)
+            push(result, param_types)
             return result
         }
         let p2 = par_expect(TOK_IDENT)
         push(params, p2[1])
+        let pt2 = 0
         if par_peek_type() == TOK_COLON {
             par_advance()
-            par_skip_type()
+            pt2 = par_collect_type()
         }
+        push(param_types, pt2)
         if par_peek_type() == TOK_EQ {
             par_advance()
             let dv2 = parse_expr()
@@ -1359,6 +1382,7 @@ fn parse_param_list() {
     push(result, params)
     push(result, defaults)
     push(result, rest_name)
+    push(result, param_types)
     return result
 }
 
@@ -1559,12 +1583,17 @@ fn parse_fn() {
         let pinfo = parse_param_list()
         let params = pinfo[0]
         let defaults = pinfo[1]
+        let mptypes = list_new()
+        if len(pinfo) > 3 { mptypes = pinfo[3] }
         par_expect(TOK_RPAREN)
         par_skip_return_type()
         let body = parse_block()
         body = inject_defaults(body, defaults)
         let mnd = ast_method_decl(name, meth, params, body)
         push(mnd, mtype_params)
+        // R24A: 6th slot on AST_METHOD_DECL = param_types (parallel to
+        // params). Codegen ignores; tc_check_call reads at call sites.
+        push(mnd, mptypes)
         return mnd
     }
     // R22B: generic type parameters `<T, U, ...>` between the fn name
@@ -1580,12 +1609,18 @@ fn parse_fn() {
     let params = pinfo[0]
     let defaults = pinfo[1]
     let rest_name = pinfo[2]
+    let fnptypes = list_new()
+    if len(pinfo) > 3 { fnptypes = pinfo[3] }
     par_expect(TOK_RPAREN)
     par_skip_return_type()
     let body = parse_block()
     body = inject_defaults(body, defaults)
     let fnd = ast_fn_decl(name, params, body)
     push(fnd, type_params)
+    // R24A: 5th slot on AST_FN_DECL = param_types (parallel to params).
+    // Codegen ignores; tc_check_call reads at call sites for the
+    // lightweight type-check pass.
+    push(fnd, fnptypes)
     return fnd
 }
 
@@ -1616,6 +1651,14 @@ fn parse_struct_decl() {
     }
     par_expect(TOK_LBRACE)
     let fields = list_new()
+    // R24A: per-field type annotations, parallel to `fields`. Each
+    // entry is either a `[base_name, [type_args]]` pair (the shape
+    // returned by par_collect_type) OR 0 when the field has no
+    // annotation. Used by the lightweight type-check pass to warn
+    // on literal-arg mismatches at positional ctor sites (Box(value:
+    // 42) is parsed today as a plain AST_CALL whose callee is the
+    // struct name). Codegen ignores this slot.
+    let field_types = list_new()
     let struct_done = 0
     while struct_done == 0 {
         if par_peek_type() == TOK_RBRACE {
@@ -1631,17 +1674,24 @@ fn parse_struct_decl() {
                 let f = par_expect(TOK_IDENT)
                 push(fields, f[1])
                 // R23A: optional field-type annotation `field: T` (or
-                // `field: List<T>`). Parser-only — discarded at codegen.
+                // `field: List<T>`).
+                // R24A: captured (was: discarded via par_skip_type).
+                let ftann = 0
                 if par_peek_type() == TOK_COLON {
                     par_advance()
-                    par_skip_type()
+                    ftann = par_collect_type()
                 }
+                push(field_types, ftann)
             } }
         }
     }
     par_expect(TOK_RBRACE)
     let nd = ast_struct_decl(name, fields)
     push(nd, type_params)
+    // R24A: 4th slot on AST_STRUCT_DECL = field_types (parallel to
+    // fields). Codegen ignores; tc_check_call reads at struct-ctor
+    // call sites.
+    push(nd, field_types)
     return nd
 }
 
@@ -2653,8 +2703,18 @@ fn parse_impl_block(decls) {
 // obvious literal (int, str, list, bool, none). Free variables, fn
 // calls, and compound expressions are skipped to avoid false positives.
 
-let tc_enums = 0      // list of [name, type_params, variants]
+let tc_enums = 0      // list of [name, variants, type_params]
 let tc_enum_count = 0
+
+// R24A: side tables for fn-call + struct-ctor type-check. Built by
+// tc_register_fns / tc_register_structs at the start of tc_check_program.
+// Entry shapes:
+//   tc_fns:     [name, type_params, param_names, param_types]
+//   tc_structs: [name, type_params, field_names, field_types]
+let tc_fns = 0
+let tc_fn_count = 0
+let tc_structs = 0
+let tc_struct_count = 0
 
 fn tc_register_enums(decls) {
     tc_enums = list_new()
@@ -2681,6 +2741,79 @@ fn tc_find_enum(name) {
     let i = 0
     while i < tc_enum_count {
         if tc_enums[i][0] == name { return tc_enums[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+// R24A: register every AST_FN_DECL by name -> [name, type_params,
+// param_names, param_types]. AST_FN_DECL layout:
+//   [0] tag, [1] name, [2] params, [3] body,
+//   [4] type_params (R23A), [5] param_types (R24A).
+// Lambdas push the same shape via parse_unary's TOK_FN branch.
+fn tc_register_fns(decls) {
+    tc_fns = list_new()
+    tc_fn_count = 0
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            let entry = list_new()
+            push(entry, d[1])      // name
+            let tps = list_new()
+            if len(d) > 4 { tps = d[4] }
+            push(entry, tps)        // type_params
+            push(entry, d[2])       // param_names
+            let ptypes = list_new()
+            if len(d) > 5 { ptypes = d[5] }
+            push(entry, ptypes)     // param_types
+            push(tc_fns, entry)
+            tc_fn_count = tc_fn_count + 1
+        }
+        i = i + 1
+    }
+}
+
+fn tc_find_fn(name) {
+    let i = 0
+    while i < tc_fn_count {
+        if tc_fns[i][0] == name { return tc_fns[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+// R24A: register every AST_STRUCT_DECL by name -> [name, type_params,
+// field_names, field_types]. AST_STRUCT_DECL layout:
+//   [0] tag, [1] name, [2] fields,
+//   [3] type_params (R23A), [4] field_types (R24A).
+fn tc_register_structs(decls) {
+    tc_structs = list_new()
+    tc_struct_count = 0
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_STRUCT_DECL {
+            let entry = list_new()
+            push(entry, d[1])      // name
+            let tps = list_new()
+            if len(d) > 3 { tps = d[3] }
+            push(entry, tps)
+            push(entry, d[2])       // field_names
+            let ftypes = list_new()
+            if len(d) > 4 { ftypes = d[4] }
+            push(entry, ftypes)
+            push(tc_structs, entry)
+            tc_struct_count = tc_struct_count + 1
+        }
+        i = i + 1
+    }
+}
+
+fn tc_find_struct(name) {
+    let i = 0
+    while i < tc_struct_count {
+        if tc_structs[i][0] == name { return tc_structs[i] }
         i = i + 1
     }
     return 0
@@ -2759,7 +2892,25 @@ fn tc_check_let_enum_ctor(let_nd) {
     let annot_args = annot[1]
     let value = let_nd[2]
     if value == 0 { return 0 }
-    if ast_tag(value) != AST_ENUM_CTOR { return 0 }
+    // R24A: dispatch on value shape — AST_ENUM_CTOR (R23A path) or
+    // AST_CALL whose callee names a struct (R24A path).
+    let vt = ast_tag(value)
+    if vt == AST_CALL {
+        let callee = value[1]
+        if callee != 0 {
+            if ast_tag(callee) == AST_IDENT {
+                let cname = callee[1]
+                if cname == annot_base {
+                    if tc_find_struct(cname) != 0 {
+                        tc_check_call_struct(value, annot_args)
+                        return 0
+                    }
+                }
+            }
+        }
+        return 0
+    }
+    if vt != AST_ENUM_CTOR { return 0 }
     let ctor_enum = value[1]
     if ctor_enum != annot_base { return 0 }
     let ctor_variant = value[2]
@@ -2811,14 +2962,269 @@ fn tc_check_let_enum_ctor(let_nd) {
     return 0
 }
 
-// Walk one AST_CALL whose callee is a known generic fn name. We can
-// only check non-generic param types here (since fn-level inference
-// isn't yet implemented); the binding map is empty. So this just warns
-// when a fn's param-type annotation names a primitive type (int/str/
-// list/etc.) and the call literal disagrees.
+// R24A: Walk an AST_CALL whose callee is an AST_IDENT naming a known
+// fn-decl. For each LITERAL arg, compare the static literal type against
+// the param's type annotation. Handles two distinct cases:
+//
+//   1. Concrete primitive param type (e.g. `fn add(a: int, b: int)`).
+//      Check each literal arg directly against the annotation.
+//   2. Generic param type (e.g. `fn add<T>(a: T, b: T)`). Infer `T`
+//      from the FIRST literal arg whose param-type names T, then check
+//      subsequent literal args that also name T against the inferred
+//      binding. Mismatches on the SECOND-and-later occurrence emit a
+//      warning naming the variable-typed parameter index.
+//
+// Conservative: literal arity drift, non-ident callees, builtin fns,
+// free variables, and complex expressions all conservatively skip.
+fn tc_check_call_fn(call_nd) {
+    if call_nd == 0 { return 0 }
+    if type_of(call_nd) != 3 { return 0 }
+    if ast_tag(call_nd) != AST_CALL { return 0 }
+    let callee = call_nd[1]
+    if callee == 0 { return 0 }
+    if ast_tag(callee) != AST_IDENT { return 0 }
+    let fname = callee[1]
+    let fdef = tc_find_fn(fname)
+    if fdef == 0 { return 0 }
+    let type_params = fdef[1]
+    let param_names = fdef[2]
+    let param_types = fdef[3]
+    let args = call_nd[2]
+    if args == 0 { return 0 }
+    // Build a binding map for the fn's type-params, inferred from the
+    // first literal arg whose param-type-annotation names a type-param.
+    // bindings: parallel list to type_params; entry is either the
+    // canonical literal-type ("int"/"str"/...) or "" if not yet bound.
+    let bindings = list_new()
+    let tpi = 0
+    while tpi < len(type_params) {
+        push(bindings, "")
+        tpi = tpi + 1
+    }
+    let ai = 0
+    while ai < len(args) {
+        if ai < len(param_types) {
+            let pt = param_types[ai]
+            if pt == 0 {
+                // No annotation on this param — nothing to check.
+            } else { if type_of(pt) != 3 {
+            } else { if len(pt) < 1 {
+            } else {
+                let pt_base = pt[0]
+                let got = tc_literal_type(args[ai])
+                // Is pt_base a type-param? (e.g. "T")
+                let is_tp = 0
+                let tpii = 0
+                while tpii < len(type_params) {
+                    if type_params[tpii] == pt_base {
+                        is_tp = 1
+                        if got != "" {
+                            if bindings[tpii] == "" {
+                                // First binding for T — record it.
+                                bindings[tpii] = got
+                            } else {
+                                if bindings[tpii] != got {
+                                    println("warning: type mismatch in " + fname + " arg " + int_to_str(ai) + ": expected " + bindings[tpii] + " but got " + got)
+                                }
+                            }
+                        }
+                        tpii = len(type_params) + 1
+                    } else {
+                        tpii = tpii + 1
+                    }
+                }
+                if is_tp == 0 {
+                    // Concrete annotation — direct check against the
+                    // canonical type name.
+                    let want = tc_canon_type(pt_base)
+                    if want != "" {
+                        if got != "" {
+                            if want != got {
+                                println("warning: type mismatch in " + fname + " arg " + int_to_str(ai) + ": expected " + want + " but got " + got)
+                            }
+                        }
+                    }
+                }
+            } } }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R24A: Walk an AST_CALL whose callee is an AST_IDENT naming a known
+// struct-decl. Uses the surrounding let-annotation's type-args to bind
+// the struct's type-params, then for each LITERAL ctor arg compares the
+// static literal type against the corresponding field's annotation.
+// `annot_args` is the recursive [base, args] list captured by
+// par_collect_type for the surrounding let-binding (or 0 / empty for
+// unannotated ctors — in which case we still check concrete-typed
+// fields like `struct Point { x: int }`).
+fn tc_check_call_struct(call_nd, annot_args) {
+    if call_nd == 0 { return 0 }
+    if type_of(call_nd) != 3 { return 0 }
+    if ast_tag(call_nd) != AST_CALL { return 0 }
+    let callee = call_nd[1]
+    if callee == 0 { return 0 }
+    if ast_tag(callee) != AST_IDENT { return 0 }
+    let sname = callee[1]
+    let sdef = tc_find_struct(sname)
+    if sdef == 0 { return 0 }
+    let type_params = sdef[1]
+    let field_names = sdef[2]
+    let field_types = sdef[3]
+    let args = call_nd[2]
+    if args == 0 { return 0 }
+    // Build bound_types from annot_args (parallel to type_params). If
+    // the let-binding lacks an annotation OR its annotation has fewer
+    // args than type_params, the remaining params are unbound (left as
+    // "" — these fields conservatively skip).
+    let bound_types = list_new()
+    let bi = 0
+    while bi < len(type_params) {
+        let bt = ""
+        if annot_args != 0 {
+            if type_of(annot_args) == 3 {
+                if bi < len(annot_args) {
+                    let ta = annot_args[bi]
+                    if type_of(ta) == 3 {
+                        if len(ta) >= 1 { bt = ta[0] }
+                    }
+                }
+            }
+        }
+        push(bound_types, bt)
+        bi = bi + 1
+    }
+    let ai = 0
+    while ai < len(args) {
+        if ai < len(field_types) {
+            let ft = field_types[ai]
+            if ft != 0 {
+                let want = tc_resolve_type(ft, type_params, bound_types)
+                let got = tc_literal_type(args[ai])
+                if want != "" {
+                    if got != "" {
+                        if want != got {
+                            println("warning: type mismatch in " + sname + " arg " + int_to_str(ai) + ": expected " + want + " but got " + got)
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R24A: walk an expression and dispatch any AST_CALL nodes through the
+// fn-call / struct-ctor checker. Recurses into compound expressions so
+// nested call sites (e.g. `let x = foo(bar(1, "x"))`) all get checked.
+// Returns 0; mutations only happen via println of warn lines.
+fn tc_walk_expr(expr) {
+    if expr == 0 { return 0 }
+    if type_of(expr) != 3 { return 0 }
+    if len(expr) < 1 { return 0 }
+    let t = ast_tag(expr)
+    if t == AST_CALL {
+        // R24A: dispatch fn-call check at every call site (generic
+        // fn signatures live on AST_FN_DECL slot 5 / non-generic on
+        // the same slot — both checked). Struct-ctor checks are
+        // intentionally skipped here: they fire only from the
+        // let-statement annotated path (tc_check_let_enum_ctor), so
+        // `let cont = Container(0, 0)` followed by mutate-and-assign
+        // doesn't gain a spurious WARN. Struct fields with concrete
+        // types still fire when the let HAS an annotation matching
+        // the struct name.
+        let callee = expr[1]
+        if callee != 0 {
+            if ast_tag(callee) == AST_IDENT {
+                let cname = callee[1]
+                if tc_find_fn(cname) != 0 {
+                    tc_check_call_fn(expr)
+                }
+            }
+        }
+        // Recurse into the args.
+        let args = expr[2]
+        if args != 0 {
+            if type_of(args) == 3 {
+                let ai = 0
+                while ai < len(args) {
+                    tc_walk_expr(args[ai])
+                    ai = ai + 1
+                }
+            }
+        }
+        return 0
+    }
+    if t == AST_BIN_OP {
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        if len(expr) > 3 { tc_walk_expr(expr[3]) }
+        return 0
+    }
+    if t == AST_UNARY_OP {
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        return 0
+    }
+    if t == AST_AND_EXPR {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        return 0
+    }
+    if t == AST_OR_EXPR {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        return 0
+    }
+    if t == AST_TERNARY {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        if len(expr) > 3 { tc_walk_expr(expr[3]) }
+        return 0
+    }
+    if t == AST_INDEX_EXPR {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        return 0
+    }
+    if t == AST_FIELD_ACCESS {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        return 0
+    }
+    if t == AST_LIST_LIT {
+        let els = expr[1]
+        if els != 0 {
+            if type_of(els) == 3 {
+                let ei = 0
+                while ei < len(els) {
+                    tc_walk_expr(els[ei])
+                    ei = ei + 1
+                }
+            }
+        }
+        return 0
+    }
+    if t == AST_ENUM_CTOR {
+        let ca = expr[3]
+        if ca != 0 {
+            if type_of(ca) == 3 {
+                let ei = 0
+                while ei < len(ca) {
+                    tc_walk_expr(ca[ei])
+                    ei = ei + 1
+                }
+            }
+        }
+        return 0
+    }
+    return 0
+}
+
+// Compatibility shim retained from R23A so older call paths still link.
 fn tc_check_call(call_nd) {
-    // Stub: fn-level annotations aren't yet captured (R22B erased them
-    // at parse time). Will be revisited in R23A.2 follow-up.
+    tc_check_call_fn(call_nd)
+    tc_check_call_struct(call_nd, 0)
     return 0
 }
 
@@ -2839,6 +3245,12 @@ fn tc_walk_stmt(nd) {
     let t = ast_tag(nd)
     if t == AST_LET_STMT {
         tc_check_let_enum_ctor(nd)
+        // R24A: also walk the let's value expression for any nested
+        // fn-call / struct-ctor sites (e.g. `let x = add(1, "x")` with
+        // no type annotation — still warns if `add<T>(a:T, b:T)`).
+        if len(nd) > 2 {
+            tc_walk_expr(nd[2])
+        }
         return 0
     }
     if t == AST_BLOCK {
@@ -2846,19 +3258,23 @@ fn tc_walk_stmt(nd) {
         return 0
     }
     if t == AST_IF_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
         if nd[2] != 0 { tc_walk_stmt(nd[2]) }
         if nd[3] != 0 { tc_walk_stmt(nd[3]) }
         return 0
     }
     if t == AST_WHILE_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
         if nd[2] != 0 { tc_walk_stmt(nd[2]) }
         return 0
     }
     if t == AST_FOR_STMT {
+        if nd[2] != 0 { tc_walk_expr(nd[2]) }
         if nd[3] != 0 { tc_walk_stmt(nd[3]) }
         return 0
     }
     if t == AST_FOR_INDEXED {
+        if nd[3] != 0 { tc_walk_expr(nd[3]) }
         if nd[4] != 0 { tc_walk_stmt(nd[4]) }
         return 0
     }
@@ -2872,6 +3288,7 @@ fn tc_walk_stmt(nd) {
     }
     if t == AST_DO_WHILE {
         if nd[1] != 0 { tc_walk_stmt(nd[1]) }
+        if len(nd) > 2 { if nd[2] != 0 { tc_walk_expr(nd[2]) } }
         return 0
     }
     if t == AST_TRY_CATCH {
@@ -2879,15 +3296,29 @@ fn tc_walk_stmt(nd) {
         if nd[2] != 0 { tc_walk_stmt(nd[2]) }
         return 0
     }
+    if t == AST_EXPR_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
+        return 0
+    }
+    if t == AST_RETURN_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
+        return 0
+    }
+    if t == AST_ASSIGN_STMT {
+        if nd[2] != 0 { tc_walk_expr(nd[2]) }
+        return 0
+    }
     return 0
 }
 
-// R23A.2: entry point. Registers all enum decls, then walks every
-// top-level decl looking for AST_LET_STMT with a type annotation +
-// AST_ENUM_CTOR value, emitting warnings for arg-type mismatches.
+// R23A.2 / R24A: entry point. Registers all enum / fn / struct decls,
+// then walks every top-level decl, emitting warnings for arg-type
+// mismatches at enum-ctor, fn-call, and struct-ctor sites.
 fn tc_check_program(prog) {
     let decls = prog[1]
     tc_register_enums(decls)
+    tc_register_fns(decls)
+    tc_register_structs(decls)
     tc_walk_stmts(decls)
     return 0
 }
