@@ -1692,6 +1692,26 @@ fn is_builtin_fn(name) {
     // SAD is computed per-block over the raw bytes -- exactly the
     // stereo block matching / optical flow workloads.
     if name == "simd_sad_u8" { return 1 }
+    // R18A: byte-level multiply-accumulate primitives. Close R17C's LK
+    // ceiling (0.80x full-LK after simd_sad_u8 wire-in) by giving the
+    // 5 LK accumulator math kernels (Sum Ix^2, Sum Iy^2, Sum Ix*Iy,
+    // Sum Ix*It, Sum Iy*It) a single SIMD instruction sequence that
+    // does N byte multiplies + horizontal-sum to a scalar i64.
+    //
+    // simd_mul_acc_byte_signed_byte(a_u8, b_i8, n)    -> Sum a[i]*b[i]
+    //   a is unsigned u8 (e.g. raw image pixel), b is signed i8
+    //   (e.g. gradient). Matches Intel's asymmetric pmaddubsw shape,
+    //   but lowering uses pmovzxbw + pmovsxbw + pmaddwd to avoid the
+    //   i16-saturation behaviour of pmaddubsw (we need exact Sum, not
+    //   saturated). Use case: cross-correlation, signed-gradient *
+    //   pixel-intensity convolutions.
+    //
+    // simd_mul_acc_signed_signed_byte(a_i8, b_i8, n) -> Sum a[i]*b[i]
+    //   Both args signed i8 (gradient * gradient). Used by all 5 LK
+    //   accumulators since Ix / Iy / It are signed gradients of the
+    //   underlying image. Lowering: pmovsxbw both + pmaddwd.
+    if name == "simd_mul_acc_byte_signed_byte"   { return 1 }
+    if name == "simd_mul_acc_signed_signed_byte" { return 1 }
     // WASI low-level builtins (R8A): expose raw WASI snapshot_preview1
     // primitives so NOVA programs targeting serverless / CDN-edge can
     // drive the runtime directly. On the WASM target they wrap the
@@ -1754,6 +1774,14 @@ fn is_inline_builtin_fn(name) {
     // ~65k times per disparity scan; the call/ret overhead at
     // ~49 bytes per call ate the AVX2 win in R12A.
     if name == "simd_sad_u8" { return 1 }
+    // R18A: byte-level multiply-accumulate primitives -- inlined for
+    // the same reason as simd_sad_u8 / simd_sum_abs_diff. LK's inner
+    // loop calls these 5x per pixel * win^2 cells (e.g. ~24M calls for
+    // a 200x200 image with ws=5), so call/ret overhead at ~25-49 lanes
+    // per call would dominate the AVX2 win. Fresh new_label() per call
+    // so multiple inlined calls in the same fn body don't collide.
+    if name == "simd_mul_acc_byte_signed_byte"   { return 1 }
+    if name == "simd_mul_acc_signed_signed_byte" { return 1 }
     if name == "int_add" { return 1 }
     if name == "int_sub" { return 1 }
     if name == "int_mul" { return 1 }
@@ -1925,6 +1953,118 @@ fn emit_inline_simd(name) {
         out("    dec rdx")
         out("    jnz " + lbl_tail_loop_u8)
         out_label(lbl_done_u8)
+        out("    vzeroupper")
+        return 0
+    }
+    // R18A: simd_mul_acc_byte_signed_byte(a_u8_ptr, b_i8_ptr, n) -> rax.
+    // Sum of a[i] * b[i] over n bytes, where a is unsigned u8 and b is
+    // signed i8 (asymmetric mul-acc, like Intel's pmaddubsw shape but
+    // without saturation).
+    //
+    // Lowering uses 16 bytes per iter: vpmovzxbw zero-extends 16 u8 a-
+    // bytes to 16 i16 lanes (in ymm), vpmovsxbw sign-extends 16 i8 b-
+    // bytes to 16 i16 lanes, then vpmaddwd computes 8 i32 pair-sums
+    // (a[2i]*b[2i] + a[2i+1]*b[2i+1]) which accumulate into ymm2.
+    // After the loop, horizontal-sum ymm2 (8 i32) -> scalar i64 in rax.
+    // Tail (n % 16) is scalar: load byte, sign/zero extend, multiply,
+    // sign-extend to i64, add. Calling convention: rdi=a, rsi=b,
+    // rdx=n. Clobbers ymm0..ymm3, rcx, rax, r8, r9.
+    if name == "simd_mul_acc_byte_signed_byte" {
+        let lbl_loop_us = new_label()
+        let lbl_tail_us = new_label()
+        let lbl_tail_loop_us = new_label()
+        let lbl_done_us = new_label()
+        out("    xor eax, eax")
+        out("    vpxor ymm2, ymm2, ymm2")
+        out("    mov rcx, rdx")
+        out("    shr rcx, 4")
+        out("    test rcx, rcx")
+        out("    jz " + lbl_tail_us)
+        out_label(lbl_loop_us)
+        out("    vpmovzxbw ymm0, [rdi]")
+        out("    vpmovsxbw ymm1, [rsi]")
+        out("    vpmaddwd ymm3, ymm0, ymm1")
+        out("    vpaddd ymm2, ymm2, ymm3")
+        out("    add rdi, 16")
+        out("    add rsi, 16")
+        out("    dec rcx")
+        out("    jnz " + lbl_loop_us)
+        out("    vextracti128 xmm3, ymm2, 1")
+        out("    vpaddd xmm2, xmm2, xmm3")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vmovd eax, xmm2")
+        out("    movsxd rax, eax")
+        out_label(lbl_tail_us)
+        out("    and rdx, 15")
+        out("    test rdx, rdx")
+        out("    jz " + lbl_done_us)
+        out_label(lbl_tail_loop_us)
+        out("    movzx r8d, byte ptr [rdi]")
+        out("    movsx r9d, byte ptr [rsi]")
+        out("    imul r8d, r9d")
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz " + lbl_tail_loop_us)
+        out_label(lbl_done_us)
+        out("    vzeroupper")
+        return 0
+    }
+    // R18A: simd_mul_acc_signed_signed_byte(a_i8_ptr, b_i8_ptr, n) -> rax.
+    // Sum of a[i] * b[i] over n bytes, both args treated as signed i8.
+    // The accumulator math for all 5 LK kernels (Sum Ix^2, Sum Iy^2,
+    // Sum Ix*Iy, Sum Ix*It, Sum Iy*It): Ix/Iy/It are signed gradients
+    // of an underlying u8 image, so both operands are i8.
+    //
+    // Same lowering shape as byte_signed_byte but with vpmovsxbw on the
+    // a-operand too (sign-extend instead of zero-extend). The vector
+    // loop processes 16 bytes per iter; vpmaddwd produces 8 i32 pair-
+    // sums into ymm2. Horizontal-sum to scalar i64 at the end. Tail
+    // (n % 16) is scalar with movsx on both bytes.
+    if name == "simd_mul_acc_signed_signed_byte" {
+        let lbl_loop_ss = new_label()
+        let lbl_tail_ss = new_label()
+        let lbl_tail_loop_ss = new_label()
+        let lbl_done_ss = new_label()
+        out("    xor eax, eax")
+        out("    vpxor ymm2, ymm2, ymm2")
+        out("    mov rcx, rdx")
+        out("    shr rcx, 4")
+        out("    test rcx, rcx")
+        out("    jz " + lbl_tail_ss)
+        out_label(lbl_loop_ss)
+        out("    vpmovsxbw ymm0, [rdi]")
+        out("    vpmovsxbw ymm1, [rsi]")
+        out("    vpmaddwd ymm3, ymm0, ymm1")
+        out("    vpaddd ymm2, ymm2, ymm3")
+        out("    add rdi, 16")
+        out("    add rsi, 16")
+        out("    dec rcx")
+        out("    jnz " + lbl_loop_ss)
+        out("    vextracti128 xmm3, ymm2, 1")
+        out("    vpaddd xmm2, xmm2, xmm3")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vmovd eax, xmm2")
+        out("    movsxd rax, eax")
+        out_label(lbl_tail_ss)
+        out("    and rdx, 15")
+        out("    test rdx, rdx")
+        out("    jz " + lbl_done_ss)
+        out_label(lbl_tail_loop_ss)
+        out("    movsx r8d, byte ptr [rdi]")
+        out("    movsx r9d, byte ptr [rsi]")
+        out("    imul r8d, r9d")
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz " + lbl_tail_loop_ss)
+        out_label(lbl_done_ss)
         out("    vzeroupper")
         return 0
     }
@@ -5841,6 +5981,43 @@ fn arm_gen_call(nd) {
         arm_out("    bl _nova_arm_simd_sad_u8")
         return 0
     }
+    // R18A: byte-level multiply-accumulate primitives on ARM64 NEON.
+    // Lowering uses `ldr d0,[x3],#8` (load 8 bytes), `ushll v0.8h,
+    // v0.8b,#0` / `sshll v0.8h, v0.8b, #0` (widen u8/i8 to i16x8),
+    // then `smlal v_acc.4s, v0.4h, v1.4h` etc. (signed multiply-
+    // accumulate long: i16x4 * i16x4 -> i32x4 sums accumulated).
+    if name == "simd_mul_acc_byte_signed_byte" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            arm_gen_expr(args[s_i])
+            arm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            arm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        arm_out("    bl _nova_arm_simd_mul_acc_byte_signed_byte")
+        return 0
+    }
+    if name == "simd_mul_acc_signed_signed_byte" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            arm_gen_expr(args[s_i])
+            arm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            arm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        arm_out("    bl _nova_arm_simd_mul_acc_signed_signed_byte")
+        return 0
+    }
 
     // Generic user-function call.
     let argc = len(args)
@@ -6308,6 +6485,103 @@ fn arm_emit_runtime() {
     arm_out("    subs x5, x5, #1")
     arm_out("    b.ne .arm_sad8_tail_loop")
     arm_label(".arm_sad8_done")
+    arm_out("    ret")
+
+    // ---- _nova_arm_simd_mul_acc_byte_signed_byte ----
+    // R18A: byte-level mul-acc primitive. x0=a_u8_ptr, x1=b_i8_ptr,
+    // x2=n_bytes -> x0=Sum a[i]*b[i] (i64 scalar).
+    //
+    // Vector loop: 8 bytes per iter. Load 8 u8 a-bytes via `ldr d0`,
+    // widen to 8 u16 via `ushll v0.8h, v0.8b, #0`. Load 8 i8 b-bytes
+    // via `ldr d1`, widen to 8 i16 via `sshll v1.8h, v1.8b, #0`.
+    // Then `smull v3.4s, v0.4h, v1.4h` and `smull2 v4.4s, v0.8h,
+    // v1.8h` produce 4 i32 lanes each from the low/high halves;
+    // both accumulated into v2.4s. Tail (n % 8) is scalar.
+    //
+    // NB: the multiply is treated as signed by NEON (smull), but a
+    // is zero-extended to a non-negative i16 first, so the product
+    // correctly equals (u8)a * (i8)b.
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_simd_mul_acc_byte_signed_byte")
+    arm_out("    mov x3, x0")                  // a iter
+    arm_out("    mov x4, x1")                  // b iter
+    arm_out("    mov x5, x2")                  // remaining n
+    arm_out("    movi v2.4s, #0")              // accumulator (4 i32 lanes)
+    arm_out("    lsr x6, x5, #3")              // x6 = n / 8
+    arm_out("    cbz x6, .arm_mac_us_tail")
+    arm_label(".arm_mac_us_loop")
+    arm_out("    ldr d0, [x3], #8")             // 8 u8 a-bytes
+    arm_out("    ldr d1, [x4], #8")             // 8 i8 b-bytes
+    arm_out("    ushll v0.8h, v0.8b, #0")       // u8 -> u16 (8 lanes)
+    arm_out("    sshll v1.8h, v1.8b, #0")       // i8 -> i16 (8 lanes)
+    arm_out("    smull v3.4s, v0.4h, v1.4h")    // 4 i32 from low halves
+    arm_out("    smull2 v4.4s, v0.8h, v1.8h")   // 4 i32 from high halves
+    arm_out("    add v2.4s, v2.4s, v3.4s")
+    arm_out("    add v2.4s, v2.4s, v4.4s")
+    arm_out("    subs x6, x6, #1")
+    arm_out("    b.ne .arm_mac_us_loop")
+    arm_label(".arm_mac_us_tail")
+    arm_out("    and x5, x5, #7")
+    arm_out("    addv s2, v2.4s")              // horizontal sum 4 i32 lanes
+    arm_out("    fmov w0, s2")
+    arm_out("    sxtw x0, w0")
+    arm_out("    cbz x5, .arm_mac_us_done")
+    arm_label(".arm_mac_us_tail_loop")
+    arm_out("    ldrb w7, [x3], #1")           // unsigned-byte load
+    arm_out("    ldrsb w8, [x4], #1")          // signed-byte load
+    arm_out("    mul w7, w7, w8")
+    arm_out("    sxtw x7, w7")
+    arm_out("    add x0, x0, x7")
+    arm_out("    subs x5, x5, #1")
+    arm_out("    b.ne .arm_mac_us_tail_loop")
+    arm_label(".arm_mac_us_done")
+    arm_out("    ret")
+
+    // ---- _nova_arm_simd_mul_acc_signed_signed_byte ----
+    // R18A: same as byte_signed_byte but BOTH operands are signed i8.
+    // Used by all 5 LK accumulators (Sum Ix*Ix, Sum Iy*Iy, Sum Ix*Iy,
+    // Sum Ix*It, Sum Iy*It) since Ix/Iy/It are signed gradients.
+    //
+    // The only difference vs the unsigned/signed variant is `sshll`
+    // (sign-extend) instead of `ushll` (zero-extend) on the a-byte
+    // widen, and `ldrsb` (signed-byte load) instead of `ldrb` in the
+    // tail.
+    arm_out("")
+    arm_out(".p2align 2")
+    arm_label("_nova_arm_simd_mul_acc_signed_signed_byte")
+    arm_out("    mov x3, x0")
+    arm_out("    mov x4, x1")
+    arm_out("    mov x5, x2")
+    arm_out("    movi v2.4s, #0")
+    arm_out("    lsr x6, x5, #3")
+    arm_out("    cbz x6, .arm_mac_ss_tail")
+    arm_label(".arm_mac_ss_loop")
+    arm_out("    ldr d0, [x3], #8")
+    arm_out("    ldr d1, [x4], #8")
+    arm_out("    sshll v0.8h, v0.8b, #0")       // i8 -> i16
+    arm_out("    sshll v1.8h, v1.8b, #0")       // i8 -> i16
+    arm_out("    smull v3.4s, v0.4h, v1.4h")
+    arm_out("    smull2 v4.4s, v0.8h, v1.8h")
+    arm_out("    add v2.4s, v2.4s, v3.4s")
+    arm_out("    add v2.4s, v2.4s, v4.4s")
+    arm_out("    subs x6, x6, #1")
+    arm_out("    b.ne .arm_mac_ss_loop")
+    arm_label(".arm_mac_ss_tail")
+    arm_out("    and x5, x5, #7")
+    arm_out("    addv s2, v2.4s")
+    arm_out("    fmov w0, s2")
+    arm_out("    sxtw x0, w0")
+    arm_out("    cbz x5, .arm_mac_ss_done")
+    arm_label(".arm_mac_ss_tail_loop")
+    arm_out("    ldrsb w7, [x3], #1")
+    arm_out("    ldrsb w8, [x4], #1")
+    arm_out("    mul w7, w7, w8")
+    arm_out("    sxtw x7, w7")
+    arm_out("    add x0, x0, x7")
+    arm_out("    subs x5, x5, #1")
+    arm_out("    b.ne .arm_mac_ss_tail_loop")
+    arm_label(".arm_mac_ss_done")
     arm_out("    ret")
 }
 
@@ -6882,6 +7156,39 @@ fn warm_gen_call(nd) {
         warm_out("    bl _nova_warm_simd_sad_u8")
         return 0
     }
+    // R18A: byte-level mul-acc primitives on ARM64 Windows (NEON).
+    if name == "simd_mul_acc_byte_signed_byte" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            warm_gen_expr(args[s_i])
+            warm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            warm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        warm_out("    bl _nova_warm_simd_mul_acc_byte_signed_byte")
+        return 0
+    }
+    if name == "simd_mul_acc_signed_signed_byte" {
+        let s_argc = len(args)
+        let s_i = 0
+        while s_i < s_argc {
+            warm_gen_expr(args[s_i])
+            warm_push_x0()
+            s_i = s_i + 1
+        }
+        s_i = s_argc - 1
+        while s_i >= 0 {
+            warm_pop_to("x" + int_to_str(s_i))
+            s_i = s_i - 1
+        }
+        warm_out("    bl _nova_warm_simd_mul_acc_signed_signed_byte")
+        return 0
+    }
 
     // Generic user-function call.
     let argc = len(args)
@@ -7376,6 +7683,85 @@ fn warm_emit_runtime() {
     warm_out("    subs x5, x5, #1")
     warm_out("    b.ne .Lwarm_sad8_tail_loop")
     warm_label(".Lwarm_sad8_done")
+    warm_out("    ret")
+
+    // ---- _nova_warm_simd_mul_acc_byte_signed_byte ----
+    // R18A: byte mul-acc, u8 * i8 -> i64. ARM64 Windows NEON.
+    // 8 bytes per iter; tail scalar. See arm64 helper for details.
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_simd_mul_acc_byte_signed_byte")
+    warm_out("    mov x3, x0")
+    warm_out("    mov x4, x1")
+    warm_out("    mov x5, x2")
+    warm_out("    movi v2.4s, #0")
+    warm_out("    lsr x6, x5, #3")
+    warm_out("    cbz x6, .Lwarm_mac_us_tail")
+    warm_label(".Lwarm_mac_us_loop")
+    warm_out("    ldr d0, [x3], #8")
+    warm_out("    ldr d1, [x4], #8")
+    warm_out("    ushll v0.8h, v0.8b, #0")
+    warm_out("    sshll v1.8h, v1.8b, #0")
+    warm_out("    smull v3.4s, v0.4h, v1.4h")
+    warm_out("    smull2 v4.4s, v0.8h, v1.8h")
+    warm_out("    add v2.4s, v2.4s, v3.4s")
+    warm_out("    add v2.4s, v2.4s, v4.4s")
+    warm_out("    subs x6, x6, #1")
+    warm_out("    b.ne .Lwarm_mac_us_loop")
+    warm_label(".Lwarm_mac_us_tail")
+    warm_out("    and x5, x5, #7")
+    warm_out("    addv s2, v2.4s")
+    warm_out("    fmov w0, s2")
+    warm_out("    sxtw x0, w0")
+    warm_out("    cbz x5, .Lwarm_mac_us_done")
+    warm_label(".Lwarm_mac_us_tail_loop")
+    warm_out("    ldrb w7, [x3], #1")
+    warm_out("    ldrsb w8, [x4], #1")
+    warm_out("    mul w7, w7, w8")
+    warm_out("    sxtw x7, w7")
+    warm_out("    add x0, x0, x7")
+    warm_out("    subs x5, x5, #1")
+    warm_out("    b.ne .Lwarm_mac_us_tail_loop")
+    warm_label(".Lwarm_mac_us_done")
+    warm_out("    ret")
+
+    // ---- _nova_warm_simd_mul_acc_signed_signed_byte ----
+    // R18A: byte mul-acc, i8 * i8 -> i64. ARM64 Windows NEON.
+    warm_out("")
+    warm_out(".p2align 2")
+    warm_label("_nova_warm_simd_mul_acc_signed_signed_byte")
+    warm_out("    mov x3, x0")
+    warm_out("    mov x4, x1")
+    warm_out("    mov x5, x2")
+    warm_out("    movi v2.4s, #0")
+    warm_out("    lsr x6, x5, #3")
+    warm_out("    cbz x6, .Lwarm_mac_ss_tail")
+    warm_label(".Lwarm_mac_ss_loop")
+    warm_out("    ldr d0, [x3], #8")
+    warm_out("    ldr d1, [x4], #8")
+    warm_out("    sshll v0.8h, v0.8b, #0")
+    warm_out("    sshll v1.8h, v1.8b, #0")
+    warm_out("    smull v3.4s, v0.4h, v1.4h")
+    warm_out("    smull2 v4.4s, v0.8h, v1.8h")
+    warm_out("    add v2.4s, v2.4s, v3.4s")
+    warm_out("    add v2.4s, v2.4s, v4.4s")
+    warm_out("    subs x6, x6, #1")
+    warm_out("    b.ne .Lwarm_mac_ss_loop")
+    warm_label(".Lwarm_mac_ss_tail")
+    warm_out("    and x5, x5, #7")
+    warm_out("    addv s2, v2.4s")
+    warm_out("    fmov w0, s2")
+    warm_out("    sxtw x0, w0")
+    warm_out("    cbz x5, .Lwarm_mac_ss_done")
+    warm_label(".Lwarm_mac_ss_tail_loop")
+    warm_out("    ldrsb w7, [x3], #1")
+    warm_out("    ldrsb w8, [x4], #1")
+    warm_out("    mul w7, w7, w8")
+    warm_out("    sxtw x7, w7")
+    warm_out("    add x0, x0, x7")
+    warm_out("    subs x5, x5, #1")
+    warm_out("    b.ne .Lwarm_mac_ss_tail_loop")
+    warm_label(".Lwarm_mac_ss_done")
     warm_out("    ret")
 }
 
@@ -11433,6 +11819,249 @@ fn wasm_gen_rt_simd() {
     wi("i32.sub")
     wi("local.set $nn")
     wi("br $tail_u8")
+    wi("end")
+    wi("end")
+    wi("local.get $sum")
+    wi("i64.extend_i32_s")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // ---- simd_mul_acc_byte_signed_byte(a, b, n) -> Sum a[i]*b[i] ----
+    // R18A: byte mul-acc primitive on WASM v128 (Phase 4 SIMD).
+    //
+    // Lowering: 16 bytes per iter. Load 16 a-bytes + 16 b-bytes via
+    // v128.load (each). Widen each half:
+    //   a_lo = i16x8.extend_low_i8x16_u  (u8 -> u16, 8 lanes)
+    //   b_lo = i16x8.extend_low_i8x16_s  (i8 -> i16, 8 lanes)
+    //   a_hi = i16x8.extend_high_i8x16_u
+    //   b_hi = i16x8.extend_high_i8x16_s
+    // Then i32x4.dot_i16x8_s computes 4 i32 lanes of (i16*i16 + i16*i16),
+    // accumulated into a v128 i32x4 accumulator. Horizontal-sum at end.
+    // Tail (n % 16) is scalar: load u8 a + signed i8 b, multiply, add.
+    wi("(func $simd_mul_acc_byte_signed_byte (param $a i64) (param $b i64) (param $n i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $ap i32)")
+    wi("(local $bp i32)")
+    wi("(local $nn i32)")
+    wi("(local $sum i32)")
+    wi("(local $acc v128)")
+    wi("(local $va v128)")
+    wi("(local $vb v128)")
+    wi("(local $byte_b i32)")
+    wi("local.get $a")
+    wi("i32.wrap_i64")
+    wi("local.set $ap")
+    wi("local.get $b")
+    wi("i32.wrap_i64")
+    wi("local.set $bp")
+    wi("local.get $n")
+    wi("i32.wrap_i64")
+    wi("local.set $nn")
+    wi("i32.const 0")
+    wi("i32x4.splat")
+    wi("local.set $acc")
+    // Vector loop: 16 bytes per iter.
+    wi("block $vec_done_us")
+    wi("loop $vec_us")
+    wi("local.get $nn")
+    wi("i32.const 16")
+    wi("i32.lt_s")
+    wi("br_if $vec_done_us")
+    wi("local.get $ap")
+    wi("v128.load")
+    wi("local.set $va")
+    wi("local.get $bp")
+    wi("v128.load")
+    wi("local.set $vb")
+    // Low half: a zero-extend, b sign-extend, dot, accumulate.
+    wi("local.get $acc")
+    wi("local.get $va")
+    wi("i16x8.extend_low_i8x16_u")
+    wi("local.get $vb")
+    wi("i16x8.extend_low_i8x16_s")
+    wi("i32x4.dot_i16x8_s")
+    wi("i32x4.add")
+    // High half: a zero-extend, b sign-extend, dot, accumulate.
+    wi("local.get $va")
+    wi("i16x8.extend_high_i8x16_u")
+    wi("local.get $vb")
+    wi("i16x8.extend_high_i8x16_s")
+    wi("i32x4.dot_i16x8_s")
+    wi("i32x4.add")
+    wi("local.set $acc")
+    wi("local.get $ap")
+    wi("i32.const 16")
+    wi("i32.add")
+    wi("local.set $ap")
+    wi("local.get $bp")
+    wi("i32.const 16")
+    wi("i32.add")
+    wi("local.set $bp")
+    wi("local.get $nn")
+    wi("i32.const 16")
+    wi("i32.sub")
+    wi("local.set $nn")
+    wi("br $vec_us")
+    wi("end")
+    wi("end")
+    // Horizontal sum of acc (4 i32 lanes) -> scalar sum.
+    wi("local.get $acc")
+    wi("i32x4.extract_lane 0")
+    wi("local.get $acc")
+    wi("i32x4.extract_lane 1")
+    wi("i32.add")
+    wi("local.get $acc")
+    wi("i32x4.extract_lane 2")
+    wi("i32.add")
+    wi("local.get $acc")
+    wi("i32x4.extract_lane 3")
+    wi("i32.add")
+    wi("local.set $sum")
+    // Scalar tail (n % 16). a is u8 (zero-ext), b is i8 (sign-ext).
+    wi("block $tail_done_us")
+    wi("loop $tail_us")
+    wi("local.get $nn")
+    wi("i32.eqz")
+    wi("br_if $tail_done_us")
+    wi("local.get $bp")
+    wi("i32.load8_s")
+    wi("local.set $byte_b")
+    wi("local.get $sum")
+    wi("local.get $ap")
+    wi("i32.load8_u")
+    wi("local.get $byte_b")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("local.set $sum")
+    wi("local.get $ap")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $ap")
+    wi("local.get $bp")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $bp")
+    wi("local.get $nn")
+    wi("i32.const 1")
+    wi("i32.sub")
+    wi("local.set $nn")
+    wi("br $tail_us")
+    wi("end")
+    wi("end")
+    wi("local.get $sum")
+    wi("i64.extend_i32_s")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // ---- simd_mul_acc_signed_signed_byte(a, b, n) -> Sum a[i]*b[i] ----
+    // R18A: byte mul-acc primitive, both args signed i8 (LK gradients).
+    // Same shape as byte_signed_byte but uses extend_low/high_i8x16_s
+    // for both operands, and i32.load8_s for both bytes in the tail.
+    wi("(func $simd_mul_acc_signed_signed_byte (param $a i64) (param $b i64) (param $n i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $ap i32)")
+    wi("(local $bp i32)")
+    wi("(local $nn i32)")
+    wi("(local $sum i32)")
+    wi("(local $acc v128)")
+    wi("(local $va v128)")
+    wi("(local $vb v128)")
+    wi("(local $byte_b i32)")
+    wi("local.get $a")
+    wi("i32.wrap_i64")
+    wi("local.set $ap")
+    wi("local.get $b")
+    wi("i32.wrap_i64")
+    wi("local.set $bp")
+    wi("local.get $n")
+    wi("i32.wrap_i64")
+    wi("local.set $nn")
+    wi("i32.const 0")
+    wi("i32x4.splat")
+    wi("local.set $acc")
+    wi("block $vec_done_ss")
+    wi("loop $vec_ss")
+    wi("local.get $nn")
+    wi("i32.const 16")
+    wi("i32.lt_s")
+    wi("br_if $vec_done_ss")
+    wi("local.get $ap")
+    wi("v128.load")
+    wi("local.set $va")
+    wi("local.get $bp")
+    wi("v128.load")
+    wi("local.set $vb")
+    wi("local.get $acc")
+    wi("local.get $va")
+    wi("i16x8.extend_low_i8x16_s")
+    wi("local.get $vb")
+    wi("i16x8.extend_low_i8x16_s")
+    wi("i32x4.dot_i16x8_s")
+    wi("i32x4.add")
+    wi("local.get $va")
+    wi("i16x8.extend_high_i8x16_s")
+    wi("local.get $vb")
+    wi("i16x8.extend_high_i8x16_s")
+    wi("i32x4.dot_i16x8_s")
+    wi("i32x4.add")
+    wi("local.set $acc")
+    wi("local.get $ap")
+    wi("i32.const 16")
+    wi("i32.add")
+    wi("local.set $ap")
+    wi("local.get $bp")
+    wi("i32.const 16")
+    wi("i32.add")
+    wi("local.set $bp")
+    wi("local.get $nn")
+    wi("i32.const 16")
+    wi("i32.sub")
+    wi("local.set $nn")
+    wi("br $vec_ss")
+    wi("end")
+    wi("end")
+    wi("local.get $acc")
+    wi("i32x4.extract_lane 0")
+    wi("local.get $acc")
+    wi("i32x4.extract_lane 1")
+    wi("i32.add")
+    wi("local.get $acc")
+    wi("i32x4.extract_lane 2")
+    wi("i32.add")
+    wi("local.get $acc")
+    wi("i32x4.extract_lane 3")
+    wi("i32.add")
+    wi("local.set $sum")
+    wi("block $tail_done_ss")
+    wi("loop $tail_ss")
+    wi("local.get $nn")
+    wi("i32.eqz")
+    wi("br_if $tail_done_ss")
+    wi("local.get $bp")
+    wi("i32.load8_s")
+    wi("local.set $byte_b")
+    wi("local.get $sum")
+    wi("local.get $ap")
+    wi("i32.load8_s")
+    wi("local.get $byte_b")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("local.set $sum")
+    wi("local.get $ap")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $ap")
+    wi("local.get $bp")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $bp")
+    wi("local.get $nn")
+    wi("i32.const 1")
+    wi("i32.sub")
+    wi("local.set $nn")
+    wi("br $tail_ss")
     wi("end")
     wi("end")
     wi("local.get $sum")
@@ -17794,6 +18423,152 @@ fn gen_runtime() {
         out("    dec rdx")
         out("    jnz .sadu8s_loop")
         out(".sadu8s_done:")
+        out("    pop rbp")
+        out("    ret")
+    }
+
+    // --- simd_mul_acc_byte_signed_byte(a_u8, b_i8, n) -> int ---
+    // R18A: byte-level multiply-accumulate primitive. Computes
+    // Sum a[i] * b[i] over n bytes where a is treated as unsigned u8
+    // and b is treated as signed i8 (asymmetric, Intel pmaddubsw shape).
+    // Runtime label used by fn-pointer callers and as the cross-target
+    // entry point (macOS/Windows x86-64 use the scalar fallback below;
+    // ARM64 / WASM dispatch to their own helper / WAT body).
+    //
+    // x86-64 Linux uses vpmovzxbw + vpmovsxbw + vpmaddwd, 16 bytes/iter,
+    // and horizontal-sums into i64. macOS/Windows fall back to a scalar
+    // a*b loop with movzx/movsx + imul + sign-extend-to-i64 + add.
+    out_label("simd_mul_acc_byte_signed_byte")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    vpxor ymm2, ymm2, ymm2")
+        out("    mov rcx, rdx")
+        out("    shr rcx, 4")
+        out("    test rcx, rcx")
+        out("    jz .mac_us_tail")
+        out(".mac_us_loop:")
+        out("    vpmovzxbw ymm0, [rdi]")
+        out("    vpmovsxbw ymm1, [rsi]")
+        out("    vpmaddwd ymm3, ymm0, ymm1")
+        out("    vpaddd ymm2, ymm2, ymm3")
+        out("    add rdi, 16")
+        out("    add rsi, 16")
+        out("    dec rcx")
+        out("    jnz .mac_us_loop")
+        out("    vextracti128 xmm3, ymm2, 1")
+        out("    vpaddd xmm2, xmm2, xmm3")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vmovd eax, xmm2")
+        out("    movsxd rax, eax")
+        out(".mac_us_tail:")
+        out("    and rdx, 15")
+        out("    test rdx, rdx")
+        out("    jz .mac_us_done")
+        out(".mac_us_tail_loop:")
+        out("    movzx r8d, byte ptr [rdi]")
+        out("    movsx r9d, byte ptr [rsi]")
+        out("    imul r8d, r9d")
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz .mac_us_tail_loop")
+        out(".mac_us_done:")
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    test rdx, rdx")
+        out("    jz .mac_us_s_done")
+        out(".mac_us_s_loop:")
+        out("    movzx r8d, byte ptr [rdi]")
+        out("    movsx r9d, byte ptr [rsi]")
+        out("    imul r8d, r9d")
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz .mac_us_s_loop")
+        out(".mac_us_s_done:")
+        out("    pop rbp")
+        out("    ret")
+    }
+
+    // --- simd_mul_acc_signed_signed_byte(a_i8, b_i8, n) -> int ---
+    // R18A: byte-level multiply-accumulate primitive for the LK
+    // accumulator math (Ix*Ix, Iy*Iy, Ix*Iy, Ix*It, Iy*It). Both
+    // operands are treated as signed i8 since LK gradients are
+    // [-127, 127]. Same lowering shape as the unsigned/signed variant
+    // but uses vpmovsxbw on BOTH operands (sign-extend instead of
+    // zero-extend on the a side). Tail loop uses movsx on both bytes.
+    out_label("simd_mul_acc_signed_signed_byte")
+    if cg_target == 0 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    vpxor ymm2, ymm2, ymm2")
+        out("    mov rcx, rdx")
+        out("    shr rcx, 4")
+        out("    test rcx, rcx")
+        out("    jz .mac_ss_tail")
+        out(".mac_ss_loop:")
+        out("    vpmovsxbw ymm0, [rdi]")
+        out("    vpmovsxbw ymm1, [rsi]")
+        out("    vpmaddwd ymm3, ymm0, ymm1")
+        out("    vpaddd ymm2, ymm2, ymm3")
+        out("    add rdi, 16")
+        out("    add rsi, 16")
+        out("    dec rcx")
+        out("    jnz .mac_ss_loop")
+        out("    vextracti128 xmm3, ymm2, 1")
+        out("    vpaddd xmm2, xmm2, xmm3")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vphaddd xmm2, xmm2, xmm2")
+        out("    vmovd eax, xmm2")
+        out("    movsxd rax, eax")
+        out(".mac_ss_tail:")
+        out("    and rdx, 15")
+        out("    test rdx, rdx")
+        out("    jz .mac_ss_done")
+        out(".mac_ss_tail_loop:")
+        out("    movsx r8d, byte ptr [rdi]")
+        out("    movsx r9d, byte ptr [rsi]")
+        out("    imul r8d, r9d")
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz .mac_ss_tail_loop")
+        out(".mac_ss_done:")
+        out("    vzeroupper")
+        out("    pop rbp")
+        out("    ret")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    xor eax, eax")
+        out("    test rdx, rdx")
+        out("    jz .mac_ss_s_done")
+        out(".mac_ss_s_loop:")
+        out("    movsx r8d, byte ptr [rdi]")
+        out("    movsx r9d, byte ptr [rsi]")
+        out("    imul r8d, r9d")
+        out("    movsxd r9, r8d")
+        out("    add rax, r9")
+        out("    add rdi, 1")
+        out("    add rsi, 1")
+        out("    dec rdx")
+        out("    jnz .mac_ss_s_loop")
+        out(".mac_ss_s_done:")
         out("    pop rbp")
         out("    ret")
     }

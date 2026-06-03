@@ -1010,6 +1010,35 @@ replaces the i32-staged SAD wrappers with raw byte ones to close the
 unsigned, multi-chunk + tail, n=0, tail-only, exact chunks, boundary
 0/255, tight loop, 16 KiB large buffer, mixed pattern vs scalar oracle).
 
+### Byte mul-acc primitives `simd_mul_acc_*_byte` (R18A)
+
+`simd_mul_acc_byte_signed_byte(a_u8_ptr, b_i8_ptr, n_bytes) -> int`
+computes `Sum a[i] * b[i]` over `n_bytes` raw bytes where `a` is
+treated as unsigned u8 (e.g. image pixel) and `b` as signed i8 (e.g.
+gradient). `simd_mul_acc_signed_signed_byte(a_i8_ptr, b_i8_ptr,
+n_bytes) -> int` is the same but treats BOTH operands as signed i8 —
+the direct fit for LK's 5 accumulator kernels (Σ Ix·Ix, Σ Iy·Iy,
+Σ Ix·Iy, Σ Ix·It, Σ Iy·It) since Ix/Iy/It are all signed gradients of
+a u8 image. Closes R17C's honestly-reported 0.80x full-LK ceiling.
+Per-target lowering: Linux x86-64 AVX2 inline at call site
+(`vpmovzxbw` / `vpmovsxbw` widen bytes to i16, `vpmaddwd` computes
+8 i32 pair-sums per 16-byte chunk, `vpaddd` accumulator, horizontal-
+sum to scalar i64; 16 bytes per iter), ARM64 Linux/Windows NEON
+(`ushll`/`sshll` widen + `smull`/`smull2` accumulate, 8 bytes per
+iter), WASM v128 (`i16x8.extend_low/high_i8x16_u/_s` + `i32x4.
+dot_i16x8_s`, 16 bytes per iter), macOS / Windows x86-64 scalar `imul`
+fallback. Lowering deliberately avoids `pmaddubsw` (which saturates
+the i16 pair-sum, breaking bit-identical correctness against scalar
+`Sum a*b` for max-magnitude inputs like `255 * 127`). CE wire-in
+deferred to R18A.2 (replace `_lk_optical_flow_u8_simd_inner`'s scalar
+WIN² inner loop with 5 mul-acc calls over packed ix/iy/it byte
+buffers; expected 2-3x LK speedup). Correctness: 35 assertions in
+`tests/test_simd_mul_acc.nova` (both primitives x identical / known
+multiply / negative b / boundary 255 vs -128 / both-negative i8 /
+n=0 / tail-only / chunk-only / multi-chunk + tail / back-to-back
+inlined calls / tight loop / 16 KiB large buffer / pseudo-textured
+pattern vs scalar oracle).
+
 ### Tensor
 `tensor_new` `tensor_set` `tensor_get` `tensor_matmul` `tensor_add` `tensor_sub` `tensor_scale` `tensor_relu` `tensor_softmax` `tensor_transpose` `tensor_cosine_sim` `tensor_print`
 
