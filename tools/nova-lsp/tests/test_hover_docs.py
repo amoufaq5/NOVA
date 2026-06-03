@@ -532,11 +532,11 @@ def test_integration_realistic_two_file_project() -> None:
 
 def test_capability_count_unchanged() -> None:
     caps = server_capabilities()
-    # The 10 top-level provider keys returned by server_capabilities()
-    # cover 11 user-facing LSP capabilities (semanticTokensProvider
-    # advertises both /full and /range — two methods, one capability
-    # key). Hover is an enhancement to the existing `hoverProvider`,
-    # NOT a new capability.
+    # Hover is an enhancement to the existing `hoverProvider`, NOT a
+    # new capability. The expected key set grows only when a new LSP
+    # capability is wired up (e.g. R15F added `callHierarchyProvider`).
+    # `semanticTokensProvider` advertises both /full and /range under a
+    # single provider key.
     expected_keys = {
         "textDocumentSync",
         "hoverProvider",
@@ -547,10 +547,11 @@ def test_capability_count_unchanged() -> None:
         "codeActionProvider",
         "workspaceSymbolProvider",
         "semanticTokensProvider",
+        "callHierarchyProvider",
         "diagnosticProvider",
     }
     assert_eq(set(caps.keys()), expected_keys,
-              "server_capabilities returns exactly the 10 provider keys")
+              "server_capabilities returns the expected provider key set")
     # Hover is still advertised as a plain boolean (no schema change).
     assert_eq(caps["hoverProvider"], True,
               "hoverProvider remains True")

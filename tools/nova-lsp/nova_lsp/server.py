@@ -22,6 +22,10 @@ using only the Python standard library. Supports:
       classification beyond TextMate: variables vs constants vs
       functions vs types, declaration vs reference, readonly + static
       modifiers, namespace tagging for import paths)
+    * `textDocument/prepareCallHierarchy` +
+      `callHierarchy/incomingCalls` + `callHierarchy/outgoingCalls`
+      (caller / callee navigation rendered as a tree in the editor;
+      reuses R8C's workspace symbol index + R9C's reference scanner)
 
 Run with::
 
@@ -44,6 +48,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse, unquote
 
 from nova_lsp import __version__
+from nova_lsp.call_hierarchy import (
+    incoming_calls,
+    outgoing_calls,
+    prepare_call_hierarchy,
+)
 from nova_lsp.hover_docs import (
     extract_doc_comment,
     extract_doc_comment_from_text,
@@ -1684,6 +1693,129 @@ def handle_semantic_tokens_range(
 
 
 # ---------------------------------------------------------------------------
+# Call hierarchy — `textDocument/prepareCallHierarchy`,
+# `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`.
+#
+# The classifier and workspace walk live in `call_hierarchy.py`. The
+# handlers here glue LSP request params to the module's API and ensure
+# the workspace index + buffer overrides are warmed before each call.
+# ---------------------------------------------------------------------------
+
+
+def _warm_workspace_for_call_hierarchy(state: ServerState) -> List[str]:
+    """Make sure the workspace symbol index has seen the project root
+    + every open buffer, returning the union of open-doc paths and
+    their transitive import closures so call-hierarchy scans don't
+    miss files outside the indexed workspace root.
+
+    Mirrors the warming used by `handle_rename_workspace` — the call-
+    hierarchy module's `incoming_calls` candidate set is structured
+    the same way (indexed files + extras).
+    """
+    overrides = _text_overrides(state)
+    if state.root_path:
+        state.workspace_symbols.index_workspace_root(state.root_path)
+    extra_paths: List[str] = []
+    seen: Set[str] = set()
+    crawled_roots: Set[str] = set()
+    if state.root_path:
+        crawled_roots.add(os.path.abspath(state.root_path))
+    for d in state.documents.values():
+        p = uri_to_path(d.uri)
+        if not p:
+            continue
+        abs_p = os.path.abspath(p)
+        if abs_p not in seen:
+            extra_paths.append(abs_p)
+            seen.add(abs_p)
+        state.workspace_symbols.index_text(p, d.text)
+        parent_dir = os.path.dirname(abs_p)
+        if parent_dir and parent_dir not in crawled_roots:
+            state.workspace_symbols.index_workspace_root(parent_dir)
+            crawled_roots.add(parent_dir)
+        for entry in walk_imports(
+            abs_p,
+            state.file_cache,
+            text_overrides=overrides,
+        ):
+            if entry.path not in seen:
+                extra_paths.append(entry.path)
+                seen.add(entry.path)
+    return extra_paths
+
+
+def handle_prepare_call_hierarchy(
+    state: ServerState, params: Dict[str, Any]
+) -> Optional[List[Dict[str, Any]]]:
+    """Resolve the cursor's symbol into a CallHierarchyItem[].
+
+    Returns either:
+      * `None` -> the cursor isn't on a recognized top-level fn name
+        (LSP clients render this as "no call hierarchy available").
+      * `[CallHierarchyItem]` -> the single-element list the editor
+        then passes to `incomingCalls`/`outgoingCalls`.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    pos = params.get("position", {}) or {}
+    doc = state.documents.get(uri)
+    if not doc:
+        return None
+    # Warm so cross-file resolution (Step 4 in prepare) sees siblings.
+    _warm_workspace_for_call_hierarchy(state)
+    return prepare_call_hierarchy(
+        uri=uri,
+        line=pos.get("line", 0),
+        character=pos.get("character", 0),
+        doc_text=doc.text,
+        file_cache=state.file_cache,
+        workspace_index=state.workspace_symbols,
+        text_overrides=_text_overrides(state),
+    )
+
+
+def handle_incoming_calls(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return every fn that CALLS `params.item`.
+
+    LSP shape: `{"item": CallHierarchyItem}` in, `CallHierarchyIncomingCall[]`
+    out. Empty list when no caller is found (private/unused fn).
+    """
+    item = params.get("item") or {}
+    if not item.get("name"):
+        return []
+    extra_paths = _warm_workspace_for_call_hierarchy(state)
+    return incoming_calls(
+        item,
+        state.workspace_symbols,
+        state.file_cache,
+        extra_paths=extra_paths,
+        text_overrides=_text_overrides(state),
+    )
+
+
+def handle_outgoing_calls(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return every fn that `params.item` CALLS.
+
+    LSP shape: `{"item": CallHierarchyItem}` in, `CallHierarchyOutgoingCall[]`
+    out. Empty list for leaf fns (no calls inside the body) or when the
+    body can't be located.
+    """
+    item = params.get("item") or {}
+    if not item.get("name"):
+        return []
+    _warm_workspace_for_call_hierarchy(state)
+    return outgoing_calls(
+        item,
+        state.file_cache,
+        workspace_index=state.workspace_symbols,
+        text_overrides=_text_overrides(state),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher.
 # ---------------------------------------------------------------------------
 
@@ -1728,6 +1860,7 @@ def server_capabilities() -> Dict[str, Any]:
             "range": True,
             "full": True,
         },
+        "callHierarchyProvider": True,
         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
     }
 
@@ -1856,6 +1989,18 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "textDocument/semanticTokens/range":
         result = handle_semantic_tokens_range(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/prepareCallHierarchy":
+        result = handle_prepare_call_hierarchy(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "callHierarchy/incomingCalls":
+        result = handle_incoming_calls(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "callHierarchy/outgoingCalls":
+        result = handle_outgoing_calls(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 

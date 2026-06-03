@@ -24,6 +24,9 @@ for the install hook.
 | `workspace/symbol`                  | yes (fuzzy name search across every indexed `.nova` file) |
 | `textDocument/semanticTokens/full`  | yes (variable / function / type / namespace / keyword / string / number / comment / parameter / constant with declaration / readonly / static modifiers) |
 | `textDocument/semanticTokens/range` | yes (same classifier, filtered to the requested line range) |
+| `textDocument/prepareCallHierarchy` | yes (resolves cursor to a `CallHierarchyItem` for a top-level `fn`; cross-file via imports + workspace index) |
+| `callHierarchy/incomingCalls`       | yes (every `name(` call site across the workspace, grouped by enclosing top-level fn) |
+| `callHierarchy/outgoingCalls`       | yes (every top-level fn called inside the source body, resolved via imports + workspace index; builtins elided) |
 
 Hover scans the open document and every `import "..."` it transitively
 references for `fn name(args)` and `let X = ...` definitions, plus the
@@ -191,6 +194,29 @@ returns the first 100 symbols in name order. SymbolKind is `Function`
 for `fn`, `Constant` for ALL_CAPS `let` (e.g. `TAU`, `MAX_SIZE`), and
 `Variable` for everything else.
 
+Call hierarchy (`textDocument/prepareCallHierarchy`,
+`callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`) renders
+the "Show Call Hierarchy" tree in VS Code (and the equivalent panel in
+other editors), letting the user navigate caller / callee chains
+without leaving the editor. `prepareCallHierarchy` resolves the
+cursor's identifier to a top-level `fn` — same-file declaration first,
+then transitively imported files, then the workspace index for
+siblings outside the import graph; non-fn identifiers (variables,
+parameters, builtins, keywords) return `null` so the editor disables
+the action. `incomingCalls` walks every indexed file plus open-buffer
+import closures, regex-scans for `name(` call sites with string +
+comment masking, and groups results by the enclosing top-level `fn`
+(one tree node per caller fn, with `fromRanges` listing every call
+site inside it). `outgoingCalls` parses the source fn's body
+(brace-counted from the `{` on the signature line), scans for
+identifier-followed-by-`(` patterns, elides keywords (`if`, `while`,
+`return`, ...) and the declaration token itself, then resolves each
+callee through the same import-graph + workspace-index path used by
+`prepareCallHierarchy`. Builtins (`println`, `len`, `list_new`, ...)
+are omitted from outgoing calls because they have no navigable source
+location. Recursion is preserved in both directions — `fib` calling
+itself shows up under both incoming and outgoing.
+
 Diagnostics are produced by writing the buffer to a tempfile and running
 `nova --check <tempfile>`. The server falls back to `nova <tempfile> -o
 /dev/null` if `--check` is not recognised by the installed compiler.
@@ -221,14 +247,15 @@ python tools/nova-lsp/tests/test_workspace_symbols.py
 python tools/nova-lsp/tests/test_rename_workspace.py
 python tools/nova-lsp/tests/test_semantic_tokens.py
 python tools/nova-lsp/tests/test_hover_docs.py
+python tools/nova-lsp/tests/test_call_hierarchy.py
 ```
 
-The nine `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The ten `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
-~10 ms each (the workspace-symbol + workspace-rename integration legs
-also index `/home/user/NOVA/src/` so they take a bit longer when the
-tree is present).
+~10 ms each (the workspace-symbol + workspace-rename + call-hierarchy
+integration legs also index `/home/user/NOVA/src/` so they take a bit
+longer when the tree is present).
 
 ## VS Code wiring
 
@@ -279,6 +306,7 @@ tools/nova-lsp/
     rename_workspace.py     # workspace-wide rename engine (top-level decls)
     semantic_tokens.py      # semantic-tokens classifier + delta encoder
     hover_docs.py           # `///` doc-comment extractor for hover
+    call_hierarchy.py       # prepare / incoming / outgoing call resolver
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -290,4 +318,5 @@ tools/nova-lsp/
     test_rename_workspace.py
     test_semantic_tokens.py
     test_hover_docs.py
+    test_call_hierarchy.py
 ```

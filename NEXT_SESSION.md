@@ -1,5 +1,133 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R15F — LSP call hierarchy (12th LSP capability)
+
+R15F lights up the call-hierarchy view in VS Code (and the equivalent
+panel in other editors) by implementing the three LSP requests that
+together render a navigable caller/callee tree for any top-level
+NOVA function:
+
+  * `textDocument/prepareCallHierarchy(uri, position)` -> resolves
+    the cursor's identifier to a `CallHierarchyItem` (single-element
+    array). Returns `null` when the cursor isn't on a top-level `fn`.
+  * `callHierarchy/incomingCalls(item)` -> every function that
+    CALLS `item.name`, grouped by the enclosing top-level fn so the
+    editor's tree view collapses multiple call sites into one node.
+  * `callHierarchy/outgoingCalls(item)` -> every top-level fn that
+    `item` CALLS (builtins like `println` / `len` are elided —
+    they have no source location to navigate to).
+
+### What landed
+
+**New module** `tools/nova-lsp/nova_lsp/call_hierarchy.py` (~480 lines):
+
+  - `find_function_spans(text)` — brace-counted span extraction for
+    every top-level `fn name(args) { ... }` declaration in `text`.
+    Returns `FunctionSpan` records carrying `decl_line`,
+    `body_open_line`, `end_line`, name char range, and the
+    argument-list string (for tooltip `detail`).
+  - `prepare_call_hierarchy(...)` — 4-step resolution: cursor on
+    decl line, same-doc top-level fn by name, transitively imported
+    fn (via R5F's `walk_imports`), workspace-index fn for siblings
+    outside the import graph (via R8C's `WorkspaceSymbolIndex`).
+  - `incoming_calls(item, workspace_index, file_cache, ...)` —
+    unions the workspace-index file list with open-buffer + import-
+    closure extras, regex-scans each file for `\bname(` with strings
+    + comments masked (same scheme as R9C's `_mask_comments_and_strings`),
+    skips the matching `fn name(` declaration line itself, then
+    groups by enclosing top-level fn for the tree view.
+  - `outgoing_calls(item, file_cache, ...)` — reads the source fn's
+    body lines (`body_open_line .. end_line` inclusive), regex-
+    scans for `\bidentifier(` (with keywords like `if`, `while`,
+    `return` elided), then resolves each callee through the same
+    import-graph + workspace-index path as prepare.
+  - `build_call_hierarchy_item(span, path)` — emits the LSP
+    `CallHierarchyItem` payload (name, kind=Function, detail=signature,
+    uri, full-decl range, name-token selectionRange, and a `data`
+    blob carrying `{path, name, decl_line, end_line}` so follow-up
+    `incomingCalls` / `outgoingCalls` requests don't have to re-walk
+    the import graph).
+
+**Server wiring** in `tools/nova-lsp/nova_lsp/server.py`:
+
+  - Three new handlers (`handle_prepare_call_hierarchy`,
+    `handle_incoming_calls`, `handle_outgoing_calls`) wired into
+    the dispatcher under their LSP method names.
+  - `_warm_workspace_for_call_hierarchy(state)` reuses the warming
+    pattern from `handle_rename_workspace` — re-indexes open
+    buffers, lazily crawls parent dirs when no workspace root was
+    supplied, and accumulates extra paths from open-doc import
+    closures so the candidate set covers files outside the indexed
+    root.
+  - Capability registration: `"callHierarchyProvider": True` added
+    to `server_capabilities()`.
+
+### Tests
+
+`tools/nova-lsp/tests/test_call_hierarchy.py` (~620 lines, NEW)
+covers 24 test functions and 75 assertions:
+
+  * `find_function_spans` basic + nested-braces span detection.
+  * `prepare_call_hierarchy` on a fn declaration / on a variable
+    (returns None) / on whitespace (returns None) / on a call site
+    (resolves back to the declaration).
+  * `incoming_calls` for: 1-file workspace with 3 callers; 3-file
+    workspace (A defines, B+C call); private/unused fn (empty);
+    recursion (self-call counted); strings + comments are skipped.
+  * `outgoing_calls` for: distinct + duplicate callees (with
+    multiple `fromRanges` for the duplicate); leaf fn (empty);
+    builtin-only body (empty — builtins elided); recursion
+    (self-call appears); cross-file callee via import; keywords
+    skipped (`if (...)`, `while (...)` are not callees); strings +
+    comments are skipped.
+  * Server wire smoke for all three handlers through the
+    `_harness.LspClient` (`callHierarchyProvider: True` in init
+    capabilities, prepare returns the right item, incoming returns
+    the expected group counts, outgoing returns the right callees).
+  * Integration on `src/compiler/codegen.nova`: prepare on `out`
+    resolves to its decl at line 167; `out()` has 23 caller fns in
+    codegen.nova (the rest of the ~138 top-level fns reach it
+    through helpers like `out_label`, `out_globl`); total call
+    sites are >1000 (~6376 actual). `cg_init()` outgoing-calls
+    correctly resolves `_cg_ht_new` as a top-level fn while
+    eliding `list_new` (a builtin).
+
+All previously-passing tests still pass:
+
+  - `test_hover_docs`: 55 assertions (the `expected_keys` set in
+    `test_capability_count_unchanged` grew by 1 to include
+    `callHierarchyProvider` — the test's intent ("hover is an
+    enhancement, not a new capability") is preserved).
+  - `test_rename_workspace`: 101 assertions.
+  - `test_semantic_tokens`: 119 assertions.
+  - `test_workspace_symbols`: 52 assertions.
+  - Five `*_smoke.py` legs (completion, rename, references,
+    code-action, definition_cross_file): unchanged.
+
+### Capability count
+
+11 -> 12 capabilities (initialize/initialized/shutdown/exit
+excluded; counting hover, completion, diagnostics, definition,
+rename, references, code actions, workspace symbols, semantic
+tokens, and now call hierarchy as the 12th).
+
+### Files touched (R15F)
+
+  - NEW `tools/nova-lsp/nova_lsp/call_hierarchy.py` (~480 lines)
+  - `tools/nova-lsp/nova_lsp/server.py` (+3 handlers, +warming
+    helper, +capability key, +3 dispatcher routes, docstring
+    refresh)
+  - NEW `tools/nova-lsp/tests/test_call_hierarchy.py` (~620 lines)
+  - `tools/nova-lsp/tests/test_hover_docs.py` (provider-key set
+    grew by 1 to include `callHierarchyProvider`)
+  - `tools/nova-lsp/README.md` (capability table 11 -> 12, new
+    call-hierarchy description, smoke-test list, layout)
+  - `README.md` (LSP bullet — added 12-capability count + call-
+    hierarchy summary)
+  - `NEXT_SESSION.md` (this section)
+
+---
+
 ## R14B — `simd_sad_u8` raw-byte SAD primitive (close R13A's LK ceiling)
 
 R14B adds the `simd_sad_u8(a_ptr, b_ptr, n_bytes) -> int` codegen
