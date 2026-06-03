@@ -1,5 +1,146 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R26A — struct update-syntax `Point { x: 10, ..p }` (field-spread)
+
+**Status: complete** — `Foo { field: val, ..base }` lowers to a
+positional struct value where any field not in the explicit override
+list is copied from `base.field`. Compiles + runs on all 6 cross-
+targets; self-host bit-identical preserved.
+
+### Surface
+
+```nova
+struct Point { x: int; y: int; z: int }
+
+let p = Point { x: 1, y: 2, z: 3 }
+
+// Override one field; rest copied from p.
+let p2 = Point { x: 10, ..p }            // p2 = Point{x:10, y:2, z:3}
+
+// `..base` at the front works identically.
+let p3 = Point { ..p, z: 99 }            // p3 = Point{x:1, y:2, z:99}
+
+// All fields overridden — `..p` covers nothing but is still valid.
+let p4 = Point { x: 1, y: 2, z: 3, ..p }
+
+// Zero fields overridden — pure clone.
+let p5 = Point { ..p }                   // structural copy of p
+
+// Non-trivial base expressions are auto-cached in a fresh temp via a
+// parser-emitted do-expr wrapper, so they evaluate exactly once.
+let q = Point { x: 100, ..compute() }    // compute() called once
+```
+
+### Constraints
+
+* **Only one `..base` per construction.** A second `..` triggers a
+  parse error: `error: only one '..base' spread allowed in struct
+  update-syntax`.
+* `..base` accepts any expression. Bare identifiers (`..p`) are
+  stored directly on the AST; non-trivial expressions are wrapped in
+  a do-expr that caches `base` in a fresh `_struct_spread_tmp_N`
+  local before the construction runs.
+* Wire-shape unchanged from R25A brace-init — still a positional
+  list `[v0, v1, ...]` in field declaration order — so cross-target
+  behaviour and self-host are identical to R25A.
+
+### Implementation
+
+#### Parser (`src/compiler/parser.nova`)
+- `parse_struct_brace_init` extended to recognise `..base_expr`
+  inside the brace body. Sets `base_expr` + `saw_base = 1`;
+  duplicate spread errors via `par_error`.
+- If `base_expr` is an `AST_IDENT`, store it directly on
+  `nd[4]`. If it's any other expression, wrap the whole construction
+  in an `AST_DO_EXPR` that first binds the base to a fresh
+  `_struct_spread_tmp_N` local (re-using `par_struct_tmp_count`),
+  then returns the `AST_STRUCT_INIT` with `nd[4] = ast_ident(temp)`.
+
+#### AST (`src/compiler/ast.nova`)
+- `ast_struct_init` now pushes a 5th slot (`nd[4] = 0`) so callers
+  can mutate it to set the spread base. Existing consumers read
+  `nd[1..3]` unchanged; new consumers gate on `len(nd) > 4`.
+
+#### Codegen (`src/compiler/codegen.nova`)
+- New `cg_reorder_struct_init_b(struct_name, src_names, src_values,
+  base)` — when `base != 0`, missing fields are filled with
+  `ast_field_access(ast_ident(base[1]), field_name)` instead of
+  `ast_none()`. Each missing field gets a fresh AST_FIELD_ACCESS
+  node pointing at the cached temp.
+- `cg_reorder_struct_init` (legacy 3-arg) now just delegates to the
+  4-arg form with `base = 0`.
+- All four target AST_STRUCT_INIT handlers (`gen_expr` x86-64,
+  `arm_gen_expr` ARM64-Linux, `warm_gen_expr` Win-ARM64,
+  `wasm_gen_expr` WASM) now read `nd[4]` and pass it through to
+  `cg_reorder_struct_init_b`. Wire-shape unchanged.
+- `cg_fold_expr` + `_cg_dce_expr_uses` AST_STRUCT_INIT branches
+  also walk `nd[4]` so const-fold + DCE see the spread base as a
+  live use.
+
+### Tests
+
+- NEW `tests/test_struct_update_syntax.nova` — 39 assertions
+  covering: override one field with `..p` at end + at front; p
+  unmodified after update; three-field struct override of one /
+  two / all / zero fields; mid-list spread (`Triple { c: 99, ..t,
+  b: 22 }`); update-syntax in a list literal; update-syntax as
+  method return value (base = self); non-trivial base expression
+  evaluated exactly once via do-expr cache; generic struct
+  update-syntax `Box<int> { ..bi }`; chained update-syntax (each
+  step produces a new value).
+- NEW `tests/test_struct_update_cross_target.sh` — six-target
+  gating harness (compile + assemble + link + run where applicable)
+  for `..base` lowering. All six pass.
+
+### Verification
+
+- All 174 R25A-era tests still green; 1 new test added
+  (`test_struct_update_syntax`) — 175 passing / 6 skipped / 181 total.
+- Self-hosting: stage2.s == stage3.s bit-identical.
+- Cross-target: all 6 targets PASS for the new struct update test
+  plus the existing `test_struct_brace_cross_target.sh` and
+  `test_enum_cross_target.sh`.
+- 39 new assertions.
+
+### R26A.2 follow-ups (deferred)
+
+* tree-sitter-nova grammar refresh to highlight `..base` inside
+  brace-init bodies (R26B's territory).
+* LSP completion at `Foo { ..` — could suggest the binding's
+  remaining-field set the way R26D's brace-init field completion
+  works for explicit fields. Today the `..` is just transparent.
+* Update-syntax with type mismatch warning — `let s = "hi";
+  Point { ..s }` is not currently warned by the R23A/R24A tc_check
+  pass. The pass only fires on annotated AST_CALL nodes, not
+  AST_STRUCT_INIT. A future R26A.2 pass could walk
+  AST_STRUCT_INIT, look up the base's static type (when known via
+  let-annotation), and warn if it doesn't match the struct being
+  constructed.
+* Constant-fold optimisation: when both the base and overrides are
+  literals, the resulting list could be computed at compile time.
+  Today every field still produces a runtime push.
+
+### Files touched (R26A)
+
+- MODIFIED: `src/compiler/ast.nova` (one slot added to ast_struct_init)
+- MODIFIED: `src/compiler/parser.nova` (parse_struct_brace_init
+  extended for `..base`)
+- MODIFIED: `src/compiler/codegen.nova` (cg_reorder_struct_init_b
+  + 4 target handlers + cg_fold_expr + _cg_dce_expr_uses)
+- NEW: `tests/test_struct_update_syntax.nova` (39 assertions)
+- NEW: `tests/test_struct_update_cross_target.sh` (6-target harness)
+- MODIFIED: `README.md` (struct bullet expanded for R26A)
+- MODIFIED: `NEXT_SESSION.md` (this entry)
+
+### Untouched by R26A
+
+- No `tools/nova-lsp/`, `tools/nova-dap/`, `tools/tree-sitter-nova/`
+  modules touched (concurrent R26B/R26D agents own those)
+- No CrossEngin files touched
+- No audit docs touched
+
+---
+
 ## R25A — struct brace-init syntax + struct destructure pattern
 
 **Status: complete** — `Foo { field: val, ... }` brace-init and the

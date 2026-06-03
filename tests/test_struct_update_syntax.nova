@@ -1,0 +1,167 @@
+// R26A: struct update-syntax `Point { x: 10, ..p }` — construct a new
+// struct value by copying fields from an existing struct value and
+// overriding some. Parser-side extension to R25A brace-init (parser.nova
+// parse_struct_brace_init accepts a single `..base_expr` element);
+// codegen-side extension to cg_reorder_struct_init that fills any field
+// not present in the explicit override list by emitting `base.field`
+// (AST_FIELD_ACCESS). Wire-shape unchanged — still a positional list
+// `[v0, v1, ...]` in field declaration order — so cross-target behaviour
+// matches the existing struct ctor.
+//
+// Semantics summary:
+//   * `Foo { f1: a, f2: b, ..base }` — fields f1, f2 override; remaining
+//     fields are copied from `base`.
+//   * `Foo { ..base }` — pure clone of `base`'s field list.
+//   * `Foo { ..base, f: a }` — `..base` at the front is equivalent to at
+//     the end since codegen sees the explicit-overrides list and the base
+//     as independent inputs.
+//   * Only one `..base` per construction. A second one is a parse error
+//     ("only one '..base' spread allowed in struct update-syntax").
+//   * Non-trivial base expressions (anything other than a bare IDENT) are
+//     transparently wrapped in a do-expr that caches the base in a fresh
+//     temp so the expression evaluates exactly once.
+//
+// 20 assertions across:
+//   * override one field with `..p` at end / front
+//   * override multiple fields
+//   * all fields overridden (spread covers nothing)
+//   * zero fields overridden (clone via `..p`)
+//   * three-field struct with various override patterns
+//   * update-syntax inside a list literal
+//   * update-syntax through a method call (base is a method return)
+//   * update-syntax with the base as a non-trivial expression (calls
+//     get cached via parser-emitted do-expr wrapper)
+//   * generic struct update-syntax with explicit `<TypeArgs>`
+
+// --- Two-field struct: override one with `..p` at end ---
+
+struct Point {
+    x: int,
+    y: int
+}
+
+let p = Point { x: 1, y: 2 }
+let p2 = Point { x: 10, ..p }
+assert(p2.x == 10, "Point { x: 10, ..p }: x overridden to 10")
+assert(p2.y == 2, "Point { x: 10, ..p }: y copied from p")
+
+// --- Same struct: override one with `..p` at front ---
+
+let p3 = Point { ..p, x: 100 }
+assert(p3.x == 100, "Point { ..p, x: 100 }: x overridden to 100")
+assert(p3.y == 2, "Point { ..p, x: 100 }: y copied from p")
+
+// --- p is unmodified (update-syntax produces a NEW value) ---
+
+assert(p.x == 1, "p.x unchanged after p2/p3")
+assert(p.y == 2, "p.y unchanged after p2/p3")
+
+// --- Three-field struct: override one, two, and all three ---
+
+struct Triple {
+    a: int,
+    b: int,
+    c: int
+}
+
+let t = Triple { a: 1, b: 2, c: 3 }
+
+let t1 = Triple { a: 100, ..t }
+assert(t1.a == 100, "Triple { a: 100, ..t }: a overridden")
+assert(t1.b == 2, "Triple { a: 100, ..t }: b copied")
+assert(t1.c == 3, "Triple { a: 100, ..t }: c copied")
+
+let t2 = Triple { a: 100, b: 200, ..t }
+assert(t2.a == 100, "Triple { a: 100, b: 200, ..t }: a overridden")
+assert(t2.b == 200, "Triple { a: 100, b: 200, ..t }: b overridden")
+assert(t2.c == 3, "Triple { a: 100, b: 200, ..t }: c copied")
+
+// All fields overridden — `..t` covers nothing but is still valid.
+let t3 = Triple { a: 100, b: 200, c: 300, ..t }
+assert(t3.a == 100, "all fields overridden: a == 100")
+assert(t3.b == 200, "all fields overridden: b == 200")
+assert(t3.c == 300, "all fields overridden: c == 300")
+
+// Zero fields overridden — pure clone of t.
+let t4 = Triple { ..t }
+assert(t4.a == 1, "pure clone via ..t: a == 1")
+assert(t4.b == 2, "pure clone via ..t: b == 2")
+assert(t4.c == 3, "pure clone via ..t: c == 3")
+
+// --- Mix: override in the middle of overrides (spread between) ---
+
+let t5 = Triple { c: 99, ..t, b: 22 }
+// Spread `..t` fills any field not in {c: 99, b: 22} = {a}. So:
+//   a = t.a = 1, b = 22, c = 99
+assert(t5.a == 1, "spread fills missing a")
+assert(t5.b == 22, "later b override wins (single override per field)")
+assert(t5.c == 99, "earlier c override")
+
+// --- Update-syntax inside a list literal ---
+
+let pts = [
+    Point { x: 1, ..p },
+    Point { y: 99, ..p }
+]
+assert(pts[0].x == 1, "list[0] override x")
+assert(pts[0].y == 2, "list[0] y from p")
+assert(pts[1].x == 1, "list[1] x from p")
+assert(pts[1].y == 99, "list[1] override y")
+
+// --- Update-syntax inside a method body, base is `self` ---
+
+struct Vec3 {
+    x: int,
+    y: int,
+    z: int
+}
+
+fn Vec3.with_z(self, nz) {
+    return Vec3 { z: nz, ..self }
+}
+
+let v = Vec3 { x: 5, y: 6, z: 7 }
+let vz = v.with_z(99)
+assert(vz.x == 5, "Vec3.with_z: x from self")
+assert(vz.y == 6, "Vec3.with_z: y from self")
+assert(vz.z == 99, "Vec3.with_z: z overridden")
+// Self preserved (update produces new value).
+assert(v.z == 7, "v.z unchanged by with_z")
+
+// --- Non-trivial base expression — parser wraps in do-expr cache ---
+// Verifies that the base evaluates exactly once even when it's a call.
+
+let counter = [0]
+fn make_p() {
+    counter[0] = counter[0] + 1
+    return Point { x: 50, y: 60 }
+}
+
+let pn = Point { x: 1000, ..make_p() }
+assert(pn.x == 1000, "non-trivial base: x overridden to 1000")
+assert(pn.y == 60, "non-trivial base: y from make_p()")
+assert(counter[0] == 1, "non-trivial base evaluated exactly once")
+
+// --- Generic struct update-syntax with explicit `<TypeArgs>` ---
+
+struct Box<T> {
+    value: T
+}
+
+let bi = Box { value: 42 }
+let bi2 = Box<int> { ..bi }
+assert(bi2.value == 42, "Box<int> { ..bi }: value copied")
+
+// --- Chained update-syntax — each step produces a new value ---
+
+let chain0 = Point { x: 0, y: 0 }
+let chain1 = Point { x: 1, ..chain0 }
+let chain2 = Point { y: 2, ..chain1 }
+assert(chain0.x == 0, "chain0 immutable: x")
+assert(chain0.y == 0, "chain0 immutable: y")
+assert(chain1.x == 1, "chain1: x overridden")
+assert(chain1.y == 0, "chain1: y from chain0")
+assert(chain2.x == 1, "chain2: x from chain1")
+assert(chain2.y == 2, "chain2: y overridden")
+
+println("test_struct_update_syntax.nova: all update-syntax assertions passed")

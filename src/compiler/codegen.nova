@@ -1001,7 +1001,18 @@ fn struct_field_index(struct_name, field_name) {
 // still has the right shape — codegen pushes one value per field. Source
 // fields that don't appear in the declaration are silently dropped (the
 // parser-time tc_check pass surfaces the warning).
+//
+// R26A: if `base` is non-zero, it's an AST_IDENT for the spread `..base`
+// expression in update-syntax `Foo { field: val, ..base }`. Missing
+// fields are filled with `base.field` (AST_FIELD_ACCESS) so the runtime
+// copies values from the existing struct value. Parser guarantees `base`
+// is always an AST_IDENT — non-trivial spreads are pre-bound to a fresh
+// temp via a do-expr wrapper.
 fn cg_reorder_struct_init(struct_name, src_names, src_values) {
+    return cg_reorder_struct_init_b(struct_name, src_names, src_values, 0)
+}
+
+fn cg_reorder_struct_init_b(struct_name, src_names, src_values, base) {
     let i = 0
     let decl_fields = list_new()
     while i < cg_struct_count {
@@ -1028,9 +1039,16 @@ fn cg_reorder_struct_init(struct_name, src_names, src_values) {
             k = k + 1
         }
         if found == 0 {
-            // Missing — push none placeholder so the value list has
-            // the correct length / shape.
-            push(result, ast_none())
+            if base != 0 {
+                // R26A: copy from base via `base.field`. base is an
+                // AST_IDENT (parser invariant); each missing field
+                // emits a fresh AST_FIELD_ACCESS pointing at it.
+                push(result, ast_field_access(ast_ident(base[1]), want))
+            } else {
+                // Missing — push none placeholder so the value list has
+                // the correct length / shape.
+                push(result, ast_none())
+            }
         }
         j = j + 1
     }
@@ -2587,6 +2605,11 @@ fn cg_fold_expr(nd) {
             cg_fold_expr(sv[i])
             i = i + 1
         }
+        // R26A: also fold the optional spread base on nd[4] (typically
+        // an AST_IDENT — folding is a no-op but keeps the walker uniform).
+        if len(nd) > 4 {
+            if nd[4] != 0 { cg_fold_expr(nd[4]) }
+        }
         return nd
     }
     if tag == AST_LAMBDA {
@@ -2972,6 +2995,14 @@ fn _cg_dce_expr_uses(nd, name) {
         while i < len(sv) {
             if _cg_dce_expr_uses(sv[i], name) == 1 { return 1 }
             i = i + 1
+        }
+        // R26A: also check the optional spread base on nd[4]. When
+        // present this is an AST_IDENT — DCE must not eliminate the
+        // local that backs it.
+        if len(nd) > 4 {
+            if nd[4] != 0 {
+                if _cg_dce_expr_uses(nd[4], name) == 1 { return 1 }
+            }
         }
         return 0
     }
@@ -3832,10 +3863,14 @@ fn gen_expr(nd) {
         // ...]` in field declaration order. Reorder source-order values
         // to decl order, then emit the same _nova_list_new + push loop
         // as the positional ctor.
+        // R26A: optional spread base on nd[4] — when set, missing fields
+        // are filled from `base.field` (cg_reorder_struct_init_b).
         let s_name = nd[1]
         let s_vals = nd[2]
         let s_names = nd[3]
-        let ordered = cg_reorder_struct_init(s_name, s_names, s_vals)
+        let s_base = 0
+        if len(nd) > 4 { s_base = nd[4] }
+        let ordered = cg_reorder_struct_init_b(s_name, s_names, s_vals, s_base)
         out("    call _nova_list_new")
         out("    push rax")
         let ai = 0
@@ -6268,10 +6303,14 @@ fn arm_gen_expr(nd) {
         // order for side effects, then return the stub list. Keeps the
         // cross-target build green; full struct value semantics on ARM64
         // native await a real list runtime.
+        // R26A: optional spread base on nd[4] — when set, missing fields
+        // are filled from `base.field`.
         let s_name_a = nd[1]
         let s_vals_a = nd[2]
         let s_names_a = nd[3]
-        let ordered_a = cg_reorder_struct_init(s_name_a, s_names_a, s_vals_a)
+        let s_base_a = 0
+        if len(nd) > 4 { s_base_a = nd[4] }
+        let ordered_a = cg_reorder_struct_init_b(s_name_a, s_names_a, s_vals_a, s_base_a)
         let ai = 0
         while ai < len(ordered_a) {
             arm_gen_expr(ordered_a[ai])
@@ -7497,10 +7536,14 @@ fn warm_gen_expr(nd) {
         // R25A: brace-init `Foo { field: val, ... }`. Mirror AST_LIST_LIT
         // — values pushed in declaration order. Reorder source-order
         // values to decl order via cg_reorder_struct_init.
+        // R26A: optional spread base on nd[4] — missing fields filled
+        // from `base.field` via cg_reorder_struct_init_b.
         let s_name_wm = nd[1]
         let s_vals_wm = nd[2]
         let s_names_wm = nd[3]
-        let ordered_wm = cg_reorder_struct_init(s_name_wm, s_names_wm, s_vals_wm)
+        let s_base_wm = 0
+        if len(nd) > 4 { s_base_wm = nd[4] }
+        let ordered_wm = cg_reorder_struct_init_b(s_name_wm, s_names_wm, s_vals_wm, s_base_wm)
         warm_out("    bl _nova_warm_list_new")
         warm_push_x0()
         let wmi = 0
@@ -9854,10 +9897,14 @@ fn wasm_gen_expr(nd) {
         // AST_LIST_LIT — values pushed in declaration order. Reorder
         // source-order values to decl order via cg_reorder_struct_init,
         // then mirror AST_LIST_LIT's runtime sequence.
+        // R26A: optional spread base on nd[4] — missing fields filled
+        // from `base.field`.
         let s_name_w = nd[1]
         let s_vals_w = nd[2]
         let s_names_w = nd[3]
-        let ordered_w = cg_reorder_struct_init(s_name_w, s_names_w, s_vals_w)
+        let s_base_w = 0
+        if len(nd) > 4 { s_base_w = nd[4] }
+        let ordered_w = cg_reorder_struct_init_b(s_name_w, s_names_w, s_vals_w, s_base_w)
         wi("call $list_new")
         wi("global.set $g__wasm_list_tmp")
         let wi2 = 0

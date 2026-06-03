@@ -646,12 +646,20 @@ fn ast_try_propagate(inner) {
 //   nd[1] = struct_name (string)
 //   nd[2] = source-order value expressions (list)
 //   nd[3] = source-order field names (list, parallel to nd[2])
+//   nd[4] = optional base expression for R26A spread `..base` (0 if none)
+//          When non-zero, codegen fills any field not present in nd[3]
+//          by emitting `base.field` (AST_FIELD_ACCESS) — i.e. functional
+//          update-syntax `Point { x: 10, ..p }`. Parser ensures `base`
+//          is always an AST_IDENT (wrapping non-trivial exprs in a
+//          do-expr that caches them in a fresh temp) so codegen only
+//          ever sees a cheap identifier reference.
 fn ast_struct_init(name, values, names) {
     let n = list_new()
     push(n, AST_STRUCT_INIT)
     push(n, name)
     push(n, values)
     push(n, names)
+    push(n, 0)
     return n
 }
 
