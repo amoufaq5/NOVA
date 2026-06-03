@@ -72,6 +72,9 @@ from nova_lsp.exhaustiveness_fix import (
     KIND_QUICKFIX,
     build_exhaustiveness_code_actions,
 )
+from nova_lsp.extract_function import (
+    build_extract_action as build_extract_function_action,
+)
 from nova_lsp.hover_docs import (
     extract_doc_comment,
     extract_doc_comment_from_text,
@@ -1123,6 +1126,18 @@ def _make_workspace_edit(uri: str, new_text: str, doc_text: str) -> Dict[str, An
 
 
 # --- Action 1: Extract function -------------------------------------------
+#
+# R21F moved the analysis + edit construction into the dedicated
+# `nova_lsp.extract_function` module so the inline implementation
+# could grow without bloating this dispatcher. The wrapper below
+# (`_build_extract_action`) keeps the public name + signature stable
+# for in-file callers and delegates the work to the module, passing
+# the builtin function name set so the free-variable scan ignores
+# `println`/`len`/etc when computing the helper's parameter list.
+#
+# `_find_fn_definitions` is preserved here because the sort-fns action
+# (Action 3) also depends on it; the rest of the extract helpers
+# (free-variable scan, locals-in-scope, etc) live in the module.
 
 
 def _find_fn_definitions(text: str) -> List[Tuple[str, int, int, int]]:
@@ -1130,7 +1145,11 @@ def _find_fn_definitions(text: str) -> List[Tuple[str, int, int, int]]:
 
     Returns a list of `(name, start_line, body_open_line, end_line)` tuples
     where `end_line` is the line index of the closing `}` (inclusive).
-    Brace counting is done from the opening `{` on the signature line."""
+    Brace counting is done from the opening `{` on the signature line.
+
+    Also used by the sort-fns code action (Action 3) — kept in this
+    file because the sort action lives here too.
+    """
     lines = text.splitlines()
     out: List[Tuple[str, int, int, int]] = []
     i = 0
@@ -1169,205 +1188,24 @@ def _find_fn_definitions(text: str) -> List[Tuple[str, int, int, int]]:
     return out
 
 
-def _enclosing_fn(
-    fns: List[Tuple[str, int, int, int]], line: int
-) -> Optional[Tuple[str, int, int, int]]:
-    """Smallest function whose body strictly contains `line`."""
-    best: Optional[Tuple[str, int, int, int]] = None
-    for fn in fns:
-        _name, start, _open, end = fn
-        if start <= line <= end:
-            if best is None or (end - start) < (best[3] - best[1]):
-                best = fn
-    return best
-
-
-_LET_BIND_RE = re.compile(r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)")
-_KEYWORDS = {
-    "fn", "let", "if", "else", "while", "for", "return", "import",
-    "true", "false", "nil", "null", "and", "or", "not", "in",
-    "break", "continue", "match", "do", "end",
-}
-
-
-def _free_variables(selection: str, available_locals: Set[str]) -> List[str]:
-    """Identifiers used in `selection` that are not bound by `let` inside
-    the selection itself, not Nova keywords, not literal numbers/strings,
-    and not builtin functions. Preserves first-seen order so call sites
-    look stable across edits."""
-    bound: Set[str] = set(_LET_BIND_RE.findall(selection))
-    seen: List[str] = []
-    seen_set: Set[str] = set()
-    # Strip strings so identifiers inside string literals do not leak in.
-    stripped = re.sub(r'"(?:\\.|[^"\\])*"', '""', selection)
-    for tok in IDENT_RE.findall(stripped):
-        if tok in _KEYWORDS:
-            continue
-        if tok in BUILTIN_FUNCTIONS:
-            continue
-        if tok in bound:
-            continue
-        if tok in seen_set:
-            continue
-        # Only treat as a free variable if it's actually visible at the
-        # call site (i.e. listed in `available_locals`). Otherwise it's
-        # a global fn name, an unknown symbol, etc — leave it alone.
-        if available_locals and tok not in available_locals:
-            continue
-        seen.append(tok)
-        seen_set.add(tok)
-    return seen
-
-
-def _locals_in_scope(fn_lines: List[str], up_to: int) -> Set[str]:
-    """Parameters + every `let`-bound name from line 0..up_to-1 of the
-    function body (inclusive of params on the signature line)."""
-    out: Set[str] = set()
-    if not fn_lines:
-        return out
-    # Parameters: first line is `fn name(a, b, c) {`.
-    sig = fn_lines[0]
-    pm = FN_DEF_RE.match(sig)
-    if pm:
-        args = pm.group(2)
-        for a in args.split(","):
-            a = a.strip()
-            if a:
-                out.add(a)
-    for i in range(min(up_to, len(fn_lines))):
-        for nm in _LET_BIND_RE.findall(fn_lines[i]):
-            out.add(nm)
-    return out
-
-
-def _last_import_line(lines: List[str]) -> int:
-    """Index of the last contiguous-from-top `import "..."` line, or -1
-    if there are none."""
-    last = -1
-    for i, line in enumerate(lines):
-        if IMPORT_RE.match(line):
-            last = i
-            continue
-        if line.strip() == "":
-            continue
-        break
-    return last
-
-
-def _next_extracted_name(text: str) -> str:
-    """`extracted_N` where N is one more than the count of existing
-    `extracted_*` identifiers (or 1 if none)."""
-    matches = re.findall(r"\bextracted_(\d+)\b", text)
-    n = max((int(m) for m in matches), default=0) + 1
-    return f"extracted_{n}"
-
-
 def _build_extract_action(
     doc: Document, range_: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
-    """If `range_` covers a usable multi-statement block inside a fn body,
-    return a `CodeAction` that extracts it into a top-level helper."""
-    lines = doc.text.splitlines()
-    start_line = range_.get("start", {}).get("line", 0)
-    end_line = range_.get("end", {}).get("line", 0)
-    end_char = range_.get("end", {}).get("character", 0)
-    # Trim a trailing empty line that VS Code sometimes includes when
-    # selecting full lines.
-    if end_line > start_line and end_char == 0:
-        end_line -= 1
-    if end_line < start_line:
-        return None
-    if not (0 <= start_line < len(lines) and 0 <= end_line < len(lines)):
-        return None
+    """Delegate to the R21F extract-function module.
 
-    fns = _find_fn_definitions(doc.text)
-    enclosing = _enclosing_fn(fns, start_line)
-    if not enclosing:
-        return None
-    fn_name, fn_start, fn_open, fn_end = enclosing
-    # Selection must be inside the body (after the opening `{`, before the
-    # closing `}`).
-    if not (fn_open < start_line and end_line < fn_end):
-        return None
-
-    selected_lines = lines[start_line:end_line + 1]
-    # Require at least one non-empty selected line.
-    if not any(l.strip() for l in selected_lines):
-        return None
-
-    # Compute available locals (params + lets defined above the selection).
-    fn_body_lines = lines[fn_start:fn_end + 1]
-    rel_start = start_line - fn_start
-    available = _locals_in_scope(fn_body_lines, rel_start)
-
-    selection_text = "\n".join(selected_lines)
-    free_vars = _free_variables(selection_text, available)
-    new_name = _next_extracted_name(doc.text)
-
-    # Compute the indentation of the first non-empty selected line so the
-    # call-site replacement matches the surrounding style.
-    indent = ""
-    for l in selected_lines:
-        if l.strip():
-            indent = l[: len(l) - len(l.lstrip())]
-            break
-
-    # Build the new helper function. Indent body by 4 spaces relative to
-    # the original selection's indent so it reads as a standalone fn.
-    args = ", ".join(free_vars)
-    helper_body_lines: List[str] = []
-    # Strip common leading indentation from selection so the helper body
-    # starts at column 4.
-    common = None
-    for l in selected_lines:
-        if not l.strip():
-            continue
-        leading = len(l) - len(l.lstrip())
-        common = leading if common is None else min(common, leading)
-    if common is None:
-        common = 0
-    for l in selected_lines:
-        if l.strip():
-            helper_body_lines.append("    " + l[common:])
-        else:
-            helper_body_lines.append("")
-    helper = (
-        f"fn {new_name}({args}) {{\n"
-        + "\n".join(helper_body_lines)
-        + "\n}\n\n"
+    Threads `BUILTIN_FUNCTIONS.keys()` through so the free-variable
+    scan inside the module knows which identifiers are builtins (and
+    therefore not parameters of the extracted helper). The module
+    returns ``None`` when the selection isn't extractable — too small,
+    outside any function body, or spans a fn boundary — and the
+    dispatcher transparently propagates that.
+    """
+    return build_extract_function_action(
+        doc.uri,
+        doc.text,
+        range_,
+        builtins=set(BUILTIN_FUNCTIONS.keys()),
     )
-
-    # Construct the new document text.
-    last_import = _last_import_line(lines)
-    insert_at = last_import + 1  # line index where helper is inserted
-    # Skip a single blank line directly after the imports so the helper
-    # lands in a tidy spot.
-    while insert_at < len(lines) and lines[insert_at].strip() == "":
-        insert_at += 1
-
-    new_lines = list(lines)
-    # 1. Replace selected range with a call.
-    call_line = f"{indent}{new_name}({args})"
-    new_lines[start_line:end_line + 1] = [call_line]
-    # 2. Recompute insert_at because we just shrank the list — but only if
-    # the selection was below the insertion point.
-    if start_line < insert_at:
-        removed = (end_line - start_line + 1) - 1
-        insert_at -= removed
-    # 3. Insert the helper.
-    helper_lines = helper.rstrip("\n").split("\n")
-    new_lines[insert_at:insert_at] = helper_lines + [""]
-
-    new_text = "\n".join(new_lines)
-    # Preserve a trailing newline if the original had one.
-    if doc.text.endswith("\n") and not new_text.endswith("\n"):
-        new_text += "\n"
-
-    return {
-        "title": f"Extract to function `{new_name}`",
-        "kind": KIND_REFACTOR_EXTRACT,
-        "edit": _make_workspace_edit(doc.uri, new_text, doc.text),
-    }
 
 
 # --- Action 2: Organize imports -------------------------------------------

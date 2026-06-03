@@ -98,6 +98,182 @@ ARM64 Linux, Windows ARM64, WASM) continue to emit the same code.
 
 ---
 
+## R21F — LSP "extract function" refactor module
+
+R21F lifts the inline extract-function code action out of `server.py`'s
+dispatcher into a dedicated `nova_lsp/extract_function.py` module so
+the analysis + edit-construction pipeline can grow without bloating
+the dispatcher. Same outward behaviour as R3's original implementation
+— the editor still gets a `CodeAction` with title
+``"Extract to function `extracted_N`"`` and a `WorkspaceEdit` that
+replaces the selected block with a call site and inserts a fresh
+top-level `fn extracted_N(<free_vars>)` — but the implementation is
+now split into three small, individually-testable pieces a real
+refactor pass needs.
+
+### What landed
+
+**nova-lsp** (`tools/nova-lsp/nova_lsp/extract_function.py`, NEW):
+
+  * `analyze_selection(uri, range, doc_text)` — classify the
+    selection and harvest the **free variables**: identifiers READ
+    inside the selection but DECLARED in the enclosing scope
+    (parameters + lets above the selection). Returns `None` when
+    the selection isn't a usable block: empty, single-line, lies
+    outside any function body, or spans a function boundary. The
+    `min_lines` parameter (default `MIN_LINES_FOR_EXTRACT = 2`)
+    gates the action so a single-statement click doesn't trigger
+    an extract; pass `require_min_lines=False` to bypass for
+    callers that want the analysis without the gate. VS Code's
+    "select full line" artifact (range extends to `(next_line, 0)`)
+    is trimmed off so a two-line full-line selection isn't
+    counted as three lines.
+  * `compute_next_extracted_name(doc_text)` — counter-based unique
+    identifier. Walks the buffer for every `extracted_N` token
+    (including text inside existing helper bodies) and returns
+    `extracted_<max+1>` so a second extract in the same session
+    doesn't collide with the first. Starting counter is 1 for a
+    fresh file.
+  * `build_extract_edit(info, doc_text, new_fn_name)` — construct
+    the `WorkspaceEdit` that replaces the selection with a call
+    site and inserts the helper function. The helper lands at
+    **file top-level** just below the last contiguous `import`
+    line (matches R3's legacy placement so the muscle memory of
+    existing users carries over). Falls back to "after the
+    enclosing function" when the file has no imports. The body
+    strips common leading indentation so the helper lives at
+    column 4 regardless of how deeply the original block was
+    nested.
+  * `build_extract_action(uri, doc_text, range, builtins=...)` —
+    end-to-end wrapper that composes the three pieces above.
+    Returns `None` on rejection, a fully-formed `CodeAction` on
+    success.
+
+**nova-lsp** (`tools/nova-lsp/nova_lsp/server.py`):
+
+  * The inline `_build_extract_action` and its private helpers
+    (`_enclosing_fn`, `_free_variables`, `_locals_in_scope`,
+    `_last_import_line`, `_next_extracted_name`) are deleted; the
+    dispatcher now delegates to
+    `extract_function.build_extract_action` passing
+    `BUILTIN_FUNCTIONS.keys()` so the free-variable scan ignores
+    builtin function names. `_find_fn_definitions` stays in
+    `server.py` because the sort-fns code action also depends on
+    it.
+  * No change to the `codeActionProvider.codeActionKinds` list —
+    `refactor.extract` is still advertised alongside the three
+    other kinds. LSP capability count stays at 15 (the dispatcher
+    is the public surface; the new module is an implementation
+    detail).
+
+**Tests** (NEW `tools/nova-lsp/tests/test_extract_function.py`,
+66 assertions across 33 test functions):
+
+  * `compute_next_extracted_name`: empty file, no prior tokens,
+    single prior token, max-not-count semantics, two-step
+    counter unique.
+  * `analyze_selection` happy paths: simple free vars
+    (`let z = x + y; println(z)` → `(x, y)`), no free variables
+    (constant selection → empty arg list), single free var
+    (`print(x)` → `(x)`), multiple free vars
+    (`print(x + y + z)` → `(x, y, z)`), local lets excluded
+    (`let a = ...; let b = ...` inside selection → not args),
+    builtins filtered (`println`, `print_int` → not args).
+  * `analyze_selection` rejections (edge cases): single-line,
+    empty / zero-width range, blank-only selection,
+    outside-function, spans-fn-boundary, malformed range
+    (end < start), out-of-document indices,
+    VS Code full-line artifact trimming,
+    `require_min_lines=False` bypass.
+  * `build_extract_edit`: helper signature shape, call-site
+    presence, no-args case, indentation preservation
+    (common-indent strip), call-site indent matches selection,
+    helper-at-file-top placement, `WorkspaceEdit` shape
+    validation, trailing-newline preservation.
+  * `build_extract_action` composed: rejection-returns-None,
+    title format, counter unique across two consecutive
+    extracts.
+  * Server-level wire smoke through `dispatch`: full
+    `textDocument/codeAction` round trip on a 3-line selection
+    inside a function with three parameters used in the
+    selection, single-line click yields no extract action but
+    still surfaces organize-imports and sort-fns.
+  * Plus `MIN_LINES_FOR_EXTRACT` constant exposure.
+
+All 15 existing LSP test suites still pass — the dispatcher
+refactor preserved every existing `code_action_smoke.py` assertion
+(helper above existing fns, signature mentions free vars, body
+contains original statements, trivial-range case still returns
+organize-imports + sort-fns).
+
+### Example
+
+Given a function with a three-statement block ready to factor out:
+
+```nova
+fn caller(a, b, c) {
+    let x = a + b
+    let y = x + c
+    let z = y * 2
+    return z
+}
+```
+
+Selecting lines 1-3 (the three `let` statements) and triggering
+the refactor lightbulb produces:
+
+```nova
+fn extracted_1(a, b, c) {
+    let x = a + b
+    let y = x + c
+    let z = y * 2
+}
+
+fn caller(a, b, c) {
+    extracted_1(a, b, c)
+    return z
+}
+```
+
+The helper's parameter list `(a, b, c)` is the free-variable set
+— identifiers used in the selection (`a`, `b`, `c`) that are
+DECLARED in the enclosing scope (parameters of `caller`).
+Identifiers bound INSIDE the selection (`x`, `y`, `z`) are locals
+of the helper, not parameters. The call site `extracted_1(a, b,
+c)` replaces the selected lines. Note that `return z` after the
+call is currently broken — `z` is no longer in scope at the call
+site. That's the R21F.2 follow-up: variables WRITTEN inside the
+selection and READ after it should become return values of the
+helper, with the call site rewritten as `let z = extracted_1(...)`
+(or destructured for multi-output blocks).
+
+### R21F.2 follow-ups (deferred)
+
+  * **Return-value inference.** Variables written inside the
+    selection and read after it (`z` in the example above) should
+    be the helper's return value. The call site should become
+    `let z = extracted_1(a, b, c)`. Multi-output blocks (two
+    variables read after) need either a tuple return + destructure
+    on the call site or a refusal-to-extract with a polite
+    diagnostic.
+  * **`return` inside selection.** When the selection ends with a
+    `return` statement, the helper computes the return value and
+    the call site should be `return extracted_1(...)`. Currently
+    the call site is bare and the enclosing fn never returns,
+    leaving a bug for the user to spot.
+  * **Closure capture.** If the selection captures a closure that
+    references a free variable, the extracted helper needs to
+    accept and pass through the closure environment. The current
+    analysis is purely lexical and doesn't model closure capture.
+  * **Stricter min-lines threshold.** Bumping
+    `MIN_LINES_FOR_EXTRACT` to 3 reduces lightbulb noise on
+    trivial selections, but the existing R3-era smoke test
+    expects the action to fire on a 2-line selection. The
+    threshold is a constant so editors that want the stricter
+    behaviour can pass `min_lines=3` to `analyze_selection`.
+
+---
+
 ## R20A — Result + postfix `?` propagation operator (R17A.3)
 
 R20A wires the canonical error-handling idiom on top of R17A's sum types

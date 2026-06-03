@@ -19,7 +19,7 @@ for the install hook.
 | `textDocument/completion`           | yes (builtins + fn/let scan, triggers on `.` and `(`) |
 | `textDocument/rename`               | yes (workspace-wide for top-level fn/let/const/type, single-buffer for locals + params) |
 | `textDocument/references`           | yes (regex scan, open docs + transitively imported files) |
-| `textDocument/codeAction`           | yes (extract function, organize imports, sort fn declarations, plus a `quickfix` for R17A's exhaustiveness WARN that auto-adds stub arms for missing variants) |
+| `textDocument/codeAction`           | yes (extract function via a dedicated `extract_function.py` analysis pipeline, organize imports, sort fn declarations, plus a `quickfix` for R17A's exhaustiveness WARN that auto-adds stub arms for missing variants) |
 | `textDocument/definition`           | yes (intra-file + follows `import "..."` transitively) |
 | `workspace/symbol`                  | yes (fuzzy name search across every indexed `.nova` file) |
 | `textDocument/semanticTokens/full`  | yes (variable / function / type / namespace / keyword / string / number / comment / parameter / constant with declaration / readonly / static modifiers) |
@@ -130,11 +130,27 @@ unsaved edits beat stale on-disk content.
 Code actions surface four refactorings via the VS Code lightbulb menu:
 
 * **Extract to function `extracted_N`** (`refactor.extract`) — only
-  shown when the selection covers a multi-statement block inside a `fn`
-  body. The server identifies free variables in the selection
-  (identifiers used but not `let`-bound inside it, minus keywords and
-  builtins), inserts a new top-level `fn extracted_N(<free_vars>)` right
-  after the last import, and replaces the selection with a call to it.
+  shown when the selection covers a multi-statement block (≥2
+  non-empty lines) inside a `fn` body. The R21F implementation
+  lives in `nova_lsp/extract_function.py` with three small,
+  individually-testable pieces: `analyze_selection(uri, range,
+  doc_text)` classifies the selection and harvests the **free
+  variables** — identifiers READ inside the selection but DECLARED
+  in the enclosing scope (parameters + lets above the selection);
+  `compute_next_extracted_name(doc_text)` walks the buffer for
+  every `extracted_<N>` token and returns the next free counter
+  (so a second extract in the same session doesn't collide with
+  the first); `build_extract_edit(info, doc_text, name)` packages
+  the call-site replacement and a fresh top-level `fn
+  extracted_N(<free_vars>)` helper into a `WorkspaceEdit`. The
+  helper lands at file top-level (just below the last `import` line)
+  so every extracted helper groups together; falls back to "after
+  the enclosing function" when the file has no imports. The action
+  is rejected when the selection is empty, single-line, spans a
+  function boundary, or sits outside any function body — the
+  lightbulb stays clean of no-op extracts. Variables WRITTEN inside
+  the selection and read AFTER it are not yet propagated as return
+  values (tracked as R21F.2).
 * **Organize imports** (`source.organizeImports`) — sorts the top-of-file
   `import "..."` block alphabetically and groups it: `std/` first,
   then `../src/`, then `../../tests/`, others last. Blank lines
