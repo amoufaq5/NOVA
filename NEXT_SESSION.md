@@ -1,5 +1,166 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R19F — LSP type hierarchy (15th LSP capability)
+
+R19F adds **type hierarchy** (`textDocument/prepareTypeHierarchy` +
+`typeHierarchy/supertypes` + `typeHierarchy/subtypes`) to `nova-lsp`,
+taking the capability count from 14 -> 15. The type-hierarchy view
+lets the user navigate sub/supertype edges from the cursor:
+clicking an `enum Option` declaration expands to a tree of its
+variants (`Some`, `None`), while clicking the right-hand side of a
+`type ID = int` exposes the `int` base as a supertype.
+
+### What landed
+
+**New module** `tools/nova-lsp/nova_lsp/type_hierarchy.py` (~600 lines)
+exposing:
+
+  * `prepare_type_hierarchy(uri, line, character, doc_text,
+    file_cache, *, workspace_index=None, text_overrides=None) ->
+    TypeHierarchyItem[] | None` — resolve the cursor to a type /
+    enum / variant item. Returns `None` when the cursor isn't on a
+    recognised type identifier (fn name, variable, parameter,
+    whitespace).
+  * `supertypes(item, file_cache, *, workspace_index=None,
+    text_overrides=None) -> TypeHierarchyItem[]` — enum/struct ->
+    empty, `type T = U` -> the U base (real type decl or synthetic
+    primitive placeholder), enum variant -> parent enum.
+  * `subtypes(item, file_cache, workspace_index, *, extra_paths=None,
+    text_overrides=None) -> TypeHierarchyItem[]` — enum -> every
+    declared variant as an `EnumMember`-kind item (kind=22), `type
+    Base = ...` -> every other alias pointing back at it,
+    struct/variant -> empty.
+  * `scan_type_declarations(text)` — parse top-level `enum` /
+    `struct` / `type` declarations at column zero. Captures the
+    alias RHS for type aliases so supertypes can resolve it.
+  * `scan_enum_variants(text, enum_decl)` — brace-counted walk of
+    an enum body returning one `EnumVariant` per declared variant
+    with inferred arity. Handles both R17A's multi-line payload
+    form (`enum Shape { Circle(int) Rect(int, int) }`) and the
+    legacy single-line C-style form (`enum Direction { North,
+    South, East, West }`).
+  * `build_type_hierarchy_item(decl, path)` /
+    `build_variant_hierarchy_item(variant, enum_decl, path)` /
+    `build_synthetic_base_item(name, uri)` — LSP shape constructors.
+
+**Server wiring**: `server.py` imports `prepare_type_hierarchy` +
+`subtypes` + `supertypes`, adds `handle_prepare_type_hierarchy` +
+`handle_type_supertypes` + `handle_type_subtypes` handlers (the
+prepare/subtypes ones warm the workspace index + open-buffer import
+closures via the new `_warm_workspace_for_type_hierarchy` helper that
+mirrors the existing `_warm_workspace_for_call_hierarchy` /
+`_for_code_lens` pattern), advertises `"typeHierarchyProvider":
+True` in `server_capabilities()`, and dispatches the three new
+methods.
+
+**LSP wire shape**:
+```json
+TypeHierarchyItem = {
+  "name": "Option",
+  "kind": 10,                      // SymbolKind.Enum
+  "detail": "enum Option",
+  "uri": "file:///.../decl.nova",
+  "range": {"start": {"line": 0, "character": 0},
+            "end":   {"line": 3, "character": 1}},
+  "selectionRange": {"start": {"line": 0, "character": 5},
+                     "end":   {"line": 0, "character": 11}},
+  "data": {"path": "/...", "name": "Option", "kind": "enum",
+           "line": 0, "body_end_line": 3, "alias_rhs": ""}
+}
+```
+
+Variant items use SymbolKind.EnumMember (22) and qualified names
+like `"Option::Some"` so the tree shows the parent-child relationship.
+Type aliases use SymbolKind.TypeParameter (26) so the editor renders
+them with the "name-standing-in-for-something" icon.
+
+### Tests
+
+`tools/nova-lsp/tests/test_type_hierarchy.py` (NEW, 88 assertions):
+
+  * `scan_type_declarations`: enum single-line, enum multi-line with
+    payloads, type alias, struct, mixed, indented filtered.
+  * `scan_enum_variants`: payloads with various arities (Circle(int),
+    Rect(int, int), Triangle(int, int, int)), nullary variants.
+  * `prepare_type_hierarchy`: enum decl, type alias decl, whitespace
+    (None), fn name (None), enum-use site (resolves to decl), variant
+    token within use site (resolves to EnumMember).
+  * `supertypes`: enum empty, struct empty, type alias -> base type
+    (int builtin synth or real decl in chain), variant -> parent enum.
+  * `subtypes`: enum -> declared variants, Shape multi-line -> 3
+    variants, struct empty, type alias -> every dependent alias.
+  * Cross-file: enum in decl.nova used in user.nova — prepare on the
+    use resolves to the decl URI; subtypes round-trips cross-file.
+  * Server-level wire smoke through `dispatch`:
+    `typeHierarchyProvider` advertised; `prepareTypeHierarchy` /
+    `supertypes` / `subtypes` requests return the expected shapes.
+  * Integration against `/home/user/NOVA/tests/test_sum_types.nova`
+    (R17A's reference fixture): `Option`, `Result`, `Shape`, `Tree`
+    enums; subtypes returns expected variant counts (Option: 2,
+    Result: 2, Shape: 3); supertypes empty for each.
+
+`test_hover_docs.py` capability-set assertion extended to include
+`typeHierarchyProvider` (same pattern R15F / R16C / R18F used).
+
+All 14 prior LSP tests still pass (75 + 64 + 55 + 66 + 101 + 119 +
+52 + smoke = 532 + smoke).
+
+### Capability count
+
+| Round | LSP capability added                                |
+| ----- | --------------------------------------------------- |
+| (pre) | sync, hover, completion, definition, references,    |
+|       | rename, code action                                 |
+| R8C   | workspace symbols                                   |
+| R13C  | semantic tokens (`/full` + `/range`)                |
+| R14C  | hover docs (enhancement, not a new capability)      |
+| R15F  | call hierarchy (prepare / incoming / outgoing)      |
+| R16C  | inlay hints                                         |
+| R18F  | code lens (`textDocument/codeLens` + `resolve`)     |
+| R19F  | **type hierarchy** (prepare / supertypes /          |
+|       | subtypes)                                           |
+
+Total: 15 advertised provider keys (plus `hoverProvider` whose
+behavior was enriched by R14C without changing the wire schema).
+
+### Files touched (R19F)
+
+  * NEW: `tools/nova-lsp/nova_lsp/type_hierarchy.py`
+  * NEW: `tools/nova-lsp/tests/test_type_hierarchy.py`
+  * `tools/nova-lsp/nova_lsp/server.py` (imports, 3 handlers, warm
+    helper, capability key, dispatcher entries)
+  * `tools/nova-lsp/tests/test_hover_docs.py` (expected capability
+    set extended to include `typeHierarchyProvider`)
+  * `tools/nova-lsp/README.md` (capability table + section + tests
+    list + layout)
+  * `README.md` (LSP capability blurb: 14 -> 15)
+  * `NEXT_SESSION.md` (this entry)
+
+### Design notes
+
+NOVA has no formal inheritance system, so the type hierarchy reduces
+cleanly to two graph edges:
+
+  1. `enum E { V1, V2 }` -> subtypes are V1, V2 (each emitted as an
+     `EnumMember`-kind item with the qualified name `E::V1`).
+  2. `type T = U` -> supertype is U; subtypes are every other `type
+     X = T` alias in the workspace.
+
+Variant items carry `data.parent_name` so the supertypes lookup
+walks back up the tree without re-scanning the workspace. The graph
+is built lazily inside each handler — there's no global graph object
+because the workspace symbol index already keys files by absolute
+path so on-the-fly scans through the FileCache are O(open files) per
+call.
+
+Built-in primitive types (`int`, `str`, `bool`, `float`, `nil`,
+`list`, `map`, `any`, plus R17A's `Option` / `Result`) surface as
+synthetic placeholder items when a type alias points at them, so the
+editor still renders a node in the tree (it just disables go-to-def
+because no source location is provided).
+
+---
+
 ## R18A — byte mul-acc SIMD primitives (close R17C LK ceiling)
 
 R18A closes R17C's honestly-reported 0.80x full-LK ceiling. R17C

@@ -30,6 +30,9 @@ for the install hook.
 | `textDocument/inlayHint`            | yes (parameter-name ghost text at call sites + literal-RHS type hints on `let` bindings; viewport-range filtered, callee resolved via imports + workspace index, builtins elided) |
 | `textDocument/codeLens`             | yes (annotations above top-level declarations — "N references" on fn / let / const, "N variants used" on enum, with optional "/ tested" marker when a `tests/test_*.nova` mentions the decl; cross-file refs via imports + workspace index) |
 | `codeLens/resolve`                  | yes (pass-through — eagerly resolved by `textDocument/codeLens`; schema retained for forward compatibility) |
+| `textDocument/prepareTypeHierarchy` | yes (resolves cursor to a `TypeHierarchyItem` for an enum / struct / type alias declaration, an enum variant via `Name::Variant`, or a cross-file use site; falls through imports + workspace index) |
+| `typeHierarchy/supertypes`          | yes (enum / struct -> empty; `type T = U` -> the `U` base resolved to its decl or a builtin placeholder; enum variant -> the parent enum) |
+| `typeHierarchy/subtypes`            | yes (enum -> every declared variant as an `EnumMember` item; `type Base = ...` -> every other `type X = Base` alias in the workspace; struct + variant -> empty) |
 
 Hover scans the open document and every `import "..."` it transitively
 references for `fn name(args)` and `let X = ...` definitions, plus the
@@ -273,6 +276,41 @@ response already carries a fully-populated `command`), but the
 forward-compatible with a future round that might offload expensive
 work to the resolve path.
 
+Type hierarchy (`textDocument/prepareTypeHierarchy`,
+`typeHierarchy/supertypes`, `typeHierarchy/subtypes`) renders the
+"Show Type Hierarchy" tree in VS Code (and the equivalent panel in
+other editors), letting the user navigate sub/supertype edges from
+the cursor without leaving the editor. `prepareTypeHierarchy`
+resolves the cursor's identifier to a top-level `enum`, `struct`, or
+`type` declaration — same-file first, then transitively imported
+files, then the workspace symbol index for siblings outside the
+import graph. A cursor sitting on a `Name::Variant` use site
+resolves to either the enum decl (when on the `Name` token) or to an
+`EnumMember`-kind variant item (when on the `Variant` token), so the
+hierarchy view can fold open either way around. Non-type identifiers
+(function names, let bindings, parameters) return `null` so the
+editor disables the action.
+
+`supertypes` follows NOVA's three-rule type model: enums and structs
+have no supertypes (NOVA has no formal inheritance) so the response
+is an empty list; a `type T = U` alias surfaces `U` as a parent — if
+`U` is itself a declared type, the lookup walks the import graph
+plus workspace index, otherwise (for primitives like `int` / `str` /
+`bool` / `float` / `Option` / `Result`) we emit a synthetic
+placeholder item so the editor still renders a node in the tree; an
+enum variant item resolves up to its parent enum via the
+`data.parent_name` handle recorded at prepare time. `subtypes`
+implements the inverse direction: an enum expands to its declared
+variants (each emitted as an `EnumMember`-kind TypeHierarchyItem
+with the qualified name `Enum::Variant` and the variant's arity
+encoded in `detail`); a `type Base = ...` alias enumerates every
+other `type X = Base` alias in the workspace so chains like `type
+ID = int` / `type UserID = ID` navigate cleanly; struct + variant
+items are leaves (empty list). Both directions reuse R5F's
+`FileCache` + R8C's `WorkspaceSymbolIndex` for the candidate file
+set, with comments and string literals masked so a name inside a
+doc comment never inflates the result.
+
 Diagnostics are produced by writing the buffer to a tempfile and running
 `nova --check <tempfile>`. The server falls back to `nova <tempfile> -o
 /dev/null` if `--check` is not recognised by the installed compiler.
@@ -306,9 +344,10 @@ python tools/nova-lsp/tests/test_hover_docs.py
 python tools/nova-lsp/tests/test_call_hierarchy.py
 python tools/nova-lsp/tests/test_inlay_hints.py
 python tools/nova-lsp/tests/test_code_lens.py
+python tools/nova-lsp/tests/test_type_hierarchy.py
 ```
 
-The twelve `tests/*_smoke.py` / `test_*.py` scripts use the bundled
+The thirteen `tests/*_smoke.py` / `test_*.py` scripts use the bundled
 `_harness.py` helper to drive `dispatch()` in-process (no subprocess),
 open a tiny workspace, and assert on the response payloads. They run in
 ~10 ms each (the workspace-symbol + workspace-rename + call-hierarchy
@@ -367,6 +406,7 @@ tools/nova-lsp/
     call_hierarchy.py       # prepare / incoming / outgoing call resolver
     inlay_hints.py          # parameter-name + literal-type inlay hints
     code_lens.py            # reference-count annotations above decls
+    type_hierarchy.py       # prepare / supertypes / subtypes resolver
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -381,4 +421,5 @@ tools/nova-lsp/
     test_call_hierarchy.py
     test_inlay_hints.py
     test_code_lens.py
+    test_type_hierarchy.py
 ```

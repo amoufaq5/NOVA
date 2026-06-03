@@ -33,6 +33,11 @@ using only the Python standard library. Supports:
       top-level declarations — "N references" on fn / let / const,
       "N variants used" on enum, with an optional "/ tested" marker
       when a `tests/test_*.nova` mentions the declaration)
+    * `textDocument/prepareTypeHierarchy` +
+      `typeHierarchy/supertypes` + `typeHierarchy/subtypes` (navigate
+      sub/supertype edges — enum -> variants, type alias -> RHS base
+      and other aliases pointing back at it, cross-file via imports +
+      workspace index; reuses R8C's symbol index for the candidate set)
 
 Run with::
 
@@ -77,6 +82,11 @@ from nova_lsp.semantic_tokens import (
     SemanticTokenizer,
     semantic_tokens_legend,
     tokens_to_lsp_array,
+)
+from nova_lsp.type_hierarchy import (
+    prepare_type_hierarchy,
+    subtypes,
+    supertypes,
 )
 from nova_lsp.workspace_symbols import (
     SYMBOL_KIND_CONSTANT,
@@ -1964,6 +1974,137 @@ def handle_code_lens_resolve(
 
 
 # ---------------------------------------------------------------------------
+# Type hierarchy — `textDocument/prepareTypeHierarchy`,
+# `typeHierarchy/supertypes`, `typeHierarchy/subtypes`.
+#
+# The 15th LSP capability. Renders sub/supertype navigation in the
+# editor: an `enum` declaration expands to its variants, a `type T = U`
+# alias surfaces `U` as a supertype and every other `type X = T` alias
+# as a subtype. NOVA's type system has no formal inheritance, so the
+# implementation reduces to the variants-of-enum and aliases-of-type
+# rules. See `type_hierarchy.py` for the per-decl parsing details.
+# ---------------------------------------------------------------------------
+
+
+def _warm_workspace_for_type_hierarchy(state: ServerState) -> List[str]:
+    """Make sure the workspace symbol index has seen the project root
+    and every open buffer, returning the union of open-doc paths plus
+    transitive import closures so type-hierarchy scans don't miss
+    files outside the indexed workspace root.
+
+    Mirrors `_warm_workspace_for_call_hierarchy` / `_for_code_lens` —
+    same warming dance, different downstream consumer.
+    """
+    overrides = _text_overrides(state)
+    if state.root_path:
+        state.workspace_symbols.index_workspace_root(state.root_path)
+    extra_paths: List[str] = []
+    seen: Set[str] = set()
+    crawled_roots: Set[str] = set()
+    if state.root_path:
+        crawled_roots.add(os.path.abspath(state.root_path))
+    for d in state.documents.values():
+        p = uri_to_path(d.uri)
+        if not p:
+            continue
+        abs_p = os.path.abspath(p)
+        if abs_p not in seen:
+            extra_paths.append(abs_p)
+            seen.add(abs_p)
+        state.workspace_symbols.index_text(p, d.text)
+        parent_dir = os.path.dirname(abs_p)
+        if parent_dir and parent_dir not in crawled_roots:
+            state.workspace_symbols.index_workspace_root(parent_dir)
+            crawled_roots.add(parent_dir)
+        for entry in walk_imports(
+            abs_p,
+            state.file_cache,
+            text_overrides=overrides,
+        ):
+            if entry.path not in seen:
+                extra_paths.append(entry.path)
+                seen.add(entry.path)
+    return extra_paths
+
+
+def handle_prepare_type_hierarchy(
+    state: ServerState, params: Dict[str, Any]
+) -> Optional[List[Dict[str, Any]]]:
+    """Resolve the cursor's symbol into a TypeHierarchyItem[].
+
+    Returns either:
+      * `None` -> the cursor isn't on a recognised type / enum
+        identifier (LSP clients render this as "no type hierarchy
+        available").
+      * `[TypeHierarchyItem]` -> the single-element list the editor
+        then passes to `supertypes` / `subtypes`.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    pos = params.get("position", {}) or {}
+    doc = state.documents.get(uri)
+    if not doc:
+        return None
+    # Warm so cross-file resolution sees siblings outside the import
+    # graph.
+    _warm_workspace_for_type_hierarchy(state)
+    return prepare_type_hierarchy(
+        uri=uri,
+        line=pos.get("line", 0),
+        character=pos.get("character", 0),
+        doc_text=doc.text,
+        file_cache=state.file_cache,
+        workspace_index=state.workspace_symbols,
+        text_overrides=_text_overrides(state),
+    )
+
+
+def handle_type_supertypes(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return every supertype of `params.item`.
+
+    LSP shape: `{"item": TypeHierarchyItem}` in, `TypeHierarchyItem[]`
+    out. Empty list when the item has no supertype (enums and structs
+    don't inherit; root type aliases that already point to builtins
+    surface those builtins via synthetic placeholder items).
+    """
+    item = params.get("item") or {}
+    if not item.get("name"):
+        return []
+    _warm_workspace_for_type_hierarchy(state)
+    return supertypes(
+        item,
+        state.file_cache,
+        workspace_index=state.workspace_symbols,
+        text_overrides=_text_overrides(state),
+    )
+
+
+def handle_type_subtypes(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return every subtype of `params.item`.
+
+    LSP shape: `{"item": TypeHierarchyItem}` in, `TypeHierarchyItem[]`
+    out. For an enum, the result is the list of declared variants; for
+    a type alias, the result is every other alias in the workspace
+    that names this alias on its RHS. Structs and variant members are
+    leaves (empty list).
+    """
+    item = params.get("item") or {}
+    if not item.get("name"):
+        return []
+    extra_paths = _warm_workspace_for_type_hierarchy(state)
+    return subtypes(
+        item,
+        state.file_cache,
+        state.workspace_symbols,
+        extra_paths=extra_paths,
+        text_overrides=_text_overrides(state),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher.
 # ---------------------------------------------------------------------------
 
@@ -2011,6 +2152,7 @@ def server_capabilities() -> Dict[str, Any]:
         "callHierarchyProvider": True,
         "inlayHintProvider": {"resolveProvider": False},
         "codeLensProvider": {"resolveProvider": True},
+        "typeHierarchyProvider": True,
         "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
     }
 
@@ -2163,6 +2305,18 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "codeLens/resolve":
         result = handle_code_lens_resolve(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/prepareTypeHierarchy":
+        result = handle_prepare_type_hierarchy(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "typeHierarchy/supertypes":
+        result = handle_type_supertypes(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "typeHierarchy/subtypes":
+        result = handle_type_subtypes(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
 
