@@ -17,7 +17,7 @@ for the install hook.
 | `textDocument/publishDiagnostics`   | yes (runs `nova --check`) |
 | `workspace/diagnostic`              | yes (R23F — pull-model aggregation of every diagnostic marker across every indexed file + open buffer into a single panel feed; content-hash `resultId` for incremental `kind: "unchanged"` vs `kind: "full"` reports; enhances the existing `diagnosticProvider` capability — `workspaceDiagnostics: true` on the same provider object rather than a new top-level provider, so the LSP capability count stays at 17) |
 | `textDocument/hover`                | yes (signatures from imports + `///` doc comments rendered as markdown) |
-| `textDocument/completion`           | yes (builtins + fn/let scan, triggers on `.` and `(`) |
+| `textDocument/completion`           | yes (R24E adds *type-aware* layer on top of the legacy builtins + fn/let scan: cursor after `Name::` returns the variants of enum `Name`; cursor after `var.` returns the fields of `var`'s struct type; cursor after `let x: ` / `: ` in a fn-param list / `Box<` returns every enum + struct + alias name from the import graph and workspace plus the built-in primitives. Falls back to the legacy text-based list when no trigger applies. Triggers still advertised: `.` and `(`.) |
 | `textDocument/rename`               | yes (workspace-wide for top-level fn/let/const/type, single-buffer for locals + params) |
 | `textDocument/references`           | yes (regex scan, open docs + transitively imported files) |
 | `textDocument/codeAction`           | yes (extract function via a dedicated `extract_function.py` analysis pipeline, organize imports, sort fn declarations, plus a `quickfix` for R17A's exhaustiveness WARN that auto-adds stub arms for missing variants) |
@@ -491,6 +491,8 @@ tools/nova-lsp/
     extract_function.py     # refactor.extract code-action analysis
     folding_ranges.py       # collapse/expand markers for blocks + comments
     document_symbols.py     # hierarchical outline tree for the sidebar
+    workspace_diagnostics.py # workspace/diagnostic aggregation (R23F)
+    type_completion.py      # type-aware completion: variants, fields, type names (R24E)
   tests/
     _harness.py             # in-process LSP client (no subprocess)
     completion_smoke.py
@@ -510,4 +512,33 @@ tools/nova-lsp/
     test_extract_function.py
     test_folding_ranges.py
     test_document_symbols.py
+    test_workspace_diagnostics.py
+    test_type_completion.py
 ```
+
+## R24E: type-aware completion samples
+
+```
+// after `Result::`
+Result::|        ->  Ok, Err
+// after `Shape::`
+Shape::|         ->  Circle, Rect, Triangle
+// struct field access (var bound to Box<int>)
+let b: Box<int> = Box(42)
+b.|              ->  value
+// let / fn-param type annotation site
+let p: |         ->  Option, Result, Shape, Box, Pair, int, str, bool, float, list, map, ...
+fn foo(p: |      ->  same set (every enum + struct + primitive)
+// nested generic argument
+let r: Box<|     ->  same set
+```
+
+Triggers detected: `::` (variant lookup), `.` (field access), `:` after
+`let`/`const`/fn-param (type annotation), `<` after a known type name
+(generic arg). When no trigger applies, the legacy text-based list
+(builtins + user fns + lets) is returned — so simple identifier
+completion still works the way it did before R24E. Cross-file lookup
+walks the open document's import graph plus the workspace symbol
+index's crawled roots, so an enum declared in `types.nova` is offered
+at a `Type::` site in `main.nova` even before the user writes the
+`import` statement.

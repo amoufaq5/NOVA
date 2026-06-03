@@ -1,5 +1,104 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R24E — Type-aware LSP completion (enum variants, struct fields, type names)
+
+R24E deepens `textDocument/completion` so the suggested list is
+context-sensitive: typing `Result::` no longer offers `println` or
+random user fns, it offers `Ok` and `Err`. The transformation is
+purely an upgrade on top of the existing text-based list — when no
+trigger context applies, the legacy "every builtin + every user fn /
+let" list is returned unchanged.
+
+**Recognised triggers** (single-line detection on the prefix before
+the cursor):
+
+  * `Name::` -> variants of enum `Name` (cross-file via R5F's
+    import-graph walker + R8C's workspace symbol index + a
+    workspace-root walk for type-only sibling files).
+  * `var.` -> fields of the struct that `var` is bound to. The
+    variable's type is resolved by scanning the document for the
+    declaration form (annotation `let var: Type = ...`, constructor
+    inference `let var = Type(...)`, fn-param annotation
+    `fn foo(var: Type)`). Generic annotations strip to the base name
+    so `let b: Box<int>` resolves to struct `Box`.
+  * `let x: ` (anywhere on a `let` / `const` line at any indent) ->
+    every enum + struct + type-alias name from the import graph and
+    workspace plus the built-in primitives (`int`, `str`, `bool`,
+    `float`, `list`, `map`, `nil`, `any`).
+  * `fn foo(p: ` (in a fn parameter list) -> same set.
+  * `<` after a known type name (`Box<`, `Pair<`) -> same set, for
+    nested generic argument positions.
+
+**New module** `tools/nova-lsp/nova_lsp/type_completion.py`:
+
+  * `detect_trigger(line_text, character) -> TriggerInfo` — single-line
+    regex-based classification. Returns one of `TRIGGER_NONE`,
+    `TRIGGER_ENUM_VARIANT`, `TRIGGER_FIELD_ACCESS`,
+    `TRIGGER_TYPE_ANNOTATION`, `TRIGGER_GENERIC_ARG`.
+  * `variable_type_name(text, var_name) -> Optional[str]` — locate the
+    declared / inferred / param-annotated type-name for `var_name` in
+    a document. Precedence is annotation > constructor inference >
+    param annotation; the leading type-name is stripped of generic
+    args so the result is suitable for direct struct-decl lookup.
+  * `collect_type_decls(uri, doc_text, file_cache, workspace_index)`
+    walks (1) the open buffer, (2) the transitive import graph, and
+    (3) every `.nova` file under any crawled workspace root. Each
+    `(path, TypeDecl)` entry de-duplicates across sources so the
+    in-buffer version of a file wins over the on-disk version.
+  * `scan_struct_fields(text, decl)` — minimal port of the
+    `document_symbols._scan_struct_fields` helper so the completion
+    module doesn't pull in the heavier outline-rendering machinery.
+    Accepts both comma and semicolon separators (R23A allowed both).
+  * `compute_type_aware_completions(uri, position, doc_text, ...) ->`
+    `Optional[List[CompletionItem]]` — the public entry point.
+    Returns `None` when no trigger applies (caller falls back to
+    legacy text-based completion), an empty list when the trigger
+    WAS recognised but no candidates exist (e.g. `Foo::` where `Foo`
+    isn't a known enum — empty list means "user asked for variants,
+    we have none, don't pollute with unrelated suggestions"), or the
+    populated list otherwise.
+
+**Server wiring** (`server.py` extends `handle_completion`):
+
+  * The handler now calls `compute_type_aware_completions` FIRST. If
+    the result is not `None` it's returned verbatim — the focused list
+    replaces the generic one rather than appending to it. If the
+    result IS `None` the handler falls through to the legacy
+    builtins + fn/let scan.
+  * The LSP capability shape is unchanged: still 15 `*Provider` keys +
+    `textDocumentSync` (16 total). `completionProvider` still
+    advertises `.` and `(` as trigger characters; R24E does not
+    introduce a new trigger character — the editor naturally requests
+    completion on `:` / `<` / `::` as part of its standard typing flow.
+
+**CompletionItemKind** values surfaced:
+
+  * `EnumMember` (20) — enum variants
+  * `Field` (5) — struct fields
+  * `Enum` (13) / `Struct` (22) / `Class` (7) — type-name candidates
+  * `Keyword` (14) — built-in primitive types
+
+**Test coverage** (`tests/test_type_completion.py`, 59 assertions):
+
+  * Trigger detection — every recognised + rejected context.
+  * `variable_type_name` — annotation, constructor inference, fn-param.
+  * `scan_struct_fields` — both comma and semicolon separators.
+  * `compute_type_aware_completions` — Option, Result, Shape, Box,
+    Pair, type-annotation, unknown-enum-returns-empty, no-trigger-
+    returns-None.
+  * Cross-file enum (with and without an `import` statement).
+  * Server-wire end-to-end through `dispatch` for variants, field
+    access, type annotation, and the generic fallback.
+  * Capability shape: 16 keys, completionProvider still advertised.
+  * Integration on `tests/test_sum_types.nova` and
+    `tests/test_generic_struct.nova` (R17A + R23A reference fixtures).
+
+All 14 existing LSP test suites continue to pass — call hierarchy,
+code lens, document symbols, exhaustiveness fix, extract function,
+folding ranges, hover docs, inlay hints, rename workspace, semantic
+tokens, type hierarchy, workspace diagnostics, workspace symbols, plus
+all five `*_smoke.py` scripts.
+
 ## R23A — Generic structs + lightweight type-check pass
 
 R23A closes two R21A/R22B follow-ups in a single round: **parser-only

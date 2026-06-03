@@ -7,7 +7,11 @@ using only the Python standard library. Supports:
     * `textDocument/didOpen`, `didChange`, `didSave`, `didClose`
     * `textDocument/publishDiagnostics` (driven by `nova --check`)
     * `textDocument/hover` (symbol scan of `import`-ed runtime files)
-    * `textDocument/completion` (builtins + fn/let from doc + imports)
+    * `textDocument/completion` (builtins + fn/let from doc + imports;
+      R24E adds context-aware suggestions: `Name::` -> enum variants,
+      `var.` -> struct fields, `let x: ` / fn-param `(p: ` / `Box<` ->
+      enum + struct + primitive type names; falls back to the legacy
+      text-based list when no trigger applies)
     * `textDocument/definition` (intra-file + transitively imported fns/lets)
     * `textDocument/rename` (workspace-wide for top-level fn/let/const/
       type via R9C's rename_workspace; single-buffer for locals + params)
@@ -107,6 +111,11 @@ from nova_lsp.semantic_tokens import (
     SemanticTokenizer,
     semantic_tokens_legend,
     tokens_to_lsp_array,
+)
+from nova_lsp.type_completion import (
+    TRIGGER_NONE,
+    compute_type_aware_completions,
+    detect_trigger,
 )
 from nova_lsp.type_hierarchy import (
     prepare_type_hierarchy,
@@ -755,14 +764,44 @@ COMPLETION_KIND_VAR = 6
 def handle_completion(
     state: ServerState, params: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Return a `CompletionList` containing builtin functions, top-level
-    `fn` definitions, and top-level `let` definitions visible in `doc`."""
+    """Return a `CompletionList` for the cursor at ``params.position``.
+
+    Behaviour is two-layered:
+
+      1. *Type-aware*: if the cursor follows a recognised trigger
+         (``Name::``, ``var.``, ``let x: ``, fn-param ``(p: ``,
+         ``Box<``) we return a focused list — enum variants, struct
+         fields, or known type names. The generic builtin / fn / let
+         list is NOT appended in this case because mixing in unrelated
+         entries would defeat the trigger's purpose. (R24E)
+      2. *Text-based fallback*: otherwise we return the legacy union of
+         builtins + top-level ``fn`` / ``let`` reachable from the open
+         buffer. The editor filters this against the typed prefix."""
     uri = params.get("textDocument", {}).get("uri", "")
     doc = state.documents.get(uri)
     items: List[Dict[str, Any]] = []
     if not doc:
         return {"isIncomplete": False, "items": items}
 
+    # --- R24E: type-aware completion (preempts the generic list) ----
+    position = params.get("position") or {}
+    if state.root_path:
+        # Keep the workspace index warm so cross-file lookups work
+        # without waiting for the user to open the donor file.
+        state.workspace_symbols.index_workspace_root(state.root_path)
+    type_aware = compute_type_aware_completions(
+        uri,
+        position,
+        doc.text,
+        state.file_cache,
+        workspace_index=state.workspace_symbols,
+        text_overrides=_text_overrides(state),
+    )
+    if type_aware is not None:
+        # Trigger recognised — return the focused list verbatim.
+        return {"isIncomplete": False, "items": type_aware}
+
+    # --- Generic fallback: builtins + user fn/let -------------------
     fns, lets = collect_symbols(doc, state)
 
     # builtins first (so users discover them in autocomplete)
