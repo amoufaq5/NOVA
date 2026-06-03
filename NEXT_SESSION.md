@@ -197,6 +197,26 @@ suffixes are stripped from the binding's type name (`Point<int>` →
 
 ---
 
+## R27F — 26-round sprint retrospective (cross-repo)
+
+**Status: complete** — new `RETROSPECTIVE_26_ROUNDS.md` (NOVA-side
+pointer + focused language/toolchain arc summary). The full unified
+retrospective lives in
+`/home/user/Crossengin-demo/RETROSPECTIVE_26_ROUNDS.md` (~7600
+words, 1180 lines). It covers all 26 rounds with commit-SHA-verified
+summaries, the cross-agent coordination patterns and failure modes,
+the honest engineering disclosures, the realization-of-perf chains,
+the NOVA language evolution arc (R17A enums through R26A
+update-syntax), and the federation evolution. No NOVA source
+touched. No tests added. Docs-only round.
+
+### Files touched (R27F, NOVA side)
+
+- NEW: `RETROSPECTIVE_26_ROUNDS.md` (pointer + NOVA arc summary).
+- MOD: `NEXT_SESSION.md` (this entry).
+
+---
+
 ## R26B — tree-sitter grammar refresh (R25A brace-init + destructure)
 
 **Status: complete** — extends R24B's R17A–R23A coverage with the
