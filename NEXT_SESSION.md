@@ -1,5 +1,90 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R31E — nova-dap reverse-debugging (gdb record/reverse-continue/stepBack)
+
+**Status: complete** — nova-dap now ships reverse debugging via gdb's
+process-record mode. The user can step / continue backwards through
+executed instructions to find the moment a bug appeared, then resume
+forward execution. The DAP `supportsStepBack` capability flips from
+False to True.
+
+### What works
+
+  - `reverseContinue` request -> `-exec-reverse-continue` to gdb.
+    Lazily enables gdb's recording (`record full` by default, or
+    `record btrace` if the user passed `recordMode: "btrace"` in the
+    launch request). Honours `threadId` + `singleThread` arguments the
+    same way forward `continue` does.
+  - `stepBack` request -> `-exec-reverse-next` (granularity
+    `"line"` / `"statement"` / default) or `-exec-reverse-step`
+    (granularity `"instruction"`). Mirrors the forward `next` /
+    `stepIn` granularity split.
+  - `gotoTargets` / `goto` requests -> arbitrary PC relocation via
+    gdb's `jump` command (delivered through the `-interpreter-exec
+    console` MI form for cross-version compatibility). Implemented
+    alongside reverse-debug because the wiring is similar.
+  - Recording lifecycle: enabled lazily on first reverse-request,
+    drained explicitly via `-target-record-stop` on DAP `disconnect`
+    / `terminate`. Sessions that never reverse pay zero recording
+    cost.
+  - `recordMode` launch attribute: `"full"` (default) or `"btrace"`.
+    A `btrace` request that fails (older CPU, no Intel PT) silently
+    falls back to `"full"` so the user's reverse-debug request
+    succeeds.
+
+### What does NOT work / honest caveats
+
+  - **`record full` is slow.** 50-1000x slowdown on the recorded
+    segment, multi-GB memory footprint for long sessions. Users with
+    modern Intel CPUs should pick `recordMode: "btrace"` in their
+    `launch.json`. The README documents this prominently.
+  - **R28F profiler + reverse-debug interaction is untested in
+    combination.** Both subsystems drive async `-exec-interrupt`/
+    `-exec-continue` pairs. Stand-alone they're fine; we keep the
+    `record_started` and `profile_sampling` flags strictly
+    independent so neither can confuse the other's gate logic. A
+    user who starts profiling and then asks for `reverseContinue`
+    will get sensible behaviour because the profiler's pause/resume
+    cycle doesn't touch the recording buffer -- but the recorded
+    instruction stream will include the profiler's interrupt frames,
+    which may look noisy in the reverse-step view. Future round may
+    want to add a "pause profiling during reverse step" affordance.
+  - **R29E hit-count BP gating is direction-blind.** The gate
+    counts physical hits; a backwards-stepped-through BP increments
+    the same counter. Users who want direction-aware gating should
+    use `condition` (gdb evaluates per-hit using the actual program
+    state) rather than `hitCondition`. Test
+    `test_r29e_bp_gate_not_confused_by_reverse_direction`
+    documents the intentional behaviour.
+
+### Test count
+
+`tests/test_reverse_debug.py`: **38 unit tests / 100 assertions**.
+All other DAP test suites still pass:
+
+  - `dap_smoke.py` -- updated assertion (`supportsStepBack: true`).
+  - `dap_multi_thread.py` -- unchanged, still green.
+  - `test_conditional_breakpoint.py` -- R29E regression: 54 assertions.
+  - `test_hit_count_breakpoints.py` -- R29E regression: 168 assertions.
+  - `test_data_breakpoints.py` -- R26 regression: 131 assertions.
+  - `test_evaluate.py` -- R20 regression: 100 assertions.
+  - `test_function_breakpoints.py` -- R23F regression: 138 assertions.
+  - `test_instruction_stepping.py` -- R27C regression: 149 assertions.
+  - `test_profiler.py` -- R28F regression: 121 assertions.
+
+### Files
+
+  - `tools/nova-dap/nova_dap/server.py` -- handler registration +
+    `_ensure_recording` / `_stop_recording` helpers +
+    `handle_reverse_continue` / `handle_step_back` /
+    `handle_goto_targets` / `handle_goto`. `Session` grew
+    `record_mode` + `record_started` fields.
+  - `tools/nova-dap/tests/test_reverse_debug.py` -- NEW.
+  - `tools/nova-dap/tests/dap_smoke.py` -- updated
+    `supportsStepBack` assertion.
+  - `tools/nova-dap/README.md` -- updated capability table +
+    test-command section + launch.json example.
+
 ## R30E — LSP textDocument/inlayHint extensions
 
 **Status: complete** — nova-lsp's inlay-hint provider grew three

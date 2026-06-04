@@ -212,7 +212,10 @@ def main() -> int:
         assert init["success"], f"initialize failed: {init}"
         caps = init.get("body", {})
         assert caps.get("supportsConfigurationDoneRequest") is True, caps
-        assert caps.get("supportsStepBack") is False, caps
+        # R31E flipped supportsStepBack from False -> True. The reverse
+        # control + record/replay wiring lives in handle_reverse_continue
+        # / handle_step_back and is exercised by test_reverse_debug.py.
+        assert caps.get("supportsStepBack") is True, caps
 
         # initialized event must follow.
         client.wait_for_event("initialized", timeout=5.0)

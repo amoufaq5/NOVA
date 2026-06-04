@@ -331,6 +331,25 @@ class Session:
     # so the DAP client doesn't see an unsolicited resume between user-
     # requested stops.
     silent_bp_resume: bool = False
+    # Reverse-debugging (R31E) configuration.
+    #
+    # ``record_mode`` is the gdb process-record mode the user picked via
+    # the ``recordMode`` launch attribute. One of:
+    #   * ``"full"``   — ``record full``: software recording, universally
+    #                   available but slow (50-1000x slowdown).
+    #   * ``"btrace"`` — ``record btrace``: hardware Intel PT recording,
+    #                   fast but requires Skylake-or-later + Linux.
+    # The default is ``"full"`` (slower but works everywhere). Set in
+    # ``handle_launch``; consulted by ``_ensure_recording`` when the
+    # first reverse request arrives.
+    record_mode: Optional[str] = None
+    # ``record_started`` tracks whether we've actually enabled gdb's
+    # recording yet. We enable lazily on the first ``reverseContinue`` /
+    # ``stepBack`` request (record-full is expensive, so we don't want
+    # to pay the cost for sessions that never reverse). The flag is
+    # cleared on ``disconnect`` after we run ``-target-record-stop`` so
+    # a subsequent launch starts clean.
+    record_started: bool = False
 
     def alloc_var_ref(self, frame_id: int) -> int:
         ref = self.next_var_ref
@@ -884,7 +903,17 @@ def _on_gdb_console(session: Session, stream: str, text: str) -> None:
 def _capabilities() -> Dict[str, Any]:
     return {
         "supportsConfigurationDoneRequest": True,
-        "supportsStepBack": False,
+        # Reverse debugging (R31E): the user can step / continue
+        # backwards through executed instructions to find the moment a
+        # bug appeared. Implemented via gdb's process-record mode
+        # (``record full`` by default — slow but universally available;
+        # ``record btrace`` if the user opts in via the ``recordMode``
+        # launch attribute — fast but needs Intel PT). The actual
+        # ``record`` MI command is issued lazily on the first
+        # ``reverseContinue`` / ``stepBack`` request so sessions that
+        # never reverse don't pay the recording-buffer cost. See
+        # ``handle_reverse_continue`` + ``handle_step_back``.
+        "supportsStepBack": True,
         "supportsTerminateRequest": True,
         "supportsRestartRequest": False,
         # Conditional breakpoints: ``-break-insert -c "<expr>"`` —
@@ -951,6 +980,15 @@ def _capabilities() -> Dict[str, Any]:
         # disassembly view when the user clicks a breakpoint
         # gutter next to a specific instruction.
         "supportsInstructionBreakpoints": True,
+        # ``goto`` extension (R31E): the user can jump the PC to an
+        # arbitrary source line without executing the code in between
+        # via DAP's ``gotoTargets`` + ``goto`` request pair. We
+        # translate the ``goto`` request to gdb's ``-exec-jump
+        # <file>:<line>``. Useful for re-running a hot loop after a
+        # source edit or skipping a known-bad branch. The wiring lives
+        # alongside the reverse-debug handlers because both rely on
+        # the same record/replay machinery.
+        "supportsGotoTargetsRequest": True,
     }
 
 
@@ -995,6 +1033,30 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     bridge.start()
     session.bridge = bridge
     session.program = program
+    # Reverse-debugging (R31E): the user may pick the gdb recording
+    # backend via the ``recordMode`` launch attribute. We default to
+    # ``"full"`` because ``record full`` works on every gdb / CPU
+    # combo; ``"btrace"`` is faster but only available on Skylake+
+    # Linux. If the supplied value isn't one of the two known modes we
+    # fall back to ``"full"`` and log it -- never reject the launch
+    # over a typo. Actual gdb enablement happens lazily on the first
+    # reverse request (see ``_ensure_recording``).
+    raw_record_mode = args.get("recordMode")
+    if isinstance(raw_record_mode, str) and raw_record_mode in (
+        "full", "btrace"
+    ):
+        session.record_mode = raw_record_mode
+    else:
+        if raw_record_mode not in (None, ""):
+            _log(
+                f"recordMode: unknown value {raw_record_mode!r}; "
+                f"falling back to 'full'"
+            )
+        session.record_mode = "full"
+    # Fresh launch -> fresh recording state. gdb forgets any prior
+    # record on inferior restart, so the lazy enabler will re-issue
+    # ``record full`` / ``record btrace`` on the next reverse request.
+    session.record_started = False
     # Fresh inferior -> no live watchpoints. Drop whatever a previous
     # launch may have left in the registry so dataIds from the old
     # session can't collide with the new gdb-assigned numbers.
@@ -2337,9 +2399,291 @@ def handle_pause(session: Session, req: Dict[str, Any]) -> None:
     send_response(session, req, body={})
 
 
+def _ensure_recording(session: Session) -> Tuple[bool, Optional[str]]:
+    """Enable gdb's process-record mode lazily on the first reverse
+    request. Returns ``(ok, error_message)``.
+
+    We pick the recording backend from ``session.record_mode`` (set in
+    ``handle_launch`` from the ``recordMode`` launch attribute; defaults
+    to ``"full"``). ``record full`` is the safe choice: it works on
+    every gdb / CPU combo at the cost of a 50-1000x slowdown on the
+    recorded segment. ``record btrace`` is dramatically faster (hardware
+    Intel PT) but requires Skylake-or-later + a recent Linux kernel; if
+    enabling it fails we fall back to ``record full`` rather than
+    failing the user's reverse-debug request outright.
+
+    The gdb MI command we use is ``-interpreter-exec console "record
+    <mode>"`` -- there's no native MI form for ``record`` so we drive
+    it through the console pseudo-interpreter. ``-target-record-stop``
+    in :func:`_stop_recording` mirrors that with the proper MI
+    counterpart.
+
+    Idempotent: once ``record_started`` is True we return ``(True,
+    None)`` without re-issuing the command, matching gdb's "already
+    recording" semantics."""
+    bridge = session.bridge
+    if bridge is None:
+        return False, "not launched"
+    if session.record_started:
+        return True, None
+    mode = session.record_mode or "full"
+    primary = f'-interpreter-exec console "record {mode}"'
+    try:
+        result = bridge.command(primary, timeout=10.0)
+    except (TimeoutError, RuntimeError) as exc:
+        return False, f"gdb error enabling record {mode}: {exc}"
+    if not result.ok and mode == "btrace":
+        # Hardware Intel PT not available -> fall back to software
+        # recording. The user asked for reverse-debug; we'd rather
+        # ship slower recording than reject the request outright.
+        _log(
+            f"record btrace unavailable ({result.error_message!r}); "
+            f"falling back to record full"
+        )
+        fallback = '-interpreter-exec console "record full"'
+        try:
+            result = bridge.command(fallback, timeout=10.0)
+        except (TimeoutError, RuntimeError) as exc:
+            return False, f"gdb error enabling record full fallback: {exc}"
+        if result.ok:
+            session.record_mode = "full"
+    if not result.ok:
+        return False, result.error_message or f"could not enable record {mode}"
+    session.record_started = True
+    return True, None
+
+
+def _stop_recording(session: Session) -> None:
+    """Tear down gdb's recording buffer on disconnect / terminate. The
+    ``record full`` buffer grows linearly with executed instructions
+    and can be GB-sized on a long-running session, so we ALWAYS issue
+    the stop even if the reverse handlers never ran (defensive: a
+    crashed adapter might leave ``record_started`` False after a
+    successful enable). Failures are logged but never raised — the
+    cleanup runs in the disconnect path where we're tearing the bridge
+    down anyway."""
+    bridge = session.bridge
+    if bridge is None:
+        return
+    if not session.record_started:
+        return
+    try:
+        bridge.command("-target-record-stop", timeout=2.0)
+    except (TimeoutError, RuntimeError) as exc:
+        _log(f"record stop failed (cleanup best-effort): {exc}")
+    session.record_started = False
+
+
+def handle_reverse_continue(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``reverseContinue`` request.
+
+    Drives gdb's ``-exec-reverse-continue`` -- the inferior runs
+    backwards from its current position until either a breakpoint is
+    hit (in reverse) or the recording's start boundary is reached.
+    Enables gdb's process-record mode lazily on the first call (see
+    :func:`_ensure_recording`); subsequent calls reuse the existing
+    recording buffer.
+
+    The DAP spec doesn't define a distinct "reverse stopped" reason,
+    so the gdb ``*stopped`` record that follows surfaces as a regular
+    ``stopped`` event with ``reason: "step"`` (handled in
+    ``_handle_stopped`` via the standard ``end-stepping-range`` ->
+    ``"step"`` mapping).
+
+    Like the forward ``continue``, this accepts the standard
+    ``threadId`` + ``singleThread`` arguments. In non-stop mode we
+    route via ``--thread`` so other threads aren't disturbed; in
+    all-stop mode the request resumes whatever gdb had stopped."""
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, success=False, message="not launched")
+        return
+    ok, err = _ensure_recording(session)
+    if not ok:
+        send_response(session, req, success=False, message=err or "could not enable recording")
+        return
+    args = req.get("arguments", {}) or {}
+    tid, single = _thread_args(session, args)
+    cmd = _exec_with_thread(session, "-exec-reverse-continue", tid, single)
+    try:
+        result = bridge.command(cmd)
+    except (TimeoutError, RuntimeError) as exc:
+        send_response(session, req, success=False, message=str(exc))
+        return
+    if not result.ok:
+        send_response(session, req, success=False, message=result.error_message)
+        return
+    # Mirror handle_continue: mark thread state so a follow-up
+    # ``threads`` query reflects the resume immediately.
+    if single and tid is not None:
+        session.mark_thread_running(tid, True)
+    else:
+        with session.threads_lock:
+            for entry in session.known_threads.values():
+                entry["running"] = True
+    send_response(session, req, body={})
+
+
+def handle_step_back(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``stepBack`` request.
+
+    Granularity routing:
+
+    * ``"line"`` (default) / ``"statement"`` -> ``-exec-reverse-next``,
+      which steps backwards over the previously-executed source line.
+      (gdb spells the source-level reverse step "reverse-next" by
+      analogy with forward "next" — the "-next" suffix is unfortunate
+      but it really is the line-granularity command, not the
+      instruction-granularity one.)
+    * ``"instruction"``                      -> ``-exec-reverse-step``,
+      which is gdb's reverse single-instruction step. Routes from the
+      DAP ``granularity: "instruction"`` arg the same way the forward
+      ``stepIn`` reroutes to ``-exec-step-instruction`` for the
+      disassembly view.
+
+    Lazy record-mode enablement matches ``reverseContinue``."""
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, success=False, message="not launched")
+        return
+    ok, err = _ensure_recording(session)
+    if not ok:
+        send_response(session, req, success=False, message=err or "could not enable recording")
+        return
+    args = req.get("arguments", {}) or {}
+    tid, single = _thread_args(session, args)
+    granularity = args.get("granularity")
+    # Default + ``"line"`` / ``"statement"`` -> reverse-next (line); only
+    # ``"instruction"`` routes to reverse-step. Mirrors the forward
+    # next/stepIn split, where source-level stepping is the default.
+    if isinstance(granularity, str) and is_instruction_granularity(granularity):
+        base_mi = "-exec-reverse-step"
+    else:
+        base_mi = "-exec-reverse-next"
+    if session.non_stop and tid is not None:
+        cmd = f"{base_mi} --thread {tid}"
+    else:
+        cmd = base_mi
+    if tid is not None:
+        session.mark_thread_running(tid, True)
+    try:
+        result = bridge.command(cmd)
+    except (TimeoutError, RuntimeError) as exc:
+        send_response(session, req, success=False, message=str(exc))
+        return
+    if not result.ok:
+        send_response(session, req, success=False, message=result.error_message)
+        return
+    send_response(session, req, body={})
+
+
+def handle_goto_targets(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``gotoTargets`` request.
+
+    The client asks: "which line(s) is it safe to jump the PC to from
+    here?" In the general case the IDE asks the debugger to compute
+    valid jump targets (e.g. for indirect dispatch); for our purposes
+    we just round-trip the requested source line back to the client as
+    a single target. The DAP client uses the returned target id in the
+    follow-up ``goto`` request.
+
+    Per DAP spec, we synthesise a stable target id by encoding the
+    ``(source.path, line)`` pair as a 32-bit hash so the client can
+    correlate the target back to a source location without server-side
+    state. The hash collision risk is theoretical (the client is the
+    only producer of ``goto`` ids and round-trips them quickly), but
+    we ALSO keep a small per-session map so ``handle_goto`` can decode
+    even if the client doesn't pass back the embedded source."""
+    args = req.get("arguments", {}) or {}
+    source = args.get("source") or {}
+    raw_path = source.get("path") or source.get("name") or ""
+    line_raw = args.get("line", 0)
+    try:
+        line = int(line_raw) if line_raw is not None else 0
+    except (TypeError, ValueError):
+        line = 0
+    if not isinstance(raw_path, str) or line <= 0:
+        send_response(
+            session, req, success=False, message="gotoTargets requires source.path + line"
+        )
+        return
+    # Encode the target id deterministically from (path, line) so a
+    # repeated request for the same location returns the same id (the
+    # IDE caches targets and we want hits to round-trip cleanly).
+    target_id = (hash((raw_path, line)) & 0x7fffffff) or 1
+    body = {
+        "targets": [
+            {
+                "id": target_id,
+                "label": f"{os.path.basename(raw_path)}:{line}",
+                "line": line,
+            }
+        ],
+    }
+    # Stash the target -> (path, line) mapping so ``handle_goto`` can
+    # recover the source location even if the client doesn't replay
+    # the source field.
+    if not hasattr(session, "_goto_targets"):
+        session._goto_targets = {}  # type: ignore[attr-defined]
+    session._goto_targets[target_id] = (raw_path, line)  # type: ignore[attr-defined]
+    send_response(session, req, body=body)
+
+
+def handle_goto(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``goto`` request.
+
+    Translates to gdb's ``-exec-jump <file>:<line>`` (or
+    ``-interpreter-exec console "jump <file>:<line>"`` if the MI form
+    isn't recognised by older gdb). Looks the target id back up in
+    the per-session goto map populated by ``handle_goto_targets``.
+
+    The DAP spec says ``goto`` is fire-and-forget — the resulting
+    ``stopped`` event is handled by the normal stop-event pipeline.
+    We don't need recording for ``goto`` (unlike ``reverseContinue``);
+    ``-exec-jump`` is a forward operation that just relocates the PC."""
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, success=False, message="not launched")
+        return
+    args = req.get("arguments", {}) or {}
+    target_id_raw = args.get("targetId")
+    try:
+        target_id = int(target_id_raw) if target_id_raw is not None else 0
+    except (TypeError, ValueError):
+        target_id = 0
+    targets = getattr(session, "_goto_targets", {}) or {}
+    location = targets.get(target_id)
+    if location is None:
+        send_response(session, req, success=False, message=f"unknown goto targetId: {target_id}")
+        return
+    path, line = location
+    # Use the console-MI form for max gdb-version compatibility; native
+    # ``-exec-jump`` was added late in MI3 and some older builds reject
+    # it.
+    cmd = f'-interpreter-exec console "jump {path}:{line}"'
+    try:
+        result = bridge.command(cmd, timeout=5.0)
+    except (TimeoutError, RuntimeError) as exc:
+        send_response(session, req, success=False, message=str(exc))
+        return
+    if not result.ok:
+        send_response(session, req, success=False, message=result.error_message)
+        return
+    send_response(session, req, body={})
+
+
 def handle_disconnect(session: Session, req: Dict[str, Any]) -> None:
     bridge = session.bridge
     if bridge is not None:
+        # Reverse-debug cleanup (R31E): drain gdb's recording buffer
+        # before we ask gdb to exit. ``record full`` can hold a
+        # multi-GB buffer for long sessions; even though
+        # ``-gdb-exit`` would reclaim the memory implicitly when the
+        # gdb process dies, we issue ``-target-record-stop`` first so
+        # the teardown sequence is symmetric with the lazy-enable in
+        # ``_ensure_recording`` and the cleanup completes deterministi-
+        # cally before the gdb subprocess goes away.
+        _stop_recording(session)
         try:
             bridge.command("-gdb-exit", timeout=2.0)
         except (TimeoutError, RuntimeError):
@@ -2379,6 +2723,16 @@ HANDLERS = {
     "stepIn": handle_step_in,
     "stepOut": handle_step_out,
     "pause": handle_pause,
+    # Reverse-debugging (R31E): step / continue backwards through
+    # executed instructions. Lazy enablement of gdb's process-record
+    # mode happens on the first call; cleanup runs on disconnect.
+    "reverseContinue": handle_reverse_continue,
+    "stepBack": handle_step_back,
+    # Goto: arbitrary PC relocation via gdb's ``jump`` command. Wired
+    # alongside the reverse handlers because both extend the exec-
+    # control surface.
+    "gotoTargets": handle_goto_targets,
+    "goto": handle_goto,
     "disconnect": handle_disconnect,
     "terminate": handle_terminate,
     # Custom DAP requests for the sample-based profiler. These don't

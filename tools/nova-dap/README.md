@@ -36,12 +36,28 @@ repo root and `make smoke-dwarf`).
 | `disassemble`             | `-data-disassemble -s <start> -e <end> -- 0` — disassembles a range of memory around `memoryReference`, returning `DisassembledInstruction[]` of length exactly `instructionCount` (padded with `??` placeholders if gdb returns fewer). `instructionOffset` and byte `offset` shift the start address (we approximate 4 bytes/insn for instruction offsets). |
 | `continue` / `next` / `stepIn` / `stepOut` | `-exec-{continue,next,step,finish}` with `--thread <id>` when DAP carries `singleThread:true`, otherwise `--all`. When `granularity: "instruction"` is supplied, `next` -> `-exec-next-instruction` and `stepIn` -> `-exec-step-instruction` so the IDE's disassembly view can advance the PC by exactly one machine instruction. (`stepOut` keeps `-exec-finish` regardless — gdb has no per-instruction finish variant.) |
 | `pause`                   | `-exec-interrupt --thread <id>` (or `--all`).     |
-| `disconnect` / `terminate`| `-gdb-exit` + reap child.                         |
+| `reverseContinue`         | `-exec-reverse-continue`, after lazily enabling gdb's process-record mode on the first call. Honours `threadId` + `singleThread` the same way forward `continue` does. The follow-up `*stopped` surfaces as a normal DAP `stopped` event with `reason: "step"` (DAP has no distinct reverse-stop reason). |
+| `stepBack`                | `-exec-reverse-next` (granularity `line` / `statement` / default) or `-exec-reverse-step` (granularity `instruction`). Mirrors the forward `next` / `stepIn` granularity split. Also lazily enables process-record on first use. |
+| `gotoTargets` / `goto`    | `gotoTargets` round-trips `{source.path, line}` as a single target id; `goto` issues `-interpreter-exec console "jump <file>:<line>"`. Useful for replaying a hot loop after a source edit without re-launching. |
+| `disconnect` / `terminate`| `-target-record-stop` (if a recording was started) + `-gdb-exit` + reap child. The record-stop is symmetric with the lazy enable in `reverseContinue` / `stepBack` so the recording buffer is drained explicitly before gdb tears down. |
 
 Capabilities advertised:
 
 * `supportsConfigurationDoneRequest: true`
-* `supportsStepBack: false`
+* `supportsStepBack: true`
+  — `reverseContinue` + `stepBack` are wired to gdb's process-record
+  mode. The `recordMode` launch attribute picks the backend: `"full"`
+  (default — software recording, works on every gdb; ~50-1000x slower
+  on the recorded segment) or `"btrace"` (hardware Intel PT, much
+  faster, requires Skylake+ + Linux; falls back to `"full"` if the
+  CPU / kernel can't support it). Recording is enabled lazily on the
+  first reverse request so sessions that never reverse pay no cost;
+  `disconnect` runs `-target-record-stop` to drain the buffer.
+* `supportsGotoTargetsRequest: true`
+  — `gotoTargets` + `goto` translate to gdb's `jump` command,
+  relocating the PC to an arbitrary source line. The goto wiring
+  rides alongside reverse-debug because both extend the exec-control
+  surface; goto itself does not require recording.
 * `supportsTerminateRequest: true`
 * `supportsRestartRequest: false`
 * `supportsConditionalBreakpoints: true`
@@ -209,7 +225,14 @@ is out of scope for this milestone.
   struct / map values come back as bare pointer strings; expanding
   them inline in the watch panel needs a debugger-side reader of
   the smart-op runtime headers — deferred.
-* **Reverse debugging (`stepBack`).** Out of scope.
+* **Reverse-debug performance with `record full`.** The default
+  `recordMode: "full"` slows the recorded segment 50-1000x because
+  gdb instruments every basic block. Long debug sessions can chew
+  through gigabytes of memory for the recording buffer. Users with
+  modern Intel CPUs should pass `recordMode: "btrace"` in their
+  `launch.json` to get hardware Intel PT recording (much faster,
+  much smaller buffer). The adapter falls back to `"full"` if
+  `btrace` isn't supported on the target.
 
 ## Layout
 
@@ -280,6 +303,7 @@ tools/nova-dap/
     test_function_breakpoints.py         function breakpoints by name (setFunctionBreakpoints)
     test_instruction_stepping.py         instruction-level stepping + disassemble + setInstructionBreakpoints
     test_profiler.py                     sample-based profiler (nova/profile/{start,stop,report})
+    test_reverse_debug.py                reverse-debug (reverseContinue / stepBack / goto / record lifecycle)
     fixtures/multi_thread.c              pthread fixture (built on demand by the test)
 ```
 
@@ -422,7 +446,22 @@ python tools/nova-dap/tests/test_profiler.py
 #   end-to-end:         ok (73 samples, 96% in loop_body, 4 folded stacks)
 ```
 
-All seven tests have a pure-Python phase that runs anywhere (no gdb
+For reverse debugging (R31E):
+
+```sh
+python tools/nova-dap/tests/test_reverse_debug.py
+# test_reverse_debug: OK
+#   unit tests:       38
+#   total assertions: 100
+```
+
+The reverse-debug test is pure unit (no gdb required); it drives
+each handler against a fake bridge and verifies the MI command
+shape + record-mode lifecycle. The end-to-end reverse-debug flow
+is covered by the existing `dap_smoke` regression (which now
+checks `supportsStepBack: true`) plus manual VS Code interaction.
+
+All eight tests have a pure-Python phase that runs anywhere (no gdb
 required) plus an end-to-end phase that SKIPs cleanly when `gdb` /
 `gcc` are missing.
 
@@ -441,7 +480,12 @@ that points at the `nova-dap` command. A minimal `launch.json`:
       "name": "Debug Nova program",
       "program": "${workspaceFolder}/bin/hello_dwarf",
       "cwd": "${workspaceFolder}",
-      "stopOnEntry": false
+      "stopOnEntry": false,
+      // R31E: enable reverse-debug recording. `full` (default) works
+      // everywhere but slows the recorded segment 50-1000x; `btrace`
+      // is much faster on modern Intel CPUs but needs Skylake+ + Linux.
+      // If `btrace` isn't supported the adapter silently falls back.
+      "recordMode": "full"
     }
   ]
 }
