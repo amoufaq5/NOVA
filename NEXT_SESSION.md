@@ -1,5 +1,38 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R30E — LSP textDocument/inlayHint extensions
+
+**Status: complete** — nova-lsp's inlay-hint provider grew three
+R30E-spec capabilities on top of the existing parameter-name +
+let-literal-type producer:
+
+  - `let x: T = <expr>` (annotated lets) now correctly suppress the
+    type hint so the editor never double-labels a binding the
+    source already annotates.
+  - `for x in <iterable>` emits a `: <element-type>` hint when the
+    iterable is a literal list (`[1, 2, 3]` -> `: int`) or a known
+    builtin iter-producer (`range(n)`, `range_list(a, b)` ->
+    `: int`); conservative — guessing wrong is worse than no hint.
+  - Parameter hints are dropped when the argument is a bare
+    identifier whose name matches the declared parameter:
+    `foo(x)` where `fn foo(x)` -> no hint. Partial matches still
+    work (`add(a, 5)` where `fn add(a, b)` -> only `b:` emitted).
+
+Test count: **104** assertions in `tests/test_inlay_hints.py` (38
+new for R30E). Parser.nova coverage smoke: 125 type hints + 382
+parameter hints over 3936 lines. All 18+ other LSP modules
+unchanged; R29D semantic-tokens still green (139 assertions).
+
+**Honest design caveat.** The spec mentions hooking the LSP into
+"R23A's typecheck pass" — but no `typecheck.nova` file exists in
+the current tree (`/home/user/NOVA/src/compiler/` has lexer, parser,
+ast, ir, codegen, lower_*, regalloc, compiler — no typecheck
+module). The R30E producer therefore runs a minimal type-inference
+walk inside the LSP itself: literal-RHS sniffing for `let` and `for`,
+parameter-list lookup for call sites. When NOVA grows a real type
+checker, the `_infer_literal_type` and `_infer_iter_element_type`
+helpers in `nova_lsp/inlay_hints.py` are the swap-in points.
+
 ## R30D — WASM `sys_poll` translation shim onto WASI `poll_oneoff`
 
 **Status: complete** — R29A's WASM `sys_poll` stub (which returned

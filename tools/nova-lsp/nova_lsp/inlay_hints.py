@@ -43,6 +43,15 @@ Edge cases handled (mirrors the integration-test matrix):
   * Named arguments ``foo(name: value)`` -> when the source already
     has an explicit ``name:`` before the argument we skip the hint
     (no point overlaying the same label).
+  * R30E: parameter hint suppressed when the argument is a bare
+    identifier whose name matches the declared parameter (e.g.
+    ``foo(x)`` where ``fn foo(x)`` — the label would be redundant).
+  * R30E: ``for x in <iterable>`` gets the same ``: <type>`` hint
+    treatment as ``let`` when the iterable is a recognised literal
+    or builtin iter-producer.
+  * R30E: ``let x: T = ...`` (annotated) is suppressed; the regex
+    requires ``=`` directly after the name, so an explicit ``:`` is
+    not matched.
   * Builtin callees (`println`, `len`, ...) -> no source location, so
     no hints. These are silently elided rather than guessed.
   * Comments and strings -> masked before scanning so a call name
@@ -84,8 +93,20 @@ _LEADING_IDENT_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 # `let NAME = RHS` (rest-of-line) for the type-inference bonus path.
 # We capture everything after the `=` so we can sniff a literal.
+# Note: this regex requires `=` IMMEDIATELY after the name (only whitespace
+# between), so `let x: T = ...` doesn't match — annotated lets are silently
+# skipped per the R30E LSP spec ("suppress hints when an explicit type
+# annotation already tells the reader the type").
 _LET_INFER_RE = re.compile(
     r"^(\s*)let\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$"
+)
+
+# `for NAME in RHS` — iterator-variable type hint (R30E). Same
+# suppression rule as `let`: if a future grammar adds `for x: T in ...`
+# the regex stays strict (`x` directly followed by `in`) so the hint
+# never doubles up with an explicit annotation.
+_FOR_INFER_RE = re.compile(
+    r"^(\s*)for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.+?)\s*$"
 )
 
 # NOVA keywords that shouldn't be interpreted as call sites even when
@@ -321,6 +342,26 @@ def _has_explicit_name_label(arg_text: str) -> bool:
     return m is not None
 
 
+def _arg_matches_param_name(arg_text: str, param_name: str) -> bool:
+    """R30E: return True when the argument expression is exactly the
+    identifier `param_name` — i.e. the caller wrote ``foo(x)`` and
+    the declaration is ``fn foo(x)``. The label would be visually
+    redundant, so we drop the hint.
+
+    Conservative: only bare identifiers count. ``foo(x + 1)`` keeps
+    the hint because the expression isn't the same as the param name.
+    """
+    s = arg_text.strip()
+    if not s:
+        return False
+    # The whole argument must be the identifier — no `.field`, no
+    # `(call)`, no `+`, no `[index]`. Strict full-match.
+    m = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", s)
+    if not m:
+        return False
+    return s == param_name
+
+
 # ---------------------------------------------------------------------------
 # Callee resolution.
 # ---------------------------------------------------------------------------
@@ -416,7 +457,8 @@ def _position_in_range(
 
 
 # ---------------------------------------------------------------------------
-# Literal type inference (bonus: type hints on `let x = literal`).
+# Literal type inference (bonus: type hints on `let x = literal` +
+# R30E iterator-element inference for `for x in <iterable>`).
 # ---------------------------------------------------------------------------
 
 
@@ -461,6 +503,59 @@ def _infer_literal_type(rhs: str) -> Optional[str]:
     return None
 
 
+def _infer_iter_element_type(rhs: str) -> Optional[str]:
+    """R30E: inspect the RHS of a `for x in <rhs>` clause and return
+    the inferred ELEMENT type name (i.e. the type of `x`), or ``None``
+    when no clean inference is available.
+
+    Handles common iterable forms:
+      ``[1, 2, 3]``       -> ``int`` (first element wins; conservative)
+      ``["a", "b"]``      -> ``str``
+      ``[]``              -> ``None`` (no element to sniff)
+      ``range(n)``        -> ``int`` (NOVA builtin returns an int seq)
+      ``range_list(a, b)``-> ``int``
+      ``enumerate(...)``  -> ``None`` (tuple type — not worth a guess)
+      anything else       -> ``None``
+
+    We deliberately stay conservative — guessing wrong is worse than
+    no hint, since the editor surfaces the false type as authoritative.
+    """
+    s = rhs.strip()
+    if not s:
+        return None
+    # Trim a trailing block-opener -- ``for x in [1,2] {`` or
+    # ``... {}`` (an empty-body for-loop) -- so we can isolate the
+    # iterable. Repeat until stable.
+    while s.endswith("{") or s.endswith("{}"):
+        if s.endswith("{}"):
+            s = s[:-2].rstrip()
+        else:
+            s = s[:-1].rstrip()
+    # List literal — sniff the first element.
+    if s.startswith("[") and s.endswith("]"):
+        body = s[1:-1].strip()
+        if not body:
+            return None
+        # Naively split at the first top-level comma to get the head.
+        depth = 0
+        head_end = len(body)
+        for i, ch in enumerate(body):
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                head_end = i
+                break
+        head = body[:head_end].strip()
+        return _infer_literal_type(head)
+    # Builtin iter-producers that yield integers.
+    if s.startswith("range(") or s.startswith("range_list(") \
+            or s.startswith("range_step("):
+        return "int"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Top-level entry point.
 # ---------------------------------------------------------------------------
@@ -487,7 +582,7 @@ def compute_inlay_hints(
       `workspace_index`  -- R8C's symbol index, fallback for non-imported sibs.
       `text_overrides`   -- open-buffer path -> text map (used by `find_def`).
       `include_type_hints` -- emit `: <type>` hints on `let x = literal`
-                              when the RHS is a clean literal. Defaults on.
+                              + `for x in <iterable>` when inferable. Default on.
 
     Returns an `InlayHint[]` per LSP spec, filtered to the requested
     `range_`. Each hint has ``position``, ``label``, ``kind``
@@ -517,6 +612,10 @@ def compute_inlay_hints(
         masked = _mask_comments_and_strings(raw_line)
 
         # --- Type hints on `let x = literal` ------------------------
+        # The regex requires `=` directly after the name (only
+        # whitespace between), so `let x: T = 5` is intentionally NOT
+        # matched -- explicit annotation suppresses the hint per R30E
+        # spec point 2.
         if include_type_hints:
             m_let = _LET_INFER_RE.match(raw_line)
             if m_let:
@@ -525,10 +624,31 @@ def compute_inlay_hints(
                 rhs = m_let.group(3)
                 # The hint sits IMMEDIATELY AFTER the name token.
                 name_end = indent_len + len("let ") + len(name)
-                # Skip if a type annotation is already present (e.g.
-                # `let x: int = 5`). NOVA's current grammar doesn't
-                # support that, but defensively check.
                 inferred = _infer_literal_type(rhs)
+                if inferred is not None and _position_in_range(
+                    lineno, name_end, range_
+                ):
+                    hints.append({
+                        "position": {"line": lineno, "character": name_end},
+                        "label": f": {inferred}",
+                        "kind": INLAY_HINT_KIND_TYPE,
+                        "paddingLeft": False,
+                        "paddingRight": True,
+                    })
+
+        # --- R30E: type hints on `for x in <iterable>` --------------
+        # Same treatment as `let`: the loop variable gets a `: <type>`
+        # hint when the iterable's element type is inferable from a
+        # simple literal / builtin form. See `_infer_iter_element_type`
+        # for the (intentionally conservative) recognised shapes.
+        if include_type_hints:
+            m_for = _FOR_INFER_RE.match(raw_line)
+            if m_for:
+                indent_len = len(m_for.group(1))
+                name = m_for.group(2)
+                rhs = m_for.group(3)
+                name_end = indent_len + len("for ") + len(name)
+                inferred = _infer_iter_element_type(rhs)
                 if inferred is not None and _position_in_range(
                     lineno, name_end, range_
                 ):
@@ -581,6 +701,13 @@ def compute_inlay_hints(
                 pname = params[i]
                 if _has_explicit_name_label(arg.text):
                     # Already explicit in source — skip.
+                    continue
+                # R30E suppression: when the argument is a bare
+                # identifier whose name equals the declared parameter,
+                # the label is redundant. `foo(x)` where `fn foo(x)`
+                # gets no hint — the reader can see the binding
+                # directly.
+                if _arg_matches_param_name(arg.text, pname):
                     continue
                 # Skip arguments whose leading char is `(` or `[` —
                 # those are paren-grouped or list-literal expressions

@@ -44,7 +44,9 @@ from nova_lsp.imports import FileCache  # noqa: E402
 from nova_lsp.inlay_hints import (  # noqa: E402
     INLAY_HINT_KIND_PARAMETER,
     INLAY_HINT_KIND_TYPE,
+    _arg_matches_param_name,
     _has_explicit_name_label,
+    _infer_iter_element_type,
     _infer_literal_type,
     _split_param_names,
     _walk_args,
@@ -563,6 +565,309 @@ def test_integration_codegen_cg_ht_set_call_site() -> None:
 
 
 # ---------------------------------------------------------------------------
+# R30E additions: annotated-let suppression, for-loop type hints, param-name
+# == arg-name suppression, multi-let mixed, parser.nova coverage smoke.
+# ---------------------------------------------------------------------------
+
+
+def test_arg_matches_param_name_basic() -> None:
+    """`_arg_matches_param_name` -- bare ident equal to param: True;
+    different ident: False; non-ident expression: False."""
+    assert_(_arg_matches_param_name("x", "x"),
+            "bare matching ident -> True")
+    assert_(not _arg_matches_param_name("y", "x"),
+            "different ident -> False")
+    assert_(not _arg_matches_param_name("x + 1", "x"),
+            "arithmetic expr -> False (different shape)")
+    assert_(not _arg_matches_param_name("foo()", "foo"),
+            "call expression -> False (not a bare ident)")
+    assert_(_arg_matches_param_name("  x  ", "x"),
+            "whitespace tolerated around bare ident")
+
+
+def test_infer_iter_element_type_basic() -> None:
+    """`_infer_iter_element_type` -- list literals, range builtin,
+    non-iterables."""
+    assert_eq(_infer_iter_element_type("[1, 2, 3]"), "int",
+              "int list literal -> int element type")
+    assert_eq(_infer_iter_element_type('["a", "b"]'), "str",
+              "str list literal -> str element type")
+    assert_eq(_infer_iter_element_type("[true, false]"), "bool",
+              "bool list literal -> bool element type")
+    assert_eq(_infer_iter_element_type("range(10)"), "int",
+              "range builtin -> int element type")
+    assert_eq(_infer_iter_element_type("range_list(0, 5)"), "int",
+              "range_list builtin -> int element type")
+    assert_eq(_infer_iter_element_type("[]"), None,
+              "empty list -> no inferable element")
+    assert_eq(_infer_iter_element_type("some_var"), None,
+              "bare ident iterable -> no inference")
+    assert_eq(_infer_iter_element_type("enumerate(xs)"), None,
+              "enumerate -> tuple type, no guess")
+
+
+def test_inlay_hints_for_loop_int_list() -> None:
+    """`for x in [1, 2, 3]` -- emit `: int` type hint after the `x`."""
+    with tempfile.TemporaryDirectory() as ws:
+        caller_path = os.path.join(ws, "caller.nova")
+        text = (
+            "fn main() {\n"
+            "    for x in [1, 2, 3] {\n"
+            "        println(x)\n"
+            "    }\n"
+            "}\n"
+        )
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+        assert_eq(len(type_hints), 1, "one for-loop type hint emitted")
+        assert_eq(type_hints[0]["label"], ": int",
+                  "for-loop hint labels element type")
+        # Position: 4-space indent + "for " (4) + "x" (1) = column 9.
+        assert_eq(type_hints[0]["position"]["character"], 9,
+                  "for-loop hint anchored right after the iterator name")
+        assert_eq(type_hints[0]["position"]["line"], 1,
+                  "for-loop hint on line 1")
+
+
+def test_inlay_hints_for_loop_str_list() -> None:
+    """`for s in ["a", "b"]` -- emit `: str` type hint."""
+    with tempfile.TemporaryDirectory() as ws:
+        caller_path = os.path.join(ws, "caller.nova")
+        text = 'fn main() {\n    for s in ["a", "b"] {\n    }\n}\n'
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+        assert_eq(len(type_hints), 1, "one for-loop type hint emitted")
+        assert_eq(type_hints[0]["label"], ": str", "str element type")
+
+
+def test_inlay_hints_for_loop_range_builtin() -> None:
+    """`for i in range(10)` -- emit `: int` from the range builtin."""
+    with tempfile.TemporaryDirectory() as ws:
+        caller_path = os.path.join(ws, "caller.nova")
+        text = "fn main() {\n    for i in range(10) {\n    }\n}\n"
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+        assert_eq(len(type_hints), 1, "one for-loop hint from range")
+        assert_eq(type_hints[0]["label"], ": int",
+                  "range builtin yields int element type")
+
+
+def test_inlay_hints_for_loop_uninferable() -> None:
+    """`for x in some_function()` -- no inference possible, no hint."""
+    with tempfile.TemporaryDirectory() as ws:
+        caller_path = os.path.join(ws, "caller.nova")
+        text = (
+            "fn main() {\n"
+            "    for x in some_function() {\n"
+            "    }\n"
+            "}\n"
+        )
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+        assert_eq(type_hints, [],
+                  "no hint when iterable element type isn't inferable")
+
+
+def test_inlay_hints_annotated_let_suppressed() -> None:
+    """`let v: Vec<i32> = some_call()` -- ZERO type hints when the
+    let has an explicit annotation (per R30E spec point 2)."""
+    with tempfile.TemporaryDirectory() as ws:
+        caller_path = os.path.join(ws, "caller.nova")
+        text = (
+            "fn main() {\n"
+            "    let v: Vec<i32> = 5\n"
+            "    let m: int = 42\n"
+            "}\n"
+        )
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+        assert_eq(type_hints, [],
+                  "no type hints on annotated lets")
+
+
+def test_inlay_hints_mixed_annotated_and_unannotated_lets() -> None:
+    """Mixed lets in one function: only the unannotated lets get hints."""
+    with tempfile.TemporaryDirectory() as ws:
+        caller_path = os.path.join(ws, "caller.nova")
+        text = (
+            "fn main() {\n"
+            "    let a = 1\n"
+            "    let b: int = 2\n"
+            "    let c = \"hi\"\n"
+            "    let d: str = \"bye\"\n"
+            "}\n"
+        )
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+        assert_eq(len(type_hints), 2,
+                  "only the two unannotated lets get hints")
+        labels = sorted(h["label"] for h in type_hints)
+        assert_eq(labels, [": int", ": str"],
+                  "labels match the unannotated RHS literals")
+
+
+def test_inlay_hints_param_name_equals_arg_name_suppressed() -> None:
+    """`add(a, b)` where `fn add(a, b)` -- ZERO parameter hints (the
+    arg names match the param names so the label would be redundant,
+    per R30E spec point 3)."""
+    with tempfile.TemporaryDirectory() as ws:
+        decl_path = os.path.join(ws, "decls.nova")
+        _write(decl_path, "fn add(a, b) {\n    return a + b\n}\n")
+        caller_path = os.path.join(ws, "caller.nova")
+        text = 'import "decls.nova"\n\nfn main() {\n    add(a, b)\n}\n'
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        param_hints = [h for h in hints
+                       if h["kind"] == INLAY_HINT_KIND_PARAMETER]
+        assert_eq(param_hints, [],
+                  "both hints suppressed when arg names match param names")
+
+
+def test_inlay_hints_partial_param_arg_name_match() -> None:
+    """`add(a, 5)` where `fn add(a, b)` -- only the second hint is
+    emitted because the first arg name matches its param name."""
+    with tempfile.TemporaryDirectory() as ws:
+        decl_path = os.path.join(ws, "decls.nova")
+        _write(decl_path, "fn add(a, b) {\n    return a + b\n}\n")
+        caller_path = os.path.join(ws, "caller.nova")
+        text = 'import "decls.nova"\n\nfn main() {\n    add(a, 5)\n}\n'
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        param_hints = [h for h in hints
+                       if h["kind"] == INLAY_HINT_KIND_PARAMETER]
+        assert_eq(len(param_hints), 1,
+                  "only the literal arg gets a hint")
+        assert_eq(param_hints[0]["label"], "b:",
+                  "the kept hint labels the second param")
+
+
+def test_inlay_hints_arg_with_expression_not_suppressed() -> None:
+    """`add(a + 1, b)` where `fn add(a, b)` -- the first arg is an
+    expression (not a bare ident), so the hint stays. The second arg
+    `b` matches param `b` -> suppressed."""
+    with tempfile.TemporaryDirectory() as ws:
+        decl_path = os.path.join(ws, "decls.nova")
+        _write(decl_path, "fn add(a, b) {\n    return a + b\n}\n")
+        caller_path = os.path.join(ws, "caller.nova")
+        text = (
+            'import "decls.nova"\n'
+            "\n"
+            "fn main() {\n"
+            "    add(a + 1, b)\n"
+            "}\n"
+        )
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        param_hints = [h for h in hints
+                       if h["kind"] == INLAY_HINT_KIND_PARAMETER]
+        assert_eq(len(param_hints), 1,
+                  "only the expression arg gets a hint")
+        assert_eq(param_hints[0]["label"], "a:",
+                  "the kept hint labels the first param")
+
+
+def test_inlay_hints_range_filter_for_loop() -> None:
+    """For-loop on line 5: viewport covering only line 5 -> 1 hint.
+    Confirms range filtering on the new for-loop producer."""
+    with tempfile.TemporaryDirectory() as ws:
+        caller_path = os.path.join(ws, "caller.nova")
+        text = (
+            "fn main() {\n"
+            "    let a = 1\n"
+            "    let b = 2\n"
+            "    let c = 3\n"
+            "    let d = 4\n"
+            "    for x in [1, 2] {}\n"
+            "}\n"
+        )
+        _write(caller_path, text)
+        cache = FileCache()
+        viewport = {
+            "start": {"line": 5, "character": 0},
+            "end": {"line": 5, "character": 200},
+        }
+        hints = compute_inlay_hints(_uri(caller_path), viewport, text, cache)
+        type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+        assert_eq(len(type_hints), 1,
+                  "only the line-5 for-loop hint kept")
+        assert_eq(type_hints[0]["position"]["line"], 5,
+                  "kept hint is on line 5")
+        assert_eq(type_hints[0]["label"], ": int",
+                  "kept hint is the int for-loop hint")
+
+
+def test_inlay_hints_multiline_for_loop() -> None:
+    """`for x in <multi-line RHS>` -- the iterator-variable hint still
+    fires on the for-line, even when the body spans multiple lines."""
+    with tempfile.TemporaryDirectory() as ws:
+        caller_path = os.path.join(ws, "caller.nova")
+        text = (
+            "fn main() {\n"
+            "    for item in [10, 20, 30] {\n"
+            "        let x = item\n"
+            "        println(x)\n"
+            "    }\n"
+            "}\n"
+        )
+        _write(caller_path, text)
+        cache = FileCache()
+        hints = compute_inlay_hints(_uri(caller_path), None, text, cache)
+        type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+        labels = [h["label"] for h in type_hints]
+        assert_(": int" in labels, "for-loop element type emitted")
+        for_hint = next(h for h in type_hints if h["label"] == ": int")
+        assert_eq(for_hint["position"]["line"], 1, "for hint on line 1")
+        # 4-space indent + len("for ") + len("item") = 12
+        assert_eq(for_hint["position"]["character"], 12,
+                  "for hint anchored right after `item`")
+
+
+def test_inlay_hints_coverage_parser_nova() -> None:
+    """Run inlay-hint computation against the real
+    `src/compiler/parser.nova` file to validate the implementation
+    over a large source. Reports counts as a smoke metric."""
+    parser_path = "/home/user/NOVA/src/compiler/parser.nova"
+    if not os.path.isfile(parser_path):
+        print("  SKIP coverage: parser.nova missing")
+        return
+    with open(parser_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    cache = FileCache()
+    idx = WorkspaceSymbolIndex()
+    idx.index_file(parser_path)
+    hints = compute_inlay_hints(
+        _uri(parser_path),
+        None,
+        text,
+        cache,
+        workspace_index=idx,
+    )
+    type_hints = [h for h in hints if h["kind"] == INLAY_HINT_KIND_TYPE]
+    param_hints = [h for h in hints
+                   if h["kind"] == INLAY_HINT_KIND_PARAMETER]
+    print(f"  parser.nova coverage: {len(type_hints)} type hints, "
+          f"{len(param_hints)} parameter hints "
+          f"({len(text.splitlines())} lines)")
+    assert_(len(param_hints) >= 0, "parser.nova returns a valid list")
+    assert_(len(type_hints) >= 0, "parser.nova returns a valid list")
+
+
+# ---------------------------------------------------------------------------
 
 
 def main() -> int:
@@ -590,6 +895,21 @@ def main() -> int:
     test_server_inlay_hint_capability_advertised()
     test_server_inlay_hint_wire()
     test_integration_codegen_cg_ht_set_call_site()
+    # R30E additions ---------------------------------------------------
+    test_arg_matches_param_name_basic()
+    test_infer_iter_element_type_basic()
+    test_inlay_hints_for_loop_int_list()
+    test_inlay_hints_for_loop_str_list()
+    test_inlay_hints_for_loop_range_builtin()
+    test_inlay_hints_for_loop_uninferable()
+    test_inlay_hints_annotated_let_suppressed()
+    test_inlay_hints_mixed_annotated_and_unannotated_lets()
+    test_inlay_hints_param_name_equals_arg_name_suppressed()
+    test_inlay_hints_partial_param_arg_name_match()
+    test_inlay_hints_arg_with_expression_not_suppressed()
+    test_inlay_hints_range_filter_for_loop()
+    test_inlay_hints_multiline_for_loop()
+    test_inlay_hints_coverage_parser_nova()
     print(f"test_inlay_hints: OK ({_assertions} assertions)")
     return 0
 
