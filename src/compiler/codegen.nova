@@ -1817,6 +1817,24 @@ fn is_builtin_fn(name) {
     if name == "sys_sendto" { return 1 }
     if name == "sys_recvfrom" { return 1 }
     if name == "sys_setsockopt_so_reuseaddr" { return 1 }
+    // R29A: poll(2) for multi-FD wait. The motivating use case is
+    // pipelined I/O over multiple sockets (R28A's blocked phase-1 /
+    // phase-2 cascade — a single-threaded peer handler that can't wait
+    // on more than one fd today, so the accept queue stalls behind
+    // whichever fd is "currently active"). poll covers select's surface
+    // area in a single syscall on every modern OS and is what stdlib
+    // glibc/musl/macOS/Win select-likes lower to internally.
+    //   Linux x86-64 : syscall 7 (poll)
+    //   macOS BSD    : syscall 230 (poll) via 0x2000000 prefix
+    //   ARM64-Linux  : syscall 73 (ppoll, since poll was removed) with
+    //                  a synthesized timespec; NULL when timeout_ms < 0
+    //   Windows x64  : __imp_WSAPoll via WS2_32.dll (R28C already wired
+    //                  the .extern; we reuse it)
+    //   winARM64     : stub returning -1
+    //   WASM         : stub returning -1 (WASI has no native poll on
+    //                  arbitrary fd sets; preview1 only exposes
+    //                  poll_oneoff which is shaped differently)
+    if name == "sys_poll" { return 1 }
     return 0
 }
 
@@ -6487,6 +6505,57 @@ fn arm_gen_call(nd) {
         arm_out("    add sp, sp, #16")
         return 0
     }
+    // R29A: sys_poll(fds, nfds, timeout_ms) on ARM64-Linux. The plain
+    // `poll` syscall (kernel #168 elsewhere) was retired on aarch64 in
+    // favor of `ppoll` (#73), which wants a {sec,nsec} timespec plus a
+    // sigmask. We synthesize the timespec from timeout_ms on the stack
+    // when timeout >= 0 and pass NULL when timeout < 0 (POSIX
+    // "wait forever"). NULL sigmask matches the no-signal-mask semantics
+    // of the plain poll on other targets.
+    //
+    // 1000000 doesn't fit ARM64's 16-bit mov-immediate window, so we
+    // synthesise tv_nsec as `(timeout_ms % 1000) * 1000 * 1000`.
+    if name == "sys_poll" {
+        let argc_pl = len(args)
+        let pli = 0
+        while pli < argc_pl {
+            arm_gen_expr(args[pli])
+            arm_push_x0()
+            pli = pli + 1
+        }
+        pli = argc_pl - 1
+        while pli >= 0 {
+            arm_pop_to("x" + int_to_str(pli))
+            pli = pli - 1
+        }
+        // x0=&fds, x1=nfds, x2=timeout_ms.
+        // Reserve 16 bytes for a timespec at sp+0.
+        arm_out("    sub sp, sp, #16")
+        let neg = arm_new_label()
+        let after = arm_new_label()
+        // If timeout_ms < 0, branch to the NULL-timespec path.
+        arm_out("    cmp x2, #0")
+        arm_out("    b.lt " + neg)
+        // tv_sec = timeout_ms / 1000, tv_nsec = (timeout_ms % 1000) * 1_000_000.
+        arm_out("    mov x9, #1000")
+        arm_out("    udiv x10, x2, x9")
+        arm_out("    msub x11, x10, x9, x2")
+        arm_out("    mul x11, x11, x9")             // x11 *= 1000
+        arm_out("    mul x11, x11, x9")             // x11 *= 1000 -> *1_000_000
+        arm_out("    str x10, [sp, #0]")            // tv_sec
+        arm_out("    str x11, [sp, #8]")            // tv_nsec
+        arm_out("    mov x2, sp")                    // &timespec
+        arm_out("    b " + after)
+        arm_out(neg + ":")
+        arm_out("    mov x2, #0")                    // NULL == wait forever
+        arm_out(after + ":")
+        arm_out("    mov x3, #0")                    // sigmask = NULL
+        arm_out("    mov x4, #8")                    // sigsetsize
+        arm_out("    mov x8, #73")                   // ppoll
+        arm_out("    svc #0")
+        arm_out("    add sp, sp, #16")
+        return 0
+    }
     // R11D SIMD intrinsics on ARM64 NEON. The NEON quad-word width is
     // 128 bits == 4x i32, so an 8-lane op is exactly 2 NEON ops.
     // Helpers `_nova_arm_simd_*` emitted in arm_emit_runtime().
@@ -7759,6 +7828,13 @@ fn warm_gen_call(nd) {
         return 0
     }
     if name == "sys_setsockopt_so_reuseaddr" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    // R29A: poll(2) — winARM64 stub returning -1. Real WSAPoll lowering
+    // can land here in a follow-up; for now the contract matches the
+    // rest of the socket family on this target.
+    if name == "sys_poll" {
         warm_emit_load_imm("x0", 0 - 1)
         return 0
     }
@@ -12675,6 +12751,18 @@ fn wasm_gen_rt_extra() {
     wasm_indent = wasm_indent - 1
     wi(")")
     wi("")
+
+    // R29A: sys_poll(fds, nfds, timeout_ms) stub. WASI preview1 has
+    // `poll_oneoff` which is a different shape (subscription / event
+    // arrays, not pollfd structs). Rather than translate the layout
+    // we return -1 so the same NOVA source compiles to WASM and the
+    // caller takes the error path. Native targets get the real poll.
+    wi("(func $sys_poll (param $fds i64) (param $nfds i64) (param $timeout_ms i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const -1")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
 }
 
 // R15B: WASM v128 SIMD lowering for the R11D / R14B intrinsics.
@@ -16105,6 +16193,47 @@ fn gen_runtime() {
         out("    mov rax, [rbp - 88]")
         out("    mov rsp, rbp")
         out("    pop rbp")
+    }
+    out("    ret")
+
+    // --- R29A: sys_poll(fds, nfds, timeout_ms) -> i32 ---
+    //
+    // Wait on an array of pollfd structs `{fd:i32, events:i16,
+    // revents:i16}` (8 bytes each, caller-allocated). Returns the
+    // number of fds with at least one event set in revents (>=1),
+    // 0 on timeout, or -1 on syscall error. timeout_ms < 0 means
+    // "wait forever"; 0 means "nonblocking probe".
+    //
+    // Linux x86-64 : syscall 7 (poll). Args already in rdi/rsi/rdx.
+    // macOS BSD    : syscall 230 via syscall_num(7) -> 0x20000E6.
+    // Windows      : __imp_WSAPoll (R28C wired the .extern). Same arg
+    //                shape but System V rdi/rsi/rdx must be re-marshalled
+    //                to Win64 rcx/edx/r8d; remember to bounce edx through
+    //                a scratch (r9d) so the move sequence is collision-
+    //                free. WSAPoll returns SOCKET_ERROR == -1 which we
+    //                propagate via movsxd (sign-extend to 64 bits).
+    out("")
+    out_label("_nova_sys_poll")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 48")
+        // Re-marshal System V (rdi, rsi, rdx) -> Win64 (rcx, rdx, r8).
+        // Order matters: rdx is both the source for arg3 and the dest
+        // for arg2, so bounce arg3 through r9 before clobbering rdx.
+        out("    mov r9d, edx")                  // save timeout_ms
+        out("    mov rdx, rsi")                  // nfds (low 32 used)
+        out("    mov rcx, rdi")                  // &fds
+        out("    mov r8d, r9d")                  // timeout_ms
+        out("    call [rip + __imp_WSAPoll]")
+        out("    movsxd rax, eax")              // sign-extend WSAPoll's int
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        // Linux/macOS: rdi=fds, rsi=nfds, rdx=timeout_ms already in
+        // the right syscall registers. emit_syscall(7) routes to the
+        // BSD-number on macOS via syscall_num.
+        emit_syscall(7)
     }
     out("    ret")
 
@@ -19687,6 +19816,11 @@ fn gen_runtime() {
     out("    jmp _nova_sys_recvfrom")
     out_label("sys_setsockopt_so_reuseaddr")
     out("    jmp _nova_sys_setsockopt_so_reuseaddr")
+    // R29A: multi-FD wait. Shared shim — Linux/macOS issue poll(2)
+    // directly, Windows hops through WSAPoll, ARM64 / WASM handled by
+    // their own backend dispatchers below.
+    out_label("sys_poll")
+    out("    jmp _nova_sys_poll")
     out_label("fork_process")
     out("    jmp _nova_fork")
     out_label("waitpid")

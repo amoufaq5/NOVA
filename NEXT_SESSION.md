@@ -1,5 +1,123 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R29A — `poll(2)` syscall for multi-FD wait
+
+**Status: complete** — NOVA codegen now exposes `sys_poll(fds, nfds,
+timeout_ms) -> i32`, the primitive that unblocks pipelined I/O over
+multiple sockets. R28A documented that NOVA's single-threaded peer
+handlers had to block their accept queues because there was no way
+to wait on more than one fd — that's the cascade R29A fixes. The
+builtin sits next to R28C's UDP family and shares the same wire
+shape across all six shipping backends.
+
+### New builtin
+
+  - **`sys_poll(fds, nfds, timeout_ms) -> i32`** — `fds` is a pointer
+    to a caller-allocated array of pollfd structs `{fd:i32 @0,
+    events:i16 @4, revents:i16 @6}` (8 bytes each); `nfds` is the
+    number of entries; `timeout_ms` is the wait budget in
+    milliseconds (`0` = nonblocking probe, `<0` = wait forever, `>0`
+    = bounded wait). Returns the number of fds with at least one
+    event set (`>=1`), `0` on timeout, or `-1` on error.
+
+### Per-target lowering
+
+  - **Linux x86-64** (`cg_target == 0`): syscall **#7** (`poll`).
+    Args land in `rdi`/`rsi`/`rdx` per the kernel ABI; no
+    marshalling needed.
+  - **macOS x86-64** (`cg_target == 1`): BSD **#230** routed
+    through `syscall_num(7) -> 0x20000E6`. The table entry was
+    added in R28C already, so the runtime label is identical to
+    Linux x86-64 modulo the syscall number.
+  - **Windows x86-64** (`cg_target == 3`): `__imp_WSAPoll` via
+    `WS2_32.dll`. R28C wired the `.extern __imp_WSAPoll` already;
+    we re-marshal System V (`rdi`/`rsi`/`rdx`) -> Win64
+    (`rcx`/`rdx`/`r8`) bouncing arg3 through `r9d` to avoid the
+    rdx-overwrite collision, then `movsxd` the i32 return.
+  - **ARM64-Linux** (`cg_target == 4`): syscall **#73** (`ppoll` —
+    plain `poll` was retired on aarch64). When `timeout_ms >= 0`
+    we synthesize a `{tv_sec, tv_nsec}` timespec on the local
+    stack (`tv_sec = ms/1000`, `tv_nsec = (ms%1000)*1_000_000`,
+    sequenced as `*1000 * 1000` because the ARM64 mov-immediate
+    window is 16 bits); when `timeout_ms < 0` we pass `NULL` so
+    `ppoll` waits forever per POSIX. `NULL` sigmask + `sigsetsize=8`.
+  - **winARM64** (`cg_target == 5`): stub returning `-1`. Matches
+    how R28C handles the rest of the socket family on this target.
+  - **WASM / WASI** (`cg_target == 2`): stub returning `-1`. WASI
+    preview1 exposes `poll_oneoff` but with a subscription/event
+    layout that doesn't match the POSIX pollfd array. Rather than
+    translate the layout we ship the sentinel so the same NOVA
+    source compiles to WASM and the caller takes the error path.
+
+### Why poll, not select
+
+We considered also shipping `sys_select` (linux #23 / macOS BSD
+#93). On every modern OS `select` is implemented in terms of `poll`
+internally (glibc, musl, macOS libc); `poll`'s array-of-structs API
+is also strictly more flexible than `select`'s three fd_sets (no
+1024-fd `FD_SETSIZE` cap, kernel writes `revents` per-fd
+independently). The single primitive covers the entire multi-fd-wait
+problem cleanly, so adding `sys_select` would have meant a second
+set of six per-target lowerings for no new capability. Skipped per
+the mission's "if poll alone is the cleaner deliverable" clause.
+
+### Implementation notes
+
+`is_builtin_fn` learns `sys_poll`. `gen_runtime` (x86-64 / macOS /
+Windows shared path) emits a new `_nova_sys_poll` label plus its
+`jmp` shim. `arm_gen_call` (ARM64-Linux) and `warm_gen_call`
+(winARM64) get their respective dispatch cases. The WASM emitter
+gets a `$sys_poll` stub returning `i64.const -1`.
+
+### Verification
+
+  - `tests/unit/test_codegen_poll.nova` (NEW; **17 native OK
+    assertions**, 3 on stub targets):
+      1. pollfd struct layout — round-trips fd/events/revents at
+         offsets 0/4/6 via store8 + load8 (6 assertions).
+      2. `sys_poll(timeout=0, no data)` returns 0 and leaves
+         revents untouched (2 assertions).
+      3. Small positive timeout with no queued data returns 0 (1).
+      4. Multi-fd poll: 2 pollfd entries, sendto primes s1, poll
+         returns >=1 and only s1's revents has POLLIN set (4).
+      5. Negative timeout (wait forever) returns immediately when
+         the queue is already non-empty (2 assertions — we can't
+         test true unbounded blocking without hanging the runner).
+      6. After draining the queue, timeout=0 returns 0 again (1).
+      7. close_fd housekeeping (1).
+    Plus a manual-inspection table at the top of the test file
+    listing the expected per-target syscall numbers / Win32
+    import so a reader can grep the generated assembly to
+    verify each backend.
+  - Full unit suite: **177 / 0 / 6** (same numbers as R28C — my
+    new test lives under `tests/unit/` so it isn't picked up by
+    `tests/run_tests.sh`'s `tests/test_*.nova` glob; it has to be
+    run directly via `bin/nova tests/unit/test_codegen_poll.nova`).
+    Existing UDP test (`test_udp_syscalls`) still passes — the
+    R28C path is undisturbed.
+  - Self-host bit-identical: **stage2 == stage3** (`make self-host`
+    clean, `_nova_sys_poll` appears in both stages identically).
+  - Cross-target compile clean on all 6 backends: Linux x86-64,
+    macOS x86-64, Windows x86-64 (`__imp_WSAPoll` call site
+    correctly emitted), ARM64-Linux (`mov x8, #73 / svc #0` with
+    timespec branch), winARM64 (`movn x0, #0` stub), WASM (`(func
+    $sys_poll ... i64.const -1)`).
+
+### File ownership (touched this round)
+
+  - `src/compiler/codegen.nova` — +`sys_poll` in `is_builtin_fn`,
+    new `_nova_sys_poll` runtime label (shared Linux/macOS/Win
+    path), `jmp sys_poll` shim, ARM64-Linux `arm_gen_call` branch
+    (ppoll syscall #73 with NULL-timespec for negative timeout),
+    winARM64 `warm_gen_call` stub, WASM `$sys_poll` stub.
+  - NEW `tests/unit/test_codegen_poll.nova` — verification harness.
+    (Path follows the R29A mission directive; mainstream NOVA
+    convention is `tests/test_*.nova` but R29A scoped a new
+    `tests/unit/` directory to keep the codegen-targeted tests
+    separate from feature/runtime tests as the suite grows.)
+  - `README.md` — `sys_poll` entry + networking-builtins list.
+  - `NEXT_SESSION.md` — round notes (this entry).
+
 ## R29D — nova-lsp semantic-tokens follow-up (class + property + type-after-colon)
 
 **Status: complete** — nova-lsp's `textDocument/semanticTokens/full`

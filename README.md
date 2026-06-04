@@ -252,6 +252,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - Arena allocator (mmap-backed bump allocation with instant reset)
 - TCP networking via raw syscalls: `socket`, `bind`, `listen`, `accept`, `send`, `recv`
 - UDP networking via raw syscalls: `sys_socket_udp`, `sys_sendto`, `sys_recvfrom`, `sys_setsockopt_so_reuseaddr` (R28C; enables NAT hole-punching after TCP-based STUN discovery)
+- Multi-FD wait via `sys_poll(fds, nfds, timeout_ms)` raw syscall (R29A; unblocks pipelined I/O over multiple sockets — R28A's single-threaded peer handlers no longer stall their accept queue behind one fd)
 - Process management: `fork`, `exec`, `waitpid`, `pipe`
 - File I/O, directory operations, environment variables
 - JSON parsing and serialization
@@ -886,7 +887,7 @@ make smoke-wasi-preopens
 `exit` `time` `sleep_ms` `getenv` `mkdir` `unlink` `file_size` `alloc`
 
 ### Networking
-`socket` `bind_socket` `listen_socket` `accept_conn` `connect_socket` `send_data` `recv_data` `close_fd` `make_sockaddr_in` `sys_socket_udp` `sys_sendto` `sys_recvfrom` `sys_setsockopt_so_reuseaddr`
+`socket` `bind_socket` `listen_socket` `accept_conn` `connect_socket` `send_data` `recv_data` `close_fd` `make_sockaddr_in` `sys_socket_udp` `sys_sendto` `sys_recvfrom` `sys_setsockopt_so_reuseaddr` `sys_poll`
 
 ### Process
 `fork_process` `waitpid` `exec_program` `pipe_create`

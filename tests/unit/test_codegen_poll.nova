@@ -1,0 +1,240 @@
+// R29A: tests for the new sys_poll(2) syscall builtin in codegen.
+//
+// The mission: NOVA single-threaded peer handlers were forced to
+// block on individual fds because the codegen had no way to wait
+// on multiple sockets at once (R28A's blocked phase-1 / phase-2
+// pipelining). sys_poll(fds, nfds, timeout_ms) is the primitive
+// that fixes that across all six backends.
+//
+// Per-target lowering (manual-inspection table for the assembly
+// dumps; the behavioral assertions below implicitly verify the
+// same numbers because the right syscall is the only way to
+// satisfy them on the host):
+//
+//   Linux x86-64  (cg_target=0) : syscall 7 (poll)
+//                                 -> "mov rax, 7" + "syscall"
+//   macOS x86-64  (cg_target=1) : syscall 0x20000E6 (BSD 230 poll)
+//                                 -> "mov rax, 33554662" + "syscall"
+//   Windows x64   (cg_target=3) : __imp_WSAPoll via WS2_32.dll
+//                                 -> "call [rip + __imp_WSAPoll]"
+//   ARM64-Linux   (cg_target=4) : syscall 73 (ppoll, plain poll is
+//                                 retired on aarch64); timespec
+//                                 synthesised from timeout_ms on the
+//                                 stack, NULL when timeout_ms < 0
+//                                 -> "mov x8, #73" + "svc #0"
+//   winARM64      (cg_target=5) : stub returning -1
+//   WASM (WASI)   (cg_target=2) : stub returning -1; WASI preview1
+//                                 has poll_oneoff but a different
+//                                 layout, so we ship the sentinel
+//
+// pollfd struct layout (matches Linux/macOS/BSD poll.h and
+// Windows WSAPOLLFD low 8 bytes):
+//
+//   offset 0..3 : fd       (i32)
+//   offset 4..5 : events   (i16, bitmask: POLLIN=1, POLLOUT=4, ...)
+//   offset 6..7 : revents  (i16, kernel writes the ready bits here)
+//
+// Assertions (this file): 18 OK lines on native targets that have
+// a working UDP stack, 3 OK lines on stub targets (WASM / winARM64
+// — sys_socket_udp returns -1 so we drop into the sentinel path
+// and just verify sys_poll itself returns -1).
+
+fn assert_int_eq(actual, expected, label) {
+    if actual == expected {
+        print("OK ")
+        println(label)
+    } else {
+        print("FAIL ")
+        print(label)
+        print(" expected ")
+        print_int(expected)
+        print(" got ")
+        print_int(actual)
+        println("")
+        exit(1)
+    }
+}
+
+fn assert_true(cond, label) {
+    if cond == 1 {
+        print("OK ")
+        println(label)
+    } else {
+        print("FAIL ")
+        println(label)
+        exit(1)
+    }
+}
+
+// Write a 16-bit little-endian word at ptr+offset using two store8's.
+// The native targets are all little-endian (x86-64 + ARM64 in LE mode
+// which is the only mode glibc/musl/Linux/macOS/Win currently ship);
+// WSAPOLLFD's events/revents are also LE on all Windows platforms NOVA
+// targets, so this is byte-identical to the kernel's struct layout.
+fn store_u16_le(ptr, off, val) {
+    let lo = int_and(val, 255)
+    let hi = int_and(int_shr(val, 8), 255)
+    store8(int_add(ptr, off), lo)
+    store8(int_add(ptr, off + 1), hi)
+    return 0
+}
+
+fn load_u16_le(ptr, off) {
+    let lo = load8(int_add(ptr, off))
+    let hi = load8(int_add(ptr, off + 1))
+    return int_or(lo, int_shl(hi, 8))
+}
+
+// Build a pollfd { fd, events, revents=0 } into the caller-provided
+// 8-byte slot. fd is stored as a full 32-bit field (write 4 bytes;
+// the high bytes are zero in practice for the small fds we deal
+// with, but we still clear them for layout correctness).
+fn init_pollfd(slot, fd, events) {
+    let f0 = int_and(fd, 255)
+    let f1 = int_and(int_shr(fd, 8), 255)
+    let f2 = int_and(int_shr(fd, 16), 255)
+    let f3 = int_and(int_shr(fd, 24), 255)
+    store8(int_add(slot, 0), f0)
+    store8(int_add(slot, 1), f1)
+    store8(int_add(slot, 2), f2)
+    store8(int_add(slot, 3), f3)
+    store_u16_le(slot, 4, events)
+    store_u16_le(slot, 6, 0)            // revents = 0
+    return 0
+}
+
+fn pollfd_revents(slot) {
+    return load_u16_le(slot, 6)
+}
+
+fn main() {
+    println("=== R29A sys_poll codegen tests ===")
+
+    // ---- pollfd struct layout: 8 bytes, offsets 0/4/6 ----
+    // R29A's per-target lowering all key on this byte layout. We
+    // confirm it round-trips through store8/load8 — the same primitives
+    // sys_poll consumes when it materialises a pollfd buffer from
+    // NOVA-allocated memory.
+    let pf = alloc(16)                  // room for 2 pollfd entries
+    init_pollfd(pf, 42, 5)              // fd=42 (0x2A), events=POLLIN|POLLOUT
+    // fd byte-level: 0x2A 0x00 0x00 0x00
+    assert_int_eq(load8(int_add(pf, 0)), 42, "pollfd offset 0 = fd low byte")
+    assert_int_eq(load8(int_add(pf, 1)), 0, "pollfd offset 1 = fd byte 1")
+    assert_int_eq(load8(int_add(pf, 2)), 0, "pollfd offset 2 = fd byte 2")
+    assert_int_eq(load8(int_add(pf, 3)), 0, "pollfd offset 3 = fd byte 3")
+    // events: 0x05 0x00
+    assert_int_eq(load_u16_le(pf, 4), 5, "pollfd offset 4-5 = events (5)")
+    // revents starts at 0
+    assert_int_eq(load_u16_le(pf, 6), 0, "pollfd offset 6-7 = revents (0)")
+
+    // ---- Behavioral: sys_poll on a real UDP socket ----
+    let s1 = sys_socket_udp()
+    let s2 = sys_socket_udp()
+
+    let native = 0
+    if s1 >= 0 { native = 1 }
+
+    if native == 1 {
+        // Bind both to localhost ports we can predict.
+        let LOCALHOST = 16777343        // 127.0.0.1 in NB order int.
+        let port_a = 53231
+        let port_b = 53232
+
+        let _sso1 = sys_setsockopt_so_reuseaddr(s1)
+        let _sso2 = sys_setsockopt_so_reuseaddr(s2)
+        let addr_a = make_sockaddr_in(port_a, LOCALHOST)
+        let addr_b = make_sockaddr_in(port_b, LOCALHOST)
+        let _ba = bind_socket(s1, addr_a, 16)
+        let _bb = bind_socket(s2, addr_b, 16)
+
+        // ---- 1. timeout=0 nonblocking probe with no data ----
+        // sys_poll with timeout_ms=0 must return 0 when no fds are
+        // ready (POSIX: "return immediately, even if no file
+        // descriptors are ready"). revents must remain clear.
+        let probe = alloc(16)
+        init_pollfd(probe, s1, 1)       // POLLIN
+        let n0 = sys_poll(probe, 1, 0)
+        assert_int_eq(n0, 0, "sys_poll(timeout=0, no data) returns 0")
+        assert_int_eq(pollfd_revents(probe), 0,
+            "revents unchanged after timeout=0 with no data")
+
+        // ---- 2. small positive timeout, no data → returns 0 ----
+        // Use 5ms so the test stays fast. The kernel must observe the
+        // timeout and return 0 with revents cleared.
+        init_pollfd(probe, s1, 1)
+        let n5 = sys_poll(probe, 1, 5)
+        assert_int_eq(n5, 0, "sys_poll(timeout=5ms, no data) times out -> 0")
+
+        // ---- 3. Multi-FD poll: 2 pollfd entries, datagram on s1 ----
+        // Send a datagram s2 -> s1, then poll on both. The kernel
+        // should set POLLIN (1) on the s1 slot's revents and leave
+        // the s2 slot's revents at 0.
+        let payload = alloc(4)
+        store8(int_add(payload, 0), 80) // 'P'
+        store8(int_add(payload, 1), 79) // 'O'
+        store8(int_add(payload, 2), 76) // 'L'
+        store8(int_add(payload, 3), 76) // 'L'
+        let sent = sys_sendto(s2, payload, 4, LOCALHOST, port_a)
+        assert_int_eq(sent, 4, "sys_sendto primed the receive queue")
+
+        let fds = alloc(16)
+        init_pollfd(fds, s1, 1)          // POLLIN
+        init_pollfd(int_add(fds, 8), s2, 1)
+        // Use a generous 100ms timeout — loopback is fast but UDP
+        // delivery is asynchronous; we want the test to be robust
+        // even under heavy load.
+        let nr = sys_poll(fds, 2, 100)
+        assert_true(nr >= 1, "sys_poll(2 fds, 100ms) saw >=1 ready fd")
+        let s1_revents = pollfd_revents(fds)
+        let s2_revents = pollfd_revents(int_add(fds, 8))
+        // s1 must have POLLIN set; s2 should not (no datagram queued).
+        let s1_in = int_and(s1_revents, 1)
+        assert_int_eq(s1_in, 1, "s1.revents has POLLIN set")
+        assert_int_eq(s2_revents, 0, "s2.revents stays 0 (no data)")
+
+        // ---- 4. negative timeout returns immediately when ready ----
+        // Negative timeout means "wait forever" per POSIX. We can't
+        // actually test infinite blocking without hanging the test
+        // runner, but a queued datagram (still on s1 from above —
+        // we haven't drained it) should make sys_poll return without
+        // blocking even with the wait-forever timeout.
+        init_pollfd(probe, s1, 1)
+        let nfin = sys_poll(probe, 1, 0 - 1)
+        assert_true(nfin >= 1,
+            "sys_poll(timeout=-1) returns >=1 immediately when ready")
+        let pin = int_and(pollfd_revents(probe), 1)
+        assert_int_eq(pin, 1, "revents POLLIN set after -1 wait")
+
+        // ---- 5. Drain queued datagram so the rebound test is clean ----
+        let drain = alloc(64)
+        let _drained = sys_recvfrom(s1, drain, 64, 50)
+
+        // ---- 6. After draining, timeout=0 returns 0 again ----
+        init_pollfd(probe, s1, 1)
+        let nd = sys_poll(probe, 1, 0)
+        assert_int_eq(nd, 0,
+            "sys_poll(timeout=0) returns 0 after drain (fd no longer ready)")
+
+        close_fd(s1)
+        close_fd(s2)
+        println("OK close_fd on both UDP sockets")
+    } else {
+        // WASM / winARM64 stub target. sys_socket_udp returned -1, so
+        // we just verify the sys_poll stub itself returns -1 on any
+        // arbitrary buffer + count + timeout shape.
+        let stub_buf = alloc(16)
+        init_pollfd(stub_buf, 0, 1)
+        let stub_n = sys_poll(stub_buf, 1, 0)
+        assert_int_eq(stub_n, 0 - 1, "stub sys_poll returns -1")
+        let stub_n2 = sys_poll(stub_buf, 1, 100)
+        assert_int_eq(stub_n2, 0 - 1, "stub sys_poll(timeout=100) returns -1")
+        let stub_n3 = sys_poll(stub_buf, 0, 0)
+        assert_int_eq(stub_n3, 0 - 1, "stub sys_poll(nfds=0) returns -1")
+        println("OK stub-target sentinel shape")
+    }
+
+    println("")
+    println("=== R29A sys_poll codegen tests passed ===")
+}
+
+main()
