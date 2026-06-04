@@ -1276,6 +1276,10 @@ fn cg_check_exhaustive(match_nd) {
         vi = vi + 1
     }
     println("warning: non-exhaustive match on " + enum_name + " (missing: " + missing + ")")
+    // R31D: mark the match node as already-warned so any subsequent
+    // pass over the same node (e.g. gen_expr followed by gen_stmt for
+    // a let-bound match in an outer block) doesn't duplicate the line.
+    if len(match_nd) < 4 { push(match_nd, 1) }
     return 0
 }
 

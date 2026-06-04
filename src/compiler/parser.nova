@@ -3805,6 +3805,15 @@ fn tc_walk_expr(expr) {
         }
         return 0
     }
+    // R31D: match used in expression position (e.g. `let x = match v
+    // { ... }`). Delegate to tc_walk_stmt's AST_MATCH_STMT branch so
+    // the same two checks fire from both contexts without
+    // duplicating logic. The exhaustiveness check's visited-flag
+    // guarantees we still only warn once.
+    if t == AST_MATCH_STMT {
+        tc_walk_stmt(expr)
+        return 0
+    }
     return 0
 }
 
@@ -3812,6 +3821,222 @@ fn tc_walk_expr(expr) {
 fn tc_check_call(call_nd) {
     tc_check_call_fn(call_nd)
     tc_check_call_struct(call_nd, 0)
+    return 0
+}
+
+// R31D: infer the static type of a match-arm body's final expression. An
+// arm body is either AST_EXPR_STMT (single-expression arm) or AST_BLOCK
+// (brace-delimited body — final stmt's expression is the value).
+// Returns the canonical type-name string ("int" / "str" / "float" /
+// "bool" / "list" / "map" / enum-name / struct-name) for statically
+// recognisable forms, or "" when the type can't be inferred at parse
+// time (binders, identifiers, calls, arithmetic on non-literals, etc.).
+//
+// The return is intentionally conservative: only emit warnings on
+// PROVABLE mismatches so codepaths that legitimately produce dynamic
+// values (e.g. an arm body that does `compute(v) + 1`) silently skip.
+fn tc_arm_body_type(body) {
+    if body == 0 { return "" }
+    if type_of(body) != 3 { return "" }
+    let bt = ast_tag(body)
+    if bt == AST_EXPR_STMT {
+        let e = body[1]
+        return tc_arm_expr_type(e)
+    }
+    if bt == AST_BLOCK {
+        let stmts = body[1]
+        if stmts == 0 { return "" }
+        if type_of(stmts) != 3 { return "" }
+        if len(stmts) == 0 { return "" }
+        let last = stmts[len(stmts) - 1]
+        if last == 0 { return "" }
+        if type_of(last) != 3 { return "" }
+        if ast_tag(last) == AST_EXPR_STMT {
+            return tc_arm_expr_type(last[1])
+        }
+        // Final stmt is a let / assign / if / while / return / ... —
+        // the block doesn't have a value (or its value isn't a literal
+        // we can statically recognise).
+        return ""
+    }
+    // Bare expression node — happens when the parser inlines a single
+    // expression as the body directly (legacy shape). Treat the same
+    // as the AST_EXPR_STMT case.
+    return tc_arm_expr_type(body)
+}
+
+// R31D: extension of tc_literal_type for the arm-body context. Beyond
+// raw literals, also recognises AST_ENUM_CTOR (whose type IS the enum
+// name) so an arm body that returns `Result::Ok(5)` reports "Result"
+// and can be compared against another arm's `Result::Err("x")`. Other
+// expression shapes still return "" (conservative).
+fn tc_arm_expr_type(e) {
+    if e == 0 { return "" }
+    if type_of(e) != 3 { return "" }
+    let t = ast_tag(e)
+    // R31D: enum constructor — type is the enum name itself.
+    if t == AST_ENUM_CTOR { return e[1] }
+    // Struct constructor under positional or brace-init shape.
+    if t == AST_STRUCT_INIT { return e[1] }
+    // Otherwise fall back to the existing literal classifier.
+    return tc_literal_type(e)
+}
+
+// R31D: arm-body type-agreement check. Walks every arm in the match,
+// infers each body's static type, and emits ONE warning per pair of
+// disagreeing arms. Conservative: arms whose body type is "" (unknown)
+// are skipped entirely so the check NEVER false-fires on dynamic
+// values. The first statically-typed arm establishes the expected type;
+// every subsequent statically-typed arm is compared against it.
+//
+// Output shape matches the existing R23A WARN convention so editor /
+// LSP filters that already grep for "warning: type mismatch" pick it
+// up without changes.
+fn tc_check_match_arm_types(match_nd) {
+    if match_nd == 0 { return 0 }
+    if type_of(match_nd) != 3 { return 0 }
+    let arms = match_nd[2]
+    if arms == 0 { return 0 }
+    if type_of(arms) != 3 { return 0 }
+    let expected = ""
+    let expected_arm = -1
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        let got = ""
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let body = arm[2]
+                got = tc_arm_body_type(body)
+            }
+        }
+        if got != "" {
+            if expected == "" {
+                expected = got
+                expected_arm = ai
+            } else {
+                if expected != got {
+                    println("warning: match arm bodies disagree on type: arm " + int_to_str(expected_arm) + " is " + expected + " but arm " + int_to_str(ai) + " is " + got)
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R31D: standalone parse-time exhaustiveness check, parallel to the
+// codegen pass cg_check_exhaustive but firing from the typecheck walk
+// so a non-exhaustive match against an enum reports its warning even
+// when the match is dead-code-eliminated before codegen reaches it.
+// The codegen-side check is retained for backwards-compatibility (the
+// duplicate warning is suppressed there via the visited-flag below).
+fn tc_check_match_exhaustive(match_nd) {
+    if match_nd == 0 { return 0 }
+    if type_of(match_nd) != 3 { return 0 }
+    let arms = match_nd[2]
+    if arms == 0 { return 0 }
+    if type_of(arms) != 3 { return 0 }
+    let enum_name = ""
+    let has_wildcard = 0
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                if pat != 0 {
+                    if type_of(pat) == 3 {
+                        let pt = ast_tag(pat)
+                        if pt == AST_WILDCARD { has_wildcard = 1 }
+                        if pt == AST_TYPE_PATTERN { has_wildcard = 1 }
+                        if pt == AST_ENUM_PATTERN {
+                            if enum_name == "" { enum_name = pat[1] }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    if enum_name == "" { return 0 }
+    if has_wildcard == 1 {
+        // R31D: mark the match as already-checked so the codegen pass
+        // doesn't re-warn. Slot 3 (zero-based) on the match node is
+        // unused by AST_MATCH_STMT in parser-emitted nodes — we lazily
+        // append the flag.
+        if len(match_nd) < 4 { push(match_nd, 1) }
+        return 0
+    }
+    let edef = tc_find_enum(enum_name)
+    if edef == 0 { return 0 }
+    let variants = edef[1]
+    if variants == 0 { return 0 }
+    if type_of(variants) != 3 { return 0 }
+    let total = len(variants)
+    if total == 0 { return 0 }
+    // Build a coverage map: covered[v] = 1 iff some arm pattern names
+    // the v'th variant. Reuse `tc_find_enum`'s declaration order so the
+    // missing-variant report keeps source-order presentation.
+    let covered = list_new()
+    let init = 0
+    while init < total {
+        push(covered, 0)
+        init = init + 1
+    }
+    ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                if pat != 0 {
+                    if type_of(pat) == 3 {
+                        if ast_tag(pat) == AST_ENUM_PATTERN {
+                            let vname = pat[2]
+                            let vi0 = 0
+                            while vi0 < total {
+                                let vent = variants[vi0]
+                                if vent[0] == vname { covered[vi0] = 1 }
+                                vi0 = vi0 + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    let count_covered = 0
+    let ci0 = 0
+    while ci0 < total {
+        if covered[ci0] == 1 { count_covered = count_covered + 1 }
+        ci0 = ci0 + 1
+    }
+    if count_covered >= total {
+        if len(match_nd) < 4 { push(match_nd, 1) }
+        return 0
+    }
+    // Assemble the missing-variant list in declaration order. Same
+    // shape as cg_check_exhaustive so the warn line is identical.
+    let missing = ""
+    let vi1 = 0
+    let first = 1
+    while vi1 < total {
+        if covered[vi1] == 0 {
+            let vname1 = variants[vi1][0]
+            if first == 1 {
+                missing = vname1
+                first = 0
+            } else {
+                missing = missing + ", " + vname1
+            }
+        }
+        vi1 = vi1 + 1
+    }
+    println("warning: non-exhaustive match on " + enum_name + " (missing: " + missing + ")")
+    // Mark visited so codegen does not re-emit the same warn.
+    if len(match_nd) < 4 { push(match_nd, 1) }
     return 0
 }
 
@@ -3893,6 +4118,39 @@ fn tc_walk_stmt(nd) {
     }
     if t == AST_ASSIGN_STMT {
         if nd[2] != 0 { tc_walk_expr(nd[2]) }
+        return 0
+    }
+    // R31D: match expression / statement. Run the two static checks
+    // (exhaustiveness against enum variants, arm-body type agreement)
+    // and recurse into the scrutinee + every arm body so nested calls
+    // / struct ctors / nested matches inside an arm still get walked.
+    if t == AST_MATCH_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
+        tc_check_match_exhaustive(nd)
+        tc_check_match_arm_types(nd)
+        let arms_tc = nd[2]
+        if arms_tc == 0 { return 0 }
+        if type_of(arms_tc) != 3 { return 0 }
+        let aix = 0
+        while aix < len(arms_tc) {
+            let arm_tc = arms_tc[aix]
+            if arm_tc != 0 {
+                if type_of(arm_tc) == 3 {
+                    let body_tc = arm_tc[2]
+                    if body_tc != 0 {
+                        if type_of(body_tc) == 3 {
+                            let bt2 = ast_tag(body_tc)
+                            if bt2 == AST_EXPR_STMT {
+                                if body_tc[1] != 0 { tc_walk_expr(body_tc[1]) }
+                            } else {
+                                tc_walk_stmt(body_tc)
+                            }
+                        }
+                    }
+                }
+            }
+            aix = aix + 1
+        }
         return 0
     }
     return 0

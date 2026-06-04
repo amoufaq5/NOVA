@@ -1,0 +1,383 @@
+// R31D: match expression with enum-variant binding + exhaustiveness +
+// arm-body type-agreement (typecheck pass extension).
+//
+// R17A shipped the underlying machinery — `match scrutinee { Variant(b)
+// => body, ... }` parses, lowers to a tag-compare + per-arm dispatch,
+// and the variant payload `b` is bound to a fresh local visible only
+// in the arm body. R23A's typecheck pass landed argument-type warnings
+// at enum-ctor / fn-call / struct-ctor sites. R31D wires those two
+// together by adding TWO new static checks that fire from the same
+// `tc_walk_stmt` walk that R23A introduced:
+//
+//   1. tc_check_match_exhaustive  — emits the existing R17A
+//      "non-exhaustive match on E (missing: V)" warning from the
+//      typecheck pass instead of (only) from codegen. The codegen
+//      check still fires for the warn-at-emit-time path BUT it is
+//      suppressed via a slot-3 visited flag the parser pass appends,
+//      so the warning prints EXACTLY ONCE per non-exhaustive site
+//      regardless of whether the match is visited via gen_expr or
+//      gen_stmt.
+//   2. tc_check_match_arm_types  — NEW arm-body type-agreement check.
+//      For each match arm whose body is a statically recognisable
+//      literal (int / str / float / bool / list / map / enum_ctor /
+//      struct_init), the first such arm establishes the expected type;
+//      every subsequent statically-typed arm is compared against it
+//      and a "warning: match arm bodies disagree on type: arm I is T
+//      but arm J is U" warning fires on disagreement.
+//
+// Both checks remain WARNINGS (non-fatal), matching R17A's pattern so
+// the existing tests/test_exhaustiveness_warn.nova suite that relies
+// on runtime fallthrough behaviour stays green. The runtime-side
+// assertions below verify the four reachable semantics of every match
+// shape (payload bind, wildcard catch-all, exhaustive Option / Result,
+// nested match) so a regression in either path fails fast.
+//
+// Lives under tests/unit/ so the tests/test_*.nova glob in
+// tests/run_tests.sh doesn't pick it up — the existing
+// tests/test_exhaustiveness.nova + test_match.nova + test_match_expression.nova
+// already cover the R17A-shipped behaviour from the user-suite glob,
+// so duplicating here would add CI cost without finding new bugs.
+// Invoke directly via `bin/nova tests/unit/test_match_expr.nova`.
+
+enum Option {
+    Some(int)
+    None
+}
+
+enum Result {
+    Ok(int)
+    Err(str)
+}
+
+enum Color {
+    Red
+    Green
+    Blue
+}
+
+let ok_count = 0
+let fail_count = 0
+
+fn check(cond, label) {
+    if cond == 1 {
+        ok_count = ok_count + 1
+        print("OK ")
+        println(label)
+    } else {
+        fail_count = fail_count + 1
+        print("FAIL ")
+        println(label)
+    }
+    return 0
+}
+
+// --- 1. Exhaustive match on Option: both arms reachable ---
+
+fn opt_value(o) {
+    return match o {
+        Option::Some(v) => v
+        Option::None => -1
+    }
+}
+
+check(opt_value(Option::Some(5)) == 5, "Option::Some(5) -> 5")
+check(opt_value(Option::Some(0)) == 0, "Option::Some(0) -> 0 (zero is a real value, not None)")
+check(opt_value(Option::Some(-42)) == -42, "Option::Some(-42) -> -42 (negative payload preserved)")
+check(opt_value(Option::None) == -1, "Option::None -> -1 (None arm taken)")
+
+// --- 2. Match-as-expression: bound to a let, used in arithmetic ---
+
+let opt_a = Option::Some(7)
+let opt_b = Option::None
+let lx = match opt_a {
+    Option::Some(v) => v + 1
+    Option::None => 0
+}
+check(lx == 8, "let lx = match Option::Some(7) { Some(v) => v + 1, None => 0 } -> 8")
+
+let ly = match opt_b {
+    Option::Some(v) => v + 1
+    Option::None => 0
+}
+check(ly == 0, "let ly = match Option::None { Some(v) => v + 1, None => 0 } -> 0")
+
+// Arithmetic context: two matches summed together.
+let lz = (match opt_a { Option::Some(v) => v  Option::None => 0 }) + (match opt_b { Option::Some(v) => v  Option::None => 100 })
+check(lz == 107, "(match Some(7)) + (match None) -> 7 + 100 = 107")
+
+// Match as a function-call argument.
+fn add_one(n) { return n + 1 }
+let ma_arg = add_one(match opt_a { Option::Some(v) => v  Option::None => 0 })
+check(ma_arg == 8, "add_one(match) -> 8 (match feeds function arg directly)")
+
+// --- 3. Variant payload binder is visible in the arm body and reads
+// the correct payload slot. NOVA's match-arm binders write to a
+// function-level local (no per-arm fresh slot), matching R17A's
+// codegen: an arm of the form `Some(v) => body` lowers to
+// `_v := scrutinee[1]; body`. The test here pins the read side and
+// verifies that two consecutive arms that bind the same name don't
+// clobber the previous match's payload until their own arm fires.
+
+fn payload_read(o) {
+    let res = match o {
+        Option::Some(v) => v * 10
+        Option::None => -1
+    }
+    return res
+}
+
+check(payload_read(Option::Some(42)) == 420, "Some(v) payload read in arm body: 42 * 10 = 420")
+check(payload_read(Option::None) == -1, "None arm: payload not bound, body returns -1")
+
+// Two SEQUENTIAL matches, second match's binder of the same name
+// should be the second scrutinee's payload, not bleed from the first.
+fn two_matches() {
+    let a = match Option::Some(1) {
+        Option::Some(v) => v
+        Option::None => 0
+    }
+    let b = match Option::Some(2) {
+        Option::Some(v) => v
+        Option::None => 0
+    }
+    return a + b
+}
+
+check(two_matches() == 3, "two sequential matches with same binder name: 1 + 2 = 3")
+
+// Binder used in arithmetic in the arm body, with two consecutive uses.
+fn use_twice(o) {
+    return match o {
+        Option::Some(v) => v + v
+        Option::None => 0
+    }
+}
+
+check(use_twice(Option::Some(21)) == 42, "Some(21) -> v + v = 42 (binder reused in same expression)")
+check(use_twice(Option::None) == 0, "None -> 0 (binder unused in this arm)")
+
+// --- 4. Wildcard arm matches any remaining variant ---
+
+fn classify_color(c) {
+    return match c {
+        Color::Red => 1
+        _ => 0
+    }
+}
+
+check(classify_color(Color::Red) == 1, "Color::Red explicit arm")
+check(classify_color(Color::Green) == 0, "Color::Green falls to wildcard")
+check(classify_color(Color::Blue) == 0, "Color::Blue falls to wildcard")
+
+// Wildcard with a non-trivial body block.
+let wc_x = match Color::Blue {
+    Color::Red => 100
+    _ => {
+        let a = 5
+        let b = 6
+        a * b
+    }
+}
+check(wc_x == 30, "wildcard with block body { let a=5; let b=6; a*b } -> 30")
+
+// --- 5. Nested match: match inside an arm body ---
+
+fn nested(outer, inner) {
+    return match outer {
+        Option::Some(v) => match inner {
+            Option::Some(w) => v + w
+            Option::None => v
+        }
+        Option::None => -1
+    }
+}
+
+check(nested(Option::Some(10), Option::Some(5)) == 15, "nested Some/Some -> 10 + 5 = 15")
+check(nested(Option::Some(10), Option::None) == 10, "nested Some/None -> 10 (inner None arm)")
+check(nested(Option::None, Option::Some(7)) == -1, "nested None/* -> -1 (outer None arm; inner not evaluated)")
+
+// Nested with payload reuse: inner binder shadows outer binder of same name.
+fn shadow_test(o) {
+    return match o {
+        Option::Some(v) => match Option::Some(v + 1) {
+            Option::Some(v) => v  // inner v shadows outer
+            Option::None => 0
+        }
+        Option::None => -1
+    }
+}
+
+check(shadow_test(Option::Some(10)) == 11, "nested inner v shadows outer v: returns inner (10 + 1 = 11)")
+check(shadow_test(Option::None) == -1, "shadow test None path")
+
+// --- 6. Match on Result: Ok + Err paths both reachable ---
+
+fn result_value(r) {
+    return match r {
+        Result::Ok(v) => v
+        Result::Err(_) => -999
+    }
+}
+
+check(result_value(Result::Ok(7)) == 7, "Result::Ok(7) -> 7")
+check(result_value(Result::Ok(-3)) == -3, "Result::Ok(-3) -> -3 (negative ok)")
+check(result_value(Result::Err("nope")) == -999, "Result::Err(_) -> -999 (Err payload ignored)")
+
+// Result with the Err binder actually used.
+fn err_len(r) {
+    return match r {
+        Result::Ok(v) => v
+        Result::Err(m) => len(m)
+    }
+}
+
+check(err_len(Result::Ok(42)) == 42, "err_len Ok(42) -> 42")
+check(err_len(Result::Err("hi")) == 2, "err_len Err(\"hi\") -> len(\"hi\") = 2")
+check(err_len(Result::Err("hello")) == 5, "err_len Err(\"hello\") -> len(\"hello\") = 5")
+
+// --- 7. Exhaustive coverage of a 3-variant enum (Color) ---
+
+let c1 = Color::Red
+let c2 = Color::Green
+let c3 = Color::Blue
+let cv1 = match c1 {
+    Color::Red => "red"
+    Color::Green => "green"
+    Color::Blue => "blue"
+}
+let cv2 = match c2 {
+    Color::Red => "red"
+    Color::Green => "green"
+    Color::Blue => "blue"
+}
+let cv3 = match c3 {
+    Color::Red => "red"
+    Color::Green => "green"
+    Color::Blue => "blue"
+}
+check(cv1 == "red", "3-variant exhaustive: Red -> \"red\"")
+check(cv2 == "green", "3-variant exhaustive: Green -> \"green\"")
+check(cv3 == "blue", "3-variant exhaustive: Blue -> \"blue\"")
+
+// --- 8. Wildcard `_` binder discards payload but matches the variant ---
+
+fn discard(o) {
+    return match o {
+        Option::Some(_) => 1
+        Option::None => 0
+    }
+}
+
+check(discard(Option::Some(123)) == 1, "Some(_) discards payload but matches variant")
+check(discard(Option::Some(0)) == 1, "Some(_) still matches even when payload is zero")
+check(discard(Option::None) == 0, "None arm taken")
+
+// --- 9. Match expression directly returned from a function ---
+
+fn opt_or_default(o, d) {
+    return match o {
+        Option::Some(v) => v
+        Option::None => d
+    }
+}
+
+check(opt_or_default(Option::Some(10), 99) == 10, "fn-return match: Some path")
+check(opt_or_default(Option::None, 99) == 99, "fn-return match: None path uses default arg")
+
+// --- 10. Non-exhaustive match falls through to 0 (R17A semantic preserved) ---
+//
+// This is the runtime side of the WARN. The parse-time check emits
+// "warning: non-exhaustive match on Option (missing: None)" when the
+// file is compiled, and the codegen-side dedup suppresses the duplicate
+// from the gen_expr/gen_stmt path.
+
+let neh = match Option::None {
+    Option::Some(n) => n
+}
+check(neh == 0, "non-exhaustive match runtime fallthrough yields 0")
+
+// --- 11. Wildcard suppresses exhaustiveness warn (no warn expected) ---
+
+let with_wc = match Color::Blue {
+    Color::Red => 1
+    _ => 99
+}
+check(with_wc == 99, "wildcard suppresses exhaustiveness; non-Red falls to _")
+
+let with_wc_2 = match Color::Red {
+    Color::Red => 1
+    _ => 99
+}
+check(with_wc_2 == 1, "wildcard arm not taken when explicit Red arm matches first")
+
+// --- 12. Source-pinning: load parser.nova and verify the R31D
+// typecheck helpers exist by name. A future refactor that drops or
+// renames these functions breaks the test loudly instead of silently
+// regressing the static-check coverage.
+
+fn assert_contains(haystack, needle, label) {
+    let i = 0
+    let hl = len(haystack)
+    let nl = len(needle)
+    let found = 0
+    while i + nl <= hl {
+        let j = 0
+        let ok = 1
+        while j < nl {
+            if haystack[i + j] != needle[j] { ok = 0  j = nl } else { j = j + 1 }
+        }
+        if ok == 1 { found = 1  i = hl } else { i = i + 1 }
+    }
+    check(found, label)
+    return 0
+}
+
+let par_src = read_file("src/compiler/parser.nova")
+assert_contains(par_src, "fn tc_check_match_exhaustive",
+    "parser.nova defines tc_check_match_exhaustive")
+assert_contains(par_src, "fn tc_check_match_arm_types",
+    "parser.nova defines tc_check_match_arm_types")
+assert_contains(par_src, "fn tc_arm_body_type",
+    "parser.nova defines tc_arm_body_type")
+assert_contains(par_src, "fn tc_arm_expr_type",
+    "parser.nova defines tc_arm_expr_type")
+// The two warning strings — pinned so the user-facing message stays
+// stable across refactors (LSP filters / editor regex match on these).
+assert_contains(par_src, "warning: non-exhaustive match on ",
+    "parser.nova carries the non-exhaustive warn prefix")
+assert_contains(par_src, "warning: match arm bodies disagree on type: arm ",
+    "parser.nova carries the arm-body type-mismatch warn prefix")
+// Visited-flag sentinel — codegen reads slot 3 to decide whether to
+// re-warn. The push(match_nd, 1) call is the marker.
+assert_contains(par_src, "push(match_nd, 1)",
+    "parser.nova appends the visited-flag to checked match nodes")
+// Entry-point integration: the new AST_MATCH_STMT branch in
+// tc_walk_stmt drives the checks. Pinning the comment header so the
+// integration site is grep-able.
+assert_contains(par_src, "R31D: match expression / statement.",
+    "parser.nova has the AST_MATCH_STMT branch in tc_walk_stmt")
+
+let cg_src = read_file("src/compiler/codegen.nova")
+// Codegen-side dedup: the early-return guard that checks the visited
+// flag the parser appends. Pin the conditional so a refactor that
+// drops it triggers the duplicate-warning regression test instead
+// of silently restoring 2-warnings-per-match behaviour.
+assert_contains(cg_src, "if match_nd[3] == 1 { return 0 }",
+    "codegen.nova cg_check_exhaustive honours the parser's visited flag")
+assert_contains(cg_src, "R31D: mark the match node as already-warned",
+    "codegen.nova mark-visited comment block")
+
+// --- Summary ---
+
+print("ok=")
+print_int(ok_count)
+print(" fail=")
+print_int(fail_count)
+println("")
+
+if fail_count == 0 {
+    println("R31D match-expr unit suite PASS")
+} else {
+    println("R31D match-expr unit suite FAIL")
+    exit(1)
+}

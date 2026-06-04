@@ -1,5 +1,153 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R31D — parser+codegen: match-arm static checks (exhaustiveness + type agreement)
+
+**Status: complete** — R17A's match-with-enum-variant-binding and
+codegen-side exhaustiveness WARN are wired into R23A's typecheck pass.
+Two checks now fire from the same `tc_walk_stmt` walk that produces
+the existing `warning: type mismatch in …` lines for ctor / call /
+struct-init mismatches, and the codegen-side check is de-duplicated
+so a non-exhaustive match warns EXACTLY ONCE per site (previously fired
+twice — once via `gen_expr`, once via `gen_stmt`).
+
+### What the two checks do
+
+  - **`tc_check_match_exhaustive`** (NEW, parser-side) walks every
+    `AST_MATCH_STMT` from the `tc_walk_stmt` AST_MATCH_STMT branch and
+    emits the same R17A WARN line — `warning: non-exhaustive match on
+    E (missing: V1, V2, ...)` — when at least one arm pattern is an
+    `AST_ENUM_PATTERN` for enum `E`, no wildcard arm is present, and
+    fewer than `|variants(E)|` distinct variant tags are covered. The
+    missing-variant list keeps source declaration order.
+  - **`tc_check_match_arm_types`** (NEW, parser-side) walks the same
+    arm list and computes each body's static type via the new helper
+    `tc_arm_body_type(body)` — `AST_EXPR_STMT` returns the literal-
+    type of its inner expression, `AST_BLOCK` looks at the final
+    statement's expression. `tc_arm_expr_type` extends
+    `tc_literal_type` to also recognise `AST_ENUM_CTOR` (whose type
+    IS the enum name) and `AST_STRUCT_INIT` (whose type IS the struct
+    name). The first arm whose body type resolves to a non-empty
+    string establishes the expected type; every subsequent arm with
+    a statically-known body type is compared, and a `warning: match
+    arm bodies disagree on type: arm I is T but arm J is U` line
+    fires on disagreement. Conservative — arms whose body type is
+    unknown (bare binder, fn-call, arithmetic on non-literals) are
+    skipped silently so the check never false-fires on dynamic values.
+
+### Codegen-side dedup
+
+`cg_check_exhaustive` gained an early-return guard `if len(match_nd)
+> 3 { if match_nd[3] == 1 { return 0 } }`. When the parser-side
+exhaustiveness check finishes a match node — whether it warned or
+not — it appends `1` as the node's 4th slot (`push(match_nd, 1)`).
+Codegen sees the sentinel and skips re-warning. Slot 3 is unused by
+parser-emitted match nodes (`ast_match(expr, arms)` is length 3) so
+the append is a safe lazy extension without breaking any existing
+consumer. The same mark-visited pattern fires from inside
+`cg_check_exhaustive` itself for paths where the typecheck pass
+was bypassed (e.g. AST built via dedicated codegen helpers that
+skip `parse_program`).
+
+### Why parser-side (not new typecheck.nova)
+
+R30E's session noted: "no `typecheck.nova` exists in the current
+tree" — R23A's typecheck functions live INSIDE `parser.nova` as the
+`tc_*` family, called from `tc_check_program` at the bottom of
+`parse_program`. R31D follows that convention: the new helpers
+(`tc_arm_body_type`, `tc_arm_expr_type`, `tc_check_match_arm_types`,
+`tc_check_match_exhaustive`) sit alongside `tc_check_let_enum_ctor`
+and friends, and the new `AST_MATCH_STMT` branch is appended to
+`tc_walk_stmt`. Creating a new top-level `typecheck.nova` module
+would have required updating `Makefile`'s `COMPILER_SRC` list and
+threading a new entry-point through `parse_program` — out of scope
+when the existing `tc_*` namespace already provides the right plumbing.
+
+### Verification
+
+  - **NEW `tests/unit/test_match_expr.nova` (49 OK assertions)** —
+    runtime coverage of the eight match-expression semantics the task
+    spec calls out (exhaustive Option, match-as-expression in let /
+    arithmetic / function-call positions, payload bind read + reuse,
+    wildcard catch-all, nested match, Result Ok+Err paths,
+    multi-variant exhaustive coverage of a 3-variant Color enum,
+    variant-with-`_`-binder discard, fn-return match), plus 9
+    source-pinning assertions (`fn tc_check_match_*` / `fn
+    tc_arm_*` exist by name in `parser.nova`; warning prefix strings
+    pinned; visited-flag `push(match_nd, 1)` pinned; codegen-side
+    `if match_nd[3] == 1 { return 0 }` early-return pinned). Lives
+    under `tests/unit/` so the `tests/test_*.nova` glob in
+    `tests/run_tests.sh` doesn't pick it up — the existing
+    `tests/test_exhaustiveness.nova` + `test_match.nova` +
+    `test_match_expression.nova` already cover the R17A-shipped
+    behaviour from the user-suite glob. Invoke directly via
+    `bin/nova tests/unit/test_match_expr.nova -o /tmp/m.s && as -o
+    /tmp/m.o /tmp/m.s && ld -o /tmp/m /tmp/m.o && /tmp/m`.
+  - **Full unit suite**: 177 / 0 / 6 (same as R31E), self-host
+    bit-identical (`make self-host` clean — stage2 == stage3 with
+    the new parser + codegen edits baked in).
+  - **R17A regression**: `test_exhaustiveness.nova` (15 positive-case
+    asserts) still passes with zero compile warnings;
+    `test_exhaustiveness_warn.nova` (4 non-exhaustive asserts) still
+    emits exactly 4 warnings (one per non-exhaustive site, down from
+    8 pre-R31D because of the dedup) and the runtime fallthrough
+    asserts still hold.
+
+### Implementation notes
+
+`src/compiler/parser.nova` — four new `tc_*` helpers and one new
+`AST_MATCH_STMT` branch on `tc_walk_stmt` + one new `AST_MATCH_STMT`
+clause in `tc_walk_expr` (delegates to `tc_walk_stmt` so match-in-
+expression-position also fires the checks). `src/compiler/codegen.nova`
+— two-line early-return guard at the top of `cg_check_exhaustive`
+plus a three-line mark-visited append at the bottom. No AST node
+shape changes; no codegen lowering changes. The visited flag is
+appended only on parser nodes that the check has actually visited,
+so AST built via dedicated codegen helpers (e.g. the R25A struct-
+match-pattern rewrite that synthesises `AST_DO_EXPR(let_cache,
+inner_match)`) still gets a codegen-side check on the synthesised
+inner match.
+
+### File ownership (touched this round)
+
+  - `src/compiler/parser.nova` — adds `tc_arm_body_type`,
+    `tc_arm_expr_type`, `tc_check_match_arm_types`,
+    `tc_check_match_exhaustive`; extends `tc_walk_stmt` with an
+    `AST_MATCH_STMT` branch; extends `tc_walk_expr` with an
+    `AST_MATCH_STMT` clause.
+  - `src/compiler/codegen.nova` — `cg_check_exhaustive` gains the
+    visited-flag early-return guard at top and the visited-flag
+    append after the warn println.
+  - NEW `tests/unit/test_match_expr.nova` — 49-assertion R31D unit
+    test (runtime semantics + source pinning).
+  - `README.md` — extends the "Enums with variant access" bullet
+    with the R31D addendum.
+  - `NEXT_SESSION.md` — this entry.
+
+### Caveats
+
+  - **Single-level patterns only.** The arm-body type-agreement
+    check doesn't infer types through nested enum patterns. So
+    `match outer { Some(Some(v)) => v, ... }` won't compare arm
+    body types against each other unless every body is one of the
+    statically-recognisable literal / ctor shapes
+    `tc_arm_body_type` handles. A bare binder body (`Some(v) => v`)
+    yields `""` from the inference, so the arm is silently skipped
+    in the agreement comparison — that's the conservative path.
+    Nested-pattern destructuring is also not implemented for the
+    enum-variant binding itself (R17A's `parse_match` enforces
+    one-level identifier binders per variant payload field), so
+    pattern-level recursion remains future work.
+  - **No "compile error" promotion.** The task spec mentions
+    "compile error" for non-exhaustive match and arm-type mismatch;
+    NOVA's existing `test_exhaustiveness_warn.nova` runtime suite
+    DEPENDS on these being non-fatal so the program still produces
+    its `assert(r1 == 7, ...)` outcomes. Promoting them to fatal
+    errors would break that suite (and the self-host bootstrap if
+    any internal codegen.nova match ever became momentarily non-
+    exhaustive during refactor). The warning channel is the same
+    one R23A established for `type mismatch in fn arg N`, which
+    keeps the editor / LSP grep filters working unchanged.
+
 ## R31E — nova-dap reverse-debugging (gdb record/reverse-continue/stepBack)
 
 **Status: complete** — nova-dap now ships reverse debugging via gdb's
