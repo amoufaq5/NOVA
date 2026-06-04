@@ -23,7 +23,8 @@ repo root and `make smoke-dwarf`).
 | `launch`                  | Spawns gdb, enables `mi-async` + `non-stop`, `-file-exec-and-symbols <program>`, optional `cwd` + `args`. |
 | `setBreakpoints`          | `-break-delete` then `-break-insert <src>:<line>` per breakpoint. Conditional breakpoints (`condition: "x > 5"`) are forwarded via `-break-insert -c "<expr>"`. |
 | `setFunctionBreakpoints`  | Tears down prior function bps via `-break-delete <id>` (per id, so source-line breakpoints + watchpoints survive) and installs `-break-insert [-c "<expr>"] "<name>"` per entry. Names gdb can't resolve come back `verified: false` with the gdb error in `message`. Hits surface as `stopped` events with `reason: "function breakpoint"` and `description: "Entry to <name>"`. |
-| `setExceptionBreakpoints` | Accepted, no-op (gdb has none for Nova).          |
+| `setExceptionBreakpoints` | Stores the active filter set on the session. Filters: `"uncaught"` (default ON, gates fatal-signal stops — SIGABRT / SIGSEGV / SIGFPE / SIGBUS / SIGILL — so NOVA panics surface as `stopped(reason=exception)` events) and `"caught"` (default OFF, placeholder for future NOVA exception-catching constructs). When `"uncaught"` is NOT in the filter set, fatal signals are silently resumed (the inferior crashes; the IDE sees `terminated`). |
+| `exceptionInfo`           | Returns `{exceptionId, description, breakMode: "unhandled", details: {typeName, message}}` for the most recent fatal signal stop. Reads `signal-name` + `signal-meaning` from the stashed gdb info. |
 | `configurationDone`       | `-exec-run` first time; `-exec-continue --all` thereafter. |
 | `threads`                 | Multi-thread: backstop reconcile with `-thread-info`; tracks `=thread-created` / `=thread-exited` for live updates. |
 | `stackTrace`              | `-stack-list-frames --thread <threadId>`; frame ids are stable per `(threadId, level)`. |
@@ -137,6 +138,23 @@ Capabilities advertised:
   instruction. Hits surface as `stopped` events with `reason:
   "instruction breakpoint"`, `hitBreakpointIds: [<id>]`, and a
   description like `Stopped at instruction 0x401045`.
+* `supportsExceptionInfoRequest: true` + `exceptionBreakpointFilters`
+  — `setExceptionBreakpoints {filters: ["uncaught"]}` activates a
+  server-side gate that converts gdb's `*stopped reason=signal-received`
+  records (for the fatal-signal set: `SIGABRT` / `SIGSEGV` / `SIGFPE`
+  / `SIGBUS` / `SIGILL`) into DAP `stopped` events with
+  `reason: "exception"` and a `description` carrying the signal name
+  + meaning (e.g. `SIGABRT (Aborted)`). The `"uncaught"` filter is
+  default-ON so a brand-new session catches panics out of the box;
+  when removed from the filter set the gate silently `-exec-continue`s
+  past fatal signals and the IDE eventually sees `terminated`. A
+  follow-up `exceptionInfo` request returns
+  `{exceptionId, description, breakMode: "unhandled", details}`. The
+  `"caught"` filter is advertised default-OFF as a placeholder for
+  future NOVA exception-catching constructs (e.g. a `?` operator) and
+  currently has no effect. `supportsExceptionFilterOptions: false`
+  because NOVA panics don't yet have per-exception-type
+  configuration.
 
 Custom DAP requests (extensions under the standard request channel):
 
@@ -304,6 +322,7 @@ tools/nova-dap/
     test_instruction_stepping.py         instruction-level stepping + disassemble + setInstructionBreakpoints
     test_profiler.py                     sample-based profiler (nova/profile/{start,stop,report})
     test_reverse_debug.py                reverse-debug (reverseContinue / stepBack / goto / record lifecycle)
+    test_exception_breakpoints.py        exception breakpoints (setExceptionBreakpoints + exceptionInfo, R33F)
     fixtures/multi_thread.c              pthread fixture (built on demand by the test)
 ```
 
@@ -461,7 +480,25 @@ shape + record-mode lifecycle. The end-to-end reverse-debug flow
 is covered by the existing `dap_smoke` regression (which now
 checks `supportsStepBack: true`) plus manual VS Code interaction.
 
-All eight tests have a pure-Python phase that runs anywhere (no gdb
+For exception breakpoints (R33F):
+
+```sh
+python tools/nova-dap/tests/test_exception_breakpoints.py
+# test_exception_breakpoints: OK
+#   unit tests:       38
+#   total assertions: 141
+```
+
+The exception-breakpoint test is pure unit (no gdb required); it
+drives `handle_set_exception_breakpoints` + `handle_exception_info`
++ `_handle_stopped`'s signal-filter gate against synthesised
+`GdbAsyncRecord` fixtures matching what gdb emits on real panics
+(SIGABRT / SIGSEGV / SIGFPE / SIGBUS / SIGILL). The R28F profiler /
+R29E conditional+hit-count BP / R31E reverse-debug regression
+guards live in the same file so a single test run confirms the
+exception filter doesn't disturb any prior subsystem.
+
+All nine tests have a pure-Python phase that runs anywhere (no gdb
 required) plus an end-to-end phase that SKIPs cleanly when `gdb` /
 `gcc` are missing.
 

@@ -350,6 +350,46 @@ class Session:
     # cleared on ``disconnect`` after we run ``-target-record-stop`` so
     # a subsequent launch starts clean.
     record_started: bool = False
+    # Exception breakpoint filters (R33F).
+    #
+    # ``exception_filters`` is the set of currently-active filter ids the
+    # client sent via ``setExceptionBreakpoints {filters: [...]}``. We
+    # advertise two filters in ``_capabilities``:
+    #
+    #   * ``"uncaught"`` -- stop on fatal signals (SIGABRT / SIGSEGV /
+    #                       SIGFPE / SIGBUS / SIGILL). Default: ON. This
+    #                       is NOVA's natural mapping for an "uncaught
+    #                       panic" -- the inferior is about to die from
+    #                       a fatal signal and we want the IDE to stop
+    #                       at the death site instead of just reporting
+    #                       a terminated event.
+    #   * ``"caught"``   -- placeholder for future NOVA exception-catching
+    #                       constructs (e.g. a `?` operator that catches
+    #                       panics at function boundaries). Default: OFF.
+    #                       Today no NOVA code path produces a "caught"
+    #                       exception, so the filter has no effect.
+    #
+    # When the client sends ``setExceptionBreakpoints {filters: []}`` the
+    # set becomes empty and fatal signals are silently resumed (the
+    # inferior continues until it actually crashes; the terminated event
+    # then surfaces). When the set contains ``"uncaught"`` we fire a DAP
+    # ``stopped`` event with ``reason="exception"`` on fatal signals.
+    #
+    # Default state matches the advertised filter defaults: ``"uncaught"``
+    # is ON by default so a brand-new session catches panics out of the
+    # box (matching VS Code's behaviour for other languages).
+    exception_filters: set = field(default_factory=lambda: {"uncaught"})
+    # Last exception info — populated by ``_handle_stopped`` when a
+    # signal-received stop crosses the uncaught filter. ``handle_exception_info``
+    # reads these fields to answer the IDE's follow-up query (DAP
+    # ``exceptionInfo`` request). The ``signal_name`` is gdb's
+    # ``signal-name`` field (e.g. ``"SIGABRT"``); ``signal_meaning`` is
+    # gdb's ``signal-meaning`` (human-readable, e.g. ``"Aborted"``);
+    # ``thread_id`` is the thread the signal arrived on so the IDE can
+    # render the stack-frame context correctly.
+    last_signal_name: Optional[str] = None
+    last_signal_meaning: Optional[str] = None
+    last_signal_thread_id: Optional[int] = None
 
     def alloc_var_ref(self, frame_id: int) -> int:
         ref = self.next_var_ref
@@ -647,6 +687,74 @@ def _resume_silently(
     worker.start()
 
 
+# Signals we treat as "uncaught panics" for the R33F exception filter.
+#
+# Each of these signals, when delivered to a NOVA inferior, indicates the
+# program is about to die from an unrecoverable fault that the DAP
+# ``"uncaught"`` filter should surface as a DAP ``stopped(reason=exception)``
+# event:
+#
+#   * SIGABRT -- ``abort(3)`` / NOVA's panic path / glibc assertion fail.
+#   * SIGSEGV -- invalid memory access (null deref, OOB, etc.).
+#   * SIGFPE  -- divide-by-zero / arithmetic overflow.
+#   * SIGBUS  -- alignment fault / mmap-backed truncation.
+#   * SIGILL  -- illegal instruction (corrupted code, unsupported CPU
+#                feature, accidentally executed data).
+#
+# We do NOT include SIGINT / SIGTERM / SIGTSTP / SIGTRAP because those are
+# controlled signals (user pressed Ctrl-C, debugger interrupt, etc.) and
+# the IDE doesn't want them gated by the exception filter. SIGTRAP in
+# particular is gdb's breakpoint trigger -- gating that would break the
+# normal breakpoint path.
+FATAL_SIGNAL_NAMES = frozenset({
+    "SIGABRT",
+    "SIGSEGV",
+    "SIGFPE",
+    "SIGBUS",
+    "SIGILL",
+})
+
+
+def is_fatal_signal(signal_name: Optional[str]) -> bool:
+    """Return True if ``signal_name`` is one of the fatal-signal names
+    we treat as an "uncaught panic" for the R33F exception filter.
+
+    The name is gdb's ``signal-name`` field (e.g. ``"SIGABRT"``). We
+    match exactly — gdb already canonicalises the name across platforms,
+    so we don't need to deal with numeric ids or alternate spellings.
+
+    A signal name of ``None`` (or any non-string value) returns False:
+    such records aren't fatal signals by definition. This matches the
+    "skip path" the test suite exercises for non-signal stops (regular
+    breakpoint hits, step-end, etc.)."""
+    if not isinstance(signal_name, str):
+        return False
+    return signal_name in FATAL_SIGNAL_NAMES
+
+
+def _extract_signal_info(rec: GdbAsyncRecord) -> Tuple[Optional[str], Optional[str]]:
+    """Extract ``(signal_name, signal_meaning)`` from a ``*stopped`` record.
+
+    gdb's ``signal-received`` records carry both fields verbatim:
+
+        *stopped,reason="signal-received",signal-name="SIGABRT",
+                 signal-meaning="Aborted",frame={...},thread-id="1",
+                 stopped-threads="all"
+
+    Either field may be missing on degenerate records (truncated MI
+    output, older gdb versions); we tolerate that by returning ``None``
+    in the corresponding slot. Non-string field values are normalised
+    to ``None`` so downstream code can safely treat the result as
+    ``Optional[str]``."""
+    name = rec.fields.get("signal-name")
+    if not isinstance(name, str):
+        name = None
+    meaning = rec.fields.get("signal-meaning")
+    if not isinstance(meaning, str):
+        meaning = None
+    return name, meaning
+
+
 def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
     reason = rec.fields.get("reason", "")
     if not isinstance(reason, str):
@@ -707,12 +815,71 @@ def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
         if primary_tid is not None:
             session.register_thread(primary_tid, running=False)
 
+    # Exception filter gate (R33F). A ``signal-received`` stop with a
+    # fatal signal (SIGABRT / SIGSEGV / SIGFPE / SIGBUS / SIGILL) is
+    # what NOVA produces when a panic escapes its containing function
+    # without being caught. The IDE's ``setExceptionBreakpoints
+    # {filters: [...]}`` controls whether we surface the stop:
+    #
+    #   * ``"uncaught"`` in filter set -> fire DAP stop with
+    #     reason="exception", description=<signal name>, and stash the
+    #     signal info on the session so a follow-up ``exceptionInfo``
+    #     request can return the details.
+    #   * ``"uncaught"`` NOT in filter set -> silent-resume (the inferior
+    #     proceeds, the signal handler / default action takes over, and
+    #     the IDE eventually sees a ``terminated`` event when the process
+    #     dies. From the user's perspective the debugger just doesn't
+    #     stop on panics, matching the configured filter intent).
+    #
+    # Non-fatal signals (SIGINT from ``-exec-interrupt``, SIGSTOP, etc.)
+    # are NOT gated -- they fall through to the regular event path with
+    # reason="exception" (matching pre-R33F behaviour). gdb's pause /
+    # interrupt path relies on SIGINT surfacing as a normal stop, and
+    # the multi-thread test (dap_multi_thread.py) explicitly asserts the
+    # pause path produces a stopped event.
+    current_signal_name: Optional[str] = None
+    current_signal_meaning: Optional[str] = None
+    if reason == "signal-received":
+        current_signal_name, current_signal_meaning = _extract_signal_info(rec)
+        if is_fatal_signal(current_signal_name):
+            if "uncaught" in session.exception_filters:
+                # Stash for the IDE's follow-up exceptionInfo request.
+                session.last_signal_name = current_signal_name
+                session.last_signal_meaning = current_signal_meaning
+                session.last_signal_thread_id = primary_tid
+            else:
+                # Silent-resume: the user has explicitly opted out of
+                # stopping on uncaught panics. We use the same
+                # ``-exec-continue`` helper as the BP-gate skip path so
+                # the DAP client doesn't see a phantom stopped /
+                # continued pair. If the inferior was already about to
+                # die from the signal, the kernel-side default action
+                # takes over and we'll see a ``*stopped reason=exited``
+                # next.
+                _resume_silently(session, primary_tid, all_stopped)
+                return
+
     body: Dict[str, Any] = {
         "reason": dap_reason,
         "threadId": primary_tid,
         "allThreadsStopped": all_stopped,
         "preserveFocusHint": False,
     }
+    # Exception-stop annotation (R33F): surface the signal name in the
+    # ``description`` field so the IDE call-stack panel renders e.g.
+    # "SIGABRT (Aborted)" alongside the standard "exception" reason
+    # badge. This runs for ANY signal-received stop that reached this
+    # point (i.e. either a fatal signal that passed the filter, or a
+    # non-fatal control signal like SIGINT from -exec-interrupt that
+    # never enters the filter path). Watchpoint / function-bp paths
+    # below may override the description for their respective kinds.
+    if reason == "signal-received" and isinstance(current_signal_name, str) and current_signal_name:
+        if isinstance(current_signal_meaning, str) and current_signal_meaning:
+            body["description"] = (
+                f"{current_signal_name} ({current_signal_meaning})"
+            )
+        else:
+            body["description"] = current_signal_name
     # DAP ``instructionPointerReference`` — the PC at the stop site.
     # We surface gdb's ``frame.addr`` so the DAP client can pin its
     # disassembly view (and subsequent ``disassemble`` requests) to
@@ -946,7 +1113,40 @@ def _capabilities() -> Dict[str, Any]:
         "supportsCompletionsRequest": False,
         "supportsModulesRequest": False,
         "supportsLogPoints": False,
-        "supportsExceptionInfoRequest": False,
+        # Exception breakpoints (R33F): the IDE asks for info about the
+        # current exception via ``exceptionInfo`` after a stop with
+        # reason="exception". The handler reads gdb's signal-name /
+        # signal-meaning fields (stashed on the session by the stop
+        # event handler when a fatal signal passed the uncaught filter)
+        # and returns the DAP ExceptionInfoResponse shape:
+        # ``{exceptionId, description, breakMode, details}``.
+        "supportsExceptionInfoRequest": True,
+        # Per-filter configuration (e.g. tying a free-form condition
+        # string to a specific exception class) is OFF -- NOVA's panic
+        # path doesn't have exception types yet, so there's nothing to
+        # parametrise per-filter. Flip this on when NOVA gains
+        # exception types + filter conditions.
+        "supportsExceptionFilterOptions": False,
+        # Filter advertisement: the client lists these in its UI and
+        # sends back the active subset via ``setExceptionBreakpoints
+        # {filters: [...]}``. ``"uncaught"`` is the natural NOVA mapping
+        # for "stop on fatal panic" (SIGABRT / SIGSEGV / SIGFPE /
+        # SIGBUS / SIGILL). ``"caught"`` is a placeholder for future
+        # NOVA exception-catching constructs (e.g. a `?` operator that
+        # could catch panics at function boundaries); today it has no
+        # effect when activated.
+        "exceptionBreakpointFilters": [
+            {
+                "filter": "uncaught",
+                "label": "Uncaught Panics",
+                "default": True,
+            },
+            {
+                "filter": "caught",
+                "label": "Caught Panics (future)",
+                "default": False,
+            },
+        ],
         "supportsDelayedStackTraceLoading": False,
         "supportsClipboardContext": False,
         # Multi-thread coordination: each step / continue / pause
@@ -1076,6 +1276,16 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     # fresh gdb id space, so stale records would gate the wrong
     # stops.
     session.breakpoints.clear_all()
+    # Exception info (R33F). A relaunch invalidates any previously
+    # recorded fatal-signal info -- the new inferior hasn't crashed
+    # yet, so an ``exceptionInfo`` request before the next fatal stop
+    # should report "no exception info available" rather than the
+    # stale signal name from the prior process. The exception-filter
+    # *set* itself is preserved across launches because the IDE
+    # configures it once at session start and expects it to persist.
+    session.last_signal_name = None
+    session.last_signal_meaning = None
+    session.last_signal_thread_id = None
 
     # Try to negotiate non-stop + mi-async so individual threads can
     # be paused / continued. If gdb rejects either (e.g. it's running
@@ -1639,7 +1849,138 @@ def handle_disassemble(session: Session, req: Dict[str, Any]) -> None:
 
 
 def handle_set_exception_breakpoints(session: Session, req: Dict[str, Any]) -> None:
-    send_response(session, req, body={})
+    """DAP ``setExceptionBreakpoints`` request (R33F).
+
+    Stores the active filter set on the session so ``_handle_stopped``
+    can gate fatal-signal stops accordingly. The request body is::
+
+        {filters: ["uncaught"], filterOptions?: [...], exceptionOptions?: [...]}
+
+    We honour ``filters`` only -- per-filter configuration
+    (``filterOptions``) is advertised as unsupported via
+    ``supportsExceptionFilterOptions: false`` because NOVA's panic path
+    doesn't yet have exception types to parametrise.
+
+    The response body always carries an empty ``breakpoints`` array;
+    per the DAP spec, exception breakpoints don't have ids (they're
+    filters, not individual breakpoint records) but the response shape
+    still requires the field so the client can attach to a uniform
+    response handler.
+
+    Edge cases:
+
+    * Empty ``filters: []`` -> filter set cleared. Subsequent fatal
+      signals are silently resumed (no DAP stop event). The inferior
+      runs until it actually dies; the kernel-default signal action
+      kills the process and we surface ``terminated`` normally.
+    * Unknown filter names (e.g. ``"thrown"`` from a Java-style client)
+      are accepted but have no effect. We could reject them but the
+      DAP spec says "the client may send any filter the server
+      advertised" and being lenient here keeps the wire shape stable
+      across protocol versions.
+    * Missing ``filters`` key altogether -> treated as ``[]`` (filter
+      set cleared). Matches DAP's "absence == empty" convention.
+
+    R33F-specific design notes:
+
+    * The ``"caught"`` filter is a placeholder. We accept it without
+      complaint (so a client UI that defaults it ON doesn't crash) but
+      take no action when it appears in the filter set, because NOVA
+      currently has no exception-catching constructs. The capability
+      advertisement explicitly labels this filter "Caught Panics
+      (future)" so end-users understand the current limitation.
+    * Activation is per-session, not per-launch. A client can flip the
+      filter set on/off mid-debug without re-launching the inferior --
+      the next fatal signal observes the new filter state.
+    """
+    args = req.get("arguments", {}) or {}
+    raw_filters = args.get("filters")
+    if isinstance(raw_filters, list):
+        # Keep only string entries; tolerate (without warning) unknown
+        # filter names so clients can include speculative entries
+        # without breaking the request.
+        cleaned = {f for f in raw_filters if isinstance(f, str) and f}
+    else:
+        # Missing / malformed ``filters`` -> empty set, matching DAP's
+        # "absence == empty" convention.
+        cleaned = set()
+    session.exception_filters = cleaned
+    # DAP requires a body even for exception breakpoints (which don't
+    # have ids). An empty list is the canonical "no individual records"
+    # response shape.
+    send_response(session, req, body={"breakpoints": []})
+
+
+def handle_exception_info(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``exceptionInfo`` request (R33F).
+
+    Returns details about the exception that just stopped the inferior.
+    The response body shape per DAP spec::
+
+        {
+          "exceptionId":  str,
+          "description":  str,
+          "breakMode":    "always" | "unhandled" | "userUnhandled" |
+                          "never",
+          "details":      {
+            "typeName":   str,
+            "message":    str,
+            "stackTrace": str,   # optional
+            ...
+          }
+        }
+
+    We populate from the signal info stashed on the session by
+    ``_handle_stopped`` when the uncaught filter let a fatal signal
+    through. ``breakMode`` is always ``"unhandled"`` because NOVA
+    doesn't yet have exception-catching constructs -- every signal we
+    surface is by definition "unhandled" (the inferior is about to
+    die).
+
+    If no exception info is available (e.g. the client sent
+    ``exceptionInfo`` without a preceding fatal-signal stop), we
+    respond with success=false and a clear message so the IDE can
+    fall back to whatever default rendering it has.
+
+    The ``stackTrace`` field is optional in the DAP spec; we don't
+    populate it here because the IDE already has the full stack from
+    its mandatory ``stackTrace`` request -- duplicating it in the
+    exception-info response would just inflate the wire shape. The
+    IDE's exception panel reads the frame chain from the existing
+    stackTrace response.
+    """
+    sig_name = session.last_signal_name
+    if not isinstance(sig_name, str) or not sig_name:
+        send_response(
+            session,
+            req,
+            success=False,
+            message=(
+                "no exception info available "
+                "(no fatal signal stop has been recorded on this session)"
+            ),
+        )
+        return
+    meaning = session.last_signal_meaning
+    description = sig_name
+    if isinstance(meaning, str) and meaning:
+        description = f"{sig_name}: {meaning}"
+    details: Dict[str, Any] = {
+        "typeName": sig_name,
+        "message": meaning if isinstance(meaning, str) and meaning else sig_name,
+    }
+    body: Dict[str, Any] = {
+        # Reuse the signal name as the stable id -- two SIGABRTs in
+        # one session refer to the "same" exception class for the IDE's
+        # grouping purposes.
+        "exceptionId": sig_name,
+        "description": description,
+        # Always ``"unhandled"`` because the inferior is on its way out
+        # when a fatal signal fires; NOVA has no catch construct yet.
+        "breakMode": "unhandled",
+        "details": details,
+    }
+    send_response(session, req, body=body)
 
 
 # ---------------------------------------------------------------------------
@@ -2709,6 +3050,7 @@ HANDLERS = {
     "setFunctionBreakpoints": handle_set_function_breakpoints,
     "setInstructionBreakpoints": handle_set_instruction_breakpoints,
     "setExceptionBreakpoints": handle_set_exception_breakpoints,
+    "exceptionInfo": handle_exception_info,
     "configurationDone": handle_configuration_done,
     "threads": handle_threads,
     "stackTrace": handle_stack_trace,

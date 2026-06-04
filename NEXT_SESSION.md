@@ -1,5 +1,103 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R33F — nova-dap: exception breakpoints for uncaught panics
+
+**Status: complete** — `tools/nova-dap` now advertises the standard
+DAP `exceptionBreakpointFilters` capability with two filters
+(`"uncaught"` default ON for NOVA panic-class signals, `"caught"`
+default OFF as a placeholder for future exception-catching
+constructs) plus `supportsExceptionInfoRequest: true` and
+`supportsExceptionFilterOptions: false`. Three integration points:
+
+  - **`setExceptionBreakpoints` handler.** Stores the active filter
+    set on `Session.exception_filters` (default `{"uncaught"}`) and
+    returns the DAP-standard `{breakpoints: []}` body. Tolerates
+    missing / malformed `filters` arrays + unknown filter names
+    (lenient: keeps wire shape stable across DAP protocol versions).
+
+  - **`_handle_stopped` signal filter gate.** When gdb emits
+    `*stopped reason="signal-received"` with a fatal signal name
+    (`SIGABRT` / `SIGSEGV` / `SIGFPE` / `SIGBUS` / `SIGILL`), the
+    handler consults `session.exception_filters`. If `"uncaught"` is
+    present, the stop surfaces as a DAP `stopped(reason="exception",
+    description="<SIGNAL> (<meaning>)")` event AND the session
+    stashes the signal info for follow-up `exceptionInfo` queries.
+    If `"uncaught"` is absent, the handler issues a silent
+    `-exec-continue` via the same `_resume_silently` helper R29E
+    uses for failed hit-count gates, so the IDE never sees a phantom
+    stop. Non-fatal signals (SIGINT from `-exec-interrupt`, SIGTRAP
+    from breakpoints, etc.) are NOT gated — they fall through to the
+    regular event path, preserving the pause / multi-thread semantics
+    the existing `dap_multi_thread.py` end-to-end test exercises.
+
+  - **`exceptionInfo` handler.** Reads the stashed signal name +
+    meaning + thread id and returns `{exceptionId: <signal-name>,
+    description, breakMode: "unhandled", details: {typeName, message}}`.
+    `breakMode` is always `"unhandled"` because NOVA has no catch
+    construct yet — every fatal signal we surface is by definition
+    unhandled. Returns success=false with a clear "no exception info
+    available" message when the session has no recorded fatal stop
+    (e.g. exceptionInfo issued before any panic happened).
+
+### Tests
+
+  - `tools/nova-dap/tests/test_exception_breakpoints.py` (NEW, 141
+    assertions across 38 unit tests): capability advertisement +
+    handler-table; `is_fatal_signal` panic-class detection; session
+    default state; `handle_set_exception_breakpoints` filter storage
+    (uncaught / caught / empty / missing / unknown / malformed);
+    `_handle_stopped` gate (uncaught-on fires stop, uncaught-off
+    silently resumes, caught-only silently resumes, fatal-signal
+    stashes info, silent resume does NOT stash, non-fatal SIGINT
+    falls through, all five fatal signals gated); `handle_exception_info`
+    wire shape (signal details, breakMode=unhandled, missing-info
+    error, missing-meaning fallback); `handle_launch` clears stale
+    info but preserves filter set across relaunch; R29E + R28F + R31E
+    regression guards (BP hit unaffected, hit-count gate independent,
+    profile sampling suppresses filter, reverse-step into recorded
+    signal honours filter); `_extract_signal_info` helper.
+
+  - All eight pre-existing nova-dap tests (`dap_smoke`,
+    `dap_multi_thread`, `test_conditional_breakpoint`,
+    `test_data_breakpoints`, `test_evaluate`,
+    `test_function_breakpoints`, `test_hit_count_breakpoints`,
+    `test_instruction_stepping`, `test_profiler`,
+    `test_reverse_debug`) remain regression-clean.
+
+### Files touched
+
+  - `tools/nova-dap/nova_dap/server.py` — added `FATAL_SIGNAL_NAMES`
+    + `is_fatal_signal` + `_extract_signal_info` helpers; extended
+    `Session` dataclass with `exception_filters` (default-on
+    uncaught) + `last_signal_name` / `last_signal_meaning` /
+    `last_signal_thread_id`; added exception-filter gate inside
+    `_handle_stopped` (between primary-thread resolution and event
+    emission) with silent-resume fallback via existing
+    `_resume_silently`; rewrote `handle_set_exception_breakpoints`
+    from no-op stub to real filter-storage; added new
+    `handle_exception_info` handler; added new
+    `exceptionBreakpointFilters` + `supportsExceptionInfoRequest:
+    true` + `supportsExceptionFilterOptions: false` capability
+    entries; added `"exceptionInfo"` to the `HANDLERS` dispatch
+    table; cleared stale signal info on `handle_launch`.
+  - `tools/nova-dap/tests/test_exception_breakpoints.py` — NEW file
+    (38 unit tests, 141 assertions).
+  - `tools/nova-dap/README.md` — added R33F entries to the request
+    table + capability list + test runner output. Layout block lists
+    the new test file.
+
+### Known caveat
+
+The `"caught"` filter is a placeholder. NOVA currently has no
+exception-catching constructs (no `try/catch`, no `?` operator yet),
+so toggling the filter has no effect: a fatal signal can only ever
+be classified as uncaught. The filter is advertised so VS Code's
+exception-breakpoint UI shows a checkbox the user expects to see,
+and the label is explicitly `"Caught Panics (future)"` to make the
+current limitation visible. When NOVA gains a panic-catching
+construct, this filter will gate stops at the catch boundary rather
+than the panic site.
+
 ## R33D — nova-lsp: textDocument/documentLink + Run/Debug code lenses on `fn test_*`
 
 **Status: complete** — `tools/nova-lsp` advertises two new standard
