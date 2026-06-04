@@ -537,6 +537,8 @@ fn syscall_num(linux_num) {
     if linux_num == 50 { return 33554538 }
     if linux_num == 54 { return 33554537 }   // setsockopt (BSD 105) — R28C UDP
     if linux_num == 7  { return 33554662 }   // poll (BSD 230) — R28C UDP timeout
+    if linux_num == 72 { return 33554524 }   // fcntl (BSD 92) — R31A nonblock
+    if linux_num == 55 { return 33554550 }   // getsockopt (BSD 118) — R31A SO_ERROR
     if linux_num == 57 { return 33554434 }
     if linux_num == 59 { return 33554491 }
     if linux_num == 60 { return 33554433 }
@@ -1201,7 +1203,16 @@ fn enum_variant_name_at(enum_name, idx) {
 // Implementation note: we walk arms left-to-right twice — once to
 // pick the enum name + collect covered variants, once just for the
 // wildcard check. Cheap; matches are tiny.
+//
+// R31D: parser.nova's tc_check_match_exhaustive runs first and tags
+// already-checked match nodes by appending a 4th slot (==1). When that
+// flag is present, skip — the warn was either already emitted or the
+// match is exhaustive. Also skip when the same gen-pass has already
+// recorded the node (gen_expr + gen_stmt would otherwise both fire).
 fn cg_check_exhaustive(match_nd) {
+    if len(match_nd) > 3 {
+        if match_nd[3] == 1 { return 0 }
+    }
     let arms = match_nd[2]
     let enum_name = ""
     let has_wildcard = 0
@@ -1835,6 +1846,36 @@ fn is_builtin_fn(name) {
     //                  arbitrary fd sets; preview1 only exposes
     //                  poll_oneoff which is shaped differently)
     if name == "sys_poll" { return 1 }
+    // R31A: non-blocking I/O helpers for parallel connect(2). The
+    // motivating workload is CrossEngin's DRFETCH phase-1 dial pass:
+    // R30A's sys_poll(POLLIN) already parallelises the response wait,
+    // but the originator still walks `_gossip_dial` serially because
+    // connect(2) blocks on this runtime. With fcntl(F_SETFL,
+    // O_NONBLOCK) + connect returning EINPROGRESS + sys_poll(POLLOUT),
+    // every peer's TCP handshake races in parallel; the dial portion
+    // of the round shrinks from O(N * dial_RTT) to O(max_dial_RTT).
+    //   sys_fcntl_setfl_nonblock(fd) -> i32
+    //     fcntl(fd, F_SETFL=4, O_NONBLOCK=2048) -> 0 | -1
+    //     Linux x86-64 : syscall 72 (fcntl)
+    //     macOS BSD    : syscall 92 via 0x2000000 prefix
+    //     ARM64-Linux  : syscall 25 (fcntl)
+    //     Windows x64  : __imp_ioctlsocket with FIONBIO
+    //     winARM64     : stub returning -1
+    //     WASM         : stub returning -1 (preview1 has fd_fdstat_set_flags
+    //                    but the polling cycle doesn't apply on WASI)
+    //   sys_getsockopt_so_error(fd) -> i32
+    //     getsockopt(fd, SOL_SOCKET=1, SO_ERROR=4, &val, &valsize) -> val
+    //     (the SO_ERROR int value itself, not the getsockopt rc), or -1
+    //     if the syscall itself failed. Reads the deferred connect(2)
+    //     error after a non-blocking connect + sys_poll(POLLOUT).
+    //     Linux x86-64 : syscall 55 (getsockopt)
+    //     macOS BSD    : syscall 118 via 0x2000000 prefix
+    //     ARM64-Linux  : syscall 209 (getsockopt)
+    //     Windows x64  : __imp_getsockopt
+    //     winARM64     : stub returning -1
+    //     WASM         : stub returning -1
+    if name == "sys_fcntl_setfl_nonblock" { return 1 }
+    if name == "sys_getsockopt_so_error" { return 1 }
     return 0
 }
 
@@ -6556,6 +6597,47 @@ fn arm_gen_call(nd) {
         arm_out("    add sp, sp, #16")
         return 0
     }
+    // R31A: sys_fcntl_setfl_nonblock(fd) -> 0 | -1 on ARM64-Linux.
+    // fcntl is syscall 25 on aarch64. x0=fd, x1=F_SETFL=4,
+    // x2=O_NONBLOCK=2048, x8=25, svc #0.
+    if name == "sys_fcntl_setfl_nonblock" {
+        if len(args) >= 1 { arm_gen_expr(args[0]) } else { arm_out("    mov x0, #0") }
+        arm_out("    mov x1, #4")                    // F_SETFL
+        arm_out("    mov x2, #2048")                 // O_NONBLOCK
+        arm_out("    mov x8, #25")                   // fcntl
+        arm_out("    svc #0")
+        return 0
+    }
+    // R31A: sys_getsockopt_so_error(fd) -> int on ARM64-Linux.
+    // getsockopt is syscall 209 on aarch64. Reads SO_ERROR into the
+    // 4-byte slot at [sp,#0]; we return the slot's value (the saved
+    // connect errno) on success and -1 on syscall failure. Linux args:
+    // x0=fd, x1=SOL_SOCKET=1, x2=SO_ERROR=4, x3=&val, x4=&vlen with
+    // *vlen=4 on entry.
+    if name == "sys_getsockopt_so_error" {
+        if len(args) >= 1 { arm_gen_expr(args[0]) } else { arm_out("    mov x0, #0") }
+        arm_out("    sub sp, sp, #16")
+        arm_out("    str wzr, [sp, #0]")             // val out = 0
+        arm_out("    mov w9, #4")
+        arm_out("    str w9, [sp, #8]")              // vlen = 4
+        arm_out("    mov x1, #1")                    // SOL_SOCKET
+        arm_out("    mov x2, #4")                    // SO_ERROR
+        arm_out("    mov x3, sp")                    // &val
+        arm_out("    add x4, sp, #8")                // &vlen
+        arm_out("    mov x8, #209")                  // getsockopt
+        arm_out("    svc #0")
+        let okg = arm_new_label()
+        let endg = arm_new_label()
+        arm_out("    cmp x0, #0")
+        arm_out("    b.ge " + okg)
+        arm_out("    mov x0, #-1")
+        arm_out("    b " + endg)
+        arm_out(okg + ":")
+        arm_out("    ldrsw x0, [sp, #0]")            // sign-extended SO_ERROR
+        arm_out(endg + ":")
+        arm_out("    add sp, sp, #16")
+        return 0
+    }
     // R11D SIMD intrinsics on ARM64 NEON. The NEON quad-word width is
     // 128 bits == 4x i32, so an 8-lane op is exactly 2 NEON ops.
     // Helpers `_nova_arm_simd_*` emitted in arm_emit_runtime().
@@ -7835,6 +7917,16 @@ fn warm_gen_call(nd) {
     // can land here in a follow-up; for now the contract matches the
     // rest of the socket family on this target.
     if name == "sys_poll" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    // R31A: non-blocking I/O knobs — winARM64 stubs returning -1, same
+    // contract as the rest of the socket family on this target.
+    if name == "sys_fcntl_setfl_nonblock" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    if name == "sys_getsockopt_so_error" {
         warm_emit_load_imm("x0", 0 - 1)
         return 0
     }
@@ -9924,6 +10016,12 @@ fn gen_program(program) {
         out(".extern __imp_setsockopt")
         out(".extern __imp_WSAPoll")
         out(".extern __imp_closesocket")
+        // R31A: non-blocking I/O knobs. `ioctlsocket(s, FIONBIO=0x8004667e,
+        // &one)` is the Win32 sibling of fcntl(F_SETFL, O_NONBLOCK).
+        // `getsockopt(s, SOL_SOCKET=0xFFFF, SO_ERROR=0x1007, &val, &vlen)`
+        // reads the deferred connect(2) error after the POLLOUT wait.
+        out(".extern __imp_ioctlsocket")
+        out(".extern __imp_getsockopt")
         // bcrypt.dll: BCryptGenRandom (cryptographically secure RNG).
         // Linked via -lbcrypt in cross-windows / smoke-secure-random.
         out(".extern __imp_BCryptGenRandom")
@@ -13269,6 +13367,28 @@ fn wasm_gen_rt_extra() {
     wi("end")
     wi("end")
     wi("local.get $nready")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // R31A: sys_fcntl_setfl_nonblock / sys_getsockopt_so_error stubs on
+    // WASM. The motivating workload (parallel TCP connect with
+    // POLLOUT) doesn't apply to WASI -- preview1 has neither plain
+    // sockets nor fcntl, only the abstract poll_oneoff cycle that R30D
+    // already wraps. Programs that need parallel dialing should run on
+    // the native targets (Linux x86-64, ARM64-Linux, macOS) where the
+    // helpers issue real fcntl/getsockopt syscalls. The stubs let the
+    // same NOVA source compile without source-level #if cfg-gates.
+    wi("(func $sys_fcntl_setfl_nonblock (param $fd i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const -1")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    wi("(func $sys_getsockopt_so_error (param $fd i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const -1")
     wasm_indent = wasm_indent - 1
     wi(")")
     wi("")
@@ -16792,6 +16912,117 @@ fn gen_runtime() {
         out("    lea r10, [rbp - 8]")              // &optval (4th syscall arg)
         out("    mov r8, 4")                        // optlen (5th syscall arg)
         emit_syscall(54)
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    }
+    out("    ret")
+
+    // --- R31A: sys_fcntl_setfl_nonblock(fd) -> 0 | -1 ---
+    //
+    // Sets O_NONBLOCK on a file descriptor. The two-syscall race-free
+    // variant (F_GETFL then F_SETFL of GETFL|O_NONBLOCK) isn't needed
+    // here because we own the fd from socket(2) onwards; a freshly
+    // created TCP socket has flags == 0, so F_SETFL of just O_NONBLOCK
+    // is correct and saves one syscall per dial. Win32 uses
+    // ioctlsocket(s, FIONBIO, &one) which is the historical winsock
+    // sibling of fcntl(F_SETFL, O_NONBLOCK).
+    //
+    //   Linux x86-64 : syscall 72 (fcntl), arg2=F_SETFL=4,
+    //                  arg3=O_NONBLOCK=2048.
+    //   macOS BSD    : syscall 92 routed via syscall_num(72).
+    //   Windows      : __imp_ioctlsocket with FIONBIO == 0x8004667e.
+    //                  One i32 cmd argument selects "set blocking-mode";
+    //                  *argp == 1 means non-blocking.
+    out("")
+    out_label("_nova_sys_fcntl_setfl_nonblock")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 48")
+        out("    mov dword ptr [rbp - 8], 1")     // argp = 1
+        out("    mov rcx, rdi")                    // s = fd
+        // FIONBIO = _IOW('f',126,u_long) == 0x8004667e on Win32.
+        out("    mov edx, -2147195266")            // 0x8004667e as signed
+        out("    lea r8, [rbp - 8]")               // &argp
+        out("    call [rip + __imp_ioctlsocket]")
+        out("    test eax, eax")
+        out("    jz .sfcntl_win_ok")
+        out("    mov rax, -1")
+        out(".sfcntl_win_ok:")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        // Linux x86-64: rdi=fd already correct from caller.
+        out("    mov rsi, 4")                       // F_SETFL
+        out("    mov rdx, 2048")                    // O_NONBLOCK
+        emit_syscall(72)
+    }
+    out("    ret")
+
+    // --- R31A: sys_getsockopt_so_error(fd) -> int ---
+    //
+    // Reads the deferred connect(2) error from a non-blocking socket
+    // after sys_poll(POLLOUT) has reported the fd ready. The value is
+    // the SO_ERROR int itself, NOT the getsockopt return code: 0 means
+    // the connection succeeded; non-zero is the connect errno
+    // (ECONNREFUSED=111, ETIMEDOUT=110, EHOSTUNREACH=113, etc on
+    // Linux). Returns -1 if the getsockopt syscall itself failed
+    // (e.g. EBADF on a closed fd) so callers can distinguish "I read
+    // the error and it was zero, connect succeeded" from "I couldn't
+    // even read the error".
+    //
+    //   Linux x86-64 : syscall 55 (getsockopt).
+    //   macOS BSD    : syscall 118 routed via syscall_num(55).
+    //   Windows      : __imp_getsockopt with SOL_SOCKET=0xFFFF and
+    //                  SO_ERROR=0x1007 (different from POSIX 1/4 due
+    //                  to BSD-vs-WinSock numbering history).
+    out("")
+    out_label("_nova_sys_getsockopt_so_error")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 48")
+        out("    mov dword ptr [rbp - 8], 0")     // optval out = 0
+        out("    mov dword ptr [rbp - 12], 4")    // optlen = 4
+        out("    mov rcx, rdi")                    // s = fd
+        out("    mov edx, 65535")                  // SOL_SOCKET = 0xFFFF
+        out("    mov r8d, 4103")                   // SO_ERROR = 0x1007
+        out("    lea r9, [rbp - 8]")               // &optval
+        out("    lea rax, [rbp - 12]")
+        out("    mov [rsp + 32], rax")             // &optlen
+        out("    call [rip + __imp_getsockopt]")
+        out("    test eax, eax")
+        out("    jnz .sgso_win_fail")
+        out("    mov eax, dword ptr [rbp - 8]")   // return SO_ERROR value
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+        out(".sgso_win_fail:")
+        out("    mov rax, -1")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 16")
+        out("    mov dword ptr [rbp - 8], 0")     // optval out = 0
+        out("    mov dword ptr [rbp - 12], 4")    // optlen = 4
+        // getsockopt(fd, SOL_SOCKET=1, SO_ERROR=4, &val, &vlen).
+        // x86-64 syscall ABI: rdi, rsi, rdx, r10, r8.
+        // rdi=fd already.
+        out("    mov rsi, 1")                       // SOL_SOCKET (POSIX)
+        out("    mov rdx, 4")                       // SO_ERROR (POSIX)
+        out("    lea r10, [rbp - 8]")              // &optval
+        out("    lea r8, [rbp - 12]")              // &optlen
+        emit_syscall(55)
+        out("    test rax, rax")
+        out("    js .sgso_nx_fail")
+        out("    mov eax, dword ptr [rbp - 8]")   // return SO_ERROR value
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+        out(".sgso_nx_fail:")
+        out("    mov rax, -1")
         out("    mov rsp, rbp")
         out("    pop rbp")
     }
@@ -20338,6 +20569,12 @@ fn gen_runtime() {
     // their own backend dispatchers below.
     out_label("sys_poll")
     out("    jmp _nova_sys_poll")
+    // R31A: non-blocking I/O helpers for parallel dial. Same dispatch
+    // pattern as sys_poll above.
+    out_label("sys_fcntl_setfl_nonblock")
+    out("    jmp _nova_sys_fcntl_setfl_nonblock")
+    out_label("sys_getsockopt_so_error")
+    out("    jmp _nova_sys_getsockopt_so_error")
     out_label("fork_process")
     out("    jmp _nova_fork")
     out_label("waitpid")
