@@ -252,7 +252,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - Arena allocator (mmap-backed bump allocation with instant reset)
 - TCP networking via raw syscalls: `socket`, `bind`, `listen`, `accept`, `send`, `recv`
 - UDP networking via raw syscalls: `sys_socket_udp`, `sys_sendto`, `sys_recvfrom`, `sys_setsockopt_so_reuseaddr` (R28C; enables NAT hole-punching after TCP-based STUN discovery)
-- Multi-FD wait via `sys_poll(fds, nfds, timeout_ms)` raw syscall (R29A; unblocks pipelined I/O over multiple sockets — R28A's single-threaded peer handlers no longer stall their accept queue behind one fd)
+- Multi-FD wait via `sys_poll(fds, nfds, timeout_ms)` raw syscall (R29A; unblocks pipelined I/O over multiple sockets — R28A's single-threaded peer handlers no longer stall their accept queue behind one fd) + WASM/WASI translation shim onto `poll_oneoff` with subscription/event marshalling, ms-to-ns timeout conversion, and `(pollfd_index << 1) | is_write` userdata encoding for O(1) event-to-pollfd attribution (R30D; the same NOVA source now also works under wasmtime/wasmer)
 - Process management: `fork`, `exec`, `waitpid`, `pipe`
 - File I/O, directory operations, environment variables
 - JSON parsing and serialization

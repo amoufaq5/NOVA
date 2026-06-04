@@ -1,5 +1,156 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R30D — WASM `sys_poll` translation shim onto WASI `poll_oneoff`
+
+**Status: complete** — R29A's WASM `sys_poll` stub (which returned
+`-1` unconditionally because preview1 has no plain `poll(2)`, only
+`poll_oneoff` with a different layout) is replaced with a real
+translation in the WASM codegen path. The same NOVA source that
+calls `sys_poll(fds, nfds, timeout_ms)` now produces working WAT
+that runs end-to-end under wasmtime / wasmer / Node.js WASI.
+winARM64 stays a `-1` stub (separate later round if anyone cares).
+
+### What the shim does
+
+Three phases inside the emitted `$sys_poll` function body:
+
+  1. **Count phase.** Walk `pollfd[nfds]`. For each entry's `events`
+     bitmask emit ONE fd_read subscription if POLLIN (`0x01`) is
+     requested and ONE fd_write subscription if POLLOUT (`0x04`) is
+     requested (both bits emit two subscriptions for the same fd).
+     Append ONE clock subscription iff `timeout_ms >= 0`;
+     `timeout_ms < 0` means "wait forever" per POSIX so the clock is
+     omitted.
+  2. **Build phase.** Bump-allocate the subscription array (48
+     bytes/sub, 8-byte aligned), the event array (32 bytes/event,
+     8-byte aligned), and a 4-byte `nevents_out` slot from
+     `$heap_ptr`. Zero-fill the subscription region (preview1
+     requires unused payload bytes to be zero — host treats them as
+     `flags=0`, `precision=0`). Walk the pollfds a second time and
+     fill each subscription:
+       - userdata (u64 @0) = `(pollfd_index << 1) | is_write_bit`
+         (sentinel `-1` for the clock entry)
+       - tag (u8 @8) = 0 (clock) / 1 (fd_read) / 2 (fd_write)
+       - fd_read / fd_write payload: `fd:u32` @16
+       - clock payload: `clock_id:u32` @16 (= 0, CLOCKID_REALTIME),
+         `timeout:u64` @24 (= `timeout_ms * 1_000_000` ns),
+         `precision:u64` @32 (= 0), `flags:u16` @40 (= 0 ->
+         relative; bit 0 set would be ABSTIME)
+  3. **Call + decode phase.** Call
+     `wasi_snapshot_preview1.poll_oneoff(subs, evs, nsubs,
+     &nevents_out)`. On non-zero errno return `-1`. Otherwise walk
+     the produced events: decode `userdata`; if it equals `-1` the
+     clock fired so we skip but keep walking (other already-ready
+     fds before the deadline still get processed). For fd events OR
+     `POLLIN` (1) or `POLLOUT` (4) into the right pollfd's `revents`
+     using the recovered index. Final tally: count pollfds whose
+     `revents` got at least one bit set (distinct from event count
+     because multi-bit fds — both POLLIN+POLLOUT ready — would
+     otherwise double-count).
+
+### Why this design
+
+  - **Scratch memory** comes from the existing `$alloc` bump
+    allocator over `$heap_ptr` — the same pattern
+    `wasi_args_get` / `wasi_environ_get` use. No new globals, no
+    fixed scratch region, and naturally handles arbitrary `nfds`
+    without a static cap. The bump pointer is rounded up to a
+    multiple of 8 before each allocation because preview1 requires
+    8-byte alignment for both subscription and event arrays (u64
+    fields).
+  - **Userdata encoding** `(pollfd_idx << 1) | is_write` packs both
+    the originating pollfd index AND the read-vs-write
+    discrimination into a single u64. Decoding is O(1) (shift +
+    mask) with no extra side-table walk. The all-ones sentinel
+    (`u64 = -1` as signed) for the clock can never collide with a
+    real `(idx << 1)|bit` for any reasonable `nfds` (collision
+    requires `idx >= 2^62`).
+  - **Negative-timeout handling** keys on `timeout_ms >= 0` to set
+    `$has_clock`; if not set, the clock subscription is omitted
+    entirely, the count phase doesn't reserve a slot for it, and
+    `poll_oneoff` is told `nsubscriptions = sum(fd_subs)` so the
+    host waits indefinitely on the fds alone.
+
+### Import declaration added
+
+```
+(import "wasi_snapshot_preview1" "poll_oneoff"
+  (func $poll_oneoff (param i32 i32 i32 i32) (result i32)))
+```
+
+Signature mirrors the witx-defined contract:
+`poll_oneoff(in *const subscription, out *mut event,
+            nsubscriptions size, nevents_out *mut size) -> errno`.
+
+### Verification
+
+  - **NEW `tests/unit/test_codegen_wasm_poll.nova` (48 OK
+    assertions)** — three layers: (1) WASI subscription / event
+    byte layout assertions that mirror the witx struct definitions
+    via the same store8 / load8 primitives the WASM shim consumes;
+    (2) userdata encoding round-trip via shift / mask; (3)
+    `read_file()`-based source assertions on
+    `src/compiler/codegen.nova` to pin load-bearing strings
+    (`poll_oneoff` import, `48` stride, `32` event stride,
+    `1000000` ms-to-ns, `-1` clock sentinel, `$has_clock` gate,
+    `i64.shl` / `i64.or` for userdata pack, `i32.shr_u` for
+    unpack). Lives under `tests/unit/` so the
+    `tests/test_*.nova` glob in `tests/run_tests.sh` doesn't pick
+    it up — run directly via
+    `bin/nova tests/unit/test_codegen_wasm_poll.nova`.
+  - **R29A test `tests/unit/test_codegen_poll.nova` (17 native OK
+    assertions)** — re-run; passes byte-identical. Native targets
+    (Linux x86-64 `mov rax, 7; syscall`, macOS BSD `mov rax,
+    33554662; syscall`, Windows `call [rip + __imp_WSAPoll]`, ARM64
+    `mov x8, #73; svc #0`, winARM64 `movn x0, #0` stub) all
+    unchanged.
+  - **Full unit suite**: 177 / 0 / 6 (same as R29E), self-host
+    bit-identical (`make self-host` clean — stage2 == stage3 with
+    the new shim baked in).
+  - **End-to-end through wasmtime**: two reproducible smoke tests
+    (in the commit body) — (a) `sys_poll(NULL, 0, -1)` returns 0
+    immediately (empty-poll path); `sys_poll(pf{fd:1, events:0}, 1,
+    10)` returns 0 on 10 ms timeout with `revents` cleared
+    (clock-only path); (b) `sys_poll([{fd:1, POLLOUT}, {fd:0,
+    POLLIN}], 2, 50)` returns 1 with stdout's revents = POLLOUT (4)
+    and stdin's revents = 0 (multi-FD path: both subscriptions
+    emitted, stdout's fd_write event fires immediately, userdata
+    decoded back to pollfd 0).
+
+### Implementation notes
+
+`wasm_gen_rt_extra` in `src/compiler/codegen.nova` — the old
+`$sys_poll` stub (3 lines, `i64.const -1`) is replaced with a
+~200-line emit that produces the three-phase WAT body. The
+`poll_oneoff` import declaration is added to the module-header
+import block in `wasm_gen_program`. Native lowering paths
+(`gen_runtime` for x86-64 / macOS / Windows, `arm_gen_call` for
+ARM64-Linux ppoll, `warm_gen_call` for winARM64 stub) are
+untouched.
+
+### File ownership (touched this round)
+
+  - `src/compiler/codegen.nova` — `wasm_gen_program` adds the
+    `poll_oneoff` import line; `wasm_gen_rt_extra` replaces the
+    `$sys_poll` stub with the three-phase translation shim. No
+    other backend touched.
+  - NEW `tests/unit/test_codegen_wasm_poll.nova` — 48-assertion
+    codegen test (layout + encoding + source string pinning).
+  - `README.md` — `sys_poll` entry extended with the R30D WASM
+    addendum.
+  - `NEXT_SESSION.md` — this entry.
+
+### Caveats
+
+  - **Big-nfds path** — every call bumps `$heap_ptr` and never
+    releases. A long-running NOVA WASM program that polls in a
+    hot loop with `nfds=N` will leak `48*N + 32*N + 8 ≈ 80N` bytes
+    per call. Acceptable for the R29A use case (peer handlers
+    polling a small fixed fd set per connection), but worth a
+    follow-up that resets the heap mark before-and-after when no
+    NOVA allocations escape the call. The native `_nova_sys_poll`
+    has no equivalent issue since args are register-passed.
+
 ## R29E — DAP conditional + hit-count breakpoints
 
 **Status: complete** — `nova-dap` now honours the two filter knobs

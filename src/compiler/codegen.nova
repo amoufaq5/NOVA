@@ -12752,14 +12752,523 @@ fn wasm_gen_rt_extra() {
     wi(")")
     wi("")
 
-    // R29A: sys_poll(fds, nfds, timeout_ms) stub. WASI preview1 has
-    // `poll_oneoff` which is a different shape (subscription / event
-    // arrays, not pollfd structs). Rather than translate the layout
-    // we return -1 so the same NOVA source compiles to WASM and the
-    // caller takes the error path. Native targets get the real poll.
+    // R30D: sys_poll(fds, nfds, timeout_ms) -> i32 translation shim
+    // mapping POSIX pollfd onto WASI preview1 `poll_oneoff`.
+    //
+    // Why a shim and not a passthrough: R29A's WASM stub returned -1
+    // unconditionally because preview1 has no plain `poll` -- only
+    // `poll_oneoff` with subscription/event arrays. The two shapes
+    // don't map 1:1, so the shim translates in three phases:
+    //
+    //   1. Count phase. Walk pollfd[nfds]. For each entry's events
+    //      bitmask emit ONE fd_read subscription if POLLIN (0x01) is
+    //      requested and ONE fd_write subscription if POLLOUT (0x04)
+    //      is requested. (Both bits emit two subscriptions for the
+    //      same fd.) Append ONE clock subscription iff timeout_ms >=
+    //      0; timeout_ms < 0 means "wait forever" so we omit it.
+    //
+    //   2. Build phase. Bump-allocate the subscription array
+    //      (48 bytes/subscription, 8-byte aligned) and the event
+    //      array (32 bytes/event, 8-byte aligned) plus a 4-byte
+    //      nevents_out slot from $heap_ptr. Fill each subscription:
+    //        userdata u64 @0 = (pollfd_index << 1) | is_write_bit
+    //                          (sentinel -1 for the clock entry)
+    //        tag u8 @8        = 0 (clock) / 1 (fd_read) / 2 (fd_write)
+    //        payload @16      = fd:u32 for read/write,
+    //                           or {id:u32, timeout:u64, prec:u64,
+    //                               flags:u16} for clock with
+    //                              clock_id=0 (CLOCKID_REALTIME),
+    //                              timeout = ms * 1_000_000 ns.
+    //
+    //   3. Call + decode phase. Call poll_oneoff(subs, evs, nsubs,
+    //      &nevents_out). Iterate the produced events: decode
+    //      userdata; if it equals -1 the clock fired -> timeout,
+    //      revents stay clear and we keep walking (no other events
+    //      can have signalled). For fd events OR POLLIN/POLLOUT into
+    //      pollfd[index].revents and bump a per-pollfd "any-bit-set"
+    //      counter (separate from the OR so multi-bit fds count once).
+    //
+    // Return value matches POSIX: number of pollfds whose revents
+    // got at least one bit set; 0 on pure timeout; -1 on WASI errno
+    // != 0 (host-side syscall error).
+    //
+    // Scratch memory: the bump allocator $alloc (over $heap_ptr).
+    // Same approach as wasi_args_get / wasi_environ_get -- no fixed
+    // region, no new globals, naturally handles arbitrary nfds.
+    // 8-byte alignment is enforced by rounding $heap_ptr up before
+    // the allocation; preview1 requires 8-byte alignment for both
+    // arrays (subscription has 8-byte fields, event has u64 nbytes).
+    //
+    // userdata encoding: (pollfd_idx << 1) | is_write. The low bit
+    // distinguishes the read vs write subscription for the same fd;
+    // the high bits recover the pollfd index in O(1) without
+    // scanning the subscription array. The clock entry uses the
+    // sentinel -1 (all-bits-set) which can never collide with a
+    // real (idx << 1)|bit value for any reasonable nfds.
     wi("(func $sys_poll (param $fds i64) (param $nfds i64) (param $timeout_ms i64) (result i64)")
     wasm_indent = wasm_indent + 1
-    wi("i64.const -1")
+    wi("(local $nfds_i i32)")
+    wi("(local $fds_i i32)")
+    wi("(local $tmo i64)")
+    wi("(local $has_clock i32)")
+    wi("(local $i i32)")
+    wi("(local $ev i32)")
+    wi("(local $pfd i32)")
+    wi("(local $nsubs i32)")
+    wi("(local $subs i32)")
+    wi("(local $evs i32)")
+    wi("(local $nev_out i32)")
+    wi("(local $sub_ptr i32)")
+    wi("(local $idx i32)")
+    wi("(local $rc i32)")
+    wi("(local $nproduced i32)")
+    wi("(local $ev_ptr i32)")
+    wi("(local $ud_lo i32)")
+    wi("(local $ud_hi i32)")
+    wi("(local $ud_pidx i32)")
+    wi("(local $is_w i32)")
+    wi("(local $pfd_slot i32)")
+    wi("(local $rev_old i32)")
+    wi("(local $bit i32)")
+    wi("(local $nready i64)")
+    wi("(local $j i32)")
+    wi("(local $rev_check i32)")
+    // Convert i64 args to i32 working values.
+    wi("local.get $fds")
+    wi("i32.wrap_i64")
+    wi("local.set $fds_i")
+    wi("local.get $nfds")
+    wi("i32.wrap_i64")
+    wi("local.set $nfds_i")
+    wi("local.get $timeout_ms")
+    wi("local.set $tmo")
+    // has_clock = (timeout_ms >= 0) ? 1 : 0
+    wi("local.get $tmo")
+    wi("i64.const 0")
+    wi("i64.ge_s")
+    wi("if (result i32)")
+    wi("  i32.const 1")
+    wi("else")
+    wi("  i32.const 0")
+    wi("end")
+    wi("local.set $has_clock")
+    // ---- Phase 1: count subscriptions ----
+    wi("i32.const 0")
+    wi("local.set $nsubs")
+    wi("i32.const 0")
+    wi("local.set $i")
+    wi("block $count_done")
+    wi("loop $count_loop")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $nfds_i")
+    wi("i32.ge_u")
+    wi("br_if $count_done")
+    // ev = (u16)*(fds_i + i*8 + 4)
+    wi("local.get $fds_i")
+    wi("local.get $i")
+    wi("i32.const 8")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("i32.const 4")
+    wi("i32.add")
+    wi("i32.load16_u")
+    wi("local.set $ev")
+    // POLLIN -> +1 subscription
+    wi("local.get $ev")
+    wi("i32.const 1")
+    wi("i32.and")
+    wi("if")
+    wi("  local.get $nsubs")
+    wi("  i32.const 1")
+    wi("  i32.add")
+    wi("  local.set $nsubs")
+    wi("end")
+    // POLLOUT -> +1 subscription
+    wi("local.get $ev")
+    wi("i32.const 4")
+    wi("i32.and")
+    wi("if")
+    wi("  local.get $nsubs")
+    wi("  i32.const 1")
+    wi("  i32.add")
+    wi("  local.set $nsubs")
+    wi("end")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $count_loop")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    // Add the clock subscription if needed.
+    wi("local.get $nsubs")
+    wi("local.get $has_clock")
+    wi("i32.add")
+    wi("local.set $nsubs")
+    // If we have zero subscriptions there's nothing to wait on; return 0
+    // immediately (POSIX poll(NULL, 0, 0) returns 0 too).
+    wi("local.get $nsubs")
+    wi("i32.eqz")
+    wi("if")
+    wi("  i64.const 0")
+    wi("  return")
+    wi("end")
+    // ---- Phase 2a: allocate subs / evs / nev_out (8-byte aligned) ----
+    // Round heap_ptr up to multiple of 8.
+    wi("global.get $heap_ptr")
+    wi("i64.const 7")
+    wi("i64.add")
+    wi("i64.const -8")
+    wi("i64.and")
+    wi("global.set $heap_ptr")
+    wi("local.get $nsubs")
+    wi("i32.const 48")
+    wi("i32.mul")
+    wi("i64.extend_i32_u")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $subs")
+    wi("global.get $heap_ptr")
+    wi("i64.const 7")
+    wi("i64.add")
+    wi("i64.const -8")
+    wi("i64.and")
+    wi("global.set $heap_ptr")
+    wi("local.get $nsubs")
+    wi("i32.const 32")
+    wi("i32.mul")
+    wi("i64.extend_i32_u")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $evs")
+    wi("global.get $heap_ptr")
+    wi("i64.const 7")
+    wi("i64.add")
+    wi("i64.const -8")
+    wi("i64.and")
+    wi("global.set $heap_ptr")
+    wi("i64.const 8")
+    wi("call $alloc")
+    wi("i32.wrap_i64")
+    wi("local.set $nev_out")
+    // Zero the subscription region. poll_oneoff requires unused payload
+    // bytes to be zero (host treats them as flags=0, precision=0).
+    wi("i32.const 0")
+    wi("local.set $j")
+    wi("block $zero_done")
+    wi("loop $zero_loop")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $j")
+    wi("local.get $nsubs")
+    wi("i32.const 48")
+    wi("i32.mul")
+    wi("i32.ge_u")
+    wi("br_if $zero_done")
+    wi("local.get $subs")
+    wi("local.get $j")
+    wi("i32.add")
+    wi("i32.const 0")
+    wi("i32.store8")
+    wi("local.get $j")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $j")
+    wi("br $zero_loop")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    // ---- Phase 2b: build subscriptions ----
+    wi("i32.const 0")
+    wi("local.set $idx")
+    wi("i32.const 0")
+    wi("local.set $i")
+    wi("block $build_done")
+    wi("loop $build_loop")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $nfds_i")
+    wi("i32.ge_u")
+    wi("br_if $build_done")
+    // pfd_slot = fds_i + i*8
+    wi("local.get $fds_i")
+    wi("local.get $i")
+    wi("i32.const 8")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("local.set $pfd_slot")
+    // events = *(pfd_slot + 4) (u16)
+    wi("local.get $pfd_slot")
+    wi("i32.const 4")
+    wi("i32.add")
+    wi("i32.load16_u")
+    wi("local.set $ev")
+    // Clear revents so each call starts fresh.
+    wi("local.get $pfd_slot")
+    wi("i32.const 6")
+    wi("i32.add")
+    wi("i32.const 0")
+    wi("i32.store16")
+    // POLLIN -> emit fd_read subscription
+    wi("local.get $ev")
+    wi("i32.const 1")
+    wi("i32.and")
+    wi("if")
+    wi("  local.get $subs")
+    wi("  local.get $idx")
+    wi("  i32.const 48")
+    wi("  i32.mul")
+    wi("  i32.add")
+    wi("  local.set $sub_ptr")
+    // userdata = (i << 1) | 0
+    wi("  local.get $sub_ptr")
+    wi("  local.get $i")
+    wi("  i64.extend_i32_u")
+    wi("  i64.const 1")
+    wi("  i64.shl")
+    wi("  i64.store")
+    // tag (u8) @ +8 = 1 (fd_read)
+    wi("  local.get $sub_ptr")
+    wi("  i32.const 8")
+    wi("  i32.add")
+    wi("  i32.const 1")
+    wi("  i32.store8")
+    // fd (u32) @ +16
+    wi("  local.get $sub_ptr")
+    wi("  i32.const 16")
+    wi("  i32.add")
+    wi("  local.get $pfd_slot")
+    wi("  i32.load")
+    wi("  i32.store")
+    wi("  local.get $idx")
+    wi("  i32.const 1")
+    wi("  i32.add")
+    wi("  local.set $idx")
+    wi("end")
+    // POLLOUT -> emit fd_write subscription
+    wi("local.get $ev")
+    wi("i32.const 4")
+    wi("i32.and")
+    wi("if")
+    wi("  local.get $subs")
+    wi("  local.get $idx")
+    wi("  i32.const 48")
+    wi("  i32.mul")
+    wi("  i32.add")
+    wi("  local.set $sub_ptr")
+    // userdata = (i << 1) | 1
+    wi("  local.get $sub_ptr")
+    wi("  local.get $i")
+    wi("  i64.extend_i32_u")
+    wi("  i64.const 1")
+    wi("  i64.shl")
+    wi("  i64.const 1")
+    wi("  i64.or")
+    wi("  i64.store")
+    // tag (u8) @ +8 = 2 (fd_write)
+    wi("  local.get $sub_ptr")
+    wi("  i32.const 8")
+    wi("  i32.add")
+    wi("  i32.const 2")
+    wi("  i32.store8")
+    // fd (u32) @ +16
+    wi("  local.get $sub_ptr")
+    wi("  i32.const 16")
+    wi("  i32.add")
+    wi("  local.get $pfd_slot")
+    wi("  i32.load")
+    wi("  i32.store")
+    wi("  local.get $idx")
+    wi("  i32.const 1")
+    wi("  i32.add")
+    wi("  local.set $idx")
+    wi("end")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $build_loop")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    // ---- Phase 2c: append the clock subscription if timeout_ms >= 0 ----
+    wi("local.get $has_clock")
+    wi("if")
+    wi("  local.get $subs")
+    wi("  local.get $idx")
+    wi("  i32.const 48")
+    wi("  i32.mul")
+    wi("  i32.add")
+    wi("  local.set $sub_ptr")
+    // userdata = -1 (clock sentinel)
+    wi("  local.get $sub_ptr")
+    wi("  i64.const -1")
+    wi("  i64.store")
+    // tag (u8) @ +8 = 0 (clock); zero-init already cleared so omit
+    // explicit store of 0 -- kept implicit by the zero-fill pass above.
+    // clock_id (u32) @ +16 = 0 (CLOCKID_REALTIME)
+    wi("  local.get $sub_ptr")
+    wi("  i32.const 16")
+    wi("  i32.add")
+    wi("  i32.const 0")
+    wi("  i32.store")
+    // timeout (u64) @ +24 = timeout_ms * 1_000_000 ns
+    wi("  local.get $sub_ptr")
+    wi("  i32.const 24")
+    wi("  i32.add")
+    wi("  local.get $tmo")
+    wi("  i64.const 1000000")
+    wi("  i64.mul")
+    wi("  i64.store")
+    // precision (u64) @ +32 = 0 (any)
+    // flags (u16) @ +40 = 0 (relative — bit set would be ABSTIME)
+    // Both already zero from the zero-fill pass.
+    wi("end")
+    // ---- Phase 3: call poll_oneoff ----
+    wi("local.get $subs")
+    wi("local.get $evs")
+    wi("local.get $nsubs")
+    wi("local.get $nev_out")
+    wi("call $poll_oneoff")
+    wi("local.set $rc")
+    // Non-zero errno -> propagate -1.
+    wi("local.get $rc")
+    wi("i32.const 0")
+    wi("i32.ne")
+    wi("if")
+    wi("  i64.const -1")
+    wi("  return")
+    wi("end")
+    wi("local.get $nev_out")
+    wi("i32.load")
+    wi("local.set $nproduced")
+    // ---- Phase 3b: decode events into pollfd.revents ----
+    wi("i32.const 0")
+    wi("local.set $j")
+    wi("block $dec_done")
+    wi("loop $dec_loop")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $j")
+    wi("local.get $nproduced")
+    wi("i32.ge_u")
+    wi("br_if $dec_done")
+    wi("local.get $evs")
+    wi("local.get $j")
+    wi("i32.const 32")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("local.set $ev_ptr")
+    // Load userdata low 32 bits (high half also loaded for the sentinel check).
+    wi("local.get $ev_ptr")
+    wi("i32.load")
+    wi("local.set $ud_lo")
+    wi("local.get $ev_ptr")
+    wi("i32.const 4")
+    wi("i32.add")
+    wi("i32.load")
+    wi("local.set $ud_hi")
+    // Clock sentinel: low == -1 && high == -1
+    wi("local.get $ud_lo")
+    wi("i32.const -1")
+    wi("i32.eq")
+    wi("local.get $ud_hi")
+    wi("i32.const -1")
+    wi("i32.eq")
+    wi("i32.and")
+    wi("if")
+    // Clock fired -> timeout; skip this event but keep walking
+    // (other already-ready fds before the deadline will still appear).
+    wi("  local.get $j")
+    wi("  i32.const 1")
+    wi("  i32.add")
+    wi("  local.set $j")
+    wi("  br $dec_loop")
+    wi("end")
+    // pollfd_idx = ud_lo >> 1; is_write = ud_lo & 1
+    wi("local.get $ud_lo")
+    wi("i32.const 1")
+    wi("i32.shr_u")
+    wi("local.set $ud_pidx")
+    wi("local.get $ud_lo")
+    wi("i32.const 1")
+    wi("i32.and")
+    wi("local.set $is_w")
+    // pfd_slot = fds_i + idx*8
+    wi("local.get $fds_i")
+    wi("local.get $ud_pidx")
+    wi("i32.const 8")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("local.set $pfd_slot")
+    // bit = is_w ? POLLOUT (4) : POLLIN (1)
+    wi("local.get $is_w")
+    wi("if (result i32)")
+    wi("  i32.const 4")
+    wi("else")
+    wi("  i32.const 1")
+    wi("end")
+    wi("local.set $bit")
+    // revents @ +6 |= bit (read-modify-write u16)
+    wi("local.get $pfd_slot")
+    wi("i32.const 6")
+    wi("i32.add")
+    wi("i32.load16_u")
+    wi("local.set $rev_old")
+    wi("local.get $pfd_slot")
+    wi("i32.const 6")
+    wi("i32.add")
+    wi("local.get $rev_old")
+    wi("local.get $bit")
+    wi("i32.or")
+    wi("i32.store16")
+    wi("local.get $j")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $j")
+    wi("br $dec_loop")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    // ---- Phase 3c: count pollfds whose revents got bits set ----
+    // (Distinct from $nproduced because multi-bit fds — POLLIN +
+    // POLLOUT both ready — would otherwise be double-counted.)
+    wi("i64.const 0")
+    wi("local.set $nready")
+    wi("i32.const 0")
+    wi("local.set $i")
+    wi("block $tally_done")
+    wi("loop $tally_loop")
+    wasm_indent = wasm_indent + 1
+    wi("local.get $i")
+    wi("local.get $nfds_i")
+    wi("i32.ge_u")
+    wi("br_if $tally_done")
+    wi("local.get $fds_i")
+    wi("local.get $i")
+    wi("i32.const 8")
+    wi("i32.mul")
+    wi("i32.add")
+    wi("i32.const 6")
+    wi("i32.add")
+    wi("i32.load16_u")
+    wi("local.set $rev_check")
+    wi("local.get $rev_check")
+    wi("if")
+    wi("  local.get $nready")
+    wi("  i64.const 1")
+    wi("  i64.add")
+    wi("  local.set $nready")
+    wi("end")
+    wi("local.get $i")
+    wi("i32.const 1")
+    wi("i32.add")
+    wi("local.set $i")
+    wi("br $tally_loop")
+    wasm_indent = wasm_indent - 1
+    wi("end")
+    wi("end")
+    wi("local.get $nready")
     wasm_indent = wasm_indent - 1
     wi(")")
     wi("")
@@ -13771,6 +14280,14 @@ fn wasm_gen_program(program) {
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "environ_get" + Q + " (func $environ_get (param i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "random_get" + Q + " (func $random_get (param i32 i32) (result i32)))")
     out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "proc_exit" + Q + " (func $proc_exit (param i32)))")
+    // R30D: poll_oneoff for the WASM sys_poll translation shim. The
+    // signature mirrors the witx-defined contract --
+    //   poll_oneoff(in: *const subscription, out: *mut event,
+    //               nsubscriptions: size, nevents_out: *mut size) -> errno
+    // -- where size + errno are u32 in preview1. Subscriptions and
+    // events are caller-allocated linear-memory arrays; the host fills
+    // `out` and writes the produced event count to `nevents_out`.
+    out("  (import " + Q + "wasi_snapshot_preview1" + Q + " " + Q + "poll_oneoff" + Q + " (func $poll_oneoff (param i32 i32 i32 i32) (result i32)))")
     out("  (memory (export " + Q + "memory" + Q + ") 256)")
     // Heap base lives above 1 MiB so heap-allocated objects pass the
     // pointer/int classifier in rt_eq / len / type_of (which use the
