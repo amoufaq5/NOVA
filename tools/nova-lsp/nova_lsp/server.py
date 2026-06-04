@@ -13,8 +13,14 @@ using only the Python standard library. Supports:
       enum + struct + primitive type names; falls back to the legacy
       text-based list when no trigger applies)
     * `textDocument/definition` (intra-file + transitively imported fns/lets)
+    * `textDocument/prepareRename` (R32E — validates the cursor sits on
+      a renameable identifier before the editor pops the rename dialog;
+      returns `{range, placeholder}` or `null` for keyword / comment /
+      string / whitespace positions)
     * `textDocument/rename` (workspace-wide for top-level fn/let/const/
-      type via R9C's rename_workspace; single-buffer for locals + params)
+      type via R9C's rename_workspace; scope-confined for locals + params
+      via R32E's `enclosing_fn_range` walker; invalid new names — bad
+      shape, NOVA keywords — return JSON-RPC `-32602 Invalid Params`)
     * `textDocument/references` (regex-based occurrence scan over the
       transitive import graph)
     * `textDocument/codeAction` (extract function, organize imports,
@@ -105,6 +111,14 @@ from nova_lsp.inlay_hints import compute_inlay_hints
 from nova_lsp.inline_variable import (
     KIND_REFACTOR_INLINE,
     build_inline_action,
+)
+from nova_lsp.prepare_rename import (
+    detect_same_scope_shadow,
+    enclosing_fn_range,
+    identifier_range_at,
+    is_keyword,
+    scope_constrained_occurrences,
+    validate_new_name,
 )
 from nova_lsp.rename_workspace import (
     build_workspace_edit,
@@ -894,28 +908,55 @@ def handle_rename(
 ) -> Optional[Dict[str, Any]]:
     """Dispatch rename requests.
 
+    R32E extends the original dispatcher with three pre-flight checks
+    matching the LSP `textDocument/rename` spec:
+
+      1. The new name must be a syntactically valid NOVA identifier.
+      2. The new name must not be a reserved NOVA keyword.
+      3. The new name should not silently shadow an existing same-scope
+         binding — we attach a warning string but still emit the edit so
+         the user can decide.
+
     For a top-level `fn` / `let` / `const` / `type` we route through
-    `handle_rename_workspace` (R9C), which uses the workspace symbol
-    index + import-graph reachability to rename every file in the
-    workspace that imports the definition site. For local bindings
-    (function parameters, indented `let`s, anonymous helpers) we keep
-    the legacy in-buffer regex rename below — those don't propagate
-    across files.
+    `handle_rename_workspace`, which uses the workspace symbol index +
+    import-graph reachability to rename every file in the workspace
+    that imports the definition site. For local bindings (function
+    parameters, indented `let`s, anonymous helpers) we walk the
+    enclosing fn's brace-counted scope and only emit edits inside that
+    window — preserving the LSP guarantee that param renames don't
+    touch unrelated `param` identifiers in sibling fns.
 
     Returns either:
       * a WorkspaceEdit `{"changes": {uri: [TextEdit, ...]}}`, OR
-      * `None` when the rename is a no-op or invalid input.
+      * `{"_rename_invalid": msg}` when the new name fails validation
+        (dispatcher converts to -32602 InvalidParams), OR
+      * `{"_rename_conflict": msg}` when the new name clashes with an
+        existing top-level decl (-32803 Request Failed), OR
+      * `{"_rename_warning": msg, "changes": {...}}` when the edit goes
+        through but the user is shadowing an existing same-scope name —
+        the dispatcher emits the edit + a `window/showMessage` warning, OR
+      * `None` when the rename is a no-op (e.g. cursor on whitespace).
     """
     uri = params.get("textDocument", {}).get("uri", "")
     pos = params.get("position", {})
     new_name = params.get("newName") or ""
     doc = state.documents.get(uri)
-    if not doc or not new_name:
+    if not doc:
         return None
+
+    # Pre-flight: the new name MUST be a valid non-keyword identifier.
+    # Empty / bad-shape / keyword all return -32602 Invalid Params so the
+    # editor can surface a clear error in the rename dialog.
+    err = validate_new_name(new_name)
+    if err is not None:
+        return {"_rename_invalid": err}
+
     old_name = word_at(doc.text, pos.get("line", 0), pos.get("character", 0))
     if not old_name or old_name == new_name:
         return None
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", new_name):
+    # Cursor on a NOVA keyword is a no-op — prepareRename already
+    # refuses those positions but defence-in-depth is cheap.
+    if is_keyword(old_name):
         return None
 
     # Try the workspace-wide path first (top-level symbols only).
@@ -925,10 +966,40 @@ def handle_rename(
     if workspace_result is not None:
         return workspace_result
 
-    # Fall back to the legacy single-buffer-plus-imports rename. This
-    # covers local bindings and the case where the symbol is unknown to
-    # the import graph (e.g. completely intra-buffer use).
-    return _handle_rename_legacy(state, old_name, new_name)
+    # Fall back to the scope-confined single-buffer rename. This covers
+    # local bindings and the case where the symbol is unknown to the
+    # import graph (e.g. completely intra-buffer use).
+    return _handle_rename_local(state, doc, old_name, new_name, pos)
+
+
+def handle_prepare_rename(
+    state: ServerState, params: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """`textDocument/prepareRename` — validate the cursor position
+    BEFORE the editor pops the rename input box.
+
+    Returns either:
+      * `{"range": <ident-range>, "placeholder": <current-name>}` when
+        the cursor is on a renameable identifier, OR
+      * `None` (LSP `null`) when the position is not renameable —
+        cursor on a keyword, comment, string literal, whitespace, or
+        an undeclared identifier the engine doesn't recognise.
+
+    The editor uses the returned range to highlight the identifier and
+    the placeholder as the prefilled text in the rename dialog.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    pos = params.get("position", {})
+    doc = state.documents.get(uri)
+    if not doc:
+        return None
+    hit = identifier_range_at(
+        doc.text, pos.get("line", 0), pos.get("character", 0)
+    )
+    if hit is None:
+        return None
+    name, rng = hit
+    return {"range": rng, "placeholder": name}
 
 
 def handle_rename_workspace(
@@ -1026,45 +1097,62 @@ def handle_rename_workspace(
     return build_workspace_edit(plan.references, new_name)
 
 
-def _handle_rename_legacy(
-    state: ServerState, old_name: str, new_name: str
-) -> Dict[str, Any]:
-    """Legacy single-buffer (+ open-doc transitive imports) rename.
+def _handle_rename_local(
+    state: ServerState,
+    doc: Document,
+    old_name: str,
+    new_name: str,
+    pos: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """R32E scope-confined local-binding rename.
 
-    Used as the fallback for local bindings — function parameters,
-    inner `let` declarations, anonymous helpers. Renames only the
-    bindings that are visible in already-open buffers + their
-    transitive on-disk imports, NOT every file in the workspace.
+    For local symbols (function parameters, indented `let`s, anonymous
+    helpers) we MUST not touch identically-named identifiers in sibling
+    functions or other files — those are independent bindings under
+    NOVA's lexical-scope rules.
+
+    Strategy:
+      * Resolve the enclosing top-level fn for the cursor position
+        (brace-counted `{` / `}` walk through `enclosing_fn_range`).
+      * Scan only that fn body's line range for occurrences. Skips
+        comments + string literals via the shared masker.
+      * Detect same-scope shadowing of `new_name` and attach a warning
+        (the edit still goes through — the user can decide).
+
+    Returns:
+      * `{"changes": {uri: [edits]}}` on a clean rename, OR
+      * `{"_rename_warning": msg, "changes": {...}}` when the new name
+        shadows an existing same-scope binding, OR
+      * `None` when no enclosing fn is found and no occurrences exist
+        (cursor at file scope on a name not declared anywhere visible).
     """
-    changes: Dict[str, List[Dict[str, Any]]] = {}
+    line = pos.get("line", 0)
+    scope = enclosing_fn_range(doc.text, line)
+    if scope is not None:
+        ranges = scope_constrained_occurrences(doc.text, old_name, scope)
+        if not ranges:
+            return None
+        warn = detect_same_scope_shadow(doc.text, new_name, scope)
+        edits = [{"range": r, "newText": new_name} for r in ranges]
+        wse: Dict[str, Any] = {"changes": {doc.uri: edits}}
+        if warn is not None:
+            return {"_rename_warning": warn, "changes": wse["changes"]}
+        return wse
 
-    # Open documents are renamed in-buffer (authoritative over disk).
-    for d in state.documents.values():
-        edits = [
-            {"range": e["range"], "newText": new_name}
-            for e in _scan_file_for_identifier(d.text, old_name)
-        ]
-        if edits:
-            changes[d.uri] = edits
-
-    # Imported files (on-disk) — only include if not already in open buffers.
-    open_paths = {uri_to_path(u) or "" for u in changes}
-    for path in _candidate_paths(state):
-        if path in open_paths:
-            continue
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except OSError:
-            continue
-        edits = [
-            {"range": e["range"], "newText": new_name}
-            for e in _scan_file_for_identifier(text, old_name)
-        ]
-        if edits:
-            changes[path_to_uri(path)] = edits
-
-    return {"changes": changes}
+    # No enclosing fn — file-scope rename. Confine to the open buffer
+    # only; we already know the symbol isn't a top-level workspace
+    # candidate (the workspace path would have caught it).
+    file_ranges = _scan_file_for_identifier(doc.text, old_name)
+    if not file_ranges:
+        return None
+    return {
+        "changes": {
+            doc.uri: [
+                {"range": e["range"], "newText": new_name}
+                for e in file_ranges
+            ]
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2207,7 +2295,7 @@ def server_capabilities() -> Dict[str, Any]:
             "resolveProvider": False,
         },
         "definitionProvider": True,
-        "renameProvider": True,
+        "renameProvider": {"prepareProvider": True},
         "referencesProvider": True,
         "codeActionProvider": {
             "codeActionKinds": [
@@ -2332,6 +2420,16 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "textDocument/rename":
         result = handle_rename(state, params)
+        if isinstance(result, dict) and "_rename_invalid" in result:
+            # R32E: new name failed validation (bad shape / keyword). LSP
+            # spec uses -32602 Invalid Params for malformed requests, and
+            # VS Code surfaces the message as an inline error in the
+            # rename input box.
+            write_message(
+                out_stream,
+                make_error(req_id, -32602, result["_rename_invalid"]),
+            )
+            return True
         if isinstance(result, dict) and "_rename_conflict" in result:
             # R9C name-conflict path — surface as a JSON-RPC ResponseError
             # (code -32803 = LSP "Request failed", a non-fatal client error
@@ -2343,6 +2441,29 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
                 make_error(req_id, -32803, result["_rename_conflict"]),
             )
             return True
+        if isinstance(result, dict) and "_rename_warning" in result:
+            # R32E: same-scope shadow detected. Per LSP convention we
+            # still emit the WorkspaceEdit but precede it with a
+            # `window/showMessage` warning so the editor surfaces the
+            # caveat. The edit itself is returned in the response.
+            warn = result.pop("_rename_warning")
+            write_message(
+                out_stream,
+                {
+                    "jsonrpc": "2.0",
+                    "method": "window/showMessage",
+                    "params": {"type": 2, "message": warn},
+                },
+            )
+            write_message(out_stream, make_response(req_id, result))
+            return True
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/prepareRename":
+        # R32E: validate the cursor position before the editor pops the
+        # rename dialog. Returns `{range, placeholder}` for renameable
+        # identifiers, `null` otherwise.
+        result = handle_prepare_rename(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
     if method == "textDocument/definition":

@@ -42,7 +42,11 @@ def main() -> int:
 
         client = LspClient()
         init = client.initialize(workspace)
-        assert init["result"]["capabilities"]["renameProvider"] is True
+        # R32E switched the renameProvider shape from a bare True to a
+        # `{prepareProvider: true}` options object so editors know they
+        # can call `textDocument/prepareRename` first.
+        rp = init["result"]["capabilities"]["renameProvider"]
+        assert isinstance(rp, dict) and rp.get("prepareProvider") is True, rp
 
         main_uri = client.open(main_path, MAIN_NOVA)
         # Position cursor on the first `greet` call: line 2, col 4.

@@ -1,5 +1,39 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R32E — nova-lsp: textDocument/rename + prepareRename across workspace
+
+**Status: complete** — `tools/nova-lsp` now advertises
+`renameProvider: { prepareProvider: true }` and ships two new
+handlers. `textDocument/prepareRename` validates the cursor position
+(returning `{range, placeholder}` for renameable identifiers, `null`
+for keywords / comments / strings / whitespace / numeric literals).
+`textDocument/rename` gains a pre-flight new-name validator —
+identifiers must match `[A-Za-z_][A-Za-z0-9_]*` and must not be one of
+the reserved NOVA keywords (`fn`, `let`, `match`, `if`, `else`,
+`while`, `for`, `return`, `import`, `mut`, etc); failures return
+JSON-RPC `-32602 Invalid Params`. Same-scope shadowing emits the edit
+but pre-pends a `window/showMessage` warning, matching the LSP
+convention (warn but don't refuse). Local-variable / parameter
+renames are now scope-confined by a brace-counted enclosing-fn walker
+(`enclosing_fn_range` in the new `nova_lsp/prepare_rename.py`), so
+renaming `parm_a` only touches the binding + its uses in the same fn
+body — sibling fns and callsite arguments named `parm_a` stay
+untouched. Top-level fn / let / const / type renames continue to
+route through R9C's `plan_workspace_rename` for cross-file edits over
+the import-graph closure. New test suite
+`tests/test_prepare_rename_r32e.py` adds 131 assertions covering
+identifier-shape validation, keyword reservation, prepareRename on
+identifier / keyword / comment / string / whitespace / numeric
+positions, invalid-name + keyword-name InvalidParams paths, local-var
+5+-occurrence rename, param scope-confinement (sibling fn untouched,
+callsites untouched), top-level fn workspace-wide rename, comment +
+string-literal exclusion, same-scope shadow warning, word-boundary
+respect, and a parser.nova smoke that picks `tc_arm_expr_type` and
+verifies prepareRename succeeds + rename's edit count matches a
+comment-/string-cleaned grep count of the identifier-token. All other
+LSP suites (`test_rename_workspace` 101, `test_semantic_tokens_r29d`
+139, `test_inlay_hints` 104) regression-clean.
+
 ## R31D — parser+codegen: match-arm static checks (exhaustiveness + type agreement)
 
 **Status: complete** — R17A's match-with-enum-variant-binding and
