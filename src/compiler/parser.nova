@@ -1262,6 +1262,15 @@ fn parse_if() {
     } else {
         par_expect(TOK_IF)
     }
+    // R33C: `if let PAT = EXPR { ... } [else ...]` shorthand. After the
+    // `if` (or `elif`) token, if the next token is `let`, parse the
+    // remainder as an if-let and lower to a two-arm match. The body
+    // returned is an AST_MATCH_STMT (or AST_DO_EXPR wrapping a match
+    // when the pattern is a struct / nested-variant pattern), reusing
+    // R17A / R31D / R32D codegen exactly. No new codegen cases.
+    if par_peek_type() == TOK_LET {
+        return parse_if_let()
+    }
     let cond = parse_expr()
     let then_body = parse_block()
     let else_body = 0
@@ -1281,6 +1290,230 @@ fn parse_if() {
     let nd = ast_if(cond, then_body, else_body)
     push(nd, if_line)
     return nd
+}
+
+// R33C: `if let PAT = EXPR { THEN } else { ELSE }` shorthand for the
+// single-arm match `match EXPR { PAT => THEN, _ => ELSE }`. Reuses
+// R17A / R31D / R32D pattern shapes — variant, nested variant, struct
+// destructure, wildcard, type pattern — by replicating the pattern
+// dispatch from parse_match and then handing the two synthesised arms
+// through the same struct / nested-variant rewrite path. Callers see
+// either an AST_MATCH_STMT directly, or an AST_DO_EXPR wrapping a
+// match (when the pattern requires the parser-time matchee-cache
+// rewrite). Either node is already understood by codegen verbatim.
+//
+// `else if let PAT2 = EXPR2 { ... }` chains by recursive descent: the
+// else branch becomes a nested if-let lowered the same way, producing
+// a tree of two-arm matches. `if let X = e { A }` without an else
+// supplies an implicit `_ => 0` arm so the value of a no-else-if-let
+// in expression position is 0 (consistent with the match no-arm
+// fallthrough at codegen).
+fn parse_if_let() {
+    par_expect(TOK_LET)
+    // R25A / R32D struct pattern detection — same lookahead chain as
+    // parse_match's arm-pattern dispatch. If the pattern is a struct or
+    // nested-variant pattern, we'll need a matchee temp to drive the
+    // post-parse rewrite below.
+    let pattern = 0
+    let saw_struct_pat = 0
+    let match_tmp_name = ""
+    let consumed_pat = 0
+    if par_peek_type() == TOK_IDENT {
+        let pk_tok = par_peek()
+        if pk_tok != 0 {
+            let pk_name = pk_tok[1]
+            if par_ident_starts_uppercase(pk_name) == 1 {
+                let lb_offm = 1
+                if par_peek_at_type(1) == TOK_LT {
+                    let saved_p = par_pos
+                    par_advance()
+                    let gnm = par_peek_generic_args_len()
+                    par_pos = saved_p
+                    if gnm > 0 { lb_offm = 1 + gnm }
+                }
+                if par_lbrace_is_struct_pattern_body(lb_offm) == 1 {
+                    match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                    par_struct_tmp_count = par_struct_tmp_count + 1
+                    saw_struct_pat = 1
+                    pattern = parse_struct_match_pattern(pk_name, lb_offm)
+                    consumed_pat = 1
+                }
+            }
+        }
+    }
+    if consumed_pat == 0 {
+        if par_peek_type() == TOK_UNDERSCORE {
+            par_advance()
+            pattern = ast_wildcard()
+        } else { if par_peek_type() == TOK_IS {
+            par_advance()
+            let tp_id = 0
+            let tp_tok = par_peek_type()
+            if tp_tok == TOK_NONE {
+                par_advance()
+                tp_id = 0
+            } else {
+                let tp_name = par_expect(TOK_IDENT)
+                let tpn = tp_name[1]
+                if tpn == "null" { tp_id = 0 }
+                if tpn == "int" { tp_id = 1 }
+                if tpn == "str" { tp_id = 2 }
+                if tpn == "string" { tp_id = 2 }
+                if tpn == "list" { tp_id = 3 }
+                if tpn == "map" { tp_id = 4 }
+            }
+            pattern = ast_type_pattern(tp_id)
+        } else {
+            // Variant pattern `Name::Variant(binders)` mirroring the
+            // same R17A / R32D parse_match dispatch. Nested sub-patterns
+            // emit AST_NESTED_VARIANT_PATTERN which the post-parse
+            // rewrite below handles via lower_nested_variant_match_arm.
+            if par_peek_type() == TOK_IDENT {
+                if par_peek_at_type(1) == TOK_COLONCOLON {
+                    let n1 = par_advance()
+                    par_advance()
+                    let n2 = par_expect(TOK_IDENT)
+                    let r33c_sub_patterns = list_new()
+                    let r33c_legacy_binders = list_new()
+                    let r33c_has_nested = 0
+                    if par_peek_type() == TOK_LPAREN {
+                        par_advance()
+                        if par_peek_type() == TOK_RPAREN {
+                            par_advance()
+                        } else {
+                            let r33c_first = parse_match_sub_pattern()
+                            push(r33c_sub_patterns, r33c_first)
+                            if r32d_pattern_is_legacy_binder(r33c_first) == 1 {
+                                push(r33c_legacy_binders, r32d_pattern_binder_name(r33c_first))
+                            } else {
+                                r33c_has_nested = 1
+                            }
+                            while par_peek_type() == TOK_COMMA {
+                                par_advance()
+                                if par_peek_type() == TOK_RPAREN { break }
+                                let r33c_nth = parse_match_sub_pattern()
+                                push(r33c_sub_patterns, r33c_nth)
+                                if r32d_pattern_is_legacy_binder(r33c_nth) == 1 {
+                                    push(r33c_legacy_binders, r32d_pattern_binder_name(r33c_nth))
+                                } else {
+                                    r33c_has_nested = 1
+                                }
+                            }
+                            par_expect(TOK_RPAREN)
+                        }
+                    }
+                    if r33c_has_nested == 1 {
+                        match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                        par_struct_tmp_count = par_struct_tmp_count + 1
+                        saw_struct_pat = 1
+                        pattern = ast_nested_variant_pattern(n1[1], n2[1], r33c_sub_patterns)
+                    } else {
+                        pattern = ast_enum_pattern(n1[1], n2[1], r33c_legacy_binders)
+                    }
+                } else {
+                    pattern = parse_expr()
+                }
+            } else {
+                pattern = parse_expr()
+            }
+        } }
+    }
+    par_expect(TOK_EQ)
+    let scrutinee = parse_expr()
+    let then_body = parse_block()
+    // Optional else / else-if / else-if-let.
+    let else_body = 0
+    if par_peek_type() == TOK_ELSE {
+        par_advance()
+        if par_peek_type() == TOK_IF {
+            // `else if ...` — recurse via parse_if which itself routes
+            // to parse_if_let when seeing `if let`. Wrap the resulting
+            // if/if-let node in an expr-stmt so it slots into the match
+            // arm body shape.
+            let sub_if = parse_if()
+            else_body = ast_expr_stmt(sub_if)
+        } else {
+            else_body = parse_block()
+        }
+    }
+    // Synthesise the two-arm match. The `_ => else_body` arm is omitted
+    // entirely when else_body is 0 — match codegen already yields 0 for
+    // an unmatched scrutinee, so an if-let without else is equivalent
+    // to `match e { Pat => then }` which falls through to 0.
+    let arms = list_new()
+    let arm1 = ast_match_arm(pattern, then_body)
+    push(arms, arm1)
+    if else_body == 0 {
+    } else {
+        let arm2 = ast_match_arm(ast_wildcard(), else_body)
+        push(arms, arm2)
+    }
+    // R32D parse-time typecheck for nested patterns, same convention
+    // parse_match uses (WARN, not ERROR).
+    r32d_tc_check_match_patterns(arms)
+    // R33C: an if-let is shorthand for `match e { Pat => then, _ =>
+    // else }` (with the wildcard arm omitted when no else is supplied,
+    // which means the synthetic match falls through to 0 and is
+    // intentionally exhaustiveness-quiet — like Rust's `if let X = e
+    // { ... }`). For the with-else case the second arm is an unguarded
+    // wildcard so r33c_check_exhaustive_raw will see has_wildcard=1
+    // and return without emitting a WARN. We always want to suppress
+    // the downstream passes from warning either way (a no-else if-let
+    // would otherwise be flagged), so we always tack on the visited
+    // flag, but call the raw check first to keep the path uniform
+    // with parse_match.
+    let raw_consumed_iflet = 0
+    if else_body == 0 {
+        // No-else if-let: skip the raw exhaustiveness check entirely
+        // — single-arm form is intentionally not exhaustive.
+        raw_consumed_iflet = 1
+    } else {
+        raw_consumed_iflet = r33c_check_exhaustive_raw(arms)
+        // If the raw check didn't see the enum (enum declared after
+        // the match), still suppress downstream WARNs because the
+        // unguarded wildcard arm makes the if-let trivially
+        // exhaustive — the downstream check would also see this and
+        // skip, but we want to be uniform with the no-else branch
+        // above.
+        raw_consumed_iflet = 1
+    }
+    // R25A / R32D rewrite: if the pattern needed a matchee temp,
+    // rewrite each arm to a wildcard + guard + prep-stmts form and
+    // wrap the whole thing in an AST_DO_EXPR caching the scrutinee.
+    // R31D / R32D codegen never sees AST_STRUCT_PATTERN /
+    // AST_NESTED_VARIANT_PATTERN directly so this keeps the existing
+    // codegen path byte-for-byte intact.
+    if saw_struct_pat == 1 {
+        let new_arms = list_new()
+        let ai = 0
+        while ai < len(arms) {
+            let arm0 = arms[ai]
+            let pat0 = arm0[1]
+            let body0 = arm0[2]
+            let old_guard = 0
+            if len(arm0) > 3 { old_guard = arm0[3] }
+            if ast_tag(pat0) == AST_STRUCT_PATTERN {
+                let lower_pair = lower_struct_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, lower_pair)
+            } else { if ast_tag(pat0) == AST_NESTED_VARIANT_PATTERN {
+                let nested_pair = lower_nested_variant_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, nested_pair)
+            } else {
+                push(new_arms, arm0)
+            } }
+            ai = ai + 1
+        }
+        let inner_match = ast_match(ast_ident(match_tmp_name), new_arms)
+        if raw_consumed_iflet == 1 { push(inner_match, 1) }
+        let init_stmts = list_new()
+        let cache_let = ast_let(match_tmp_name, scrutinee)
+        push(cache_let, 0)
+        push(init_stmts, cache_let)
+        return ast_do_expr(init_stmts, inner_match)
+    }
+    let nd_if_let = ast_match(scrutinee, arms)
+    if raw_consumed_iflet == 1 { push(nd_if_let, 1) }
+    return nd_if_let
 }
 
 fn parse_while_labeled(lbl) {
@@ -2342,6 +2575,22 @@ fn parse_match() {
     // shape) and emits a WARN for any arm that references an unknown
     // enum / variant / arity. Mirrors R31D's WARN-not-ERROR convention.
     r32d_tc_check_match_patterns(arms)
+    // R33C: exhaustiveness must be computed on the RAW arms — once the
+    // R32D rewrite below collapses AST_NESTED_VARIANT_PATTERN into a
+    // wildcard-with-synthetic-guard, the existing
+    // cg_check_exhaustive / tc_check_match_exhaustive passes would
+    // either over-cover (treating the synthetic guard as a real catch-
+    // all) or under-cover (treating every nested arm as inconclusive).
+    // Running the check here against the RAW arm shapes lets a
+    // user-written guard (`Some(v) if v > 0 => ...`) opt OUT of
+    // covering its variant while preserving R32D's nested-pattern
+    // coverage for unguarded arms. The visited flag we tack onto the
+    // returned match node ([match_nd][3] = 1) silences both downstream
+    // passes from re-warning. The check returns 1 iff it took
+    // ownership of the diagnostic (enum found in par_enum_tags); a
+    // zero return means the enum wasn't visible at parse time so we
+    // defer to the later tc_check_match_exhaustive pass.
+    let raw_consumed = r33c_check_exhaustive_raw(arms)
     // R25A: if any arm carried a struct pattern, rewrite the entire
     // match into a `{ let _struct_match_N = expr; match _struct_match_N
     // { rewritten arms } }` block. Each struct-pattern arm becomes a
@@ -2378,6 +2627,11 @@ fn parse_match() {
             ai = ai + 1
         }
         let inner_match = ast_match(ast_ident(match_tmp_name), new_arms)
+        // R33C: mark visited iff the raw check took ownership of the
+        // diagnostic. When raw_consumed == 0 (enum unknown at parse
+        // time) we leave the slot blank so the typecheck pass still
+        // gets to run its own exhaustiveness check.
+        if raw_consumed == 1 { push(inner_match, 1) }
         // Wrap as AST_DO_EXPR so the rewritten match remains usable in
         // expression position (e.g. `let x = match ... { Point { ... } }`).
         // AST_DO_EXPR semantics: run init_stmts, then evaluate final_expr
@@ -2389,7 +2643,160 @@ fn parse_match() {
         push(init_stmts, cache_let)
         return ast_do_expr(init_stmts, inner_match)
     }
-    return ast_match(expr, arms)
+    let nd = ast_match(expr, arms)
+    // R33C: mark visited iff the raw check ran.
+    if raw_consumed == 1 { push(nd, 1) }
+    return nd
+}
+
+// R33C: raw exhaustiveness check. Runs on the RAW match-arm list
+// BEFORE R25A / R32D rewrites collapse struct- and nested-variant
+// patterns into wildcards-with-synthetic-guards. This lets us treat
+// `Some(v) if v > 0 => ...` (user guard) as NOT covering Some, while
+// preserving `Some(Some(v)) => ...` (no user guard) as covering Some.
+// Recognised patterns:
+//   * AST_WILDCARD (no user guard)           — catch-all, skip warn
+//   * AST_TYPE_PATTERN (no user guard)       — catch-all, skip warn
+//   * AST_ENUM_PATTERN (no user guard)       — covers the variant
+//   * AST_NESTED_VARIANT_PATTERN (no guard)  — covers the OUTER variant
+//                                              (same shallow rule the
+//                                               legacy check used)
+// Returns 1 if it took ownership of the exhaustiveness diagnostic for
+// this match (enum identified, parser-time tag table populated),
+// regardless of whether a WARN actually fired. The caller marks the
+// match node visited iff this returns 1 so downstream
+// cg_check_exhaustive / tc_check_match_exhaustive passes are
+// suppressed. Returns 0 when the parser couldn't find the enum (e.g.
+// it's declared AFTER the match site in source order); in that case
+// downstream typecheck-pass enum registry still gets a chance to warn.
+fn r33c_check_exhaustive_raw(arms) {
+    if arms == 0 { return 0 }
+    if type_of(arms) != 3 { return 0 }
+    let enum_name = ""
+    let has_wildcard = 0
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                if pat != 0 {
+                    if type_of(pat) == 3 {
+                        let pt = ast_tag(pat)
+                        let arm_has_guard = 0
+                        if len(arm) > 3 { arm_has_guard = 1 }
+                        if pt == AST_WILDCARD {
+                            if arm_has_guard == 0 { has_wildcard = 1 }
+                        }
+                        if pt == AST_TYPE_PATTERN {
+                            if arm_has_guard == 0 { has_wildcard = 1 }
+                        }
+                        if pt == AST_ENUM_PATTERN {
+                            if enum_name == "" { enum_name = pat[1] }
+                        }
+                        if pt == AST_NESTED_VARIANT_PATTERN {
+                            if enum_name == "" { enum_name = pat[1] }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    if enum_name == "" { return 0 }
+    let total = par_lookup_variant_count(enum_name)
+    if total == 0 { return 0 }
+    if has_wildcard == 1 { return 1 }
+    // Coverage map: covered[i] == 1 iff some unguarded arm names the
+    // i'th declared variant. Reuses par_lookup_variant_count + a per-
+    // index probe (tc_find_enum / variants list lookup style) to keep
+    // missing-variant ordering source-declaration order.
+    let covered = list_new()
+    let init = 0
+    while init < total {
+        push(covered, 0)
+        init = init + 1
+    }
+    ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                if pat != 0 {
+                    if type_of(pat) == 3 {
+                        let pt2 = ast_tag(pat)
+                        let arm_has_guard = 0
+                        if len(arm) > 3 { arm_has_guard = 1 }
+                        if arm_has_guard == 0 {
+                            if pt2 == AST_ENUM_PATTERN {
+                                let vidx = par_lookup_variant_index(enum_name, pat[2])
+                                if vidx >= 0 {
+                                    if vidx < total { covered[vidx] = 1 }
+                                }
+                            }
+                            if pt2 == AST_NESTED_VARIANT_PATTERN {
+                                let vidx2 = par_lookup_variant_index(enum_name, pat[2])
+                                if vidx2 >= 0 {
+                                    if vidx2 < total { covered[vidx2] = 1 }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    let count_covered = 0
+    let ci0 = 0
+    while ci0 < total {
+        if covered[ci0] == 1 { count_covered = count_covered + 1 }
+        ci0 = ci0 + 1
+    }
+    if count_covered >= total { return 1 }
+    // Assemble the missing-variant list in declaration order so the
+    // warn line matches the existing tc_check_match_exhaustive /
+    // cg_check_exhaustive format byte-for-byte.
+    let missing = ""
+    let vi1 = 0
+    let first = 1
+    while vi1 < total {
+        if covered[vi1] == 0 {
+            let vname1 = par_lookup_variant_name_at(enum_name, vi1)
+            if first == 1 {
+                missing = vname1
+                first = 0
+            } else {
+                missing = missing + ", " + vname1
+            }
+        }
+        vi1 = vi1 + 1
+    }
+    println("warning: non-exhaustive match on " + enum_name + " (missing: " + missing + ")")
+    return 1
+}
+
+// R33C: parser-time variant-name-at-index lookup. Returns the
+// declaration-order variant name at index `idx` for `enum_name`, or
+// the empty string when out of range / enum unknown. Used by the raw
+// exhaustiveness check above to assemble the missing-variant warn
+// message in source order. Mirrors par_lookup_variant_index's
+// par_enum_tags structure.
+fn par_lookup_variant_name_at(enum_name, idx) {
+    if par_enum_tags == 0 { return "" }
+    let i = 0
+    while i < len(par_enum_tags) {
+        let e = par_enum_tags[i]
+        if e[0] == enum_name {
+            let variants = e[1]
+            if idx >= 0 {
+                if idx < len(variants) { return variants[idx][0] }
+            }
+        }
+        i = i + 1
+    }
+    return ""
 }
 
 // R32D: parse one element of a variant payload's argument list. Each
@@ -2521,30 +2928,66 @@ fn r32d_pattern_binder_name(sub) {
 // codegen already understands. No new codegen cases needed.
 fn lower_nested_variant_match_arm(tmp_name, variant_pat, body, user_guard) {
     let prep_stmts = list_new()
-    let guard_expr = user_guard
+    // R33C: when a user guard is present together with nested binders,
+    // the binders MUST be available when the user guard evaluates
+    // (otherwise `Some(Some(v)) if v == 0 => ...` reads v before it's
+    // assigned — see r32d_attach_prep). The synthetic tag-check chain
+    // is built FIRST (so wrong-typed values aren't dereferenced), then
+    // the user guard is folded in inside an AST_DO_EXPR that prepends
+    // the per-binder lets before evaluating the user guard. The
+    // ordering is:
+    //   (tag_chain) && do { let v = tmp[1][1]; ...; user_guard }
+    // When user_guard is 0 (no user guard) we keep the prior R32D
+    // shape exactly — bindings go on the body via r32d_attach_prep,
+    // guard_expr is the bare tag chain — preserving R32D byte-
+    // identical codegen for every arm that doesn't carry a guard.
+    let tag_chain = 0
     // Outer tag check: tmp[0] == outer_tag.
     let outer_enum = variant_pat[1]
     let outer_variant = variant_pat[2]
     let outer_tag_call = r32d_make_enum_tag_int(outer_enum, outer_variant)
     let outer_idx = ast_index(ast_ident(tmp_name), ast_int(0))
     let outer_eq = ast_binop("==", outer_idx, outer_tag_call)
-    guard_expr = r32d_and_merge(guard_expr, outer_eq)
+    tag_chain = r32d_and_merge(tag_chain, outer_eq)
     // Walk each payload slot, building per-binder lets / per-tag guards.
     let sub_patterns = variant_pat[3]
     let si = 0
     while si < len(sub_patterns) {
         let sub = sub_patterns[si]
         let payload_idx = ast_index(ast_ident(tmp_name), ast_int(si + 1))
-        guard_expr = r32d_lower_sub_pattern(sub, payload_idx, prep_stmts, guard_expr)
+        tag_chain = r32d_lower_sub_pattern(sub, payload_idx, prep_stmts, tag_chain)
         si = si + 1
     }
-    let new_body = r32d_attach_prep(body, prep_stmts)
-    let arm = ast_match_arm(ast_wildcard(), new_body)
-    if guard_expr == 0 {
-    } else {
-        push(arm, guard_expr)
+    let final_guard = 0
+    if user_guard == 0 {
+        // No user guard: keep the legacy R32D shape — bindings in the
+        // body via r32d_attach_prep, guard is the tag chain alone.
+        final_guard = tag_chain
+        let new_body = r32d_attach_prep(body, prep_stmts)
+        let arm = ast_match_arm(ast_wildcard(), new_body)
+        if final_guard == 0 {
+        } else {
+            push(arm, final_guard)
+        }
+        return arm
     }
-    return arm
+    // User guard present: bind binders inside an AST_DO_EXPR so the
+    // guard sees them, then attach the SAME bindings to the body too
+    // (so the body can also read them — the function-frame locals
+    // were written by the guard's do-expr but the body's prep_stmts
+    // run again on a successful guard and overwrite with the same
+    // values, which is cheap and idempotent). prep_stmts is read but
+    // never mutated by either side, so the shared list is safe.
+    let guarded_do = ast_do_expr(prep_stmts, user_guard)
+    if tag_chain == 0 {
+        final_guard = guarded_do
+    } else {
+        final_guard = ast_and(tag_chain, guarded_do)
+    }
+    let new_body2 = r32d_attach_prep(body, prep_stmts)
+    let arm2 = ast_match_arm(ast_wildcard(), new_body2)
+    push(arm2, final_guard)
+    return arm2
 }
 
 // R32D: recursive sub-pattern lowering. `accessor` is the AST expression
@@ -2962,7 +3405,15 @@ fn lower_struct_match_arm(tmp_name, struct_pat, body, user_guard) {
     let field_names = struct_pat[2]
     let sub_patterns = struct_pat[3]
     let prep_stmts = list_new()
-    let guard_expr = user_guard
+    // R33C: separate the synthetic literal-field equality chain from
+    // any user guard so we can wrap the user guard in an AST_DO_EXPR
+    // that binds the struct-field binders BEFORE evaluating the user
+    // guard. The R25A legacy shape put user_guard at the FRONT of the
+    // chain and the prep_stmts only in the body — that worked when
+    // the user guard didn't reference struct binders (R25A doesn't
+    // test that combo) but breaks for `Point { x, y } if x > 0` where
+    // x must be bound before the guard reads it.
+    let lit_chain = 0
     let ki = 0
     while ki < len(field_names) {
         let fnm = field_names[ki]
@@ -2983,13 +3434,36 @@ fn lower_struct_match_arm(tmp_name, struct_pat, body, user_guard) {
         } else {
             // Treat as literal equality test: tmp.field == sub.
             let eq_node = ast_binop("==", field_acc, sub)
-            if guard_expr == 0 {
-                guard_expr = eq_node
+            if lit_chain == 0 {
+                lit_chain = eq_node
             } else {
-                guard_expr = ast_and(guard_expr, eq_node)
+                lit_chain = ast_and(lit_chain, eq_node)
             }
         } }
         ki = ki + 1
+    }
+    // Merge the user guard. When user_guard is 0 the final guard is
+    // just the literal-equality chain — preserves R25A byte-identical
+    // shape. When user_guard is present we bind the struct binders
+    // inside an AST_DO_EXPR so the user guard reads them with the
+    // correct values; the literal chain still runs first (short-
+    // circuit prevents the do-expr from evaluating when the chain
+    // fails, which is fine — the binders only get assigned on a
+    // successful match).
+    let guard_expr = 0
+    if user_guard == 0 {
+        guard_expr = lit_chain
+    } else {
+        // Copy prep_stmts so r32d_attach_prep below can mutate /
+        // append to a fresh list without changing the do-expr's
+        // init_stmts (same pattern lower_nested_variant_match_arm
+        // uses for the body half).
+        let guard_do = ast_do_expr(prep_stmts, user_guard)
+        if lit_chain == 0 {
+            guard_expr = guard_do
+        } else {
+            guard_expr = ast_and(lit_chain, guard_do)
+        }
     }
     // Body lowering strategy depends on the original arm body shape:
     //   * `=> expr`  body is AST_EXPR_STMT(expr) — lower to
@@ -4600,6 +5074,15 @@ fn tc_check_match_arm_types(match_nd) {
 fn tc_check_match_exhaustive(match_nd) {
     if match_nd == 0 { return 0 }
     if type_of(match_nd) != 3 { return 0 }
+    // R33C: honour the parse_match-side visited flag the same way
+    // cg_check_exhaustive does. parse_match now runs the raw
+    // exhaustiveness check on the pre-rewrite arm list and marks the
+    // node visited iff it took ownership of the diagnostic; if so we
+    // must NOT re-run here or the warn line would be printed twice
+    // (once from the raw check, once from this pass).
+    if len(match_nd) > 3 {
+        if match_nd[3] == 1 { return 0 }
+    }
     let arms = match_nd[2]
     if arms == 0 { return 0 }
     if type_of(arms) != 3 { return 0 }

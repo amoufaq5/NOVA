@@ -1,5 +1,122 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R33C — parser+codegen: `if let` shorthand + match arm guards
+
+**Status: complete** — `if let PAT = EXPR { ... } [else ...]` parses as
+a single-arm `match` shorthand and lowers to the same AST_MATCH_STMT
+shape R17A / R31D / R32D codegen already understands. Match arms gain
+an optional `if EXPR` guard between the pattern and `=>`, parsed as
+`arm[3]` and surfaced in the x86_64 / WASM codegen wildcard +
+type-pattern + enum-pattern + value-pattern dispatch.
+
+Three integration points:
+
+  - **`parse_if_let`** (parser.nova). `parse_if` peeks for `TOK_LET`
+    after the `if` (or `elif`) token and dispatches to `parse_if_let`
+    when seen. The pattern dispatch mirrors `parse_match`'s
+    arm-pattern logic (struct, nested-variant, single-level variant,
+    type-pattern, wildcard, value) so every shape R32D supports works
+    in if-let position too. Synthesised arms `[Pat => then, _ =>
+    else]` flow through the same R25A / R32D matchee-cache rewrite
+    when the pattern needs it (`if let Some(Some(v)) = ...` produces
+    AST_DO_EXPR around an AST_MATCH_STMT just like the equivalent
+    match would). `else if let` chains by recursive descent.
+
+  - **`r33c_check_exhaustive_raw`** (parser.nova). Exhaustiveness now
+    runs on the RAW arm list (with AST_NESTED_VARIANT_PATTERN /
+    AST_ENUM_PATTERN intact) BEFORE the R25A / R32D wildcard-with-
+    synthetic-guard rewrite. A user-written guard
+    (`Some(v) if v > 0 => ...`) opts out of covering its variant —
+    so a match with only a guarded Some arm + an unguarded None arm
+    fires the "non-exhaustive" warn that R31D / R32D's post-rewrite
+    check would have missed. The visited flag the parser pass tacks
+    onto the final match node also suppresses the downstream
+    `tc_check_match_exhaustive` and `cg_check_exhaustive` passes
+    when it took ownership of the diagnostic.
+
+  - **Lowering fix for guard + nested binders.** R32D's
+    `lower_nested_variant_match_arm` and R25A's
+    `lower_struct_match_arm` previously attached the per-binder
+    `let v = tmp[...]` prep stmts to the BODY, leaving the user guard
+    (front of the merged guard chain) reading the binder slot BEFORE
+    it was assigned — so `Some(Some(v)) if v == 0 => ...` matched on
+    `v`'s stale pre-arm value. R33C separates the synthetic
+    tag-check chain from the user guard, wraps the user guard in an
+    `AST_DO_EXPR(prep_stmts, user_guard)`, and emits
+    `tag_chain && do { lets; user_guard }`. R32D byte-identical is
+    preserved because the new shape only fires when a user guard is
+    present; every R32D test that has no user guard hits the
+    unchanged `final_guard = tag_chain` path.
+
+### Codegen
+
+  - **x86_64.** Existing guard handling at every arm dispatch
+    (AST_WILDCARD / AST_TYPE_PATTERN / AST_ENUM_PATTERN / generic
+    value) was preserved — R33C adds no new arm-shape cases. The new
+    `AST_DO_EXPR` branch in `gen_stmt` lets statement-position if-let
+    on nested or struct patterns emit code (previously
+    statement-position AST_DO_EXPR fell through to gen_stmt's
+    unknown-tag catch-all).
+
+  - **WASM.** Added guard handling to the AST_ENUM_PATTERN and
+    generic-value-pattern arms (the AST_WILDCARD path already had
+    guard support from R25A). Each guard wraps body emission in an
+    inner `if (result i64)` so a false guard falls through to the
+    outer chain's `else` branch — mirroring x86_64's
+    `test rax, rax; jz next_arm`.
+
+### Tests
+
+  - `tests/unit/test_if_let.nova` (NEW, 33 assertions): Some / None
+    binding, no-else fall-through to 0, Result Ok / Err, nested
+    `Some(Some(v))`, single-line `else if let` chain across two
+    enums, nullary variants on a 3-variant enum, struct destructure,
+    wildcard payload binder, binder usable in arm body arithmetic,
+    if-let in function-return position, parser source pin.
+
+  - `tests/unit/test_match_guards.nova` (NEW, 45 assertions):
+    wildcard + guard, value pattern + guard with strict fall-
+    through, enum pattern + guard (the R33C primary use case),
+    multiple guarded arms on the same variant with order-sensitive
+    fall-through, guard reading the payload binder, even / odd
+    payload check, Result::Ok(v) if v > 0 + bare Ok fallback,
+    nested pattern + guard (`SS(Some(v)) if v == 0`), guarded-only
+    Some exhaustiveness warn case (3 separate matches), guard
+    side-effect ordering (guard does NOT evaluate when pattern
+    doesn't match), parser + codegen source pin.
+
+  - R31D 49 + R32D 72 prior match-expression assertions remain
+    byte-identical: 83 in `test_match_expr.nova` (49 R31D + 34 R32D
+    nested) + 38 in `test_let_destructure.nova` (R32D let
+    destructure) — 121 total, all pass.
+
+  - `make test-all`: 177 / 177 (6 skipped).
+
+  - `make self-host`: stage2 == stage3, byte-identical.
+
+### Caveats
+
+  - **`if let` chains can't rebind across the chain.** Because Nova
+    has function-frame locals (no per-block scope), the binder name
+    `v` in `if let Some(v) = a { ... } else if let Some(v) = b { ... }`
+    shares one slot. Within a single chain that's harmless (only one
+    branch fires), but a tighter Rust-style scoping would require
+    the codegen-side per-block slot allocator NOVA doesn't ship yet.
+
+  - **Guard side-effects are not memoised across re-entries.** A
+    guard expression is re-evaluated each time the arm is reached
+    in source order — if you write `if let Some(v) = a {} else if
+    let Some(v) = b {}` and the first guard has a side effect, the
+    side effect fires on every call. Same observable semantic as
+    chained `match` arms.
+
+  - **Exhaustiveness diagnostics are per-enum only.** A match with
+    `Some(v) if v > 0 => ...` and no `Some(_)` fallback still warns
+    on the OUTER enum's missing variants only — it doesn't try to
+    enumerate "all integer values of v not covered by guards". That
+    would require a constraint-style refinement check beyond R33C's
+    scope.
+
 ## R33F — nova-dap: exception breakpoints for uncaught panics
 
 **Status: complete** — `tools/nova-dap` now advertises the standard

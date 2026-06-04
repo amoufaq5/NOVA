@@ -1,0 +1,305 @@
+// R33C: match arm guards. `Pat if expr => body` runs the body iff the
+// pattern matches AND the guard expression evaluates truthy. A guard
+// failure falls through to the NEXT arm (it does NOT match more
+// aggressively). Guards do not count toward exhaustiveness coverage
+// because they may evaluate false at runtime.
+//
+// Lives under tests/unit/ so the tests/test_*.nova glob in
+// tests/run_tests.sh doesn't pick it up — invoke directly via
+// `bin/nova tests/unit/test_match_guards.nova`. The top-level
+// tests/test_match_guards.nova covers wildcard-guard + value-pattern
+// guard semantics (which R25A actually shipped via the struct-pattern
+// rewrite); this file pins the R33C extensions: enum-pattern guards,
+// guard-fall-through, exhaustiveness-warn-on-guarded-only, and the
+// nested-pattern + guard combo.
+
+enum Option {
+    Some(int)
+    None
+}
+
+enum Result {
+    Ok(int)
+    Err(str)
+}
+
+enum OptOpt {
+    SS(Option)
+    NN
+}
+
+let ok_count = 0
+let fail_count = 0
+
+fn check(cond, label) {
+    if cond == 1 {
+        ok_count = ok_count + 1
+        print("OK ")
+        println(label)
+    } else {
+        fail_count = fail_count + 1
+        print("FAIL ")
+        println(label)
+    }
+    return 0
+}
+
+// --- 1. Wildcard + guard (R25A shape, retest as baseline) ---
+
+fn classify_int(n) {
+    let r = ""
+    match n {
+        _ if n > 100 => { r = "huge" }
+        _ if n > 10 => { r = "big" }
+        _ if n > 0 => { r = "small" }
+        _ => { r = "zero-or-neg" }
+    }
+    return r
+}
+
+check(classify_int(200) == "huge", "wildcard + guard: 200 > 100 -> huge")
+check(classify_int(50) == "big", "wildcard + guard: 50 > 10 -> big (first arm fails)")
+check(classify_int(5) == "small", "wildcard + guard: 5 > 0 -> small (first two arms fail)")
+check(classify_int(0) == "zero-or-neg", "wildcard + guard: 0 -> default (all guarded fail)")
+check(classify_int(-3) == "zero-or-neg", "wildcard + guard: -3 -> default")
+
+// --- 2. Value pattern + guard ---
+
+fn analyze_mode(mode, strict) {
+    let r = ""
+    match mode {
+        1 => { r = "one" }
+        2 if strict == 1 => { r = "two-strict" }
+        2 => { r = "two-relaxed" }
+        _ => { r = "other" }
+    }
+    return r
+}
+
+check(analyze_mode(1, 0) == "one", "value pattern: 1 with no guard")
+check(analyze_mode(2, 1) == "two-strict", "value pattern: 2 with strict=1 guard true")
+check(analyze_mode(2, 0) == "two-relaxed", "value pattern: 2 with strict=0 falls through to next 2 arm")
+check(analyze_mode(3, 1) == "other", "value pattern: 3 falls to wildcard")
+
+// --- 3. Enum pattern + guard — the R33C primary use case ---
+
+fn positive_some(o) {
+    let r = -100
+    match o {
+        Option::Some(v) if v > 0 => { r = v }
+        Option::Some(_) => { r = -1 }
+        Option::None => { r = -2 }
+    }
+    return r
+}
+
+check(positive_some(Option::Some(5)) == 5, "Some(v) if v > 0: positive payload")
+check(positive_some(Option::Some(100)) == 100, "Some(v) if v > 0: large positive payload")
+check(positive_some(Option::Some(1)) == 1, "Some(v) if v > 0: boundary 1")
+check(positive_some(Option::Some(0)) == -1, "Some(v) if v > 0: zero falls to Some(_)")
+check(positive_some(Option::Some(-5)) == -1, "Some(v) if v > 0: negative falls to Some(_)")
+check(positive_some(Option::None) == -2, "Some(v) if v > 0: None still hits None arm")
+
+// --- 4. Multiple guarded arms on same variant: order matters ---
+
+fn classify_value(o) {
+    let r = "none"
+    match o {
+        Option::Some(v) if v > 100 => { r = "huge" }
+        Option::Some(v) if v > 10 => { r = "big" }
+        Option::Some(v) if v > 0 => { r = "small" }
+        Option::Some(_) => { r = "zero-or-neg" }
+        Option::None => { r = "none" }
+    }
+    return r
+}
+
+check(classify_value(Option::Some(200)) == "huge", "ordered Some guards: 200 -> huge")
+check(classify_value(Option::Some(50)) == "big", "ordered Some guards: 50 -> big (first arm fails)")
+check(classify_value(Option::Some(5)) == "small", "ordered Some guards: 5 -> small")
+check(classify_value(Option::Some(0)) == "zero-or-neg", "ordered Some guards: 0 falls to bare Some(_)")
+check(classify_value(Option::None) == "none", "ordered Some guards: None")
+
+// --- 5. Guard with payload binding visible in guard expression ---
+
+fn even_some(o) {
+    let r = -1
+    match o {
+        Option::Some(v) if (v % 2) == 0 => { r = v * 10 }
+        Option::Some(v) => { r = 0 - v }
+        Option::None => { r = 0 }
+    }
+    return r
+}
+
+check(even_some(Option::Some(4)) == 40, "Some(v) if v%2==0: even payload binds + computes")
+check(even_some(Option::Some(7)) == 0 - 7, "Some(v) if v%2==0: odd falls to bare Some(v) with -v")
+check(even_some(Option::None) == 0, "Some(v) if v%2==0: None")
+
+// --- 6. Guard with Result enum, payload visible ---
+
+fn classify_result(r) {
+    let s = ""
+    match r {
+        Result::Ok(v) if v > 0 => { s = "ok-pos" }
+        Result::Ok(_) => { s = "ok-nonpos" }
+        Result::Err(_) => { s = "err" }
+    }
+    return s
+}
+
+check(classify_result(Result::Ok(42)) == "ok-pos", "Result::Ok(v) if v > 0: positive")
+check(classify_result(Result::Ok(0)) == "ok-nonpos", "Result::Ok(v) if v > 0: zero falls to bare Ok")
+check(classify_result(Result::Ok(-1)) == "ok-nonpos", "Result::Ok(v) if v > 0: negative falls to bare Ok")
+check(classify_result(Result::Err("nope")) == "err", "Result::Err arm")
+
+// --- 7. Nested pattern + guard combo ---
+//
+// `Some(Some(v)) if v == 0 => ...` requires both the nested-pattern
+// rewrite (R32D) and the user guard. The rewrite merges the synthetic
+// tag-check chain with the user guard via r32d_and_merge.
+
+fn classify_nested(oo) {
+    let r = "default"
+    match oo {
+        OptOpt::SS(Option::Some(v)) if v == 0 => { r = "zero-inner" }
+        OptOpt::SS(Option::Some(v)) if v > 0 => { r = "positive-inner" }
+        OptOpt::SS(Option::Some(_)) => { r = "other-inner" }
+        OptOpt::SS(Option::None) => { r = "inner-none" }
+        OptOpt::NN => { r = "outer-none" }
+    }
+    return r
+}
+
+check(classify_nested(OptOpt::SS(Option::Some(0))) == "zero-inner", "nested + guard: SS(Some(0)) -> zero-inner")
+check(classify_nested(OptOpt::SS(Option::Some(5))) == "positive-inner", "nested + guard: SS(Some(5)) -> positive-inner")
+check(classify_nested(OptOpt::SS(Option::Some(-5))) == "other-inner", "nested + guard: SS(Some(-5)) falls to bare nested arm")
+check(classify_nested(OptOpt::SS(Option::None)) == "inner-none", "nested + guard: SS(None)")
+check(classify_nested(OptOpt::NN) == "outer-none", "nested + guard: NN")
+
+// --- 8. Exhaustiveness: a guarded-only Some arm is NOT exhaustive ---
+//
+// This match has arms for BOTH Option variants by name, but the Some
+// arm is guarded. Under R33C, guard'd arms don't contribute to
+// exhaustiveness coverage so this match should fire the non-exhaustive
+// warn. The runtime side: when no arm matches, the match yields 0.
+
+let exhaust_test_some = match Option::Some(-5) {
+    Option::Some(v) if v > 0 => v
+    Option::None => -1
+}
+check(exhaust_test_some == 0, "guarded-only Some + None: Some(-5) with guard false falls through to 0")
+
+let exhaust_test_none = match Option::None {
+    Option::Some(v) if v > 0 => v
+    Option::None => -1
+}
+check(exhaust_test_none == -1, "guarded-only Some + None: None still hits None arm")
+
+let exhaust_test_pos = match Option::Some(7) {
+    Option::Some(v) if v > 0 => v
+    Option::None => -1
+}
+check(exhaust_test_pos == 7, "guarded-only Some + None: Some(7) with guard true returns 7")
+
+// --- 9. Multiple guarded arms only, no fallback wildcard ---
+//
+// Both Some and None matching arms are present and unguarded -> match
+// is fully exhaustive, but the Some arm itself has a guard so the
+// "Some(v) if v > 0 => ..." doesn't cover Some(0) or Some(-1). The
+// unguarded Some(_) arm picks them up; None hits its dedicated arm.
+
+let triple_some_check_a = match Option::Some(99) {
+    Option::Some(v) if v > 0 => 1
+    Option::Some(_) => 2
+    Option::None => 3
+}
+check(triple_some_check_a == 1, "guarded Some + fallback Some + None: Some(99) -> guard taken")
+
+let triple_some_check_b = match Option::Some(-1) {
+    Option::Some(v) if v > 0 => 1
+    Option::Some(_) => 2
+    Option::None => 3
+}
+check(triple_some_check_b == 2, "guarded Some + fallback Some + None: Some(-1) -> bare Some")
+
+let triple_some_check_c = match Option::None {
+    Option::Some(v) if v > 0 => 1
+    Option::Some(_) => 2
+    Option::None => 3
+}
+check(triple_some_check_c == 3, "guarded Some + fallback Some + None: None -> None arm")
+
+// --- 10. Guard side-effects evaluate ONLY when pattern matches ---
+//
+// The guard expression must NOT fire on arms whose pattern doesn't
+// match. Use a global counter incremented from inside the guard to
+// observe the eval count.
+
+let guard_eval_count = 0
+
+fn incr_and_check(b) {
+    guard_eval_count = guard_eval_count + 1
+    return b
+}
+
+let g_a = match Option::Some(5) {
+    Option::Some(v) if incr_and_check(v > 0) == 1 => v
+    Option::Some(_) => -1
+    Option::None => -2
+}
+check(g_a == 5, "guard side-effect: Some(5) with guard returning true")
+check(guard_eval_count == 1, "guard side-effect: counter incremented exactly once")
+
+guard_eval_count = 0
+let g_b = match Option::None {
+    Option::Some(v) if incr_and_check(v > 0) == 1 => v
+    Option::Some(_) => -1
+    Option::None => -2
+}
+check(g_b == -2, "guard side-effect: None arm matched without guard eval")
+check(guard_eval_count == 0, "guard side-effect: guard NOT evaluated when pattern Some doesn't match None")
+
+// --- 11. Parser + codegen source pin ---
+
+fn assert_contains(haystack, needle, label) {
+    let i = 0
+    let hl = len(haystack)
+    let nl = len(needle)
+    let found = 0
+    while i + nl <= hl {
+        let j = 0
+        let ok = 1
+        while j < nl {
+            if haystack[i + j] != needle[j] { ok = 0  j = nl } else { j = j + 1 }
+        }
+        if ok == 1 { found = 1  i = hl } else { i = i + 1 }
+    }
+    check(found, label)
+    return 0
+}
+
+let par_src = read_file("src/compiler/parser.nova")
+assert_contains(par_src, "fn r33c_check_exhaustive_raw",
+    "parser.nova defines r33c_check_exhaustive_raw")
+assert_contains(par_src, "R33C: an if-let",
+    "parser.nova carries the R33C if-let commentary")
+
+let cg_src = read_file("src/compiler/codegen.nova")
+assert_contains(cg_src, "R33C: AST_DO_EXPR can land in statement position",
+    "codegen.nova carries the R33C statement-context do-expr branch")
+
+// --- Summary ---
+
+print("ok=")
+print_int(ok_count)
+print(" fail=")
+print_int(fail_count)
+println("")
+
+if fail_count == 0 {
+    println("R33C match-guards unit suite PASS")
+} else {
+    println("R33C match-guards unit suite FAIL")
+    exit(1)
+}
