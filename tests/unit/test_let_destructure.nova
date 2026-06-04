@@ -1,0 +1,295 @@
+// R32D: irrefutable `let` destructure for structs (R25A consumer) and
+// refutable `let` destructure for enum variants (NEW).
+//
+// `let Point { x, y } = p`        — binds local x, y to p.x, p.y. R25A
+//                                    shipped the parser-time lowering;
+//                                    R32D adds the top-level path (the
+//                                    inner-let names now register as
+//                                    globals via cg_collect_block_globals).
+//
+// `let Some(v) = opt`             — binds local v to opt[1] AFTER a
+//                                    runtime tag check. Multi-variant
+//                                    enum -> typecheck WARN noting the
+//                                    pattern is refutable. Mismatch ->
+//                                    "panic" message + exit(1).
+//
+// `let Box::Of(n) = box`          — single-variant enum: no WARN, no
+//                                    user-visible runtime cost beyond
+//                                    one tag-compare per binding site.
+//
+// Lives under tests/unit/ so the test runner glob doesn't pick this up
+// — invoke directly via `bin/nova tests/unit/test_let_destructure.nova`.
+
+struct Point {
+    x: int
+    y: int
+}
+
+struct Triple {
+    a: int
+    b: int
+    c: int
+}
+
+enum Option {
+    Some(int)
+    None
+}
+
+enum Result {
+    Ok(int)
+    Err(str)
+}
+
+enum Box {
+    Of(int)
+}
+
+enum Pair {
+    Both(int, int)
+}
+
+let ok_count = 0
+let fail_count = 0
+
+fn check(cond, label) {
+    if cond == 1 {
+        ok_count = ok_count + 1
+        print("OK ")
+        println(label)
+    } else {
+        fail_count = fail_count + 1
+        print("FAIL ")
+        println(label)
+    }
+    return 0
+}
+
+// --- 1. R25A struct destructure: full binding (both fields) ---
+
+let p1 = Point { x: 10, y: 20 }
+let Point { x, y } = p1
+check(x == 10, "R25A let Point{x,y}: x bound to 10")
+check(y == 20, "R25A let Point{x,y}: y bound to 20")
+
+// --- 2. Top-level destructure registers globals (R32D extension) ---
+
+let p2 = Point { x: -5, y: 99 }
+let Point { x: px2, y: py2 } = p2
+check(px2 == -5, "R32D top-level let Point{x:px2,y:py2} binds px2 = -5")
+check(py2 == 99, "R32D top-level let Point{x:px2,y:py2} binds py2 = 99")
+
+// --- 3. R25A partial destructure: bind only one field ---
+
+let p3 = Point { x: 7, y: 99 }
+let Point { x: px3 } = p3
+check(px3 == 7, "R25A partial let Point{x: px3}: px3 = 7")
+
+// --- 4. R25A struct destructure with shorthand AND explicit bind ---
+
+let p4 = Point { x: 100, y: 200 }
+let Point { x: px4 } = p4
+check(px4 == 100, "R25A shorthand mixed bind: px4 = 100")
+
+// --- 5. Triple-field struct destructure ---
+
+let t = Triple { a: 1, b: 2, c: 3 }
+let Triple { a: ta, b: tb, c: tc } = t
+check(ta == 1, "Triple destructure: a = 1")
+check(tb == 2, "Triple destructure: b = 2")
+check(tc == 3, "Triple destructure: c = 3")
+
+// --- 6. Triple shorthand ---
+
+let t2 = Triple { a: 4, b: 5, c: 6 }
+let Triple { a, b, c } = t2
+check(a == 4, "Triple shorthand destructure: a = 4")
+check(b == 5, "Triple shorthand destructure: b = 5")
+check(c == 6, "Triple shorthand destructure: c = 6")
+
+// --- 7. Inside a function: destructure local variable ---
+
+fn fn_destructure() {
+    let pl = Point { x: 11, y: 22 }
+    let Point { x, y } = pl
+    return x + y
+}
+
+check(fn_destructure() == 33, "fn_destructure: 11+22 = 33")
+
+// --- 8. Destructure of a value returned by a function ---
+
+fn make_point(a, b) {
+    return Point { x: a, y: b }
+}
+
+fn destructure_returned() {
+    let Point { x, y } = make_point(50, 60)
+    return x * 100 + y
+}
+
+check(destructure_returned() == 5060, "destructure of fn-returned struct: 50*100+60")
+
+// --- 9. R32D let-enum destructure: irrefutable single-variant Box ---
+
+let bx1 = Box::Of(7)
+let Box::Of(n) = bx1
+check(n == 7, "R32D let Box::Of(n) on single-variant: n = 7")
+
+let bx2 = Box::Of(-100)
+let Box::Of(n2) = bx2
+check(n2 == -100, "R32D let Box::Of(n2) negative: n2 = -100")
+
+// --- 10. R32D let-enum destructure: refutable multi-variant Some ---
+
+let opt_a = Option::Some(42)
+let Option::Some(va) = opt_a
+check(va == 42, "R32D let Option::Some(va) refutable, matches: va = 42")
+
+let opt_b = Option::Some(0)
+let Option::Some(vb) = opt_b
+check(vb == 0, "R32D let Option::Some(vb) zero payload: vb = 0")
+
+let opt_c = Option::Some(-1)
+let Option::Some(vc) = opt_c
+check(vc == -1, "R32D let Option::Some(vc) negative: vc = -1")
+
+// --- 11. R32D let-enum destructure: Result::Ok happy path ---
+
+let rok = Result::Ok(99)
+let Result::Ok(rv) = rok
+check(rv == 99, "R32D let Result::Ok(rv) on Ok: rv = 99")
+
+// --- 12. R32D let-enum destructure: multi-arg variant ---
+
+let pp = Pair::Both(3, 5)
+let Pair::Both(fp1, fp2) = pp
+check(fp1 == 3, "R32D let Pair::Both(fp1, fp2): fp1 = 3")
+check(fp2 == 5, "R32D let Pair::Both(fp1, fp2): fp2 = 5")
+
+// --- 13. R32D let-enum destructure inside a function ---
+
+fn fn_enum_destructure() {
+    let o = Option::Some(123)
+    let Option::Some(x) = o
+    return x
+}
+
+check(fn_enum_destructure() == 123, "fn-scope let Option::Some(x) = o: x = 123")
+
+// --- 14. R32D let-enum destructure: wildcard binder discards payload ---
+
+let opt_w = Option::Some(999)
+let Option::Some(_) = opt_w
+check(1 == 1, "R32D let Option::Some(_) compiles + runs (no panic on Some)")
+
+// --- 15. R32D struct destructure: re-bind to different names ---
+
+let p_5 = Point { x: 1, y: 2 }
+let Point { x: nx, y: ny } = p_5
+check(nx == 1, "R25A let Point { x: nx, y: ny }: nx = 1")
+check(ny == 2, "R25A let Point { x: nx, y: ny }: ny = 2")
+
+// --- 16. R32D destructure use in subsequent expression ---
+
+fn use_destructured() {
+    let p = Point { x: 13, y: 17 }
+    let Point { x, y } = p
+    let sum = x + y
+    let prod = x * y
+    return sum + prod
+}
+
+check(use_destructured() == 251, "use_destructured: (13+17)+(13*17) = 30+221 = 251")
+
+// --- 17. Sequential let-destructures don't interfere ---
+
+fn sequential_destructures() {
+    let pa = Point { x: 1, y: 2 }
+    let Point { x: ax, y: ay } = pa
+    let pb = Point { x: 10, y: 20 }
+    let Point { x: bx, y: by } = pb
+    return ax + ay + bx + by
+}
+
+check(sequential_destructures() == 33, "sequential destructures: 1+2+10+20 = 33")
+
+// --- 18. R32D mix: enum destructure followed by struct destructure ---
+
+fn mix_destructure() {
+    let bx = Box::Of(100)
+    let Box::Of(bn) = bx
+    let pt = Point { x: 5, y: 6 }
+    let Point { x, y } = pt
+    return bn + x + y
+}
+
+check(mix_destructure() == 111, "mix enum+struct destructure: 100+5+6 = 111")
+
+// --- 19. R32D struct destructure inside a struct field ---
+
+struct Container {
+    inner: int
+}
+
+fn nested_struct() {
+    let c = Container { inner: 77 }
+    let Container { inner: ix } = c
+    return ix
+}
+
+check(nested_struct() == 77, "nested_struct: Container { inner: ix } -> ix = 77")
+
+// --- 20. R32D source pin: parser carries the new helpers ---
+
+fn assert_contains(haystack, needle, label) {
+    let i = 0
+    let hl = len(haystack)
+    let nl = len(needle)
+    let found = 0
+    while i + nl <= hl {
+        let j = 0
+        let ok = 1
+        while j < nl {
+            if haystack[i + j] != needle[j] { ok = 0  j = nl } else { j = j + 1 }
+        }
+        if ok == 1 { found = 1  i = hl } else { i = i + 1 }
+    }
+    check(found, label)
+    return 0
+}
+
+let par_src = read_file("src/compiler/parser.nova")
+assert_contains(par_src, "fn parse_struct_let_destructure",
+    "parser.nova retains R25A parse_struct_let_destructure")
+assert_contains(par_src, "fn parse_let_enum_destructure",
+    "parser.nova adds R32D parse_let_enum_destructure")
+assert_contains(par_src, "fn par_lookup_variant_count",
+    "parser.nova adds R32D par_lookup_variant_count")
+assert_contains(par_src, "fn par_lookup_variant_arity",
+    "parser.nova adds R32D par_lookup_variant_arity")
+assert_contains(par_src, "warning: let destructure on ",
+    "parser.nova carries the R32D let-destructure refutability WARN prefix")
+assert_contains(par_src, "panic: let destructure: expected ",
+    "parser.nova synthesises the runtime panic message")
+
+let cg_src = read_file("src/compiler/codegen.nova")
+assert_contains(cg_src, "fn cg_collect_block_globals",
+    "codegen.nova exposes cg_collect_block_globals for top-level destructure")
+assert_contains(cg_src, "top-level AST_BLOCK (struct / enum destructure",
+    "codegen.nova wires top-level AST_BLOCK global registration on warm path")
+
+// --- Summary ---
+
+print("ok=")
+print_int(ok_count)
+print(" fail=")
+print_int(fail_count)
+println("")
+
+if fail_count == 0 {
+    println("R32D let-destructure unit suite PASS")
+} else {
+    println("R32D let-destructure unit suite FAIL")
+    exit(1)
+}

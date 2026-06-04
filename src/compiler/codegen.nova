@@ -606,6 +606,34 @@ fn add_global(name) {
     cg_global_count = cg_global_count + 1
 }
 
+// R32D: recurse into a top-level AST_BLOCK to register its inner
+// AST_LET_STMT names as globals. Used when the parser lowers a top-level
+// destructure (struct or enum) into a block of plain lets. We don't
+// recurse into nested AST_BLOCK structures: top-level destructure only
+// ever produces a flat list of lets in a single block, so a shallow
+// walk suffices and avoids accidentally hoisting deeply nested let
+// names (inside if/while bodies etc.) into globals.
+fn cg_collect_block_globals(block_nd) {
+    if block_nd == 0 { return 0 }
+    if type_of(block_nd) != 3 { return 0 }
+    let stmts = block_nd[1]
+    if stmts == 0 { return 0 }
+    if type_of(stmts) != 3 { return 0 }
+    let i = 0
+    while i < len(stmts) {
+        let s = stmts[i]
+        if s != 0 {
+            if type_of(s) == 3 {
+                if ast_tag(s) == AST_LET_STMT {
+                    add_global(s[1])
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 fn is_global(name) {
     let i = 0
     while i < cg_global_count {
@@ -7425,6 +7453,11 @@ fn arm64_gen_program(program) {
         if ast_tag(d) == AST_LET_STMT {
             add_global(d[1])
         }
+        // R32D: top-level AST_BLOCK from parse_let's struct / enum
+        // destructure lowering also registers its inner-let names.
+        if ast_tag(d) == AST_BLOCK {
+            cg_collect_block_globals(d)
+        }
         i = i + 1
     }
 
@@ -9082,6 +9115,10 @@ fn winarm64_gen_program(program) {
         if ast_tag(d) == AST_LET_STMT {
             add_global(d[1])
         }
+        // R32D: top-level AST_BLOCK (struct / enum destructure).
+        if ast_tag(d) == AST_BLOCK {
+            cg_collect_block_globals(d)
+        }
         i = i + 1
     }
 
@@ -9642,11 +9679,22 @@ fn gen_program(program) {
     }
 
     // Collect globals (top-level let declarations)
+    //
+    // R32D: also recurse into top-level AST_BLOCK so the let stmts that
+    // R25A (struct destructure) and R32D (let-enum-destructure) lower
+    // into a `{ let tmp = rhs; let x = tmp.x; let y = tmp.y; ... }`
+    // shape register their inner-let names as globals at the top level.
+    // Without this, accesses like `print_int(x)` after the destructure
+    // would fall through to an unreserved stack slot. The WASM codegen
+    // already wires this path via wasm_collect_locals.
     i = 0
     while i < len(decls) {
         let d = decls[i]
         if ast_tag(d) == AST_LET_STMT {
             add_global(d[1])
+        }
+        if ast_tag(d) == AST_BLOCK {
+            cg_collect_block_globals(d)
         }
         i = i + 1
     }
@@ -14359,6 +14407,10 @@ fn wasm_gen_program(program) {
         let d = decls[i]
         if ast_tag(d) == AST_LET_STMT {
             add_global(d[1])
+        }
+        // R32D: top-level AST_BLOCK (struct / enum destructure lowering).
+        if ast_tag(d) == AST_BLOCK {
+            cg_collect_block_globals(d)
         }
         i = i + 1
     }

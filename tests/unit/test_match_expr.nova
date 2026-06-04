@@ -367,6 +367,192 @@ assert_contains(cg_src, "if match_nd[3] == 1 { return 0 }",
 assert_contains(cg_src, "R31D: mark the match node as already-warned",
     "codegen.nova mark-visited comment block")
 
+// --- R32D extension: nested variant patterns in match arms ---
+//
+// R32D adds the AST_NESTED_VARIANT_PATTERN node + parse-time lowering
+// so a match arm can recursively destructure variant payloads. The
+// existing single-level pattern path (R17A / R31D) is unchanged when
+// every payload slot is a plain binder or `_`; the wrapper-rewrite
+// fires ONLY when at least one slot is itself a sub-pattern. This keeps
+// the 49 R31D assertions above byte-identical.
+//
+// Coverage: nested Option<Option<int>>, mixed enum-in-Result, struct
+// inside a variant payload, wildcards at any depth, deep nesting,
+// shadowing across rewrite-introduced temporaries, exhaustive vs
+// non-exhaustive nested arms.
+
+enum OptOpt {
+    SS(Option)
+    NN
+}
+
+fn nested_some(o) {
+    return match o {
+        OptOpt::SS(Option::Some(v)) => v
+        OptOpt::SS(Option::None) => 0
+        OptOpt::NN => -1
+    }
+}
+
+check(nested_some(OptOpt::SS(Option::Some(7))) == 7, "R32D nested SS(Some(7)) -> 7")
+check(nested_some(OptOpt::SS(Option::Some(0))) == 0, "R32D nested SS(Some(0)) -> 0 (zero payload preserved)")
+check(nested_some(OptOpt::SS(Option::Some(-42))) == -42, "R32D nested SS(Some(-42)) -> -42 (negative inner payload)")
+check(nested_some(OptOpt::SS(Option::None)) == 0, "R32D nested SS(None) -> 0 (inner None arm)")
+check(nested_some(OptOpt::NN) == -1, "R32D nested NN -> -1 (outer arm)")
+
+// Nested wildcard at inner-most position: still matches but discards.
+fn nested_discard(o) {
+    return match o {
+        OptOpt::SS(Option::Some(_)) => 1
+        OptOpt::SS(Option::None) => 2
+        OptOpt::NN => 3
+    }
+}
+
+check(nested_discard(OptOpt::SS(Option::Some(99))) == 1, "R32D nested SS(Some(_)) discards inner payload")
+check(nested_discard(OptOpt::SS(Option::None)) == 2, "R32D nested SS(None) -> 2")
+check(nested_discard(OptOpt::NN) == 3, "R32D nested NN -> 3")
+
+// --- R32D mix-of-enum-and-struct nesting ---
+
+struct R32DPoint {
+    x: int
+    y: int
+}
+
+enum R32DPResult {
+    POk(R32DPoint)
+    PErr(str)
+}
+
+fn r32d_sum_or_err(r) {
+    return match r {
+        R32DPResult::POk(R32DPoint { x, y }) => x + y
+        R32DPResult::PErr(_) => -1
+    }
+}
+
+let r32d_p1 = R32DPoint { x: 3, y: 4 }
+check(r32d_sum_or_err(R32DPResult::POk(r32d_p1)) == 7, "R32D POk(Point{x,y}) -> x+y = 7")
+let r32d_p2 = R32DPoint { x: -1, y: -2 }
+check(r32d_sum_or_err(R32DPResult::POk(r32d_p2)) == -3, "R32D POk(Point{-1,-2}) -> -3")
+let r32d_p3 = R32DPoint { x: 100, y: 0 }
+check(r32d_sum_or_err(R32DPResult::POk(r32d_p3)) == 100, "R32D POk(Point{100,0}) -> 100")
+check(r32d_sum_or_err(R32DPResult::PErr("bad")) == -1, "R32D PErr arm matched")
+
+// --- R32D deeper nesting: 3-level Option<Option<Option<int>>> ---
+//
+// Real triple-Option needs the enum payload to carry the same enum type
+// (recursive) — Nova's enum payload uses generic positional shapes so
+// we model it with a chain of distinct enums for clarity.
+
+enum L3 {
+    L3S(L2)
+    L3N
+}
+
+enum L2 {
+    L2S(Option)
+    L2N
+}
+
+fn deep_unwrap(l) {
+    return match l {
+        L3::L3S(L2::L2S(Option::Some(v))) => v
+        L3::L3S(L2::L2S(Option::None)) => 100
+        L3::L3S(L2::L2N) => 200
+        L3::L3N => 300
+    }
+}
+
+check(deep_unwrap(L3::L3S(L2::L2S(Option::Some(11)))) == 11, "R32D 3-level deep: full Some path -> 11")
+check(deep_unwrap(L3::L3S(L2::L2S(Option::None))) == 100, "R32D 3-level deep: inner None -> 100")
+check(deep_unwrap(L3::L3S(L2::L2N)) == 200, "R32D 3-level deep: mid N -> 200")
+check(deep_unwrap(L3::L3N) == 300, "R32D 3-level deep: outer N -> 300")
+
+// --- R32D nested pattern's binder is visible only in arm body ---
+
+fn r32d_nested_arith(o) {
+    return match o {
+        OptOpt::SS(Option::Some(v)) => v + v
+        OptOpt::SS(Option::None) => 7
+        OptOpt::NN => -7
+    }
+}
+
+check(r32d_nested_arith(OptOpt::SS(Option::Some(10))) == 20, "R32D nested binder usable in arithmetic: 10+10=20")
+check(r32d_nested_arith(OptOpt::SS(Option::Some(0))) == 0, "R32D nested binder 0+0 = 0")
+
+// --- R32D match-as-expression with nested patterns ---
+
+let r32d_e1 = OptOpt::SS(Option::Some(50))
+let r32d_lv = match r32d_e1 {
+    OptOpt::SS(Option::Some(v)) => v
+    OptOpt::SS(Option::None) => 0
+    OptOpt::NN => -1
+}
+check(r32d_lv == 50, "R32D let lv = match nested -> 50")
+
+// --- R32D struct-in-variant binder reuse: bindings live in the
+// function-level frame (Nova lacks lexical block scoping for `let`),
+// so a binder named `x` overwrites any prior `x`. The test pins the
+// observed semantic so a future refactor that adds block scoping
+// breaks the test rather than silently changing user-observable
+// behaviour.
+
+fn r32d_reuse_test(r) {
+    let outer = 999
+    let mr = match r {
+        R32DPResult::POk(R32DPoint { x, y }) => x + y
+        R32DPResult::PErr(_) => -1
+    }
+    return mr + outer
+}
+
+let r32d_sp = R32DPoint { x: 1, y: 2 }
+check(r32d_reuse_test(R32DPResult::POk(r32d_sp)) == 1002, "R32D struct-in-variant: 3 + outer 999 = 1002")
+check(r32d_reuse_test(R32DPResult::PErr("e")) == 998, "R32D struct-in-variant: PErr -> -1 + 999 = 998")
+
+// --- R32D wildcard arm coexists with nested arms ---
+
+fn r32d_with_wc(o) {
+    return match o {
+        OptOpt::SS(Option::Some(v)) => v * 100
+        _ => -1
+    }
+}
+
+check(r32d_with_wc(OptOpt::SS(Option::Some(3))) == 300, "R32D nested + wildcard: Some(3) * 100 = 300")
+check(r32d_with_wc(OptOpt::SS(Option::None)) == -1, "R32D nested + wildcard: None falls through to _")
+check(r32d_with_wc(OptOpt::NN) == -1, "R32D nested + wildcard: outer N falls through to _")
+
+// --- R32D nested-pattern source pin: parser must define the new
+// AST node + lowering helpers. A future refactor that drops them
+// breaks this test loudly instead of silently regressing the feature.
+
+assert_contains(par_src, "AST_NESTED_VARIANT_PATTERN",
+    "parser.nova exposes AST_NESTED_VARIANT_PATTERN constant")
+assert_contains(par_src, "fn lower_nested_variant_match_arm",
+    "parser.nova defines lower_nested_variant_match_arm")
+assert_contains(par_src, "fn parse_match_sub_pattern",
+    "parser.nova defines parse_match_sub_pattern")
+assert_contains(par_src, "fn r32d_lower_sub_pattern",
+    "parser.nova defines r32d_lower_sub_pattern recursive lowering")
+assert_contains(par_src, "fn par_lookup_variant_index",
+    "parser.nova defines par_lookup_variant_index for parse-time tag resolution")
+assert_contains(par_src, "fn parse_let_enum_destructure",
+    "parser.nova defines parse_let_enum_destructure")
+assert_contains(par_src, "warning: let destructure on ",
+    "parser.nova carries the let-destructure refutability WARN prefix")
+assert_contains(par_src, "fn r32d_tc_check_pattern",
+    "parser.nova defines r32d_tc_check_pattern for nested-pattern arity checks")
+
+let ast_src = read_file("src/compiler/ast.nova")
+assert_contains(ast_src, "AST_NESTED_VARIANT_PATTERN = 69",
+    "ast.nova reserves tag 69 for AST_NESTED_VARIANT_PATTERN")
+assert_contains(ast_src, "fn ast_nested_variant_pattern",
+    "ast.nova defines ast_nested_variant_pattern constructor")
+
 // --- Summary ---
 
 print("ok=")
@@ -376,8 +562,8 @@ print_int(fail_count)
 println("")
 
 if fail_count == 0 {
-    println("R31D match-expr unit suite PASS")
+    println("R31D+R32D match-expr unit suite PASS")
 } else {
-    println("R31D match-expr unit suite FAIL")
+    println("R31D+R32D match-expr unit suite FAIL")
     exit(1)
 }

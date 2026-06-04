@@ -1,5 +1,50 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R32D — parser+codegen: nested match patterns + `let` destructure for enums and structs
+
+**Status: complete** — Pattern grammar gains two new shapes:
+
+  - **Nested variant patterns in match arms.** `match outer { Some(Some(v)) => v, Some(None) => 0, None => -1 }` now parses, typechecks, and lowers correctly. Mixed enum-with-struct nesting (`match res { Ok(Point { x, y }) => x + y, Err(_) => -1 }`) works too. The parser emits a new `AST_NESTED_VARIANT_PATTERN` node (tag 69) when at least one payload slot is itself a sub-pattern; single-level patterns continue to emit `AST_ENUM_PATTERN` and flow through R31D's tag-compare + binder-bind path byte-for-byte. R31D's 49 assertions stay green.
+
+  - **`let`-binding enum destructure.** `let Option::Some(v) = opt` lowers to a block: cache the RHS, emit a runtime tag check (`println` + `exit(1)` on mismatch), bind each payload slot. Multi-variant enums emit a parse-time `warning: let destructure on E is refutable (multi-variant enum; runtime panic if scrutinee is not V)` line; single-variant enums (`enum Box { Of(int) }`) compile silently. Top-level `let Point { x, y } = p` (the R25A struct path) now correctly registers `x` and `y` as globals via a new `cg_collect_block_globals` helper — previously broken because the parser-emitted `AST_BLOCK` shape wasn't recognised at top-level. The fix wires into the x86-64, ARM64, Windows ARM64, and WASM codepaths.
+
+### Grammar extension
+
+```
+pattern := wildcard | enum_variant_pattern | struct_pattern
+enum_variant_pattern := ident "::" ident ("(" pattern ("," pattern)* ")")?
+struct_pattern := ident "{" field_pattern ("," field_pattern)* "}"
+field_pattern := ident (":" pattern)?
+```
+
+Patterns nest: a variant payload slot can be another variant pattern, a struct pattern, a wildcard `_`, or a plain binder. Struct-pattern field shorthand `{ x }` desugars to `{ x: x }`.
+
+### How the nested-pattern rewrite works
+
+Inside `parse_match`, when a payload slot is detected as a sub-pattern (not a plain binder), the arm is rewritten into a guarded wildcard. The cached scrutinee `_struct_match_N = expr` is then matched arm-by-arm with a guard chain `tmp[0] == outer_tag && tmp[1][0] == inner_tag && ...` and a `let binder = tmp[i][j]...` prep stmt for every binder anywhere in the nest. Codegen sees only the existing `AST_AND_EXPR`, `AST_DO_EXPR`, `AST_FIELD_ACCESS`, and `AST_INDEX_EXPR` shapes — no new codegen cases needed. Discriminant tags are resolved at parse time via a new `par_enum_tags` registry that `parse_enum` populates as it parses each enum declaration.
+
+### Tests
+
+  - `tests/unit/test_match_expr.nova` extended from 49 to 83 assertions (R31D's 49 preserved byte-identical; 34 new for nested patterns: Option-of-Option, struct-in-variant, 3-level deep nesting, wildcards at any depth, match-as-expression with nested patterns, struct-in-variant binder reuse, wildcard arm coexisting with nested arms, source-pin assertions for parser/ast helpers).
+  - `tests/unit/test_let_destructure.nova` (NEW, 38 assertions): R25A struct destructure (full binding, top-level globals registration, partial destructure, triple-field struct, function-local destructure, destructure of fn-returned value), R32D let-enum destructure (irrefutable single-variant Box, refutable multi-variant Some, Result::Ok happy path, multi-arg variant Pair::Both, function-local enum destructure, wildcard binder discards payload), mix of enum + struct destructure, sequential destructures, source-pin assertions.
+  - Both invoke directly via `bin/nova tests/unit/test_*.nova` (under tests/unit/ so the user-test glob doesn't pick them up). Combined: **72 new assertions** (target was 40+).
+
+### Self-host
+
+`make self-host` shows stage2 == stage3 bit-identical. The R32D parser changes are purely additive (single-level patterns flow through the legacy codepath untouched), and the new `cg_collect_block_globals` helper only fires for top-level `AST_BLOCK` nodes (which the compiler source itself never produces at top level).
+
+### Files touched (within R32D's strict ownership window)
+
+  - `src/compiler/ast.nova` — added `AST_NESTED_VARIANT_PATTERN = 69` constant + `ast_nested_variant_pattern` ctor.
+  - `src/compiler/parser.nova` — extended `parse_match`'s enum-variant pattern parser to detect nested payloads via `parse_match_sub_pattern`; added `lower_nested_variant_match_arm`, `r32d_lower_sub_pattern`, `r32d_and_merge`, `r32d_make_enum_tag_int`, `r32d_attach_prep`, `r32d_tc_check_match_patterns`, `r32d_tc_check_pattern`. Added `parse_let_enum_destructure` for the `let Some(v) = opt` shape. Added `par_enum_tags` parser-time registry + `par_lookup_variant_index` / `par_lookup_variant_count` / `par_lookup_variant_arity` lookups. `parse_enum` now registers each enum into the table as it parses.
+  - `src/compiler/codegen.nova` — added `cg_collect_block_globals` helper; wired into the x86-64, ARM64, Windows ARM64, and WASM top-level global-collection loops so `let Point { x, y } = p` / `let Some(v) = opt` at top level correctly register inner-let names as globals.
+  - `tests/unit/test_match_expr.nova` — appended 34 new R32D assertions (R31D's 49 preserved byte-identical).
+  - `tests/unit/test_let_destructure.nova` — NEW file, 38 assertions.
+
+### Known caveat
+
+Generic-typed struct destructure (`let Container<T> { value } = c`) parses but the parser-time enum / variant lookups don't yet resolve type arguments, so the typecheck WARN's refutability heuristic may treat a single-variant parametric enum as multi-variant when the lookup races the parse order. The runtime behaviour is unaffected — the tag check fires either way.
+
 ## R32E — nova-lsp: textDocument/rename + prepareRename across workspace
 
 **Status: complete** — `tools/nova-lsp` now advertises

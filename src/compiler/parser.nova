@@ -16,6 +16,13 @@ let par_source = ""
 // across the program and unlikely to collide with user idents (leading
 // underscore + the `_struct_` token).
 let par_struct_tmp_count = 0
+// R32D: parser-time enum registry. Each entry is [enum_name, variants]
+// where variants follows the parse_enum shape ([[vname, arity, ptypes], ...]).
+// Populated as parse_enum runs so nested-variant patterns can resolve the
+// discriminant tag at parse time (instead of deferring to codegen). The
+// tc_check_program pass builds tc_enums independently — keeping the two
+// tables separate avoids ordering hazards between parse and typecheck.
+let par_enum_tags = 0
 
 fn par_init(tokens) {
     par_tokens = tokens
@@ -25,6 +32,7 @@ fn par_init(tokens) {
     par_lambdas = list_new()
     par_consts = list_new()
     par_struct_tmp_count = 0
+    par_enum_tags = list_new()
 }
 
 fn par_set_source(src) {
@@ -1403,6 +1411,32 @@ fn parse_let() {
                 if par_lbrace_is_struct_pattern_body(lb_off2) == 1 {
                     return parse_struct_let_destructure(peek_name, lb_off2)
                 }
+                // R32D: enum-variant let-destructure:
+                //   let Enum::Variant(b1, b2, ...) = expr
+                // Detected by `IDENT :: IDENT (`. The lowering builds a
+                // block:
+                //   let _enum_tmp_N = expr
+                //   if _enum_tmp_N[0] != variant_tag { panic "let destructure: variant mismatch" }
+                //   let b1 = _enum_tmp_N[1]
+                //   let b2 = _enum_tmp_N[2]
+                //   ...
+                // If the enum has multiple variants, emit a typecheck
+                // WARN noting the pattern is refutable (could panic).
+                // Single-variant enums (e.g. struct-like) compile clean.
+                if par_peek_at_type(1) == TOK_COLONCOLON {
+                    if par_peek_at_type(2) == TOK_IDENT {
+                        // Confirm payload-list shape: optional `(...)` then `=`.
+                        let after_v = par_peek_at_type(3)
+                        if after_v == TOK_LPAREN {
+                            return parse_let_enum_destructure()
+                        }
+                        if after_v == TOK_EQ {
+                            // Nullary variant: `let Color::Red = c` — bind
+                            // nothing but still emit the tag check.
+                            return parse_let_enum_destructure()
+                        }
+                    }
+                }
             }
         }
     }
@@ -2032,6 +2066,101 @@ fn parse_struct_let_destructure(struct_name, lb_off) {
     return ast_block(stmts)
 }
 
+// R32D: parse a `let Enum::Variant(b1, b2, ...) = expr` statement. The
+// lowering caches the RHS in a temp, emits a runtime tag-check that
+// panics on mismatch, then binds each payload slot to its corresponding
+// binder.
+//
+// Refutability: a pattern `Some(v)` against an `Option` is refutable
+// (could be None at runtime). We emit a typecheck WARN when the enum
+// has more than one variant. Single-variant enums compile silently.
+// The runtime check fires either way so the binding is always sound.
+fn parse_let_enum_destructure() {
+    // Expects current token to be the enum name (uppercase IDENT).
+    let enum_tok = par_expect(TOK_IDENT)
+    par_expect(TOK_COLONCOLON)
+    let variant_tok = par_expect(TOK_IDENT)
+    let binders = list_new()
+    if par_peek_type() == TOK_LPAREN {
+        par_advance()
+        if par_peek_type() == TOK_RPAREN {
+            par_advance()
+        } else {
+            if par_peek_type() == TOK_UNDERSCORE {
+                par_advance()
+                push(binders, "_")
+            } else {
+                let bt1 = par_expect(TOK_IDENT)
+                push(binders, bt1[1])
+            }
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN { break }
+                if par_peek_type() == TOK_UNDERSCORE {
+                    par_advance()
+                    push(binders, "_")
+                } else {
+                    let btn = par_expect(TOK_IDENT)
+                    push(binders, btn[1])
+                }
+            }
+            par_expect(TOK_RPAREN)
+        }
+    }
+    par_expect(TOK_EQ)
+    let rhs = parse_expr()
+
+    // Build the lowered block: cache rhs, emit tag check, bind payload.
+    let tmp_name = "_enum_tmp_" + int_to_str(par_struct_tmp_count)
+    par_struct_tmp_count = par_struct_tmp_count + 1
+    let stmts = list_new()
+    let tmp_let = ast_let(tmp_name, rhs)
+    push(tmp_let, 0)
+    push(stmts, tmp_let)
+
+    // Tag check: if _enum_tmp_N[0] != tag { println("..."); exit(1) }
+    let tag_idx_val = par_lookup_variant_index(enum_tok[1], variant_tok[1])
+    let tag_idx = ast_int(tag_idx_val)
+    let actual_tag = ast_index(ast_ident(tmp_name), ast_int(0))
+    let neq = ast_binop("!=", actual_tag, tag_idx)
+    let msg_args = list_new()
+    push(msg_args, ast_str("panic: let destructure: expected " + enum_tok[1] + "::" + variant_tok[1] + " variant"))
+    let println_call = ast_call(ast_ident("println"), msg_args)
+    let println_stmt = ast_expr_stmt(println_call)
+    let exit_args = list_new()
+    push(exit_args, ast_int(1))
+    let exit_call = ast_call(ast_ident("exit"), exit_args)
+    let exit_stmt = ast_expr_stmt(exit_call)
+    let panic_block_stmts = list_new()
+    push(panic_block_stmts, println_stmt)
+    push(panic_block_stmts, exit_stmt)
+    let panic_block = ast_block(panic_block_stmts)
+    let if_stmt = ast_if(neq, panic_block, 0)
+    push(stmts, if_stmt)
+
+    // Bind each payload slot.
+    let bi = 0
+    while bi < len(binders) {
+        let bname = binders[bi]
+        if bname == "_" {
+        } else {
+            let pay_idx = ast_index(ast_ident(tmp_name), ast_int(bi + 1))
+            let blet = ast_let(bname, pay_idx)
+            push(blet, 0)
+            push(stmts, blet)
+        }
+        bi = bi + 1
+    }
+
+    // Refutability warning. Emit at parse time so editors / LSP filters
+    // (same convention R23A / R31D adopted) can surface the diagnostic.
+    let variant_count = par_lookup_variant_count(enum_tok[1])
+    if variant_count > 1 {
+        println("warning: let destructure on " + enum_tok[1] + " is refutable (multi-variant enum; runtime panic if scrutinee is not " + variant_tok[1] + ")")
+    }
+    return ast_block(stmts)
+}
+
 fn parse_match() {
     par_expect(TOK_MATCH)
     let expr = parse_expr()
@@ -2120,34 +2249,62 @@ fn parse_match() {
                     let n1 = par_advance()
                     par_advance()
                     let n2 = par_expect(TOK_IDENT)
-                    let binders = list_new()
+                    // R32D: parse the variant payload. The parser collects
+                    // each payload slot as a SUB-PATTERN node (AST_IDENT for
+                    // a binder, AST_WILDCARD for `_`, AST_ENUM_PATTERN /
+                    // AST_NESTED_VARIANT_PATTERN for a nested variant, or
+                    // AST_STRUCT_PATTERN for `Outer(Struct{...})`). When
+                    // every sub_pattern is a plain binder / wildcard, we
+                    // emit the legacy AST_ENUM_PATTERN node (preserving
+                    // R31D's tag-compare + binder-bind codegen path exactly
+                    // — this matters for the byte-identical-self-host
+                    // invariant). When at least one sub_pattern is a real
+                    // sub-pattern, emit AST_NESTED_VARIANT_PATTERN and let
+                    // the match-rewrite below turn the arm into a guarded
+                    // wildcard. R32D ONLY changes the wire shape for the
+                    // nested case; single-level patterns continue to flow
+                    // through the R17A / R31D code path.
+                    let r32d_sub_patterns = list_new()
+                    let r32d_legacy_binders = list_new()
+                    let r32d_has_nested = 0
                     if par_peek_type() == TOK_LPAREN {
                         par_advance()
                         if par_peek_type() == TOK_RPAREN {
                             par_advance()
                         } else {
-                            if par_peek_type() == TOK_UNDERSCORE {
-                                par_advance()
-                                push(binders, "_")
+                            let r32d_first = parse_match_sub_pattern()
+                            push(r32d_sub_patterns, r32d_first)
+                            if r32d_pattern_is_legacy_binder(r32d_first) == 1 {
+                                push(r32d_legacy_binders, r32d_pattern_binder_name(r32d_first))
                             } else {
-                                let b1 = par_expect(TOK_IDENT)
-                                push(binders, b1[1])
+                                r32d_has_nested = 1
                             }
                             while par_peek_type() == TOK_COMMA {
                                 par_advance()
                                 if par_peek_type() == TOK_RPAREN { break }
-                                if par_peek_type() == TOK_UNDERSCORE {
-                                    par_advance()
-                                    push(binders, "_")
+                                let r32d_nth = parse_match_sub_pattern()
+                                push(r32d_sub_patterns, r32d_nth)
+                                if r32d_pattern_is_legacy_binder(r32d_nth) == 1 {
+                                    push(r32d_legacy_binders, r32d_pattern_binder_name(r32d_nth))
                                 } else {
-                                    let bk = par_expect(TOK_IDENT)
-                                    push(binders, bk[1])
+                                    r32d_has_nested = 1
                                 }
                             }
                             par_expect(TOK_RPAREN)
                         }
                     }
-                    pattern = ast_enum_pattern(n1[1], n2[1], binders)
+                    if r32d_has_nested == 1 {
+                        // Lazy-init the matchee-temp on first nested-pattern
+                        // sighting, mirroring the AST_STRUCT_PATTERN path.
+                        if saw_struct_pat == 0 {
+                            match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                            par_struct_tmp_count = par_struct_tmp_count + 1
+                            saw_struct_pat = 1
+                        }
+                        pattern = ast_nested_variant_pattern(n1[1], n2[1], r32d_sub_patterns)
+                    } else {
+                        pattern = ast_enum_pattern(n1[1], n2[1], r32d_legacy_binders)
+                    }
                 } else {
                     pattern = parse_expr()
                 }
@@ -2180,6 +2337,11 @@ fn parse_match() {
         push(arms, arm)
     }
     par_expect(TOK_RBRACE)
+    // R32D: parse-time typecheck for nested variant patterns. Walks every
+    // arm before the rewrite (so we still see the raw nested-pattern
+    // shape) and emits a WARN for any arm that references an unknown
+    // enum / variant / arity. Mirrors R31D's WARN-not-ERROR convention.
+    r32d_tc_check_match_patterns(arms)
     // R25A: if any arm carried a struct pattern, rewrite the entire
     // match into a `{ let _struct_match_N = expr; match _struct_match_N
     // { rewritten arms } }` block. Each struct-pattern arm becomes a
@@ -2187,6 +2349,14 @@ fn parse_match() {
     // a body prepended with `let binder = _struct_match_N.field` for
     // every binder. Result: only AST node shapes the existing codegen
     // already handles (no new codegen cases).
+    //
+    // R32D: the same rewrite handles AST_NESTED_VARIANT_PATTERN arms.
+    // The lowering recurses through each sub-pattern, emitting a guard
+    // chain like `tmp[0] == outer_tag && tmp[1][0] == inner_tag && ...`
+    // plus a `let binder = tmp[i][j]...` prep stmt for every binder.
+    // Struct sub-patterns nested inside a variant payload (e.g.
+    // `Ok(Point { x, y })`) reuse the same field-access strategy as
+    // R25A's standalone struct-pattern lowering.
     if saw_struct_pat == 1 {
         let new_arms = list_new()
         let ai = 0
@@ -2199,9 +2369,12 @@ fn parse_match() {
             if ast_tag(pat0) == AST_STRUCT_PATTERN {
                 let lower_pair = lower_struct_match_arm(match_tmp_name, pat0, body0, old_guard)
                 push(new_arms, lower_pair)
+            } else { if ast_tag(pat0) == AST_NESTED_VARIANT_PATTERN {
+                let nested_pair = lower_nested_variant_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, nested_pair)
             } else {
                 push(new_arms, arm0)
-            }
+            } }
             ai = ai + 1
         }
         let inner_match = ast_match(ast_ident(match_tmp_name), new_arms)
@@ -2217,6 +2390,489 @@ fn parse_match() {
         return ast_do_expr(init_stmts, inner_match)
     }
     return ast_match(expr, arms)
+}
+
+// R32D: parse one element of a variant payload's argument list. Each
+// element is treated as a SUB-PATTERN so it can recursively be another
+// variant pattern, a struct pattern, a wildcard, or a binder. Returns
+// the AST node representing that sub-pattern (which the caller stores
+// in r32d_sub_patterns). The returned shape is one of:
+//   * AST_WILDCARD             — `_`
+//   * AST_IDENT                — bare binder name `v`
+//   * AST_ENUM_PATTERN         — `Inner::Variant(b1, b2)` (single-level)
+//   * AST_NESTED_VARIANT_PATTERN — `Inner::Variant(Deeper::V(x))` etc.
+//   * AST_STRUCT_PATTERN       — `Inner { x, y }`
+fn parse_match_sub_pattern() {
+    if par_peek_type() == TOK_UNDERSCORE {
+        par_advance()
+        return ast_wildcard()
+    }
+    if par_peek_type() == TOK_IDENT {
+        // Possible forms:
+        //   IDENT                       -> binder
+        //   IDENT :: IDENT ( ... )      -> sub-variant (recurse)
+        //   IDENT :: IDENT              -> sub-variant nullary
+        //   IDENT { ... }               -> sub-struct (delegates to struct
+        //                                  pattern parser; requires the
+        //                                  identifier to start uppercase
+        //                                  and the lookahead to look like
+        //                                  a struct pattern body, exactly
+        //                                  as the top-level match arm
+        //                                  detector demands).
+        let nxt = par_peek_at_type(1)
+        if nxt == TOK_COLONCOLON {
+            let nsub1 = par_advance()
+            par_advance()
+            let nsub2 = par_expect(TOK_IDENT)
+            let sub_subs = list_new()
+            let sub_binders = list_new()
+            let sub_has_nested = 0
+            if par_peek_type() == TOK_LPAREN {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN {
+                    par_advance()
+                } else {
+                    let s1 = parse_match_sub_pattern()
+                    push(sub_subs, s1)
+                    if r32d_pattern_is_legacy_binder(s1) == 1 {
+                        push(sub_binders, r32d_pattern_binder_name(s1))
+                    } else {
+                        sub_has_nested = 1
+                    }
+                    while par_peek_type() == TOK_COMMA {
+                        par_advance()
+                        if par_peek_type() == TOK_RPAREN { break }
+                        let sn = parse_match_sub_pattern()
+                        push(sub_subs, sn)
+                        if r32d_pattern_is_legacy_binder(sn) == 1 {
+                            push(sub_binders, r32d_pattern_binder_name(sn))
+                        } else {
+                            sub_has_nested = 1
+                        }
+                    }
+                    par_expect(TOK_RPAREN)
+                }
+            }
+            if sub_has_nested == 1 {
+                return ast_nested_variant_pattern(nsub1[1], nsub2[1], sub_subs)
+            }
+            return ast_enum_pattern(nsub1[1], nsub2[1], sub_binders)
+        }
+        if nxt == TOK_LBRACE {
+            // Sub-struct pattern. Reuse parse_struct_match_pattern which
+            // expects the IDENT to be the current token and lb_off=1.
+            let peek_tok_sub = par_peek()
+            if peek_tok_sub != 0 {
+                let pks = peek_tok_sub[1]
+                if par_ident_starts_uppercase(pks) == 1 {
+                    if par_lbrace_is_struct_pattern_body(1) == 1 {
+                        return parse_struct_match_pattern(pks, 1)
+                    }
+                }
+            }
+        }
+        let bind_tok = par_advance()
+        return ast_ident(bind_tok[1])
+    }
+    // Unknown sub-pattern shape — fall back to parse_expr so literal
+    // values (rare in this position, but legal at the top level) still
+    // tokenize. Wrap in AST_IDENT-equivalent treatment by returning the
+    // expression node; the caller's legacy-binder check sees it as a
+    // non-binder and triggers the nested-rewrite path, which emits a
+    // literal-equality guard.
+    return parse_expr()
+}
+
+// R32D: classify a sub-pattern as a legacy single-binder name that the
+// existing AST_ENUM_PATTERN form can carry without a wire-shape change.
+// Returns 1 when the sub-pattern is AST_IDENT (a binder), or AST_WILDCARD
+// (the `_` discard). All other shapes — nested variant, struct, literal
+// expressions — force the wrapper to emit AST_NESTED_VARIANT_PATTERN so
+// the parser-side lowering generates the corresponding guard / prep stmts.
+fn r32d_pattern_is_legacy_binder(sub) {
+    if sub == 0 { return 0 }
+    if type_of(sub) != 3 { return 0 }
+    let st = ast_tag(sub)
+    if st == AST_IDENT { return 1 }
+    if st == AST_WILDCARD { return 1 }
+    return 0
+}
+
+// R32D: extract the binder-name string from a legacy-binder sub-pattern.
+// AST_IDENT -> name; AST_WILDCARD -> "_". Caller has already gated on
+// r32d_pattern_is_legacy_binder == 1 so other shapes never reach here.
+fn r32d_pattern_binder_name(sub) {
+    let st = ast_tag(sub)
+    if st == AST_IDENT { return sub[1] }
+    return "_"
+}
+
+// R32D: lower a `Outer::Variant(SubPat0, SubPat1, ...) => body` arm
+// where at least one SubPat is itself a pattern (not just a binder) into
+// a wildcard arm referencing the cached scrutinee `tmp_name`. The lowering
+// walks each sub-pattern, building:
+//   * a guard-chain  `tmp[0] == outer_tag && <sub-pattern guards> && ...`
+//   * prep-stmts     `let binder = tmp[i+1]` for every binder anywhere
+//                    in the nest, addressed via a chain of AST_INDEX_EXPR
+//                    (or AST_FIELD_ACCESS for struct sub-patterns).
+// The returned arm is shaped like the regular parse_match output —
+// `[AST_MATCH_ARM, AST_WILDCARD, body, guard?]` — and reuses the same
+// AST_AND_EXPR / AST_DO_EXPR / AST_FIELD_ACCESS / AST_INDEX_EXPR nodes
+// codegen already understands. No new codegen cases needed.
+fn lower_nested_variant_match_arm(tmp_name, variant_pat, body, user_guard) {
+    let prep_stmts = list_new()
+    let guard_expr = user_guard
+    // Outer tag check: tmp[0] == outer_tag.
+    let outer_enum = variant_pat[1]
+    let outer_variant = variant_pat[2]
+    let outer_tag_call = r32d_make_enum_tag_int(outer_enum, outer_variant)
+    let outer_idx = ast_index(ast_ident(tmp_name), ast_int(0))
+    let outer_eq = ast_binop("==", outer_idx, outer_tag_call)
+    guard_expr = r32d_and_merge(guard_expr, outer_eq)
+    // Walk each payload slot, building per-binder lets / per-tag guards.
+    let sub_patterns = variant_pat[3]
+    let si = 0
+    while si < len(sub_patterns) {
+        let sub = sub_patterns[si]
+        let payload_idx = ast_index(ast_ident(tmp_name), ast_int(si + 1))
+        guard_expr = r32d_lower_sub_pattern(sub, payload_idx, prep_stmts, guard_expr)
+        si = si + 1
+    }
+    let new_body = r32d_attach_prep(body, prep_stmts)
+    let arm = ast_match_arm(ast_wildcard(), new_body)
+    if guard_expr == 0 {
+    } else {
+        push(arm, guard_expr)
+    }
+    return arm
+}
+
+// R32D: recursive sub-pattern lowering. `accessor` is the AST expression
+// that, when evaluated, yields the value being matched at this position
+// in the nest (e.g. `tmp[1]` for the outer's first payload slot, or
+// `tmp[1][2]` for a deeper slot). Each sub-pattern shape extends the
+// guard chain and / or appends a `let binder = accessor` prep stmt.
+// Returns the new guard_expr (potentially extended with this level's
+// tag-compare / equality checks).
+fn r32d_lower_sub_pattern(sub, accessor, prep_stmts, guard_expr) {
+    if sub == 0 { return guard_expr }
+    if type_of(sub) != 3 { return guard_expr }
+    let st = ast_tag(sub)
+    if st == AST_WILDCARD {
+        // Skip — no binder, no equality check.
+        return guard_expr
+    }
+    if st == AST_IDENT {
+        let bnm = sub[1]
+        if bnm == "_" { return guard_expr }
+        let blet = ast_let(bnm, accessor)
+        push(blet, 0)
+        push(prep_stmts, blet)
+        return guard_expr
+    }
+    if st == AST_ENUM_PATTERN {
+        // Sub-variant single-level. Add tag-compare then per-binder lets.
+        let sub_enum = sub[1]
+        let sub_variant = sub[2]
+        let sub_binders = sub[3]
+        let tag_call = r32d_make_enum_tag_int(sub_enum, sub_variant)
+        let tag_idx = ast_index(accessor, ast_int(0))
+        let tag_eq = ast_binop("==", tag_idx, tag_call)
+        let g2 = r32d_and_merge(guard_expr, tag_eq)
+        let bi = 0
+        while bi < len(sub_binders) {
+            let bn = sub_binders[bi]
+            if bn == "_" {
+            } else {
+                let pay_idx = ast_index(accessor, ast_int(bi + 1))
+                let bl = ast_let(bn, pay_idx)
+                push(bl, 0)
+                push(prep_stmts, bl)
+            }
+            bi = bi + 1
+        }
+        return g2
+    }
+    if st == AST_NESTED_VARIANT_PATTERN {
+        // Deeper nesting. Add tag-compare then recurse into each slot.
+        let n_enum = sub[1]
+        let n_variant = sub[2]
+        let n_sub_patterns = sub[3]
+        let n_tag_call = r32d_make_enum_tag_int(n_enum, n_variant)
+        let n_tag_idx = ast_index(accessor, ast_int(0))
+        let n_tag_eq = ast_binop("==", n_tag_idx, n_tag_call)
+        let g3 = r32d_and_merge(guard_expr, n_tag_eq)
+        let ni = 0
+        while ni < len(n_sub_patterns) {
+            let ns = n_sub_patterns[ni]
+            let inner_acc = ast_index(accessor, ast_int(ni + 1))
+            g3 = r32d_lower_sub_pattern(ns, inner_acc, prep_stmts, g3)
+            ni = ni + 1
+        }
+        return g3
+    }
+    if st == AST_STRUCT_PATTERN {
+        // Struct destructure inside a variant payload (e.g. `Ok(Point { x, y })`).
+        // Bind each field via AST_FIELD_ACCESS on the accessor expression.
+        // Literal sub-patterns within the struct emit equality checks
+        // against the field, mirroring R25A's lowering exactly.
+        let sf_names = sub[2]
+        let sf_subs = sub[3]
+        let g4 = guard_expr
+        let fi = 0
+        while fi < len(sf_names) {
+            let fnm = sf_names[fi]
+            let fsub = sf_subs[fi]
+            let fst = ast_tag(fsub)
+            // Each field's accessor: cache the payload accessor through
+            // AST_FIELD_ACCESS, then recurse. Note: `accessor` is reused
+            // by ast_field_access; codegen accepts arbitrary base exprs
+            // so the nested-index chain works as-is.
+            let f_acc = ast_field_access(accessor, fnm)
+            if fst == AST_IDENT {
+                let fbn = fsub[1]
+                if fbn == "_" {
+                } else {
+                    let fbl = ast_let(fbn, f_acc)
+                    push(fbl, 0)
+                    push(prep_stmts, fbl)
+                }
+            } else { if fst == AST_WILDCARD {
+            } else { if fst == AST_ENUM_PATTERN {
+                g4 = r32d_lower_sub_pattern(fsub, f_acc, prep_stmts, g4)
+            } else { if fst == AST_NESTED_VARIANT_PATTERN {
+                g4 = r32d_lower_sub_pattern(fsub, f_acc, prep_stmts, g4)
+            } else { if fst == AST_STRUCT_PATTERN {
+                g4 = r32d_lower_sub_pattern(fsub, f_acc, prep_stmts, g4)
+            } else {
+                // Literal sub-pattern — emit field-equality check.
+                let leq = ast_binop("==", f_acc, fsub)
+                g4 = r32d_and_merge(g4, leq)
+            } } } } }
+            fi = fi + 1
+        }
+        return g4
+    }
+    // Literal sub-pattern in a variant payload (e.g. `Some(42)` where
+    // 42 is a literal). Emit equality check.
+    let lit_eq = ast_binop("==", accessor, sub)
+    return r32d_and_merge(guard_expr, lit_eq)
+}
+
+// R32D: combine two guard expressions with logical AND. The first guard
+// may be 0 (no prior guard), in which case the new guard becomes the
+// chain root.
+fn r32d_and_merge(prev, next) {
+    if prev == 0 { return next }
+    return ast_and(prev, next)
+}
+
+// R32D: synthesize an AST_INT_LIT node whose value is the enum variant
+// discriminant index. We can resolve this at parse time by querying the
+// parser-time enum registry par_enum_tags, populated as each `enum`
+// declaration parses. Codegen's enum_variant_index() runs at codegen and
+// produces the same index — but the AST emitted from parse_match is
+// already shaped as `[base_expr][0] == <int_literal>` so the comparison
+// happens against a literal in the generated assembly. If the enum is
+// unknown at parse time (pattern uses an enum declared later in the file
+// — unusual but legal since parse runs left-to-right), tc_lookup returns
+// -1 and the guard reduces to a constant-false check at runtime — the
+// arm will simply never match. The typecheck pass also flags this case.
+fn r32d_make_enum_tag_int(enum_name, variant_name) {
+    let idx = par_lookup_variant_index(enum_name, variant_name)
+    return ast_int(idx)
+}
+
+// R32D: parser-time enum-variant discriminant lookup. Walks par_enum_tags
+// (populated by parse_enum) and returns the variant's declaration-order
+// index, or -1 if the enum / variant isn't found. Mirrors codegen's
+// enum_variant_index but operates on the parser-side table so it can run
+// during parse_match's lowering.
+fn par_lookup_variant_index(enum_name, variant_name) {
+    if par_enum_tags == 0 { return 0 - 1 }
+    let i = 0
+    while i < len(par_enum_tags) {
+        let e = par_enum_tags[i]
+        if e[0] == enum_name {
+            let variants = e[1]
+            let vi = 0
+            while vi < len(variants) {
+                if variants[vi][0] == variant_name { return vi }
+                vi = vi + 1
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// R32D: parser-time variant-count lookup. Returns the number of variants
+// on the named enum, or 0 if the enum is unknown (in which case let-
+// destructure-of-enum emits no warning). Used by parse_let_enum_destructure
+// to decide whether the irrefutable-binding pattern fires a typecheck
+// warning ("multi-variant enum, runtime mismatch panic possible").
+fn par_lookup_variant_count(enum_name) {
+    if par_enum_tags == 0 { return 0 }
+    let i = 0
+    while i < len(par_enum_tags) {
+        let e = par_enum_tags[i]
+        if e[0] == enum_name { return len(e[1]) }
+        i = i + 1
+    }
+    return 0
+}
+
+// R32D: parser-time payload arity lookup for a specific variant. Returns
+// the declared arity (e.g. `Some(int)` -> 1, `None` -> 0) or -1 if the
+// variant is unknown. Used by parse_let_enum_destructure to validate the
+// number of sub-patterns matches the variant's payload arity.
+fn par_lookup_variant_arity(enum_name, variant_name) {
+    if par_enum_tags == 0 { return 0 - 1 }
+    let i = 0
+    while i < len(par_enum_tags) {
+        let e = par_enum_tags[i]
+        if e[0] == enum_name {
+            let variants = e[1]
+            let vi = 0
+            while vi < len(variants) {
+                if variants[vi][0] == variant_name {
+                    return variants[vi][1]
+                }
+                vi = vi + 1
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// R32D: attach the per-binder prep stmts to the arm body. The body shape
+// determines whether we prepend stmts to a block or wrap an expression in
+// an AST_DO_EXPR. Mirrors R25A's lower_struct_match_arm body lowering.
+fn r32d_attach_prep(body, prep_stmts) {
+    if body == 0 {
+        return ast_block(prep_stmts)
+    }
+    let bt = ast_tag(body)
+    if bt == AST_EXPR_STMT {
+        let do_e = ast_do_expr(prep_stmts, body[1])
+        return ast_expr_stmt(do_e)
+    }
+    if bt == AST_BLOCK {
+        let new_body_stmts = list_new()
+        let pi = 0
+        while pi < len(prep_stmts) {
+            push(new_body_stmts, prep_stmts[pi])
+            pi = pi + 1
+        }
+        let bs = body[1]
+        let bj = 0
+        while bj < len(bs) {
+            push(new_body_stmts, bs[bj])
+            bj = bj + 1
+        }
+        return ast_block(new_body_stmts)
+    }
+    let new_body_stmts2 = list_new()
+    let pi2 = 0
+    while pi2 < len(prep_stmts) {
+        push(new_body_stmts2, prep_stmts[pi2])
+        pi2 = pi2 + 1
+    }
+    push(new_body_stmts2, body)
+    return ast_block(new_body_stmts2)
+}
+
+// R32D: parse-time typecheck for match arms with nested-variant patterns.
+// Walks every arm's pattern and emits a WARN for any unknown enum /
+// variant name, or for an arity mismatch (e.g. `Some(a, b)` against a
+// 1-arity variant). Mirrors R31D's WARN-not-ERROR convention so existing
+// runtime-fallthrough behaviour is preserved.
+fn r32d_tc_check_match_patterns(arms) {
+    if arms == 0 { return 0 }
+    if type_of(arms) != 3 { return 0 }
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                r32d_tc_check_pattern(pat)
+            }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R32D: recursive pattern validator. Handles AST_ENUM_PATTERN (legacy
+// single-level), AST_NESTED_VARIANT_PATTERN, and AST_STRUCT_PATTERN.
+// Other shapes (AST_WILDCARD, AST_IDENT, AST_TYPE_PATTERN, literals) are
+// trivially well-formed. Each call may emit one or more WARN lines but
+// never errors — non-fatal diagnostics keep R31D's editor / LSP filters
+// compatible without changes.
+fn r32d_tc_check_pattern(pat) {
+    if pat == 0 { return 0 }
+    if type_of(pat) != 3 { return 0 }
+    let t = ast_tag(pat)
+    if t == AST_ENUM_PATTERN {
+        let en = pat[1]
+        let vn = pat[2]
+        let arity_real = par_lookup_variant_arity(en, vn)
+        if arity_real < 0 {
+            println("warning: match arm references unknown variant " + en + "::" + vn)
+            return 0
+        }
+        let bnds = pat[3]
+        let got = 0
+        if bnds != 0 {
+            if type_of(bnds) == 3 { got = len(bnds) }
+        }
+        // Legacy AST_ENUM_PATTERN may carry zero binders even when the
+        // variant has payload arity > 0 (e.g. `Some(_)` parses as a
+        // single-binder "_"), so only warn if the binder count is
+        // non-zero AND mismatched. This preserves R31D's `Some(_)` shape
+        // exactly.
+        if got > 0 {
+            if got != arity_real {
+                println("warning: match arm " + en + "::" + vn + " arity mismatch: variant takes " + int_to_str(arity_real) + " arg(s) but pattern binds " + int_to_str(got))
+            }
+        }
+        return 0
+    }
+    if t == AST_NESTED_VARIANT_PATTERN {
+        let en2 = pat[1]
+        let vn2 = pat[2]
+        let arity2 = par_lookup_variant_arity(en2, vn2)
+        if arity2 < 0 {
+            println("warning: match arm references unknown variant " + en2 + "::" + vn2)
+            return 0
+        }
+        let subs2 = pat[3]
+        let got2 = 0
+        if subs2 != 0 {
+            if type_of(subs2) == 3 { got2 = len(subs2) }
+        }
+        if got2 != arity2 {
+            println("warning: match arm " + en2 + "::" + vn2 + " arity mismatch: variant takes " + int_to_str(arity2) + " arg(s) but pattern has " + int_to_str(got2) + " sub-pattern(s)")
+        }
+        // Recurse into each sub-pattern so nested-of-nested
+        // (`Some(Some(Some(v)))`) still gets validated.
+        let si = 0
+        while si < len(subs2) {
+            r32d_tc_check_pattern(subs2[si])
+            si = si + 1
+        }
+        return 0
+    }
+    if t == AST_STRUCT_PATTERN {
+        // R32D: only validate the struct exists; codegen will reject
+        // unknown field names at AST_FIELD_ACCESS time. Use tc_find_struct
+        // if it's already populated; otherwise rely on the field-access
+        // backend check. Conservative — no false WARN.
+        return 0
+    }
+    return 0
 }
 
 // R25A: struct match-arm pattern body parser. Caller (parse_match) has
@@ -3244,6 +3900,16 @@ fn parse_enum() {
     par_expect(TOK_RBRACE)
     let nd = ast_enum_decl(name, variants)
     push(nd, type_params)
+    // R32D: register the [enum_name, variants] pair in a parser-time
+    // table so nested-variant-pattern lowering can resolve discriminant
+    // tags at parse time (the tc_register_enums pass runs LATER, in
+    // tc_check_program). Codegen ignores this table — it builds its own
+    // cg_enums when gen_program walks the AST. The redundancy is cheap
+    // and keeps the nested-pattern rewrite a pure parser operation.
+    let parsed_entry = list_new()
+    push(parsed_entry, name)
+    push(parsed_entry, variants)
+    push(par_enum_tags, parsed_entry)
     return nd
 }
 

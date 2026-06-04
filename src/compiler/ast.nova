@@ -89,6 +89,27 @@ let AST_TRY_PROPAGATE = 67
 // where each AST_STRUCT_PATTERN arm becomes a guarded wildcard arm —
 // codegen never sees AST_STRUCT_PATTERN directly.
 let AST_STRUCT_PATTERN = 68
+// R32D: nested variant pattern (e.g. `Some(Some(v))` or `Ok(Point { x, y })`).
+// The single-level `Some(v)` form continues to emit AST_ENUM_PATTERN
+// (preserving R31D's tag-compare + binder-bind codegen path byte-for-byte).
+// AST_NESTED_VARIANT_PATTERN fires ONLY when at least one payload slot is
+// itself a sub-pattern (another AST_NESTED_VARIANT_PATTERN, AST_ENUM_PATTERN,
+// or AST_STRUCT_PATTERN). Wire shape:
+//   [tag, enum_name, variant_name, sub_patterns]
+// where each sub_patterns[i] is one of:
+//   * a string (legacy binder name carried through)  — never used in the
+//     wrapper-emitting path; included for shape uniformity if needed.
+//   * AST_IDENT (binder)
+//   * AST_WILDCARD (skip)
+//   * AST_ENUM_PATTERN (single-level inner variant pattern)
+//   * AST_NESTED_VARIANT_PATTERN (deeper nesting)
+//   * AST_STRUCT_PATTERN (struct destructure within the variant payload)
+// parse_match rewrites the entire match into a wildcard arm with a guard
+// chain `tmp[0] == outer_tag && tmp[1][0] == inner_tag && ...` plus a
+// `let v = tmp[1][...]` prep stmt for every binder. The wrapping AST_DO_EXPR
+// is reused from the AST_STRUCT_PATTERN codepath so codegen never sees a
+// new pattern shape.
+let AST_NESTED_VARIANT_PATTERN = 69
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -623,6 +644,22 @@ fn ast_enum_pattern(enum_name, variant_name, binders) {
     push(n, enum_name)
     push(n, variant_name)
     push(n, binders)
+    return n
+}
+
+// R32D: nested variant pattern. `sub_patterns` is a list where each entry
+// is itself a pattern node (AST_IDENT for a binder, AST_WILDCARD for `_`,
+// or AST_ENUM_PATTERN / AST_NESTED_VARIANT_PATTERN / AST_STRUCT_PATTERN
+// for a sub-pattern that recursively destructures the corresponding
+// payload slot). Lowered by parse_match into a wildcard arm with a guard
+// chain + per-binder prep `let` stmts referencing the cached scrutinee
+// temp; codegen never sees this node directly.
+fn ast_nested_variant_pattern(enum_name, variant_name, sub_patterns) {
+    let n = list_new()
+    push(n, AST_NESTED_VARIANT_PATTERN)
+    push(n, enum_name)
+    push(n, variant_name)
+    push(n, sub_patterns)
     return n
 }
 
