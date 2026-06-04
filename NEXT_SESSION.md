@@ -1,5 +1,36 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R29D — nova-lsp semantic-tokens follow-up (class + property + type-after-colon)
+
+**Status: complete** — nova-lsp's `textDocument/semanticTokens/full`
++ `/range` already shipped in R8E with declaration / readonly / static
+modifiers. R29D extends the legend with the two missing types called
+out by the LSP brief — `class` (slot 11) and `property` (slot 12) —
+and tightens the classifier so:
+
+  - `let x: Foo = ...` -> `Foo` classifies as `type` (declaration=False)
+    while `x` stays a `variable` with declaration=True.
+  - `Box<Foo>` -> `Foo` after `<` classifies as `type`.
+  - `Point { x: 1 }` -> `Point` before `{` classifies as `type`.
+  - `obj.field` -> `field` after `.` classifies as `property`.
+  - chained `a.b.c` -> both `b` and `c` classify as `property`.
+  - `list.push(1)` -> `push` stays `property` (the `.`-aware rule beats
+    the call-site rule on member names).
+
+Comment-line suppression, the hand-computed delta encoding, and the
+`range`-is-a-subset-of-`full` guarantee are now covered by 139 fresh
+assertions in `tests/test_semantic_tokens_r29d.py`. Coverage rate on
+`src/compiler/parser.nova` is 100 % of classifiable raw tokens
+(identifiers / strings / numbers / comments — i.e. everything except
+plain operators / punctuation, which the LSP intentionally elides to
+keep the wire payload small).
+
+The `semanticTokensProvider` legend now advertises `keyword`, `type`,
+`class`, `function`, `parameter`, `variable`, `property`, `namespace`,
+`string`, `number`, `comment`, `operator`, plus `constant` with
+modifiers `declaration`, `definition`, `readonly`, `static`,
+`deprecated`. Both `full` and `range` continue to advertise `true`.
+
 ## R28C — UDP syscalls (sendto/recvfrom/setsockopt) for NAT hole-punching
 
 **Status: complete** — NOVA now exposes the four datagram-socket

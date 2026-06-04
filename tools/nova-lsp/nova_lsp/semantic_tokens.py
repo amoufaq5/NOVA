@@ -62,6 +62,8 @@ TOKEN_TYPES: List[str] = [
     "operator",     # 8  - + - * / == etc (currently not emitted, reserved)
     "parameter",    # 9  - function parameters in their declaration position
     "constant",     # 10 - const X = ... + ALL_CAPS lets
+    "class",        # 11 - `struct` names + struct-literal head `Foo { ... }`
+    "property",     # 12 - field access after `.`, e.g. `obj.field`
 ]
 
 TOKEN_MODIFIERS: List[str] = [
@@ -85,6 +87,8 @@ TYPE_COMMENT = 7
 TYPE_OPERATOR = 8
 TYPE_PARAMETER = 9
 TYPE_CONSTANT = 10
+TYPE_CLASS = 11
+TYPE_PROPERTY = 12
 
 MOD_DECLARATION = 1 << 0
 MOD_DEFINITION = 1 << 1
@@ -484,6 +488,7 @@ class SemanticTokenizer:
 
                 prev_ident = _previous_ident(raws, i)
                 next_punct = _next_punct(raws, i)
+                prev_punct = _previous_punct(raws, i)
                 kind_kw = prev_ident.text if prev_ident else None
 
                 # Special-case `mut x` introduces a writeable variable
@@ -573,6 +578,53 @@ class SemanticTokenizer:
                         modifier_bits=MOD_DECLARATION | MOD_DEFINITION,
                     ))
                     local_variables.add(name)
+                    i += 1
+                    continue
+
+                # Field access: `obj.field` -> classify `field` as property.
+                # We check the immediately-preceding punctuation token; if
+                # it's a `.` we treat this ident as a property reference.
+                # This must run BEFORE the type / function / variable
+                # branches so member names don't accidentally land in
+                # `known_functions` or `known_types` (they share namespaces
+                # with top-level symbols in NOVA's flat module layout).
+                if prev_punct == ".":
+                    out.append(SemanticToken(
+                        line=tok.line,
+                        start_char=tok.col,
+                        length=tok.length,
+                        token_type=TYPE_PROPERTY,
+                    ))
+                    i += 1
+                    continue
+
+                # Type annotation slot: `let x: Foo = ...`, `fn f(x: Foo)`,
+                # `Box<Foo>`. Heuristic: a capitalised identifier (first
+                # char uppercase letter) preceded by `:` or `<` is most
+                # likely a type reference. We only apply the rule when the
+                # name actually looks like a type to limit false positives
+                # in dict-literal-ish contexts (`{key: value}`).
+                if prev_punct in (":", "<") and name and name[0].isupper():
+                    out.append(SemanticToken(
+                        line=tok.line,
+                        start_char=tok.col,
+                        length=tok.length,
+                        token_type=TYPE_TYPE,
+                    ))
+                    i += 1
+                    continue
+
+                # Struct-literal head: `Foo { ... }` — a capitalised
+                # identifier immediately followed by `{` is the type being
+                # constructed. We emit it as TYPE_TYPE so editors colour
+                # the constructor consistently with type annotations.
+                if next_punct == "{" and name and name[0].isupper():
+                    out.append(SemanticToken(
+                        line=tok.line,
+                        start_char=tok.col,
+                        length=tok.length,
+                        token_type=TYPE_TYPE,
+                    ))
                     i += 1
                     continue
 
@@ -750,6 +802,29 @@ def _next_punct(raws: List[_RawToken], idx: int) -> Optional[str]:
             j += 1
             continue
         # Hitting another token kind first means the punct check fails.
+        return None
+    return None
+
+
+def _previous_punct(raws: List[_RawToken], idx: int) -> Optional[str]:
+    """Return the punctuation character immediately preceding `raws[idx]`.
+
+    Unlike `_previous_ident`, this looks at the raw-token *right before*
+    the current one (skipping only comments), so `obj.field` -> `.` and
+    `let x: Foo` -> `:` for the `Foo` ident. We stop at any other ident
+    or non-punct token because we only care about the *immediate*
+    predecessor — `.x` and ` .x` both classify, but `.x + y` does not
+    classify `y` as a property.
+    """
+    j = idx - 1
+    while j >= 0:
+        t = raws[j]
+        if t.kind == "punct":
+            return t.text
+        if t.kind == "comment":
+            j -= 1
+            continue
+        # Any other token kind interrupts the immediate-predecessor chain.
         return None
     return None
 

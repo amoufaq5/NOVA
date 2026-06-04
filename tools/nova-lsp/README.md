@@ -23,7 +23,7 @@ for the install hook.
 | `textDocument/codeAction`           | yes (extract function via a dedicated `extract_function.py` analysis pipeline, **inline variable** via R25F's `inline_variable.py` that replaces every use of a `let x = expr` binding with the parenthesised `(expr)` and removes the let — refuses on reassignment + closure capture, warns on side-effecting RHS that would duplicate calls across uses, organize imports, sort fn declarations, plus a `quickfix` for R17A's exhaustiveness WARN that auto-adds stub arms for missing variants) |
 | `textDocument/definition`           | yes (intra-file + follows `import "..."` transitively) |
 | `workspace/symbol`                  | yes (fuzzy name search across every indexed `.nova` file) |
-| `textDocument/semanticTokens/full`  | yes (variable / function / type / namespace / keyword / string / number / comment / parameter / constant with declaration / readonly / static modifiers) |
+| `textDocument/semanticTokens/full`  | yes (variable / function / type / namespace / keyword / string / number / comment / parameter / constant / class / property with declaration / readonly / static / deprecated modifiers; R29D adds `class` + `property` token types, `obj.field` -> property, `let x: Foo` -> Foo is type, `Box<Foo>` -> Foo is type, `Point { ... }` -> Point is type) |
 | `textDocument/semanticTokens/range` | yes (same classifier, filtered to the requested line range) |
 | `textDocument/prepareCallHierarchy` | yes (resolves cursor to a `CallHierarchyItem` for a top-level `fn`; cross-file via imports + workspace index) |
 | `callHierarchy/incomingCalls`       | yes (every `name(` call site across the workspace, grouped by enclosing top-level fn) |
@@ -208,10 +208,13 @@ Semantic tokens (`textDocument/semanticTokens/full` + `/range`) drive
 rich syntax highlighting beyond TextMate regex scopes. Each identifier
 is classified into one of `variable` / `function` / `type` /
 `namespace` / `keyword` / `string` / `number` / `comment` /
-`parameter` / `constant`, plus a modifier bitmask of `declaration` /
-`definition` / `readonly` / `static` / `deprecated`. Editors use this
-to colour `let` bindings differently from `mut`, italicise types vs
-values, fade out deprecated symbols, and so on.
+`parameter` / `constant` / `class` / `property`, plus a modifier
+bitmask of `declaration` / `definition` / `readonly` / `static` /
+`deprecated`. Editors use this to colour `let` bindings differently
+from `mut`, italicise types vs values, fade out deprecated symbols,
+and so on. R29D added `class` + `property` to the legend so the
+classifier can split member-access (`obj.field`) and type-annotation
+slots (`let x: Foo`) out from generic `variable` references.
 
 Classification rules (in priority order):
 
@@ -225,6 +228,15 @@ Classification rules (in priority order):
   * `module NAME` -> `namespace + declaration`.
   * `import "..."` -> the string literal is classified as `namespace`
     so the editor can colour the path distinctively.
+  * Identifier preceded by `.` -> `property` (`obj.field`,
+    `list.push`, chained `a.b.c`). The rule wins over the call-site
+    rule so `list.push(1)` still classifies `push` as a property.
+  * Identifier preceded by `:` or `<` whose first character is upper
+    case -> `type` (`let x: Foo = ...`, `Box<Foo>`). The capitalised-
+    ident gate keeps dict-literal keys (`{key: value}`) from being
+    promoted to type references.
+  * Identifier followed by `{` whose first character is upper case ->
+    `type` (struct-literal head: `Point { x: 1 }`).
   * Identifier followed by `(` -> `function` (call site).
   * Identifier matching a known function / constant from the workspace
     symbol index (R8C) -> classified accordingly, even when there's no
@@ -440,6 +452,7 @@ python tools/nova-lsp/tests/definition_cross_file_smoke.py
 python tools/nova-lsp/tests/test_workspace_symbols.py
 python tools/nova-lsp/tests/test_rename_workspace.py
 python tools/nova-lsp/tests/test_semantic_tokens.py
+python tools/nova-lsp/tests/test_semantic_tokens_r29d.py
 python tools/nova-lsp/tests/test_hover_docs.py
 python tools/nova-lsp/tests/test_call_hierarchy.py
 python tools/nova-lsp/tests/test_inlay_hints.py
