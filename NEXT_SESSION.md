@@ -1,5 +1,210 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R28F — DAP sample-based profiler (custom-request extension)
+
+**Status: complete** — `nova-dap` now exposes a sample-based
+profiler through three custom DAP requests
+(`nova/profile/{start,stop,report}`). A DAP client can periodically
+sample the inferior's call stack while it runs and retrieve a
+flame-graph-shaped aggregate of where time is being spent. Less
+invasive than instrumentation (no code rewriting, no per-call
+overhead) and ideal for finding perf bottlenecks in production-shape
+binaries. The DAP capability count stays at **21** — these are
+custom requests under the standard DAP request channel, not new
+top-level capability flags (the spec explicitly permits ad-hoc
+extensions this way).
+
+### Custom-request surface
+
+  - **`nova/profile/start({frequency_hz})`** — starts a background
+    sampler. The frequency is clamped to [1, 1000] Hz; the default
+    is 100 Hz. Optional `threadId` argument routes the sampler at a
+    specific thread (otherwise sampling follows gdb's
+    currently-selected thread). Returns `{frequency_hz, started}`.
+    Fails cleanly with `success: false` if no inferior is launched.
+  - **`nova/profile/stop()`** — halts the sampler, joins the
+    background thread, and returns the aggregated flame-graph data:
+    `{samples: [{ts, frame_ids, thread_id}, ...], frames: {fid:
+    {function, file, line}}, total_samples, duration_s,
+    frequency_hz, drop_count}`. Idempotent — a stop() with no prior
+    start returns the empty aggregate.
+  - **`nova/profile/report({format})`** — re-formats the captured
+    samples in one of three shapes without halting the profile:
+    `"text"` (human-readable top-10 stack outline with sample
+    percentages), `"folded"` (Brendan-Gregg flamegraph.pl input —
+    one `frame1;frame2;... count` per line, outermost-first), or
+    `"json"` (full samples + frames table). Each format has its own
+    use case: text for quick inspection in the IDE's debug console,
+    folded for piping into `flamegraph.pl > out.svg`, JSON for
+    downstream tooling.
+
+### Sampling architecture
+
+gdb cannot walk the stack of a thread that's currently executing
+instructions — `-stack-list-frames` against a running thread
+returns `^error,msg="No registers."`. So each sample is actually a
+three-step cycle:
+
+  1. **`-exec-interrupt --all`** (or `--thread N` in non-stop mode)
+     — pause the inferior.
+  2. **`-stack-list-frames`** with a short retry loop (5 ms increments,
+     up to 8 attempts) so the call doesn't race the just-issued
+     interrupt — the stop record can take a millisecond to land.
+  3. **`-exec-continue --all`** — resume the inferior.
+
+This generates a flood of `*stopped` / `*running` async records at
+the profile rate (100/sec by default). To prevent the DAP client
+seeing them, the session carries a `profile_sampling` flag that
+the pausing-stack-fn flips on before the interrupt and clears
+after the continue; `_handle_stopped` and `_handle_running` check
+the flag and skip the otherwise-spammy `stopped` / `continued`
+event emission. Real DAP stops (e.g. a user-set breakpoint hit
+during profiling) still come through normally because they happen
+between sample cycles, when the flag is False.
+
+### Frame deduplication
+
+Two frames are considered identical if their `(function, file,
+line)` triple matches. Address is intentionally NOT part of the
+identity — gdb sometimes reports slightly different addresses for
+the same source line (different basic blocks of an inlined
+function), and we want those samples to aggregate together for the
+flame graph. File paths are reduced to basenames so frames from
+the same logical source still compare equal if gdb reports them
+with different working directories. The result: a profile with
+millions of samples but only ~dozens of unique frames still has a
+compact wire shape; the `samples` array carries only frame ids,
+and the `frames` table is the one-time mapping back to
+human-readable triples.
+
+### Folded format details
+
+Brendan Gregg's flamegraph.pl expects one stack per line, with
+frames separated by semicolons (OUTERMOST first — `main` on the
+left, the deepest call on the right) and a count after the last
+frame. Our `format_folded` flips gdb's innermost-first stack
+ordering and writes
+`"main (file:line);loop_body (file:line) 23"` style lines.
+Embedded semicolons in display strings (rare — would only happen
+in C++ template arguments) are replaced with `:` so the count
+parser doesn't get confused. Stacks are sorted by count
+descending so the heavy hitters are at the top of the output.
+
+### What landed
+
+**New module** `tools/nova-dap/nova_dap/profiler.py` (~550 lines):
+
+  - `Frame` (frozen dataclass) — typed `(function, file, line)`
+    triple with stable key + display() formatter.
+  - `Sample` (dataclass) — single stack snapshot: timestamp,
+    frame_ids list, optional thread_id.
+  - `Profiler` (dataclass with lock) — sampling state. Public
+    methods: `start(frequency_hz)`, `sample(stack_fn, thread_id)`
+    (synchronous, used by tests), `run_sampler(stack_fn,
+    thread_id)` (spawns the background thread), `stop()` (returns
+    the aggregate), `snapshot()` (mid-profile peek), `format(type)`.
+  - `normalise_frequency(value)` — validate + clamp to [1, 1000].
+  - `aggregate_stacks(snap)` — fold identical stacks into a count
+    map, flipping innermost-first to outermost-first.
+  - `format_text(snap)` / `format_folded(snap)` /
+    `format_json(snap)` — the three output formatters.
+  - `parse_stack_frames(fields)` — decode a gdb
+    `-stack-list-frames` reply into `[(function, file, line),
+    ...]`. Strips dirnames from file paths.
+  - `stack_fn_from_bridge(bridge)` — non-pausing adapter (only
+    useful when the caller already paused the inferior some
+    other way — kept for unit-test parity).
+  - `pausing_stack_fn(bridge, profile_flag, non_stop)` — the
+    production adapter that drives the interrupt-sample-resume
+    cycle, with an optional setter callback for the
+    `profile_sampling` flag on the session.
+  - `report_body(profiler, format)` — composes the
+    `nova/profile/report` response wrapping.
+
+**server.py changes:**
+
+  - `Session` gains `profiler: Profiler` and `profile_sampling:
+    bool` fields. The profiler is a fresh-per-session state;
+    sampling flag is mutated by the pausing-stack-fn driver to
+    suppress sample-cycle DAP events.
+  - `_handle_stopped` early-returns when `session.profile_sampling`
+    is True (except for `exited` records, which still get through
+    so the IDE notices a profile-target crash).
+  - `_handle_running` early-returns under the same flag — the
+    `*running` records the resume produces are also suppressed.
+  - **3 new handlers** `handle_profile_start`, `handle_profile_stop`,
+    `handle_profile_report` plus 3 new HANDLERS routes for
+    `nova/profile/start`, `nova/profile/stop`, `nova/profile/report`.
+  - Handler count: 22 -> 25. DAP capability count: 21 -> still 21.
+
+### Verification
+
+  - **101 unit assertions** in
+    `tools/nova-dap/tests/test_profiler.py` covering: Frame display
+    formats, frame key stability, frequency normalisation
+    (clamp + reject), Profiler start-resets-state, sample append +
+    interning, distinct call sites (same fn at different lines)
+    produce distinct frame ids, drop_count on empty / exception,
+    stop() snapshot shape, aggregate_stacks fold semantics,
+    folded format (Brendan Gregg shape, semicolon separator,
+    OUTERMOST-first order, count suffix), folded output
+    flamegraph.pl-parseable (regex check on every line), text
+    format header + top-N outline, JSON format valid + round-trip
+    via json.loads, format() rejects unknown formats with
+    ValueError, parse_stack_frames basic + missing fields +
+    dirname-stripping + empty-reply tolerance, stack_fn_from_bridge
+    no-op on None, report_body shape, late-sample-after-stop ignored.
+  - **Handler tests with a stub bridge:** start without bridge
+    fails cleanly, start with bridge installs the sampler, stop
+    returns the {samples, frames} body, stop idempotent when never
+    started, report text/folded format, report rejects unknown
+    format, HANDLERS routes the 3 nova/profile/* commands, DAP
+    capability count unchanged at 21.
+  - **End-to-end** against a tight-loop C fixture
+    (`/tmp/nova_dap_profile_fixture.c` — a `loop_body(n, acc)` fn
+    called 50,000 times in a busy_caller loop): launches the
+    binary, starts profiling at 100 Hz, sleeps 1.0s, stops
+    — captures **73 samples in 1 second** with **96% of them in
+    loop_body** (proves the sampler successfully observes the
+    intended hot path), and the folded format aggregates to **4
+    distinct stacks**.
+  - **Total: 120 assertions, all pass** (101 unit + 19 e2e).
+  - **Existing tests:** dap_smoke OK, dap_multi_thread OK,
+    test_evaluate OK (100 asserts), test_conditional_breakpoint
+    OK (54 asserts), test_data_breakpoints OK (131 asserts),
+    test_function_breakpoints OK (138 asserts),
+    test_instruction_stepping OK (149 asserts) — no regressions
+    from the new `profile_sampling` suppression flag.
+
+### Capability tally
+
+DAP capabilities: **21 -> 21**. The full table is unchanged: the
+profiler is an extension under DAP's custom-request channel
+(supported by the spec — any request the server doesn't recognise
+is normally rejected with `"unsupported command"`, but a server is
+free to recognise additional ones; capability flags are only
+required for built-in DAP features the IDE shells out to). VS Code
+and other DAP clients ignore unknown custom requests gracefully,
+so this addition is fully backward-compatible.
+
+(The HANDLERS table grew by 3 — `nova/profile/start`,
+`nova/profile/stop`, `nova/profile/report` — but those are
+ad-hoc extensions, not part of the DAP capability inventory.)
+
+### Files touched (R28F)
+
+  - NEW `tools/nova-dap/nova_dap/profiler.py` (~550 lines)
+  - `tools/nova-dap/nova_dap/server.py` — imports + Session fields
+    + 3 new request handlers + 3 HANDLERS routes + 2-line guards
+    in `_handle_stopped` / `_handle_running` for the
+    profile-sampling suppression
+  - NEW `tools/nova-dap/tests/test_profiler.py` (~1020 lines, 101
+    unit + 19 e2e assertions)
+  - `tools/nova-dap/README.md` — custom-request docs, layout
+    table entry, sample run output
+  - `README.md` — DAP bullet extended with R28F summary
+  - `NEXT_SESSION.md` — round notes (this entry)
+
 ## R27A.2 — NOVA struct const-fold optimisation (R26A.2 follow-up to R26A)
 
 **Status: complete** — the AST-level constant-folding pass (R12E)
