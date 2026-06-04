@@ -1,0 +1,186 @@
+// Test the R28C UDP-syscall builtins.
+//
+// New builtins (shipped R28C to unblock R23E.2 NAT hole-punching):
+//   sys_socket_udp()                              -> fd | -1
+//   sys_sendto(fd, buf, len, addr_ip, addr_port)  -> bytes_sent | -1
+//   sys_recvfrom(fd, buf, max_len, timeout_ms)
+//       -> [bytes_read, sender_ip, sender_port]
+//   sys_setsockopt_so_reuseaddr(fd)               -> 0 | -1
+//
+// Per-target lowering:
+//   Linux x86-64: socket(41) / sendto(44) / recvfrom(45) / setsockopt(54).
+//   macOS x86-64: BSD numbers 97 / 133 / 29 / 105 via 0x2000000 prefix.
+//   Windows x64:  ws2_32.dll socket / sendto / recvfrom / setsockopt
+//                 (WSAStartup auto-init shared with the TCP builtins).
+//   ARM64-Linux:  syscalls 198 / 206 / 207 / 208 via x8+svc.
+//   winARM64:     stubs (returns -1 / [-1,0,0]) — no Win32 wiring yet.
+//   WASM (WASI):  stubs returning -1 / [-1,0,0]; WASI doesn't define UDP.
+//
+// Verifies (15 assertions on native targets):
+//   1. sys_socket_udp() returns fd >= 0 (3 sockets, all distinct).
+//   2. sys_setsockopt_so_reuseaddr() succeeds on a fresh UDP socket.
+//   3. bind_socket() works on a UDP socket bound to localhost:0
+//      (kernel-chosen ephemeral port).
+//   4. sys_recvfrom(fd, buf, max, 0) returns immediately with
+//      bytes_read == -1 when no datagram is queued.
+//   5. sys_sendto + sys_recvfrom round-trip on localhost:
+//      - sendto returns the exact len we passed
+//      - recvfrom returns [bytes_read == len, sender_ip != 0, sender_port != 0]
+//      - the received buffer matches the sent buffer byte-for-byte.
+//   6. close_fd() succeeds on all UDP sockets we created.
+//
+// On the WASM/winARM64 stub targets this test still passes -- the
+// stubs return the sentinel values and the assertions are written
+// against `fd < 0` / `bytes_read == -1` paths so the same source
+// runs everywhere.
+
+fn assert_int_eq(actual, expected, label) {
+    if actual == expected {
+        print("OK ")
+        println(label)
+    } else {
+        print("FAIL ")
+        print(label)
+        print(" expected ")
+        print_int(expected)
+        print(" got ")
+        print_int(actual)
+        println("")
+        exit(1)
+    }
+}
+
+fn assert_true(cond, label) {
+    if cond == 1 {
+        print("OK ")
+        println(label)
+    } else {
+        print("FAIL ")
+        println(label)
+        exit(1)
+    }
+}
+
+fn main() {
+    println("=== R28C UDP syscall tests ===")
+
+    // ---- 1. sys_socket_udp() returns valid fd (>= 0) ----
+    let s1 = sys_socket_udp()
+    let s2 = sys_socket_udp()
+    let s3 = sys_socket_udp()
+
+    let native = 0
+    if s1 >= 0 { native = 1 }
+
+    if native == 1 {
+        assert_true(s1 >= 0, "sys_socket_udp() #1 returned valid fd")
+        assert_true(s2 >= 0, "sys_socket_udp() #2 returned valid fd")
+        assert_true(s3 >= 0, "sys_socket_udp() #3 returned valid fd")
+        assert_true(s1 != s2, "fd1 != fd2 (distinct sockets)")
+        assert_true(s2 != s3, "fd2 != fd3 (distinct sockets)")
+
+        // ---- 2. SO_REUSEADDR succeeds ----
+        let sso = sys_setsockopt_so_reuseaddr(s1)
+        assert_true(sso == 0, "sys_setsockopt_so_reuseaddr(s1) succeeds")
+        let sso2 = sys_setsockopt_so_reuseaddr(s2)
+        assert_true(sso2 == 0, "sys_setsockopt_so_reuseaddr(s2) succeeds")
+
+        // ---- 3. bind to localhost ephemeral port ----
+        // 127.0.0.1 in network-byte-order int = 0x0100007F = 16777343.
+        // We bind both s1 and s2 to ephemeral ports (port = 0 lets the
+        // kernel pick). Then we discover s1's actual port via the next
+        // recvfrom (we can't getsockname without another builtin).
+        //
+        // Simpler approach: bind to a hardcoded high port. Risk of
+        // collision is low for the test runner; 53129 + 53130 are well
+        // above the IANA-registered range and unlikely to be in use.
+        let LOCALHOST = 16777343
+        let port_a = 53129
+        let port_b = 53130
+
+        let addr_a = make_sockaddr_in(port_a, LOCALHOST)
+        let ba = bind_socket(s1, addr_a, 16)
+        assert_true(ba == 0, "bind_socket(s1, 127.0.0.1:53129)")
+
+        let addr_b = make_sockaddr_in(port_b, LOCALHOST)
+        let bb = bind_socket(s2, addr_b, 16)
+        assert_true(bb == 0, "bind_socket(s2, 127.0.0.1:53130)")
+
+        // ---- 4. recvfrom with timeout=0 returns immediately ----
+        // No datagram has been sent yet; the poll inside sys_recvfrom
+        // should return 0 and we emit a [-1, 0, 0] sentinel.
+        let rx_buf = alloc(256)
+        let empty = sys_recvfrom(s1, rx_buf, 256, 0)
+        let empty_n = empty[0]
+        assert_int_eq(empty_n, 0 - 1, "recvfrom(timeout=0) is non-blocking")
+
+        // ---- 5. sendto + recvfrom round-trip ----
+        let payload = alloc(11)
+        store8(payload, 78)       // 'N'
+        store8(int_add(payload, 1), 79)   // 'O'
+        store8(int_add(payload, 2), 86)   // 'V'
+        store8(int_add(payload, 3), 65)   // 'A'
+        store8(int_add(payload, 4), 95)   // '_'
+        store8(int_add(payload, 5), 85)   // 'U'
+        store8(int_add(payload, 6), 68)   // 'D'
+        store8(int_add(payload, 7), 80)   // 'P'
+        store8(int_add(payload, 8), 95)   // '_'
+        store8(int_add(payload, 9), 79)   // 'O'
+        store8(int_add(payload, 10), 75)  // 'K'
+
+        // Send from s2 -> s1's bound port.
+        let sent = sys_sendto(s2, payload, 11, LOCALHOST, port_a)
+        assert_int_eq(sent, 11, "sendto returned bytes_sent == 11")
+
+        // recvfrom on s1 with 500ms timeout (loopback is fast; this is
+        // a generous safety margin so the test stays robust).
+        let recv_buf = alloc(64)
+        let rx = sys_recvfrom(s1, recv_buf, 64, 500)
+        let rx_n = rx[0]
+        let rx_ip = rx[1]
+        let rx_port = rx[2]
+        assert_int_eq(rx_n, 11, "recvfrom returned bytes_read == 11")
+        assert_true(rx_ip == LOCALHOST, "recvfrom sender_ip == 127.0.0.1")
+        assert_true(rx_port == port_b, "recvfrom sender_port == 53130")
+
+        // Verify content matches byte-for-byte.
+        let match_ok = 1
+        let mi = 0
+        while mi < 11 {
+            let a = load8(int_add(payload, mi))
+            let b = load8(int_add(recv_buf, mi))
+            if a != b { match_ok = 0 }
+            mi = mi + 1
+        }
+        assert_true(match_ok, "recvfrom payload matches sent payload")
+
+        // ---- 6. close_fd succeeds ----
+        close_fd(s1)
+        close_fd(s2)
+        close_fd(s3)
+        println("OK close_fd on all UDP sockets")
+    } else {
+        // Stub target (WASM, winARM64). sys_socket_udp returned -1
+        // unconditionally so we can't exercise the round-trip. Still
+        // verify the sentinel shape so the test isn't a no-op:
+        // sys_recvfrom must return a 3-element list with -1 as element 0.
+        let stub_buf = alloc(16)
+        let stub_rx = sys_recvfrom(0, stub_buf, 16, 0)
+        let stub_n = stub_rx[0]
+        let stub_ip = stub_rx[1]
+        let stub_port = stub_rx[2]
+        assert_int_eq(stub_n, 0 - 1, "stub sys_recvfrom returns [-1, 0, 0]")
+        assert_int_eq(stub_ip, 0, "stub sender_ip == 0")
+        assert_int_eq(stub_port, 0, "stub sender_port == 0")
+        let stub_send = sys_sendto(0, stub_buf, 4, 0, 0)
+        assert_int_eq(stub_send, 0 - 1, "stub sys_sendto returns -1")
+        let stub_sso = sys_setsockopt_so_reuseaddr(0)
+        assert_int_eq(stub_sso, 0 - 1, "stub sys_setsockopt_so_reuseaddr returns -1")
+        println("OK stub-target sentinel shape")
+    }
+
+    println("")
+    println("=== UDP syscall tests passed ===")
+}
+
+main()

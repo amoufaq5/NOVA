@@ -531,8 +531,12 @@ fn syscall_num(linux_num) {
     if linux_num == 93 { return 33554525 }
     if linux_num == 42 { return 33554530 }
     if linux_num == 43 { return 33554462 }
+    if linux_num == 44 { return 33554565 }   // sendto (BSD 133) — R28C UDP
+    if linux_num == 45 { return 33554461 }   // recvfrom (BSD 29) — R28C UDP
     if linux_num == 49 { return 33554536 }
     if linux_num == 50 { return 33554538 }
+    if linux_num == 54 { return 33554537 }   // setsockopt (BSD 105) — R28C UDP
+    if linux_num == 7  { return 33554662 }   // poll (BSD 230) — R28C UDP timeout
     if linux_num == 57 { return 33554434 }
     if linux_num == 59 { return 33554491 }
     if linux_num == 60 { return 33554433 }
@@ -1800,6 +1804,19 @@ fn is_builtin_fn(name) {
     if name == "wasi_filestat" { return 1 }
     if name == "wasi_args_get" { return 1 }
     if name == "wasi_environ_get" { return 1 }
+    // R28C: UDP syscalls for NAT hole-punching (R23E.2 follow-up). The
+    // four builtins below expose datagram socket primitives so NOVA
+    // programs can implement UDP hole-punching after TCP-based STUN-
+    // style NAT discovery (R23E). Native x86-64 Linux/macOS go through
+    // socket(AF_INET, SOCK_DGRAM, 0) + sendto/recvfrom/setsockopt
+    // syscalls (41, 44, 45, 54 -> macOS BSD 97, 133, 29, 105). ARM64
+    // Linux uses syscalls 198/206/207/208. Windows / winARM64 go
+    // through ws2_32.dll (sendto, recvfrom, setsockopt imports added
+    // below). WASM stubs to -1 since WASI doesn't define UDP.
+    if name == "sys_socket_udp" { return 1 }
+    if name == "sys_sendto" { return 1 }
+    if name == "sys_recvfrom" { return 1 }
+    if name == "sys_setsockopt_so_reuseaddr" { return 1 }
     return 0
 }
 
@@ -6298,6 +6315,178 @@ fn arm_gen_call(nd) {
         arm_out("    bl _nova_arm_stub_list_new")
         return 0
     }
+    // R28C: UDP syscalls for NAT hole-punching on ARM64 Linux.
+    //   sys_socket_udp   -> syscall 198 (socket)
+    //   sys_sendto       -> syscall 206
+    //   sys_recvfrom     -> syscall 207
+    //   sys_setsockopt_* -> syscall 208
+    // ARM64 calling convention: x0..x7 args, syscall number in x8, svc.
+    if name == "sys_socket_udp" {
+        // socket(AF_INET=2, SOCK_DGRAM=2, 0).
+        arm_out("    mov x0, #2")
+        arm_out("    mov x1, #2")
+        arm_out("    mov x2, #0")
+        arm_out("    mov x8, #198")
+        arm_out("    svc #0")
+        return 0
+    }
+    if name == "sys_sendto" {
+        // sys_sendto(fd, buf, len, ip, port). Build sockaddr_in on stack.
+        // We need 5 args; evaluate left-to-right and push, then materialise.
+        let argc_st = len(args)
+        let sti = 0
+        while sti < argc_st {
+            arm_gen_expr(args[sti])
+            arm_push_x0()
+            sti = sti + 1
+        }
+        // Pop into x4=port, x3=ip, x2=len, x1=buf, x0=fd (reverse order).
+        sti = argc_st - 1
+        while sti >= 0 {
+            arm_pop_to("x" + int_to_str(sti))
+            sti = sti - 1
+        }
+        // Reserve 16 bytes for sockaddr_in: family=2, port (htons), ip, zero.
+        arm_out("    sub sp, sp, #32")
+        arm_out("    mov w9, #2")
+        arm_out("    strh w9, [sp, #0]")            // sin_family = AF_INET
+        // htons(port): reverse low 16 bits.
+        arm_out("    rev16 w9, w4")
+        arm_out("    strh w9, [sp, #2]")
+        arm_out("    str w3, [sp, #4]")             // sin_addr
+        arm_out("    str xzr, [sp, #8]")            // sin_zero
+        arm_out("    mov x3, #0")                    // flags = 0
+        arm_out("    mov x4, sp")                    // &sockaddr_in
+        arm_out("    mov x5, #16")                   // addrlen
+        arm_out("    mov x8, #206")
+        arm_out("    svc #0")
+        arm_out("    add sp, sp, #32")
+        return 0
+    }
+    if name == "sys_recvfrom" {
+        // sys_recvfrom(fd, buf, max_len, timeout_ms).
+        let argc_rf = len(args)
+        let rfi = 0
+        while rfi < argc_rf {
+            arm_gen_expr(args[rfi])
+            arm_push_x0()
+            rfi = rfi + 1
+        }
+        rfi = argc_rf - 1
+        while rfi >= 0 {
+            arm_pop_to("x" + int_to_str(rfi))
+            rfi = rfi - 1
+        }
+        // Reserve scratch: sockaddr_in (16) + addrlen (4 padded to 8) +
+        // pollfd (8) + saved (fd, buf, len, list) = 64 bytes aligned.
+        arm_out("    sub sp, sp, #80")
+        // Save args
+        arm_out("    str x0, [sp, #32]")             // fd
+        arm_out("    str x1, [sp, #40]")             // buf
+        arm_out("    str x2, [sp, #48]")             // len
+        arm_out("    str x3, [sp, #56]")             // timeout_ms
+        // pollfd at sp+16: { fd:i32, events:i16, revents:i16 }
+        arm_out("    str w0, [sp, #16]")
+        arm_out("    mov w9, #1")                    // POLLIN
+        arm_out("    strh w9, [sp, #20]")
+        arm_out("    strh wzr, [sp, #22]")
+        // ppoll(&pollfd, 1, NULL_timespec_OR_use_poll, NULL_sigmask, 8)
+        // Linux removed `poll` on arm64; use `ppoll` (syscall 73) with
+        // a tiny timespec when timeout > 0, or NULL for no-wait.
+        // For simplicity we synthesise a timespec from timeout_ms into
+        // the second-to-last 16 bytes of the frame [sp + 64..80].
+        arm_out("    mov x9, x3")                    // timeout_ms
+        // tv_sec = timeout_ms / 1000; tv_nsec = (timeout_ms % 1000) * 1000000
+        // 1000000 doesn't fit ARM64's mov-immediate window (16 bits),
+        // so we synthesise it as 1000 * 1000.
+        arm_out("    mov x10, #1000")
+        arm_out("    udiv x11, x9, x10")
+        arm_out("    msub x12, x11, x10, x9")
+        arm_out("    mul x12, x12, x10")             // x12 *= 1000
+        arm_out("    mul x12, x12, x10")             // x12 *= 1000 -> *1_000_000
+        arm_out("    str x11, [sp, #64]")
+        arm_out("    str x12, [sp, #72]")
+        arm_out("    add x0, sp, #16")               // &pollfd
+        arm_out("    mov x1, #1")                    // nfds
+        arm_out("    add x2, sp, #64")               // &timespec
+        arm_out("    mov x3, #0")                    // sigmask = NULL
+        arm_out("    mov x4, #8")                    // sigsetsize
+        arm_out("    mov x8, #73")                   // ppoll
+        arm_out("    svc #0")
+        arm_out("    cmp x0, #0")
+        // bl _nova_list_new uses x30 (link); we re-use list pointer in x19.
+        // Simpler: branch over success path to a fail tail that returns a [-1,0,0] list.
+        let okl = arm_new_label()
+        let endl = arm_new_label()
+        arm_out("    b.le " + okl + "_fail")        // <=0 means timeout/error
+        // Build sockaddr scratch at sp+0
+        arm_out("    strh wzr, [sp, #0]")
+        arm_out("    strh wzr, [sp, #2]")
+        arm_out("    str wzr, [sp, #4]")
+        arm_out("    str xzr, [sp, #8]")
+        arm_out("    mov w9, #16")
+        arm_out("    str w9, [sp, #24]")             // addrlen
+        arm_out("    ldr x0, [sp, #32]")             // fd
+        arm_out("    ldr x1, [sp, #40]")             // buf
+        arm_out("    ldr x2, [sp, #48]")             // len
+        arm_out("    mov x3, #0")                    // flags
+        arm_out("    mov x4, sp")                    // &sockaddr
+        arm_out("    add x5, sp, #24")               // &addrlen
+        arm_out("    mov x8, #207")
+        arm_out("    svc #0")
+        arm_out("    cmp x0, #0")
+        arm_out("    b.lt " + okl + "_fail")
+        // Save bytes_read; allocate result list.
+        arm_out("    mov x19, x0")                   // bytes_read (x19 callee-saved)
+        arm_out("    bl _nova_arm_stub_list_new")
+        arm_out("    mov x20, x0")                   // list
+        arm_out("    mov x0, x20")
+        arm_out("    mov x1, x19")
+        arm_out("    bl _nova_arm_stub_push")
+        arm_out("    mov x0, x20")
+        arm_out("    ldr w1, [sp, #4]")              // ip (native order)
+        arm_out("    bl _nova_arm_stub_push")
+        arm_out("    mov x0, x20")
+        arm_out("    ldrh w1, [sp, #2]")             // port (big-endian)
+        arm_out("    rev16 w1, w1")                  // ntohs
+        arm_out("    and x1, x1, #0xFFFF")
+        arm_out("    bl _nova_arm_stub_push")
+        arm_out("    mov x0, x20")
+        arm_out("    b " + endl + "_done")
+        arm_out(okl + "_fail:")
+        arm_out("    bl _nova_arm_stub_list_new")
+        arm_out("    mov x20, x0")
+        arm_out("    mov x0, x20")
+        arm_out("    mov x1, #-1")
+        arm_out("    bl _nova_arm_stub_push")
+        arm_out("    mov x0, x20")
+        arm_out("    mov x1, #0")
+        arm_out("    bl _nova_arm_stub_push")
+        arm_out("    mov x0, x20")
+        arm_out("    mov x1, #0")
+        arm_out("    bl _nova_arm_stub_push")
+        arm_out("    mov x0, x20")
+        arm_out(endl + "_done:")
+        arm_out("    add sp, sp, #80")
+        return 0
+    }
+    if name == "sys_setsockopt_so_reuseaddr" {
+        // sys_setsockopt_so_reuseaddr(fd) -> setsockopt(fd, SOL_SOCKET=1,
+        //   SO_REUSEADDR=2, &one, 4).
+        if len(args) >= 1 { arm_gen_expr(args[0]) } else { arm_out("    mov x0, #0") }
+        arm_out("    sub sp, sp, #16")
+        arm_out("    mov w9, #1")
+        arm_out("    str w9, [sp, #0]")
+        // x0=fd already.
+        arm_out("    mov x1, #1")                    // SOL_SOCKET
+        arm_out("    mov x2, #2")                    // SO_REUSEADDR
+        arm_out("    mov x3, sp")                    // &optval
+        arm_out("    mov x4, #4")                    // optlen
+        arm_out("    mov x8, #208")
+        arm_out("    svc #0")
+        arm_out("    add sp, sp, #16")
+        return 0
+    }
     // R11D SIMD intrinsics on ARM64 NEON. The NEON quad-word width is
     // 128 bits == 4x i32, so an 8-lane op is exactly 2 NEON ops.
     // Helpers `_nova_arm_simd_*` emitted in arm_emit_runtime().
@@ -7540,6 +7729,37 @@ fn warm_gen_call(nd) {
     }
     if name == "wasi_environ_get" {
         warm_out("    bl _nova_warm_stub_list_new")
+        return 0
+    }
+    // R28C: UDP syscalls. winARM64 stubs to -1 / [-1,0,0]. The full
+    // Win32 ws2_32.dll wiring is x86-64 Windows territory; the winARM64
+    // contract here is "links and returns sentinels" until a downstream
+    // user actually needs UDP from a Windows ARM laptop.
+    if name == "sys_socket_udp" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    if name == "sys_sendto" {
+        warm_emit_load_imm("x0", 0 - 1)
+        return 0
+    }
+    if name == "sys_recvfrom" {
+        warm_out("    bl _nova_warm_stub_list_new")
+        warm_out("    mov x19, x0")
+        warm_out("    mov x0, x19")
+        warm_emit_load_imm("x1", 0 - 1)
+        warm_out("    bl _nova_warm_stub_push")
+        warm_out("    mov x0, x19")
+        warm_out("    mov x1, #0")
+        warm_out("    bl _nova_warm_stub_push")
+        warm_out("    mov x0, x19")
+        warm_out("    mov x1, #0")
+        warm_out("    bl _nova_warm_stub_push")
+        warm_out("    mov x0, x19")
+        return 0
+    }
+    if name == "sys_setsockopt_so_reuseaddr" {
+        warm_emit_load_imm("x0", 0 - 1)
         return 0
     }
     // R11D SIMD intrinsics on ARM64 Windows (NEON). Helpers emitted in
@@ -9623,6 +9843,10 @@ fn gen_program(program) {
         out(".extern __imp_connect")
         out(".extern __imp_send")
         out(".extern __imp_recv")
+        out(".extern __imp_sendto")
+        out(".extern __imp_recvfrom")
+        out(".extern __imp_setsockopt")
+        out(".extern __imp_WSAPoll")
         out(".extern __imp_closesocket")
         // bcrypt.dll: BCryptGenRandom (cryptographically secure RNG).
         // Linked via -lbcrypt in cross-windows / smoke-secure-random.
@@ -12398,6 +12622,56 @@ fn wasm_gen_rt_extra() {
     wi("end")
     wi("end")
     wi("local.get $list")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    // R28C: UDP syscall stubs on WASM. WASI snapshot_preview1 does not
+    // expose datagram sockets, so these always return the failure
+    // sentinel (-1 / [-1, 0, 0]). Programs that need UDP hole-punching
+    // should run on native targets (Linux x86-64, macOS, ARM64-Linux)
+    // where R28C lowers to real socket/sendto/recvfrom/setsockopt
+    // syscalls. The stubs exist so the same NOVA source compiles
+    // without #if cfg-gates at the source level.
+    wi("(func $sys_socket_udp (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const -1")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    wi("(func $sys_sendto (param $fd i64) (param $buf i64) (param $blen i64) (param $ip i64) (param $port i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const -1")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    wi("(func $sys_recvfrom (param $fd i64) (param $buf i64) (param $mlen i64) (param $timeout_ms i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("(local $list i64)")
+    wi("call $list_new")
+    wi("local.set $list")
+    wi("local.get $list")
+    wi("i64.const -1")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $list")
+    wi("i64.const 0")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $list")
+    wi("i64.const 0")
+    wi("call $push")
+    wi("drop")
+    wi("local.get $list")
+    wasm_indent = wasm_indent - 1
+    wi(")")
+    wi("")
+
+    wi("(func $sys_setsockopt_so_reuseaddr (param $fd i64) (result i64)")
+    wasm_indent = wasm_indent + 1
+    wi("i64.const -1")
     wasm_indent = wasm_indent - 1
     wi(")")
     wi("")
@@ -15564,6 +15838,317 @@ fn gen_runtime() {
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
+    out("    ret")
+
+    // --- R28C: UDP syscalls (sendto/recvfrom) for NAT hole-punching ---
+    //
+    // The four helpers below implement the datagram-socket primitives
+    // R23E.2 needs to drive UDP hole-punching after TCP-based NAT
+    // discovery. They share the same wire shape across all six targets:
+    //
+    //   sys_socket_udp() -> fd | -1
+    //   sys_sendto(fd, buf, len, addr_ip, addr_port) -> bytes_sent | -1
+    //   sys_recvfrom(fd, buf, max_len, timeout_ms)
+    //       -> [bytes_read, sender_ip, sender_port]
+    //   sys_setsockopt_so_reuseaddr(fd) -> 0 | -1
+    //
+    // sender_ip is a host-byte-order u32 (e.g. 127.0.0.1 = 0x7F000001
+    // in big-endian wire == 0x0100007F as native u32). Callers should
+    // unpack via the same scheme make_sockaddr_in uses (per-octet via
+    // int_and / int_shr). timeout_ms of 0 returns immediately without
+    // blocking; values > 0 wait up to that many milliseconds.
+
+    // --- sys_socket_udp() -> fd | -1 ---
+    // socket(AF_INET=2, SOCK_DGRAM=2, IPPROTO_UDP=0).
+    out("")
+    out_label("_nova_sys_socket_udp")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 32")
+        out("    call _nova_win_init_wsa")
+        out("    mov ecx, 2")          // AF_INET
+        out("    mov edx, 2")          // SOCK_DGRAM
+        out("    xor r8d, r8d")        // protocol = 0
+        out("    call [rip + __imp_socket]")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        out("    mov rdi, 2")          // AF_INET
+        out("    mov rsi, 2")          // SOCK_DGRAM
+        out("    xor rdx, rdx")        // protocol = 0
+        emit_syscall(41)
+    }
+    out("    ret")
+
+    // --- sys_sendto(fd, buf, len, addr_ip, addr_port) -> bytes_sent | -1 ---
+    //
+    // Materialises a sockaddr_in on the local stack: family=AF_INET (2),
+    // port (big-endian u16), ip (already in network order on input —
+    // callers pass the int as the wire-format dword), 8 bytes of pad.
+    // Then dispatches to sendto syscall 44 (Linux) / 133 (macOS BSD) /
+    // ws2_32.dll on Windows.
+    out("")
+    out_label("_nova_sys_sendto")
+    if cg_target == 3 {
+        // Windows: sendto(s, buf, len, flags=0, &to, tolen=16). Shadow
+        // space [rsp..rsp+31], stack args [rsp+32]=to, [rsp+40]=tolen.
+        // sockaddr_in lives at [rbp - 24] (16 bytes); save fd at -32.
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 64")
+        out("    mov word ptr [rbp - 24], 2")     // sin_family = AF_INET
+        out("    mov eax, r8d")                    // port (low 16 bits)
+        out("    xchg al, ah")                     // htons
+        out("    mov word ptr [rbp - 22], ax")
+        out("    mov [rbp - 20], ecx")             // ip (32 bits)
+        out("    mov qword ptr [rbp - 16], 0")    // sin_zero
+        // rdi=fd already (Linux ABI); on Windows our incoming is rdi/rsi/rdx/rcx/r8
+        // Save scratch for the call.
+        out("    mov [rbp - 32], rdi")             // fd
+        out("    mov [rbp - 40], rsi")             // buf
+        out("    mov [rbp - 48], rdx")             // len
+        out("    mov rcx, [rbp - 32]")             // s = fd
+        out("    mov rdx, [rbp - 40]")             // buf
+        out("    mov r8, [rbp - 48]")              // len
+        out("    xor r9d, r9d")                    // flags = 0
+        out("    lea rax, [rbp - 24]")
+        out("    mov [rsp + 32], rax")             // to
+        out("    mov qword ptr [rsp + 40], 16")    // tolen
+        out("    call [rip + __imp_sendto]")
+        out("    movsxd rax, eax")                 // sign-extend SOCKET_ERROR / count
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        // Linux x64: rdi=fd, rsi=buf, rdx=len already correct. Build
+        // sockaddr_in on stack at [rbp - 16]; pass r8=&sa, r9=16.
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 32")
+        out("    mov word ptr [rbp - 16], 2")     // sin_family = AF_INET
+        out("    mov eax, r8d")                    // port
+        out("    xchg al, ah")                     // htons
+        out("    mov word ptr [rbp - 14], ax")
+        out("    mov [rbp - 12], ecx")             // ip
+        out("    mov qword ptr [rbp - 8], 0")     // sin_zero
+        out("    xor r10, r10")                    // flags = 0
+        out("    lea r8, [rbp - 16]")              // &sockaddr_in
+        out("    mov r9, 16")                       // addrlen
+        emit_syscall(44)
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    }
+    out("    ret")
+
+    // --- sys_recvfrom(fd, buf, max_len, timeout_ms) ---
+    //   -> [bytes_read, sender_ip, sender_port]
+    //
+    // Strategy: poll() (Linux/macOS) or WSAPoll() (Windows) with the
+    // given timeout_ms; if no data, return [-1, 0, 0]. Otherwise
+    // recvfrom() into a stack sockaddr_in, extract ip+port (host order),
+    // build a 3-element list via _nova_list_new + _nova_push.
+    out("")
+    out_label("_nova_sys_recvfrom")
+    if cg_target == 3 {
+        // Windows path.
+        // Stack frame: shadow (32) + WSAPOLLFD (16) + sockaddr_in (16)
+        // + addrlen i32 (4 padded to 8) + saved args (40) = 112 aligned.
+        // We use [rbp-16..-32] for sockaddr_in scratch, [rbp-40..-32]
+        // for addrlen i32, [rbp-56..-40] for WSAPOLLFD, and [rbp-96..-56]
+        // for saved (fd, buf, max_len, timeout_ms, list_handle).
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 128")
+        out("    mov [rbp - 56], rdi")             // saved fd
+        out("    mov [rbp - 64], rsi")             // saved buf
+        out("    mov [rbp - 72], rdx")             // saved max_len
+        out("    mov [rbp - 80], rcx")             // saved timeout_ms
+        // WSAPOLLFD: { fd:i64, events:i16, revents:i16 padded }
+        out("    mov rax, [rbp - 56]")
+        out("    mov [rbp - 40], rax")             // fd
+        out("    mov word ptr [rbp - 32], 256")   // events = POLLRDNORM (Win)
+        out("    mov word ptr [rbp - 30], 0")     // revents = 0
+        // WSAPoll(&pollfd, 1, timeout_ms)
+        out("    lea rcx, [rbp - 40]")
+        out("    mov edx, 1")
+        out("    mov r8d, dword ptr [rbp - 80]")
+        out("    call [rip + __imp_WSAPoll]")
+        out("    test eax, eax")
+        out("    jle .srf_win_timeout")
+        // sockaddr_in scratch at [rbp - 16], addrlen at [rbp - 24]
+        out("    mov word ptr [rbp - 16], 0")
+        out("    mov word ptr [rbp - 14], 0")
+        out("    mov dword ptr [rbp - 12], 0")
+        out("    mov qword ptr [rbp - 8], 0")
+        out("    mov dword ptr [rbp - 24], 16")
+        out("    mov rcx, [rbp - 56]")             // s
+        out("    mov rdx, [rbp - 64]")             // buf
+        out("    mov r8, [rbp - 72]")              // len
+        out("    xor r9d, r9d")                    // flags = 0
+        out("    lea rax, [rbp - 16]")
+        out("    mov [rsp + 32], rax")             // from
+        out("    lea rax, [rbp - 24]")
+        out("    mov [rsp + 40], rax")             // fromlen
+        out("    call [rip + __imp_recvfrom]")
+        out("    movsxd rax, eax")
+        out("    test rax, rax")
+        out("    js .srf_win_fail")
+        // Build result list.
+        out("    mov [rbp - 88], rax")             // bytes_read
+        out("    call _nova_list_new")
+        out("    mov [rbp - 96], rax")             // list handle
+        out("    mov rdi, rax")
+        out("    mov rsi, [rbp - 88]")
+        out("    call _nova_push")
+        // Extract ip (offset +4 of sockaddr_in, network byte order int).
+        // We return as host-order int (callers know it's wire-format).
+        out("    mov rdi, [rbp - 96]")
+        out("    mov esi, dword ptr [rbp - 12]")
+        out("    call _nova_push")
+        // Extract port (offset +2, big-endian u16). ntohs via xchg.
+        out("    mov rdi, [rbp - 96]")
+        out("    movzx eax, word ptr [rbp - 14]")
+        out("    xchg al, ah")
+        out("    mov rsi, rax")
+        out("    call _nova_push")
+        out("    mov rax, [rbp - 96]")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+        out(".srf_win_timeout:")
+        out(".srf_win_fail:")
+        // Return [-1, 0, 0] so callers see a 3-element list with a
+        // sentinel first element. Cheaper than a separate None marker.
+        out("    call _nova_list_new")
+        out("    mov [rbp - 96], rax")
+        out("    mov rdi, rax")
+        out("    mov rsi, -1")
+        out("    call _nova_push")
+        out("    mov rdi, [rbp - 96]")
+        out("    xor rsi, rsi")
+        out("    call _nova_push")
+        out("    mov rdi, [rbp - 96]")
+        out("    xor rsi, rsi")
+        out("    call _nova_push")
+        out("    mov rax, [rbp - 96]")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        // Linux/macOS path. rdi=fd, rsi=buf, rdx=max_len, rcx=timeout_ms.
+        // Stack frame: sockaddr_in (16) + addrlen i32 (8) + pollfd (8)
+        // + saved (fd, buf, max_len, timeout_ms, bytes_read, list, scratch) = 96.
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 128")
+        out("    mov [rbp - 48], rdi")             // saved fd
+        out("    mov [rbp - 56], rsi")             // saved buf
+        out("    mov [rbp - 64], rdx")             // saved max_len
+        out("    mov [rbp - 72], rcx")             // saved timeout_ms
+        // pollfd: { fd:i32, events:i16, revents:i16 } at [rbp - 32]
+        out("    mov eax, dword ptr [rbp - 48]")
+        out("    mov dword ptr [rbp - 32], eax")
+        out("    mov word ptr [rbp - 28], 1")     // POLLIN
+        out("    mov word ptr [rbp - 26], 0")     // revents
+        // poll(&pollfd, nfds=1, timeout_ms)
+        out("    lea rdi, [rbp - 32]")
+        out("    mov rsi, 1")
+        out("    mov rdx, [rbp - 72]")
+        emit_syscall(7)
+        out("    test rax, rax")
+        out("    jle .srf_nx_timeout")
+        // sockaddr_in scratch at [rbp - 16], addrlen at [rbp - 24]
+        out("    mov word ptr [rbp - 16], 0")
+        out("    mov word ptr [rbp - 14], 0")
+        out("    mov dword ptr [rbp - 12], 0")
+        out("    mov qword ptr [rbp - 8], 0")
+        out("    mov dword ptr [rbp - 24], 16")
+        out("    mov rdi, [rbp - 48]")             // fd
+        out("    mov rsi, [rbp - 56]")             // buf
+        out("    mov rdx, [rbp - 64]")             // len
+        out("    xor r10, r10")                    // flags = 0
+        out("    lea r8, [rbp - 16]")              // &sockaddr
+        out("    lea r9, [rbp - 24]")              // &addrlen
+        emit_syscall(45)
+        out("    test rax, rax")
+        out("    js .srf_nx_fail")
+        out("    mov [rbp - 80], rax")             // bytes_read
+        out("    call _nova_list_new")
+        out("    mov [rbp - 88], rax")
+        out("    mov rdi, rax")
+        out("    mov rsi, [rbp - 80]")
+        out("    call _nova_push")
+        out("    mov rdi, [rbp - 88]")
+        out("    mov esi, dword ptr [rbp - 12]")
+        out("    call _nova_push")
+        out("    mov rdi, [rbp - 88]")
+        out("    movzx eax, word ptr [rbp - 14]")
+        out("    xchg al, ah")
+        out("    mov rsi, rax")
+        out("    call _nova_push")
+        out("    mov rax, [rbp - 88]")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+        out("    ret")
+        out(".srf_nx_timeout:")
+        out(".srf_nx_fail:")
+        out("    call _nova_list_new")
+        out("    mov [rbp - 88], rax")
+        out("    mov rdi, rax")
+        out("    mov rsi, -1")
+        out("    call _nova_push")
+        out("    mov rdi, [rbp - 88]")
+        out("    xor rsi, rsi")
+        out("    call _nova_push")
+        out("    mov rdi, [rbp - 88]")
+        out("    xor rsi, rsi")
+        out("    call _nova_push")
+        out("    mov rax, [rbp - 88]")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    }
+    out("    ret")
+
+    // --- sys_setsockopt_so_reuseaddr(fd) -> 0 | -1 ---
+    //
+    // setsockopt(fd, SOL_SOCKET=1, SO_REUSEADDR=2, &one, 4) where
+    // one=int32(1). Needed before bind() so multiple processes can
+    // listen on the same UDP port (the typical hole-punch shape: each
+    // peer binds the same local port that NAT mapped externally).
+    out("")
+    out_label("_nova_sys_setsockopt_so_reuseaddr")
+    if cg_target == 3 {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 48")
+        out("    mov dword ptr [rbp - 8], 1")     // optval = 1
+        out("    mov rcx, rdi")                    // s = fd
+        out("    mov edx, 65535")                  // SOL_SOCKET = 0xFFFF on Win
+        out("    mov r8d, 4")                      // SO_REUSEADDR = 4 on Win
+        out("    lea r9, [rbp - 8]")               // &optval
+        out("    mov qword ptr [rsp + 32], 4")    // optlen = 4
+        out("    call [rip + __imp_setsockopt]")
+        out("    test eax, eax")
+        out("    jz .sso_win_ok")
+        out("    mov rax, -1")
+        out(".sso_win_ok:")
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    } else {
+        out("    push rbp")
+        out("    mov rbp, rsp")
+        out("    sub rsp, 16")
+        out("    mov dword ptr [rbp - 8], 1")     // optval = 1
+        // setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, 4).
+        // x86-64 syscall ABI: rdi, rsi, rdx, r10, r8, r9.
+        // rdi=fd already correct from caller.
+        out("    mov rsi, 1")                       // SOL_SOCKET
+        out("    mov rdx, 2")                       // SO_REUSEADDR
+        out("    lea r10, [rbp - 8]")              // &optval (4th syscall arg)
+        out("    mov r8, 4")                        // optlen (5th syscall arg)
+        emit_syscall(54)
+        out("    mov rsp, rbp")
+        out("    pop rbp")
+    }
     out("    ret")
 
     // --- fork() -> pid (0 in child, >0 in parent) ---
@@ -19093,6 +19678,15 @@ fn gen_runtime() {
     out("    jmp _nova_close_fd")
     out_label("make_sockaddr_in")
     out("    jmp _nova_make_sockaddr_in")
+    // R28C: UDP syscalls for NAT hole-punching (R23E.2 unblock).
+    out_label("sys_socket_udp")
+    out("    jmp _nova_sys_socket_udp")
+    out_label("sys_sendto")
+    out("    jmp _nova_sys_sendto")
+    out_label("sys_recvfrom")
+    out("    jmp _nova_sys_recvfrom")
+    out_label("sys_setsockopt_so_reuseaddr")
+    out("    jmp _nova_sys_setsockopt_so_reuseaddr")
     out_label("fork_process")
     out("    jmp _nova_fork")
     out_label("waitpid")

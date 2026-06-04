@@ -251,6 +251,7 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - Memory primitives: `store64`, `load64`, `store8`, `load8`, `memcpy_raw`
 - Arena allocator (mmap-backed bump allocation with instant reset)
 - TCP networking via raw syscalls: `socket`, `bind`, `listen`, `accept`, `send`, `recv`
+- UDP networking via raw syscalls: `sys_socket_udp`, `sys_sendto`, `sys_recvfrom`, `sys_setsockopt_so_reuseaddr` (R28C; enables NAT hole-punching after TCP-based STUN discovery)
 - Process management: `fork`, `exec`, `waitpid`, `pipe`
 - File I/O, directory operations, environment variables
 - JSON parsing and serialization
@@ -885,7 +886,7 @@ make smoke-wasi-preopens
 `exit` `time` `sleep_ms` `getenv` `mkdir` `unlink` `file_size` `alloc`
 
 ### Networking
-`socket` `bind_socket` `listen_socket` `accept_conn` `connect_socket` `send_data` `recv_data` `close_fd` `make_sockaddr_in`
+`socket` `bind_socket` `listen_socket` `accept_conn` `connect_socket` `send_data` `recv_data` `close_fd` `make_sockaddr_in` `sys_socket_udp` `sys_sendto` `sys_recvfrom` `sys_setsockopt_so_reuseaddr`
 
 ### Process
 `fork_process` `waitpid` `exec_program` `pipe_create`

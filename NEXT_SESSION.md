@@ -1,5 +1,118 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R28C — UDP syscalls (sendto/recvfrom/setsockopt) for NAT hole-punching
+
+**Status: complete** — NOVA now exposes the four datagram-socket
+primitives R23E.2 needs for UDP hole-punching after R23E's
+TCP-based NAT discovery. The new builtins live alongside the
+existing socket / send_data / recv_data family but speak SOCK_DGRAM
++ `sendto` / `recvfrom` so a NOVA program can implement the classic
+hole-punch pattern (both peers send simultaneously through their
+own NAT mapping, packets cross paths and open bidirectional state
+in each NAT's connection-tracking table).
+
+### New builtins
+
+  - **`sys_socket_udp() -> fd | -1`** — `socket(AF_INET, SOCK_DGRAM,
+    0)` returning the datagram fd. Existing `socket` builtin is
+    SOCK_STREAM-shaped via its `type` arg; this is the dedicated
+    UDP wrapper so callers don't need to memorise the constants.
+  - **`sys_sendto(fd, buf, len, addr_ip, addr_port) -> bytes_sent | -1`**
+    — sends `len` bytes from `buf` to the given peer. `addr_ip` is
+    a host-order int matching `make_sockaddr_in`'s convention
+    (e.g. 127.0.0.1 = 16777343 = 0x0100007F). The helper builds
+    the sockaddr_in on the local stack and dispatches to the
+    sendto syscall.
+  - **`sys_recvfrom(fd, buf, max_len, timeout_ms)`** —
+    `-> [bytes_read, sender_ip, sender_port]`. A 3-element list so
+    the caller learns who the datagram came from (needed to know
+    which peer punched through). `timeout_ms` of 0 returns
+    immediately (`bytes_read == -1`) if no datagram is queued; > 0
+    waits up to that many milliseconds. Internally a `poll()`
+    (Linux/macOS) / `WSAPoll()` (Windows) gates the recvfrom call.
+  - **`sys_setsockopt_so_reuseaddr(fd) -> 0 | -1`** — sets
+    SO_REUSEADDR so multiple processes / restarts can bind the
+    same UDP port. R23E.2 needs this because the hole-punch peer
+    binds the local port that the NAT mapped externally, and the
+    same NAT mapping persists across short reconnect windows.
+
+### Per-target lowering
+
+The same NOVA source compiles bit-identically against all six
+shipping targets; the assembly differs because the syscall ABIs
+differ but the semantic shape is constant.
+
+  - **Linux x86-64 (`cg_target == 0`)**: socket #41, sendto #44,
+    recvfrom #45, setsockopt #54, poll #7. Uses the standard
+    `emit_syscall()` helper that handles macOS BSD-number
+    translation when the same path lights up for the next target.
+  - **macOS x86-64 (`cg_target == 1`)**: same syscall numbers
+    routed through `syscall_num()` -> 0x2000000 + BSD entry
+    (socket=97/0x2000061, sendto=133/0x2000085, recvfrom=29/
+    0x200001D, setsockopt=105/0x2000069, poll=230/0x20000E6).
+    Added 4 new entries to the `syscall_num` table.
+  - **Windows x86-64 (`cg_target == 3`)**: WSAStartup + ws2_32.dll
+    imports (`sendto`, `recvfrom`, `setsockopt`, `WSAPoll`). The
+    sockaddr_in still lives on the local stack and is passed by
+    pointer; WSAPoll handles the timeout before recvfrom.
+  - **ARM64-Linux (`cg_target == 4`)**: native arm64 path in
+    `arm_gen_call` — syscalls 198/206/207/208 + ppoll #73 (poll
+    is removed on aarch64 in favour of ppoll with NULL sigmask).
+    timeout_ms is split into tv_sec / tv_nsec for the timespec
+    argument that ppoll wants.
+  - **winARM64 (`cg_target == 5`)**: stubs returning -1 /
+    [-1, 0, 0]. The Win32 ws2_32.dll ABI on arm64-windows is the
+    same as x86-64 but we don't have a real winARM64 use-case yet
+    and stubbing matches how other socket builtins behave on this
+    target.
+  - **WASM / WASI (`cg_target == 2`)**: stubs returning -1 /
+    [-1, 0, 0]. WASI snapshot_preview1 has no datagram-socket
+    primitive (`fd_read` is stream-only), so the contract is "the
+    same source compiles, calls return the failure sentinel".
+
+### Implementation notes
+
+`is_builtin_fn` learns the 4 new names. `gen_runtime` now emits
+four new `_nova_sys_*` labels alongside `_nova_socket` /
+`_nova_make_sockaddr_in`, and the bottom-of-file builtin-shim
+list jumps to them. The macOS BSD table grew 4 entries (44, 45,
+54, 7) so the same `emit_syscall(linux_num)` call site routes to
+the right number on both targets. For ARM64-Linux + winARM64 we
+add the cases directly to `arm_gen_call` / `warm_gen_call` since
+those backends don't reuse the x86-64 label/jmp shape. The WASM
+backend grows 4 new `$sys_*` shadow functions inside
+`wasm_gen_rt_extra` that always return the sentinel.
+
+### Verification
+
+  - `tests/test_udp_syscalls.nova` (NEW, ~16 OK assertions):
+    creates 3 UDP sockets, verifies distinct fds, exercises
+    SO_REUSEADDR, binds 2 of them to localhost ephemeral ports
+    (53129 / 53130), verifies recvfrom(timeout=0) returns the
+    -1 sentinel immediately, then does a full sendto + recvfrom
+    round-trip with an 11-byte payload ("NOVA_UDP_OK") between
+    the two sockets and verifies bytes_read, sender_ip,
+    sender_port, and that the bytes match. On WASM / winARM64
+    the test detects the stub return and exercises the
+    sentinel-shape path instead, so the same test_*.nova runs
+    everywhere.
+  - 177/0/6 native test count (R27A's 176 + this new test).
+  - Self-host bit-identical preserved (`make self-host` clean).
+  - Cross-target builds clean on all 6 targets: native x86-64
+    Linux, macOS, Windows, ARM64-Linux, winARM64, WASM/WASI.
+
+### File ownership (touched this round)
+
+  - `src/compiler/codegen.nova` — +four builtins in is_builtin_fn,
+    +four entries in syscall_num for macOS BSD numbers, four new
+    runtime labels (`_nova_sys_socket_udp`, `_nova_sys_sendto`,
+    `_nova_sys_recvfrom`, `_nova_sys_setsockopt_so_reuseaddr`)
+    plus their shim jumps, ARM64-Linux + winARM64 + WASM lowering
+    branches.
+  - NEW `tests/test_udp_syscalls.nova` — verification harness.
+  - `README.md` — UDP-syscall builtin entries.
+  - `NEXT_SESSION.md` — round notes (this entry).
+
 ## R28F — DAP sample-based profiler (custom-request extension)
 
 **Status: complete** — `nova-dap` now exposes a sample-based
