@@ -624,7 +624,9 @@ def test_server_wire_no_change_when_no_match() -> None:
 
 def test_server_wire_capability_unchanged() -> None:
     """R26A.2 extends completion behaviour without adding a new top-
-    level capability. Provider count must remain 16."""
+    level capability. R33D bumped the provider count to 17 (added
+    `documentLinkProvider`); the completionProvider shape itself is
+    still unchanged."""
     with tempfile.TemporaryDirectory() as ws:
         client = LspClient()
         init = client.initialize(ws)
@@ -635,8 +637,8 @@ def test_server_wire_capability_unchanged() -> None:
             k for k in caps.keys()
             if k.endswith("Provider") or k == "textDocumentSync"
         )
-        assert_eq(len(provider_keys), 16,
-                  "capability key count unchanged at 16")
+        assert_eq(len(provider_keys), 17,
+                  "capability key count 17 (R33D documentLink added)")
 
 
 def test_server_wire_falls_through_when_no_dots() -> None:

@@ -485,16 +485,17 @@ def test_server_completion_capability_still_advertised() -> None:
         cp = caps["completionProvider"]
         assert_("." in cp["triggerCharacters"], ". still a trigger")
         assert_("(" in cp["triggerCharacters"], "( still a trigger")
-        # Expected: 15 *Provider keys plus textDocumentSync. R24E does
+        # Expected: 16 *Provider keys plus textDocumentSync. R24E does
         # NOT add a new capability — it only deepens what
-        # completionProvider returns.
+        # completionProvider returns. R33D later added
+        # `documentLinkProvider`, bumping the snapshot to 17.
         provider_keys = sorted(
             k for k in caps.keys()
             if k.endswith("Provider") or k == "textDocumentSync"
         )
-        # Concrete snapshot: 15 providers + 1 sync key = 16 total.
-        assert_eq(len(provider_keys), 16,
-                  "capability key count unchanged at 16")
+        # Concrete snapshot: 16 providers + 1 sync key = 17 total.
+        assert_eq(len(provider_keys), 17,
+                  "capability key count 17 (R33D documentLink added)")
         # And completionProvider IS one of them.
         assert_("completionProvider" in provider_keys,
                 "completionProvider still advertised")

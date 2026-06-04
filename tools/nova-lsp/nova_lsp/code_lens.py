@@ -672,6 +672,12 @@ def compute_code_lenses(
             )
         tested = has_corresponding_test(decl.name, workspace_root)
         out.append(build_code_lens(decl, uri, count, tested))
+    # R33D: append Run / Debug test lenses for top-level `fn test_*` decls.
+    # These are stacked ABOVE the reference-count lens so the user reads
+    # "▶ Run | ⏷ Debug | N references" from top to bottom — the test
+    # actions come first because clicking is what users do most often on
+    # a test fn (vs reading its callers).
+    out.extend(compute_test_code_lenses(uri, doc_text))
     return out
 
 
@@ -713,3 +719,171 @@ def resolve_code_lens(lens: Dict[str, Any]) -> Dict[str, Any]:
                     tested,
                 )["command"]
     return lens
+
+
+# ---------------------------------------------------------------------------
+# R33D — Run / Debug test lenses for top-level `fn test_*` declarations.
+#
+# NOVA's test convention (per ``tests/test_path.nova``, ``test_runtime.nova``,
+# etc) is that every top-level fn whose name starts with ``test_`` is a
+# self-contained test case the test harness invokes from the file's
+# ``main()`` driver. R33D surfaces two clickable lenses above each such
+# decl:
+#
+#   * ``▶ Run``    -> client command ``nova-lsp.runTest`` with the test
+#                     file path + fn name, so the editor can shell out to
+#                     ``bin/nova <file>`` (or a more targeted harness).
+#   * ``⏷ Debug``  -> client command ``nova-lsp.debugTest`` with the same
+#                     payload so the editor can launch the test under
+#                     nova-dap (the DAP server lives at tools/nova-dap).
+#
+# The lenses are emitted at the FN'S declaration line (line 0-indexed,
+# column 0). The editor draws them as a synthetic line ABOVE the source
+# line — both lenses sit on the same synthetic row separated by the
+# editor's lens separator (typically ``|``).
+#
+# Why not a separate code_lens module? The LSP wire only allows one
+# ``textDocument/codeLens`` response per file; multiple servers can't
+# easily compose their lens lists. Sharing the dispatcher path with the
+# existing reference-count lens (R10-era) keeps the wire shape clean and
+# lets the user read both annotations on the same hover.
+# ---------------------------------------------------------------------------
+
+
+# `nova-lsp.runTest` / `nova-lsp.debugTest` — the client command IDs the
+# editor binds to. Naming follows the LSP de-facto convention of
+# `<server-name>.<verb>` so a generic VS Code keybinding can route the
+# action via a single dispatcher (`commands.registerCommand`).
+TEST_RUN_COMMAND = "nova-lsp.runTest"
+TEST_DEBUG_COMMAND = "nova-lsp.debugTest"
+
+TEST_RUN_TITLE = "▶ Run"        # ▶ Run
+TEST_DEBUG_TITLE = "⏷ Debug"    # ⏷ Debug
+
+
+# Top-level `fn test_*` matcher. Anchored at column zero so an indented
+# (nested) `fn test_x` inside another function body is NOT picked up —
+# nested fns in NOVA aren't directly invokable as tests by the harness,
+# and the test discovery scan in tests/run_tests.sh only finds top-level
+# fns anyway, so matching the harness's actual behaviour is the right
+# call.
+_TEST_FN_DEF_RE = re.compile(
+    r"^fn\s+(test_[A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)"
+)
+
+
+@dataclass
+class TestFunction:
+    """One top-level ``fn test_*(...)`` declaration parsed out of a NOVA file.
+
+    ``name`` is the full fn name including the ``test_`` prefix (so a
+    file with ``fn test_join()`` yields ``TestFunction(name="test_join", ...)``).
+    ``line`` is the zero-based source line of the declaration; the Run /
+    Debug lenses both sit at column 0 on this line.
+    """
+    name: str
+    line: int
+
+
+def scan_test_functions(text: str) -> List[TestFunction]:
+    """Return every top-level ``fn test_*`` declaration in ``text``.
+
+    "Top-level" means column zero — indented (nested) fns are excluded
+    even when their name starts with ``test_``, mirroring the test
+    harness's discovery rule. The scan is single-pass and source-order
+    deterministic so the lens list is stable across re-renders.
+    """
+    out: List[TestFunction] = []
+    for line_no, line in enumerate(text.splitlines()):
+        m = _TEST_FN_DEF_RE.match(line)
+        if not m:
+            continue
+        out.append(TestFunction(name=m.group(1), line=line_no))
+    return out
+
+
+def build_test_run_lens(
+    test_fn: TestFunction,
+    uri: str,
+) -> Dict[str, Any]:
+    """Build the "▶ Run" CodeLens for ``test_fn``.
+
+    ``command.command`` is ``nova-lsp.runTest`` — the client looks this
+    up in its command registry and forwards the ``arguments`` array.
+    The single positional argument is a structured payload (``{file, name}``)
+    so the client can pick out either field without parsing positional
+    indices — this is the convention rust-analyzer / pyright use for their
+    own Run-test lenses.
+    """
+    file_path = _uri_to_abs(uri) or ""
+    return {
+        "range": {
+            "start": {"line": test_fn.line, "character": 0},
+            "end": {"line": test_fn.line, "character": 0},
+        },
+        "command": {
+            "title": TEST_RUN_TITLE,
+            "command": TEST_RUN_COMMAND,
+            "arguments": [{"file": file_path, "name": test_fn.name}],
+        },
+        "data": {
+            "kind": "test_run",
+            "name": test_fn.name,
+            "line": test_fn.line,
+            "uri": uri,
+        },
+    }
+
+
+def build_test_debug_lens(
+    test_fn: TestFunction,
+    uri: str,
+) -> Dict[str, Any]:
+    """Build the "⏷ Debug" CodeLens for ``test_fn``.
+
+    Same shape as ``build_test_run_lens`` but with the Debug command +
+    title. Editors typically render the two lenses side-by-side on the
+    same synthetic line above the declaration (separated by ``|``); the
+    LSP spec doesn't enforce the layout, so the visual order is up to
+    the client.
+    """
+    file_path = _uri_to_abs(uri) or ""
+    return {
+        "range": {
+            "start": {"line": test_fn.line, "character": 0},
+            "end": {"line": test_fn.line, "character": 0},
+        },
+        "command": {
+            "title": TEST_DEBUG_TITLE,
+            "command": TEST_DEBUG_COMMAND,
+            "arguments": [{"file": file_path, "name": test_fn.name}],
+        },
+        "data": {
+            "kind": "test_debug",
+            "name": test_fn.name,
+            "line": test_fn.line,
+            "uri": uri,
+        },
+    }
+
+
+def compute_test_code_lenses(
+    uri: str,
+    doc_text: str,
+) -> List[Dict[str, Any]]:
+    """Return Run + Debug CodeLens[] for every top-level ``fn test_*``.
+
+    Each test fn contributes TWO lenses (Run, then Debug) in that order,
+    grouped per fn so the editor renders ``▶ Run | ⏷ Debug`` together.
+    Non-test fns contribute nothing — see ``scan_test_functions``.
+
+    Pure single-buffer analysis: no workspace warm-up, no import-graph
+    walk. The Run / Debug actions are dispatched to client-side
+    commands; the server's only job is to point at the right (file, fn)
+    pair, which the buffer text fully determines.
+    """
+    out: List[Dict[str, Any]] = []
+    for test_fn in scan_test_functions(doc_text):
+        out.append(build_test_run_lens(test_fn, uri))
+        out.append(build_test_debug_lens(test_fn, uri))
+    return out

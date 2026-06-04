@@ -1,5 +1,39 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R33D — nova-lsp: textDocument/documentLink + Run/Debug code lenses on `fn test_*`
+
+**Status: complete** — `tools/nova-lsp` advertises two new standard
+LSP capabilities and ships matching handlers. `textDocument/documentLink`
+turns every `import "..."` statement into a clickable hyperlink whose
+`target` is the resolved absolute `file://` URI; the range covers the
+path text between the quotes (not the quotes themselves), and dead
+links (target file does not exist on disk) are still emitted because
+the editor handles dead-link UX (red squiggle on click) on its own.
+Relative paths anchor on the source file's directory, absolute paths
+pass through unchanged. `textDocument/codeLens` extends the existing
+"N references" lens layer with a Run/Debug pair on every top-level
+`fn test_*` declaration: a `▶ Run` lens whose `command` is
+`nova-lsp.runTest` and a `⏷ Debug` lens whose `command` is
+`nova-lsp.debugTest`; both carry a `{file, name}` argument payload so
+the client can dispatch to `bin/nova <file>` for Run and to the
+`tools/nova-dap` server for Debug without parsing positional indices.
+Indented (nested) `fn test_x` decls inside another function body do
+NOT receive lenses — only top-level fns at column zero qualify,
+matching what the test harness's `nova <file>` invocation actually
+discovers. New modules `nova_lsp/document_link.py` and the R33D
+extension in `nova_lsp/code_lens.py` keep the wire-shape simple; the
+existing reference-count lens stays untouched so the R10-era contract
+(and its 64 existing assertions) regression-clean. New test suites
+`tests/test_document_link.py` (69 assertions) and
+`tests/test_code_lens_r33d.py` (61 assertions) cover the unit + smoke
++ integration paths. Capability count bumps from 16 to 17 — the four
+snapshot tests (`test_hover_docs`, `test_type_completion`,
+`test_struct_field_completion`, `test_base_spread_completion`) were
+updated in lockstep. All other LSP suites
+(`test_semantic_tokens_r29d` 139, `test_inlay_hints` 104,
+`test_prepare_rename_r32e` 131, `test_rename_workspace` 101,
+`test_code_lens` 64, etc.) stay green.
+
 ## R32D — parser+codegen: nested match patterns + `let` destructure for enums and structs
 
 **Status: complete** — Pattern grammar gains two new shapes:

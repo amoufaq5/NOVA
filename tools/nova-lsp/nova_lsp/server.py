@@ -44,7 +44,14 @@ using only the Python standard library. Supports:
     * `textDocument/codeLens` + `codeLens/resolve` (annotations above
       top-level declarations — "N references" on fn / let / const,
       "N variants used" on enum, with an optional "/ tested" marker
-      when a `tests/test_*.nova` mentions the declaration)
+      when a `tests/test_*.nova` mentions the declaration; R33D layers
+      "▶ Run / ⏷ Debug" lenses on top-level `fn test_*` decls that
+      dispatch to client-side `nova-lsp.runTest` / `nova-lsp.debugTest`
+      commands)
+    * `textDocument/documentLink` (R33D — each `import "path/file.nova"`
+      becomes a clickable link with the resolved `file://` URI; relative
+      paths anchor on the current file's directory, absolute paths pass
+      through unchanged, dead-link UX is the editor's job)
     * `textDocument/prepareTypeHierarchy` +
       `typeHierarchy/supertypes` + `typeHierarchy/subtypes` (navigate
       sub/supertype edges — enum -> variants, type alias -> RHS base
@@ -92,6 +99,7 @@ from nova_lsp.call_hierarchy import (
     prepare_call_hierarchy,
 )
 from nova_lsp.code_lens import compute_code_lenses, resolve_code_lens
+from nova_lsp.document_link import compute_document_links
 from nova_lsp.document_symbols import compute_document_symbols
 from nova_lsp.exhaustiveness_fix import (
     KIND_QUICKFIX,
@@ -2069,6 +2077,38 @@ def handle_code_lens_resolve(
 
 
 # ---------------------------------------------------------------------------
+# Document links — `textDocument/documentLink`.
+#
+# Turns every `import "path/to/file.nova"` statement in the open buffer
+# into a clickable hyperlink. The link's target URI is the resolved
+# absolute path of the import (relative paths are joined against the
+# current file's directory). Dead links — paths that don't exist on
+# disk — are STILL emitted; the editor surfaces them via its own
+# dead-link UI (red squiggle on click) so the user can spot typos
+# without the LSP having to stat every import on every keystroke.
+# Single-file analysis — no workspace warm-up needed.
+# ---------------------------------------------------------------------------
+
+
+def handle_document_link(
+    state: ServerState, params: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return DocumentLink[] for the document under `uri`.
+
+    Per LSP spec the response is `DocumentLink[] | null`; we return an
+    empty list (which the client treats identically to null) when the
+    document isn't open in the server. Each link covers the path text
+    BETWEEN the quotes (not the quote characters themselves) so the
+    editor's underline lines up under the visible path.
+    """
+    uri = params.get("textDocument", {}).get("uri", "")
+    doc = state.documents.get(uri)
+    if not doc:
+        return []
+    return compute_document_links(uri=doc.uri, doc_text=doc.text)
+
+
+# ---------------------------------------------------------------------------
 # Type hierarchy — `textDocument/prepareTypeHierarchy`,
 # `typeHierarchy/supertypes`, `typeHierarchy/subtypes`.
 #
@@ -2315,6 +2355,11 @@ def server_capabilities() -> Dict[str, Any]:
         "callHierarchyProvider": True,
         "inlayHintProvider": {"resolveProvider": False},
         "codeLensProvider": {"resolveProvider": True},
+        # R33D: clickable `import "..."` paths. No resolveProvider — every
+        # link is fully populated (`range` + `target`) on the initial
+        # request because resolving an import path is cheap (one
+        # `os.path.join` + `os.path.abspath`); no need to defer.
+        "documentLinkProvider": {},
         "typeHierarchyProvider": True,
         "foldingRangeProvider": True,
         "documentSymbolProvider": True,
@@ -2512,6 +2557,10 @@ def dispatch(state: ServerState, msg: Dict[str, Any], out_stream) -> bool:
         return True
     if method == "codeLens/resolve":
         result = handle_code_lens_resolve(state, params)
+        write_message(out_stream, make_response(req_id, result))
+        return True
+    if method == "textDocument/documentLink":
+        result = handle_document_link(state, params)
         write_message(out_stream, make_response(req_id, result))
         return True
     if method == "textDocument/prepareTypeHierarchy":

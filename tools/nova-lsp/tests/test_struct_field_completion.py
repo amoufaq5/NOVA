@@ -527,20 +527,22 @@ def test_server_wire_fallback_when_no_brace_init() -> None:
 
 def test_server_wire_capability_still_advertised() -> None:
     """R26D extends completion behaviour without adding a new top-
-    level capability. The provider count should remain the same."""
+    level capability. R33D later added `documentLinkProvider`, so the
+    snapshot is now 17 (16 from R26D + 1 from R33D); the
+    completionProvider trigger set is still unchanged."""
     with tempfile.TemporaryDirectory() as ws:
         client = LspClient()
         init = client.initialize(ws)
         caps = init["result"]["capabilities"]
         cp = caps["completionProvider"]
         assert_("." in cp["triggerCharacters"], ". still a trigger")
-        # 15 providers + 1 sync key = 16 total (unchanged from R24E).
+        # 16 providers + 1 sync key = 17 total (R33D added documentLink).
         provider_keys = sorted(
             k for k in caps.keys()
             if k.endswith("Provider") or k == "textDocumentSync"
         )
-        assert_eq(len(provider_keys), 16,
-                  "capability key count unchanged at 16")
+        assert_eq(len(provider_keys), 17,
+                  "capability key count 17 (R33D documentLink added)")
 
 
 def test_top_level_aware_routes_through_brace_init() -> None:

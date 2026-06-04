@@ -15,7 +15,7 @@ for the install hook.
 | `textDocument/didSave`              | yes    |
 | `textDocument/didClose`             | yes    |
 | `textDocument/publishDiagnostics`   | yes (runs `nova --check`) |
-| `workspace/diagnostic`              | yes (R23F — pull-model aggregation of every diagnostic marker across every indexed file + open buffer into a single panel feed; content-hash `resultId` for incremental `kind: "unchanged"` vs `kind: "full"` reports; enhances the existing `diagnosticProvider` capability — `workspaceDiagnostics: true` on the same provider object rather than a new top-level provider, so the LSP capability count stays at 17) |
+| `workspace/diagnostic`              | yes (R23F — pull-model aggregation of every diagnostic marker across every indexed file + open buffer into a single panel feed; content-hash `resultId` for incremental `kind: "unchanged"` vs `kind: "full"` reports; enhances the existing `diagnosticProvider` capability — `workspaceDiagnostics: true` on the same provider object rather than a new top-level provider, so the LSP capability count stays at 17 here and bumps to 18 with R33D's `documentLinkProvider`) |
 | `textDocument/hover`                | yes (signatures from imports + `///` doc comments rendered as markdown) |
 | `textDocument/completion`           | yes (R24E adds *type-aware* layer on top of the legacy builtins + fn/let scan: cursor after `Name::` returns the variants of enum `Name`; cursor after `var.` returns the fields of `var`'s struct type; cursor after `let x: ` / `: ` in a fn-param list / `Box<` returns every enum + struct + alias name from the import graph and workspace plus the built-in primitives. R26D adds brace-init field completion: cursor inside `Point { ` returns the field names declared on `struct Point`; cursor after a partial init body `Point { x: 10, ` returns the remaining fields with already-typed names filtered out (`y` only, `x` excluded). Multi-line aware so the trigger still fires after Enter inside the brace body; nested brace-inits pick the innermost struct; in-string and in-comment braces ignored. R26A.2 follow-up adds *base-spread* completion: cursor immediately after `..` inside a brace-init body (`Point { ..|`, `Point { x: 10, ..|`) returns every in-scope variable whose type is `Point`. The walk handles let-annotation (`let p: Point = ...`), constructor inference (`let p = Point(...)`), brace-init form (`let p = Point { ... }`), and fn-parameter rows (`fn f(p: Point)`); type filtering excludes Box / other-struct values; the variable being defined on the cursor's own line is skipped (so `let q: Point = Point { ..|` won't suggest `q`); items are CompletionItemKind.Variable (6) with `name: Point` detail. Falls back to the legacy text-based list when no trigger applies. Triggers still advertised: `.` and `(`.) |
 | `textDocument/rename`               | yes (workspace-wide for top-level fn/let/const/type, single-buffer for locals + params) |
@@ -29,8 +29,9 @@ for the install hook.
 | `callHierarchy/incomingCalls`       | yes (every `name(` call site across the workspace, grouped by enclosing top-level fn) |
 | `callHierarchy/outgoingCalls`       | yes (every top-level fn called inside the source body, resolved via imports + workspace index; builtins elided) |
 | `textDocument/inlayHint`            | yes (parameter-name ghost text at call sites + literal-RHS type hints on `let` bindings; viewport-range filtered, callee resolved via imports + workspace index, builtins elided) |
-| `textDocument/codeLens`             | yes (annotations above top-level declarations — "N references" on fn / let / const, "N variants used" on enum, with optional "/ tested" marker when a `tests/test_*.nova` mentions the decl; cross-file refs via imports + workspace index) |
+| `textDocument/codeLens`             | yes (annotations above top-level declarations — "N references" on fn / let / const, "N variants used" on enum, with optional "/ tested" marker when a `tests/test_*.nova` mentions the decl; cross-file refs via imports + workspace index. **R33D** layers Run/Debug test lenses on top: every top-level `fn test_*` decl additionally surfaces "▶ Run" + "⏷ Debug" lenses whose commands are `nova-lsp.runTest` / `nova-lsp.debugTest`; clicking the lens forwards `{file, name}` to the client which shells out to `bin/nova <file>` for Run and to the nova-dap server for Debug) |
 | `codeLens/resolve`                  | yes (pass-through — eagerly resolved by `textDocument/codeLens`; schema retained for forward compatibility) |
+| `textDocument/documentLink`         | yes (**R33D** — every `import "path/file.nova"` statement becomes a clickable hyperlink; the link range covers the path text between the quotes (not the quotes themselves), the target is the resolved absolute `file://` URI. Relative paths anchor on the source file's directory, absolute paths pass through unchanged. Dead-link UX is the editor's job — we still emit the link even when the target file doesn't exist on disk so the editor's typo-spotting affordances kick in. Pure single-file analysis — no workspace warm-up needed) |
 | `textDocument/prepareTypeHierarchy` | yes (resolves cursor to a `TypeHierarchyItem` for an enum / struct / type alias declaration, an enum variant via `Name::Variant`, or a cross-file use site; falls through imports + workspace index) |
 | `typeHierarchy/supertypes`          | yes (enum / struct -> empty; `type T = U` -> the `U` base resolved to its decl or a builtin placeholder; enum variant -> the parent enum) |
 | `typeHierarchy/subtypes`            | yes (enum -> every declared variant as an `EnumMember` item; `type Base = ...` -> every other `type X = Base` alias in the workspace; struct + variant -> empty) |
@@ -579,3 +580,43 @@ walks the open document's import graph plus the workspace symbol
 index's crawled roots, so an enum declared in `types.nova` is offered
 at a `Type::` site in `main.nova` even before the user writes the
 `import` statement.
+
+## R33D — `textDocument/documentLink` + Run/Debug code lenses on `fn test_*`
+
+R33D adds two standard LSP capabilities to the server:
+
+### `textDocument/documentLink`
+
+Every `import "path/to/file.nova"` statement in the open buffer becomes
+a clickable hyperlink (Cmd-click in VS Code / Ctrl-click elsewhere).
+The link's `range` covers the path text **between the quotes** so the
+editor's underline lines up cleanly under the visible path; the link's
+`target` is the resolved absolute `file://` URI. Relative paths anchor
+on the source file's own directory (so `import "../runtime/path.nova"`
+inside `src/compiler/parser.nova` resolves to `src/runtime/path.nova`);
+absolute paths are passed through unchanged. Dead links — paths that
+don't exist on disk — are STILL emitted with the resolved URI;
+dead-link UX (red squiggle on click, "file not found" tooltip) is the
+editor's job, not the LSP's. The implementation lives in
+`nova_lsp/document_link.py`; the wire shape is the standard
+`{ range, target, tooltip, data }` per the spec.
+
+### Run / Debug code lenses
+
+Every top-level `fn test_<name>(...)` declaration gets two extra
+lenses stacked above the existing reference-count lens:
+
+  * `▶ Run`   -> client command `nova-lsp.runTest`
+  * `⏷ Debug` -> client command `nova-lsp.debugTest`
+
+Both commands receive a single `{file, name}` payload so the client
+can shell out to `bin/nova <file>` for Run and to the `tools/nova-dap`
+DAP server for Debug without parsing positional argument indices.
+The lens range sits at the fn's declaration line (column 0); the
+editor renders the two titles side-by-side on a single synthetic
+line above the source. Non-test fns and nested (indented) `fn test_*`
+declarations are excluded — only top-level `fn test_*` at column zero
+qualifies, matching what `tests/run_tests.sh` actually discovers when
+it shells `nova` over the file. The implementation extends
+`nova_lsp/code_lens.py` so both lens kinds (reference count + test
+run/debug) coexist on the same `textDocument/codeLens` response.

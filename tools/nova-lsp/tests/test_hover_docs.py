@@ -557,6 +557,8 @@ def test_capability_count_unchanged() -> None:
         "foldingRangeProvider",
         "documentSymbolProvider",
         "diagnosticProvider",
+        # R33D — clickable import links via `textDocument/documentLink`.
+        "documentLinkProvider",
     }
     assert_eq(set(caps.keys()), expected_keys,
               "server_capabilities returns the expected provider key set")
