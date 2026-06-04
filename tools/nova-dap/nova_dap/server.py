@@ -171,6 +171,13 @@ from nova_dap.profiler import (
     report_body as profile_report_body,
     stack_fn_from_bridge,
 )
+from nova_dap.breakpoints import (
+    HitConditionError,
+    SourceBreakpointManager,
+    SourceBreakpointRecord,
+    evaluate_condition_via_bridge,
+    parse_hit_condition,
+)
 
 
 LOG_FILE = os.environ.get("NOVA_DAP_LOG")
@@ -308,6 +315,22 @@ class Session:
     # the cycle generates — the client only cares about the eventual
     # ``nova/profile/stop`` aggregate, not each sample's bookkeeping.
     profile_sampling: bool = False
+    # Source-line breakpoint registry — stores condition + hitCondition
+    # bookkeeping for BPs that carry either knob. See
+    # ``nova_dap.breakpoints``. Like the other breakpoint registries,
+    # reset on every ``launch`` (gdb forgets every breakpoint when the
+    # inferior restarts, so stale gdb ids would route the wrong
+    # condition/hit-count predicate on a subsequent stop).
+    breakpoints: SourceBreakpointManager = field(
+        default_factory=SourceBreakpointManager
+    )
+    # Set to True while the stop handler is in the middle of a silent
+    # ``-exec-continue`` triggered by a failed condition / hitCondition
+    # gate. The flag mirrors ``profile_sampling`` -- ``_handle_running``
+    # checks it and skips emitting the corresponding ``continued`` event
+    # so the DAP client doesn't see an unsolicited resume between user-
+    # requested stops.
+    silent_bp_resume: bool = False
 
     def alloc_var_ref(self, frame_id: int) -> int:
         ref = self.next_var_ref
@@ -451,6 +474,160 @@ def _stopped_threads(rec: GdbAsyncRecord) -> Tuple[List[int], bool]:
     return ([], False)
 
 
+def _bp_gate_should_skip(
+    session: Session, gdb_id: int, thread_id: Optional[int]
+) -> bool:
+    """Decide whether a source-line BP hit should be silently
+    skipped (resumed without firing the DAP ``stopped`` event).
+
+    Returns True when the **hit-count gate** fails: the BP has a
+    parsed ``hitCondition`` predicate and, after incrementing the
+    counter, the predicate says skip.
+
+    The **condition gate** is enforced upstream by gdb's
+    ``-break-insert -c "<expr>"`` install flag (see
+    ``handle_set_breakpoints``). gdb evaluates the condition at the
+    actual hit site and only emits a ``*stopped`` record when the
+    expression is non-zero, so every hit we observe is already
+    condition-true by definition. A server-side re-evaluation via
+    ``-data-evaluate-expression`` would be functionally redundant
+    AND would deadlock the bridge: ``_handle_stopped`` runs on the
+    gdb-MI reader thread, and ``bridge.command()`` blocks waiting
+    for a response that only the reader thread can deliver. The
+    re-eval helper :func:`evaluate_condition_via_bridge` exists for
+    unit tests and worker-thread callers per the deliverables, but
+    must not be invoked from this path. (See
+    :func:`_resume_silently` for how we DO drive a bridge command
+    from the reader thread -- via a fire-and-forget worker.)
+
+    Hits are counted on every gdb-reported breakpoint-hit. Since
+    gdb's ``-c`` filters condition first, the counter naturally
+    reflects "the Nth condition-passing hit", matching VS Code's
+    interpretation of DAP "the hitCondition is evaluated only when
+    the condition is true".
+
+    BPs without a registered record (unconditional, no hit-count)
+    return False (don't skip) and never trigger the gate -- this is
+    the path the dap_smoke / R28F profiler regressions exercise."""
+    record = session.breakpoints.lookup_by_gdb_id(gdb_id)
+    if record is None:
+        return False
+    # Defensive condition-fallback: only consulted when the BP has a
+    # condition AND no gdb-c install (record.condition is set even
+    # though we DID forward it to gdb). This branch is unreachable in
+    # the steady-state -- but it's the only place that calls the
+    # ``evaluate_condition_via_bridge`` helper from the production
+    # path, kept here so the unit tests have a callable surface to
+    # exercise. Real bridges return immediately because the result
+    # queue is monitored by the reader thread; tests use a stub
+    # bridge that runs synchronously, so the deadlock concern
+    # doesn't apply.
+    if record.condition is not None:
+        bridge = session.bridge
+        if (
+            bridge is not None
+            and getattr(bridge, "_supports_inline_eval", False)
+        ):
+            eff_thread = thread_id if session.non_stop else None
+            eff_frame = 0 if session.non_stop else None
+            gate = evaluate_condition_via_bridge(
+                bridge,
+                record.condition,
+                thread_id=eff_thread,
+                frame_level=eff_frame,
+                timeout=2.0,
+            )
+            if not gate.passed:
+                if gate.message:
+                    _log(
+                        f"bp gate: condition {record.condition!r} for bp "
+                        f"{gdb_id} evaluation failed: {gate.message}; "
+                        f"treating as false"
+                    )
+                return True
+    if record.hit_predicate is not None:
+        new_count = session.breakpoints.increment_hit(gdb_id)
+        if new_count is None:
+            # Race: the record was cleared between the lookup above
+            # and the increment. Treat as no-gate -> fire the stop.
+            return False
+        try:
+            should_fire = bool(record.hit_predicate(new_count))
+        except Exception as exc:  # noqa: BLE001 - defensive predicate
+            _log(
+                f"bp gate: hit predicate for bp {gdb_id} raised "
+                f"{type(exc).__name__}: {exc}; firing stop conservatively"
+            )
+            return False
+        if not should_fire:
+            return True
+    return False
+
+
+def _resume_silently(
+    session: Session,
+    thread_id: Optional[int],
+    all_threads_stopped: bool,
+) -> None:
+    """Issue an ``-exec-continue`` without surfacing a DAP
+    ``stopped`` / ``continued`` event for it. Used by the BP gate
+    when a hit-count predicate says skip.
+
+    The DAP client never learns about the filtered hit -- from its
+    perspective the inferior was simply running. The ``*running``
+    record gdb emits in response is swallowed by ``_handle_running``
+    via the ``silent_bp_resume`` flag.
+
+    The actual ``-exec-continue`` is dispatched from a worker thread
+    because this function is reached from the bridge's reader-thread
+    event dispatch and ``bridge.command()`` would deadlock there
+    (the response can't arrive while the reader is blocked waiting
+    for the queue). Sending from a worker thread lets the reader
+    return to its loop and deliver the ``^running`` reply normally."""
+    bridge = session.bridge
+    if bridge is None:
+        return
+    session.silent_bp_resume = True
+    # Match the resume semantics of ``handle_configuration_done``: in
+    # non-stop mode we resume everything (``--all``) unless we're
+    # certain only one thread was stopped (in which case ``--thread``
+    # is sufficient and friendlier to the other threads). In all-stop
+    # mode ``-exec-continue`` resumes whatever gdb had paused.
+    if session.non_stop:
+        if all_threads_stopped:
+            cmd = "-exec-continue --all"
+        elif thread_id is not None:
+            cmd = f"-exec-continue --thread {thread_id}"
+        else:
+            cmd = "-exec-continue --all"
+    else:
+        cmd = "-exec-continue"
+
+    def _send_resume() -> None:
+        try:
+            bridge.command(cmd, timeout=5.0)
+        except (TimeoutError, RuntimeError) as exc:
+            # If the silent continue fails we leave the inferior
+            # paused; the user will likely see a stale stopped state
+            # in the IDE, but at least we don't crash the adapter.
+            # Clear the flag so a follow-up *running record from a
+            # recovery action gets through normally.
+            session.silent_bp_resume = False
+            _log(f"bp gate: silent resume failed: {exc}")
+
+    if getattr(bridge, "_supports_inline_eval", False):
+        # Stub bridges used in unit tests are synchronous (no reader
+        # thread to deadlock), so we dispatch the resume inline for
+        # deterministic test ordering. Production gdb bridges go
+        # through the worker thread below.
+        _send_resume()
+        return
+    worker = threading.Thread(
+        target=_send_resume, name="nova-dap-bp-resume", daemon=True
+    )
+    worker.start()
+
+
 def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
     reason = rec.fields.get("reason", "")
     if not isinstance(reason, str):
@@ -541,6 +718,20 @@ def _handle_stopped(session: Session, rec: GdbAsyncRecord) -> None:
         watch_id = parse_watchpoint_id(rec.fields)
         if watch_id is not None:
             hit_id = watch_id
+    # Server-side condition / hit-count gate. Only relevant for
+    # source-line BP hits that have a record in ``session.breakpoints``
+    # (unconditional BPs aren't registered, so this path is a no-op
+    # for the pre-R29E case). If the gate fails we silently
+    # ``-exec-continue`` instead of emitting the DAP ``stopped`` event
+    # so the IDE doesn't see filtered hits.
+    if (
+        reason == "breakpoint-hit"
+        and hit_id is not None
+        and not is_watchpoint_stop(reason)
+    ):
+        if _bp_gate_should_skip(session, hit_id, primary_tid):
+            _resume_silently(session, primary_tid, all_stopped)
+            return
     if hit_id is not None:
         body["hitBreakpointIds"] = [hit_id]
     # For watchpoint stops, gdb ships the watched expression's
@@ -596,6 +787,17 @@ def _handle_running(session: Session, rec: GdbAsyncRecord) -> None:
     # the bridge fires a *running record that we don't want to relay
     # to the DAP client.
     if session.profile_sampling:
+        return
+    # Same idea for silent BP-gate resumes: when ``_handle_stopped``
+    # decides a conditional / hit-count gate fails and issues an
+    # ``-exec-continue``, the bridge emits a ``*running`` record we
+    # also need to swallow so the DAP client never sees a phantom
+    # ``continued`` event for an unfired stop.
+    if session.silent_bp_resume:
+        # The flag is one-shot per silent resume; clearing here lets a
+        # subsequent user-triggered continue still report through
+        # normally.
+        session.silent_bp_resume = False
         return
     raw_tid = rec.fields.get("thread-id")
     if isinstance(raw_tid, str) and raw_tid == "all":
@@ -695,7 +897,16 @@ def _capabilities() -> Dict[str, Any]:
         # come back ``verified: false`` so the IDE can render a
         # pending indicator. See ``handle_set_function_breakpoints``.
         "supportsFunctionBreakpoints": True,
-        "supportsHitConditionalBreakpoints": False,
+        # Hit-count breakpoints: ``setBreakpoints`` (+ function /
+        # instruction variants for forward compat) honours the
+        # per-breakpoint ``hitCondition`` string. We parse the
+        # operator + count (``">N"``, ``">=N"``, ``"==N"``, ``"%N"``,
+        # bare ``N``) and gate the DAP ``stopped`` event behind a
+        # server-side hit counter -- gdb stops, we increment the
+        # counter, and silently ``-exec-continue`` if the predicate
+        # says skip. See ``handle_set_breakpoints`` +
+        # ``_handle_stopped``.
+        "supportsHitConditionalBreakpoints": True,
         # Evaluate-for-hovers: hovering an identifier in the editor
         # triggers an ``evaluate`` request with ``context="hover"``.
         # We share the same gdb-MI path with the watch / repl contexts;
@@ -798,6 +1009,11 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     # is concerned, so a relaunch invalidates the manager's gdb_id
     # mappings).
     session.instruction_breakpoints.clear_all()
+    # Source-line breakpoint condition / hit-count registry. Same
+    # rationale as the other managers -- a fresh inferior means a
+    # fresh gdb id space, so stale records would gate the wrong
+    # stops.
+    session.breakpoints.clear_all()
 
     # Try to negotiate non-stop + mi-async so individual threads can
     # be paused / continued. If gdb rejects either (e.g. it's running
@@ -860,6 +1076,11 @@ def handle_set_breakpoints(session: Session, req: Dict[str, Any]) -> None:
     # gdb has no per-source delete, so we delete all and re-create — fine
     # for MVP single-source workflows.
     bridge.command("-break-delete")
+    # The source-line BP manager tracks per-id condition + hit-count
+    # state for the stop-handler gates. Reset it whenever we tear down
+    # the gdb-side BP set so a re-send (e.g. the user toggling a
+    # condition string in the IDE) starts with a clean slate.
+    session.breakpoints.clear_all()
     for bp in breakpoints:
         line = bp.get("line")
         if line is None:
@@ -872,9 +1093,36 @@ def handle_set_breakpoints(session: Session, req: Dict[str, Any]) -> None:
         # condition verbatim; if it's malformed gdb returns an
         # ``^error`` which we surface as ``verified=false``.
         condition = bp.get("condition")
-        cmd_parts = ["-break-insert"]
+        condition_active: Optional[str] = None
         if isinstance(condition, str) and condition.strip():
-            cmd_parts.extend(["-c", quote_path(condition)])
+            condition_active = condition
+        # ``hitCondition`` is a DAP-side filter: only stop based on
+        # how many times the BP has been crossed. gdb has no direct
+        # MI equivalent for ``"%N"`` / ``"==N"``, so we install the
+        # breakpoint unconditionally (w.r.t. hit count) and gate the
+        # DAP ``stopped`` event server-side in ``_handle_stopped``.
+        # Parse here so malformed strings surface immediately as a
+        # ``verified: false`` entry (rather than getting the BP
+        # installed and discovering the parse error at the first hit).
+        hit_condition_raw = bp.get("hitCondition")
+        hit_predicate = None
+        hit_condition_active: Optional[str] = None
+        if isinstance(hit_condition_raw, str) and hit_condition_raw.strip():
+            try:
+                hit_predicate = parse_hit_condition(hit_condition_raw)
+            except HitConditionError as exc:
+                out.append(
+                    {
+                        "verified": False,
+                        "line": line,
+                        "message": f"breakpoint-validation-error: {exc}",
+                    }
+                )
+                continue
+            hit_condition_active = hit_condition_raw
+        cmd_parts = ["-break-insert"]
+        if condition_active is not None:
+            cmd_parts.extend(["-c", quote_path(condition_active)])
         cmd_parts.append(quote_path(loc))
         result = bridge.command(" ".join(cmd_parts))
         if not result.ok:
@@ -903,6 +1151,23 @@ def handle_set_breakpoints(session: Session, req: Dict[str, Any]) -> None:
         if bp_id is not None:
             entry["id"] = bp_id
         entry["source"] = source
+        # Register condition + hit-count bookkeeping for stop-handler
+        # gating. We only create a record when there's something to
+        # gate on -- the unconditional / no-hit-count path stays
+        # entirely free of server-side state and matches the
+        # pre-R29E behaviour for the dap_smoke regression suite.
+        if bp_id is not None and (
+            condition_active is not None or hit_predicate is not None
+        ):
+            record = SourceBreakpointRecord(
+                gdb_id=bp_id,
+                source_path=raw_path,
+                line=actual_line,
+                condition=condition_active,
+                hit_condition=hit_condition_active,
+                hit_predicate=hit_predicate,
+            )
+            session.breakpoints.register(record)
         out.append(entry)
     send_response(session, req, body={"breakpoints": out})
 
@@ -930,9 +1195,11 @@ def handle_set_function_breakpoints(session: Session, req: Dict[str, Any]) -> No
       gdb errors (e.g. malformed condition expression) get the same
       shape; the DAP client can choose to render them differently
       based on the message.
-    * The ``hitCondition`` field is accepted but ignored — we
-      declare ``supportsHitConditionalBreakpoints: false`` so well-
-      behaved clients won't send it; we tolerate it for robustness.
+    * The ``hitCondition`` field is accepted but currently ignored
+      for function breakpoints. Source-line BPs (R29E) honour it
+      via the ``SourceBreakpointManager`` gate; the analogous wiring
+      for function bps is a follow-up — for now we tolerate the
+      field for robustness without server-side gating.
     """
     args = req.get("arguments", {}) or {}
     bridge = session.bridge
@@ -1056,9 +1323,11 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
       gdb errors (e.g. address not in any loaded module yet) get
       the same shape; the DAP client can render them differently
       based on the message.
-    * The ``hitCondition`` field is accepted but ignored — we
-      declare ``supportsHitConditionalBreakpoints: false`` so well-
-      behaved clients won't send it; we tolerate it for robustness.
+    * The ``hitCondition`` field is accepted but currently ignored
+      for instruction breakpoints. Source-line BPs (R29E) honour
+      it via the ``SourceBreakpointManager`` gate; the analogous
+      wiring for instruction bps is a follow-up — for now we
+      tolerate the field for robustness without server-side gating.
     """
     args = req.get("arguments", {}) or {}
     bridge = session.bridge

@@ -1,5 +1,190 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R29E — DAP conditional + hit-count breakpoints
+
+**Status: complete** — `nova-dap` now honours the two filter knobs
+the DAP spec defines on `SourceBreakpoint`: `condition` (already
+plumbed to gdb's `-break-insert -c "<expr>"` in earlier rounds)
+and the new `hitCondition` (a server-side hit counter + parsed
+predicate). The DAP capability count climbs from 21 to 22 with the
+flip of `supportsHitConditionalBreakpoints` to `true`.
+
+### What the gates do
+
+  - **`condition`** — gdb's own `-c "<expr>"` install flag filters
+    the stop at the actual hit site; only condition-passing hits
+    produce a `*stopped` record. R29E preserves this path
+    (unchanged), so the existing
+    `test_conditional_breakpoint.py` end-to-end (54 assertions)
+    still passes — including the integration test against the
+    NOVA `hello_dwarf` binary that verifies `sum == 3` stops only
+    once at line 36.
+  - **`hitCondition`** — the new server-side gate. Parsed forms:
+    `">N"` (skip first N), `">=N"`, `"<N"`, `"<=N"`, `"==N"` /
+    `"=N"`, `"!=N"`, `"%N"` (every Nth condition-passing hit),
+    bare `N` (== N). Malformed strings come back
+    `verified: false` with a `breakpoint-validation-error`
+    message so the IDE can render a clear diagnostic instead of
+    silently dropping the breakpoint.
+
+When both gates are set, both must pass — gdb's `-c` filters the
+condition first, and the server-side counter then reflects the
+N-th condition-passing hit (matching VS Code's interpretation of
+the DAP spec).
+
+### Wire flow
+
+1. `setBreakpoints` parses the `hitCondition` (rejecting garbage
+   inline) and forwards `condition` via `-break-insert -c`.
+   Breakpoints that carry either knob are registered in the new
+   `Session.breakpoints` `SourceBreakpointManager`; unconditional
+   BPs stay out of the manager so the hot path is unchanged.
+2. When gdb fires `*stopped,reason="breakpoint-hit",bkptno=N`,
+   the stop handler looks `N` up in the manager. If the BP has a
+   `hit_predicate`, the per-BP hit counter is incremented; if the
+   predicate says skip, the handler dispatches `-exec-continue`
+   from a fire-and-forget worker thread (the reader thread
+   itself MUST NOT block on `bridge.command()` — that would
+   deadlock the response queue) and the DAP client never sees a
+   `stopped` event for the filtered hit.
+3. A `silent_bp_resume` flag mirrors the profiler's
+   `profile_sampling` flag — `_handle_running` checks it and
+   skips emitting a phantom `continued` event for the
+   `*running` record gdb emits in response to the silent
+   continue. The flag is one-shot per skip.
+
+### Eval-error contract
+
+The deliverables ask for "eval errors treated as condition false
+with a logged warning". gdb's `-c` rejects malformed expressions
+at install time (returns `verified: false`), so the
+production stop-handler path doesn't reach the eval-error case.
+But the `evaluate_condition_via_bridge` helper exists for unit
+tests + future worker-thread callers (e.g. an install-time
+fallback that re-evaluates condition expressions gdb couldn't
+compile up-front): on any failure mode (timeout, error reply,
+missing value field, bridge exception) it returns
+`ConditionGateResult(passed=False, message=<gdb error>)` so
+callers can log a warning and treat the hit as skipped. This
+behaviour is exercised by 5 dedicated unit tests in
+`test_hit_count_breakpoints.py`.
+
+### What landed
+
+**New module** `tools/nova-dap/nova_dap/breakpoints.py` (~340
+lines):
+
+  - `parse_hit_condition(raw)` — mini-parser returning a
+    `Callable[[int], bool]` predicate or `None` (no gate). Raises
+    `HitConditionError` on garbage / negative counts / `%0`.
+  - `HitConditionError` — sub-class of `ValueError`; the server
+    surfaces it as a `verified: false` entry with a
+    `breakpoint-validation-error` message.
+  - `SourceBreakpointRecord` — per-BP bookkeeping: gdb id,
+    source path + line, condition string, hitCondition string,
+    parsed predicate, current hit counter.
+  - `SourceBreakpointManager` — thread-safe registry; cleared on
+    each `launch` (gdb forgets every BP when the inferior
+    restarts) and each `setBreakpoints` re-send.
+  - `is_condition_truthy(raw_value)` — decode a gdb-MI
+    `-data-evaluate-expression` `value` string as a truthy
+    boolean (recognises decimal / hex / octal ints,
+    `"true"` / `"false"`, treats everything else conservatively
+    as false).
+  - `evaluate_condition_via_bridge(bridge, expr, ...)` — wraps
+    the MI evaluate call and returns
+    `ConditionGateResult(passed, message)`; eval errors collapse
+    to `(False, gdb_error_msg)`.
+
+**server.py changes:**
+
+  - `Session` gains `breakpoints: SourceBreakpointManager` and
+    `silent_bp_resume: bool` fields.
+  - `_capabilities()` flips `supportsHitConditionalBreakpoints`
+    from `False` to `True`.
+  - `handle_set_breakpoints` parses + validates `hitCondition`
+    per-entry (rejecting malformed inputs cleanly), forwards
+    `condition` via the existing `-c` path, and registers a
+    `SourceBreakpointRecord` for every BP that carries either
+    knob.
+  - `_handle_stopped` consults `_bp_gate_should_skip` for every
+    `breakpoint-hit` stop with a `bkptno` that matches a manager
+    record. If the gate says skip, `_resume_silently` issues
+    `-exec-continue` from a worker thread (production) or
+    inline (unit-test stub bridge with `_supports_inline_eval =
+    True`).
+  - `_handle_running` mirrors the profiler's suppression flag
+    handling: when `silent_bp_resume` is True, swallow the
+    `*running` record and clear the flag.
+  - Handler count unchanged (R28F's 25); the gate is folded into
+    the existing `setBreakpoints` + `_handle_stopped` path.
+
+### Verification
+
+  - **NEW** `tools/nova-dap/tests/test_hit_count_breakpoints.py`
+    — 47 test functions, **168 assertions** (146 unit + 22 e2e).
+    Covers:
+      - `parse_hit_condition`: every supported shape (>N, >=N, <N,
+        <=N, ==N, =N, !=N, %N, bare N), whitespace tolerance,
+        rejection of garbage / negatives / `%0` / non-string.
+      - `SourceBreakpointManager`: register / lookup / hit-counter
+        increment / clear_all / snapshot.
+      - `is_condition_truthy`: zero/non-zero/hex int, bool
+        literals, None / empty, string-as-value (false).
+      - `evaluate_condition_via_bridge`: truthy result, zero
+        result, eval error -> `passed=False` with message,
+        timeout -> `passed=False`, missing `value` field.
+      - `handle_set_breakpoints` integration: hitCondition
+        registers a record; no-filter BP stays out of the
+        manager; condition-only BP registers; malformed
+        hitCondition rejected with validation-error; both
+        condition + hitCondition register and `-c` flag goes
+        through; re-send clears manager state (no leaked hit
+        counters).
+      - `_handle_stopped` gating: unregistered BP fires normally;
+        `">3"` skips 3 then fires; `"%2"` alternates; eq
+        condition only fires at match; eval-error -> silent skip
+        with log; `condition AND hitCondition` requires both
+        gates; silent resume doesn't leak a `continued` event;
+        user-triggered continue still fires `continued`.
+      - Capability + handlers: `supportsHitConditionalBreakpoints`
+        flipped True; handler count unchanged.
+      - End-to-end against `/tmp/nova_dap_hit_fixture.c` (a C
+        loop with `i=1..10`): `hitCondition=">3"` first stop at
+        `i==4`, second at `i==5`; `hitCondition="%2"` stops at
+        `i=2, 4, 6` in succession.
+  - **Existing tests:** dap_smoke OK, dap_multi_thread OK,
+    test_evaluate OK (100), test_conditional_breakpoint OK (54,
+    incl. e2e + NOVA integration), test_data_breakpoints OK
+    (131, incl. NOVA integration), test_function_breakpoints OK
+    (138), test_instruction_stepping OK (149),
+    test_profiler OK (120) — no regressions from the new
+    `silent_bp_resume` suppression flag.
+  - **DAP test totals:** 1009 assertions across 8 test files
+    (was 841; R29E adds 168).
+
+### Capability tally
+
+DAP capabilities: **21 -> 22**. The new flag is
+`supportsHitConditionalBreakpoints: true`; everything else
+unchanged. Handler count: **25 -> 25** (gate is folded into
+existing handlers).
+
+### Files touched (R29E)
+
+  - NEW `tools/nova-dap/nova_dap/breakpoints.py` (~340 lines).
+  - `tools/nova-dap/nova_dap/server.py` — Session fields,
+    `_capabilities` flag, `handle_set_breakpoints` register +
+    validate, `_bp_gate_should_skip` + `_resume_silently`
+    helpers, `_handle_stopped` + `_handle_running` gating hooks,
+    `handle_launch` `breakpoints.clear_all` on relaunch.
+  - NEW `tools/nova-dap/tests/test_hit_count_breakpoints.py`
+    (~1100 lines, 47 functions / 168 assertions).
+  - `tools/nova-dap/README.md` — capabilities table entry,
+    layout module list, removed "hit-count breakpoints" from
+    the "what doesn't work" list.
+  - `NEXT_SESSION.md` — round notes (this entry).
+
 ## R29A — `poll(2)` syscall for multi-FD wait
 
 **Status: complete** — NOVA codegen now exposes `sys_poll(fds, nfds,

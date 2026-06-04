@@ -49,6 +49,20 @@ Capabilities advertised:
   forwarded verbatim to gdb's `-break-insert -c "<expr>"`. gdb only
   fires the breakpoint when the expression is non-zero, so a loop
   with `condition: "x > 5"` skips iterations where `x <= 5`.
+* `supportsHitConditionalBreakpoints: true`
+  — `setBreakpoints` honours the per-breakpoint `hitCondition`
+  string. We parse the operator + count form (`">N"`, `">=N"`,
+  `"==N"` / `"=N"`, `"!=N"`, `"<N"`, `"<=N"`, `"%N"`, bare `N`)
+  and gate the DAP `stopped` event behind a server-side hit
+  counter — gdb stops, we increment, and silently `-exec-continue`
+  if the predicate says skip. So `hitCondition: ">3"` skips the
+  first 3 hits and fires from the 4th onwards; `"%2"` fires every
+  other hit. When combined with `condition`, both gates must pass
+  (gdb's `-c` filters condition first; the hit counter then
+  reflects "the Nth condition-passing hit"). Malformed
+  `hitCondition` strings come back `verified: false` with a
+  `breakpoint-validation-error` message so the IDE can render a
+  diagnostic.
 * `supportsFunctionBreakpoints: true`
   — `setFunctionBreakpoints` accepts a list of `{name, condition?}`
   entries and installs gdb breakpoints by symbol name. Useful when
@@ -186,9 +200,6 @@ is out of scope for this milestone.
 
 ## What does NOT work yet
 
-* **Hit-count breakpoints.** Conditional breakpoints are supported
-  (gdb's `-break-insert -c`), hit-count (`-break-insert -i N` /
-  `ignore N`) is not yet plumbed.
 * **NOVA coroutines as separate DAP threads.** See the thread-model
   note above — coroutines look like ordinary function calls to gdb.
 * **`stopOnEntry`.** The adapter runs straight to the first
@@ -243,11 +254,28 @@ tools/nova-dap/
                                           the inferior to sample then
                                           resumes (the only way gdb can
                                           walk a live thread's stack).
+    breakpoints.py                       Source-line BP gating (R29E):
+                                          `parse_hit_condition` mini-parser
+                                          (>N / >=N / ==N / =N / !=N / <N
+                                          / <=N / %N / bare N),
+                                          `SourceBreakpointRecord`
+                                          (per-BP condition + hit-count
+                                          bookkeeping),
+                                          `SourceBreakpointManager`
+                                          (thread-safe registry the
+                                          `Session` holds),
+                                          `evaluate_condition_via_bridge`
+                                          (server-side re-eval helper
+                                          with eval-error -> false
+                                          fallback for the
+                                          worker-thread / install-time
+                                          path).
   tests/
     dap_smoke.py                         end-to-end single-thread smoke test
     dap_multi_thread.py                  end-to-end multi-thread coordination test
     test_evaluate.py                     evaluate request: decoder + REPL/watch/hover
     test_conditional_breakpoint.py       conditional `setBreakpoints` with `condition`
+    test_hit_count_breakpoints.py        hit-count + condition gating (R29E)
     test_data_breakpoints.py             data breakpoints / watchpoints (dataBreakpointInfo + setDataBreakpoints)
     test_function_breakpoints.py         function breakpoints by name (setFunctionBreakpoints)
     test_instruction_stepping.py         instruction-level stepping + disassemble + setInstructionBreakpoints
