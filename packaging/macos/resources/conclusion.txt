@@ -1,0 +1,19 @@
+Nova has been installed.
+
+The compiler binary is at:
+  /usr/local/bin/nova
+
+Confirm with:
+  nova --version
+
+For documentation and examples:
+  /usr/local/share/doc/nova/
+  man nova
+
+To uninstall, run:
+  sudo rm -f /usr/local/bin/nova
+  sudo rm -rf /usr/local/share/doc/nova
+  sudo rm -f /usr/local/share/man/man1/nova.1
+
+For the Homebrew install path instead, see:
+  https://github.com/nova-lang/homebrew-nova

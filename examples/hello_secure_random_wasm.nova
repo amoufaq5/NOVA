@@ -1,0 +1,27 @@
+// Minimal WASM smoke test for secure_random.
+//
+// Verifies the wasi_snapshot_preview1.random_get import resolves
+// and that secure_random returns the requested byte count.
+//
+// The test stays small on purpose: WASM's runtime does not (yet)
+// expose load8 / int_add as $-function imports, so the
+// full-fidelity tests/test_secure_random.nova does not assemble
+// under wat2wasm. This file is the import-resolution check.
+//
+// Build:
+//   bin/nova examples/hello_secure_random_wasm.nova \
+//       --target=wasm -o /tmp/hsr.wat
+//   wat2wasm /tmp/hsr.wat -o /tmp/hsr.wasm
+//   node --experimental-wasi-unstable-preview1 ...
+
+fn main() {
+    let buf = alloc(32)
+    let n = secure_random(buf, 32)
+    if n == 32 {
+        println("secure_random WASM: OK")
+    } else {
+        println("secure_random WASM: FAIL")
+    }
+}
+
+main()

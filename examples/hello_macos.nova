@@ -1,0 +1,49 @@
+// Cross-platform smoke test for the macOS codegen path.
+// Compile with:
+//     bin/nova examples/hello_macos.nova --target=macos -o /tmp/hello_macos.s
+//
+// On real macOS (preferred):
+//     as -o /tmp/hello_macos.o /tmp/hello_macos.s
+//     ld -e _main -o bin/hello_macos /tmp/hello_macos.o
+//     ./bin/hello_macos
+//
+// Cross-link from Linux (this sandbox), using LLVM clang + ld64.lld:
+//     clang -target x86_64-apple-darwin -c /tmp/hello_macos.s -o /tmp/hello_macos.o
+//     ld64.lld -arch x86_64 -platform_version macos 10.13 10.13 \
+//         -e _main -o bin/hello_macos /tmp/hello_macos.o
+//     file bin/hello_macos  # => Mach-O 64-bit executable x86_64
+//
+// (the binary cannot actually run on Linux -- needs the Darwin kernel for
+// the BSD syscalls. file/llvm-objdump verify the format.)
+//
+// Exercises:
+//   - println of a string literal       (raw write syscall via Darwin BSD#4)
+//   - string concat (a + b)             (_nova_concat -> _nova_alloc -> mmap)
+//   - int_to_str                        (pure-logic helper)
+//   - a hardcoded loop counter          (control flow)
+//   - clean exit                        (Darwin BSD exit syscall #1)
+//
+// Skipped vs hello_win32.nova: file I/O. The macOS path uses BSD syscalls
+// for open/read/write/close (same numbering as the Linux source side via
+// syscall_num translation); file roundtrip will be added in a later milestone
+// once a real Darwin host or fuller dyld setup is available.
+
+fn main() {
+    println("hello from NOVA on macOS")
+
+    // Concat exercises _nova_concat + _nova_alloc.
+    let who = "world"
+    let greeting = "hello, " + who + "!"
+    println(greeting)
+
+    // int_to_str + concat together.
+    let i = 0
+    while i < 3 {
+        println("tick " + int_to_str(i))
+        i = i + 1
+    }
+
+    println("done")
+}
+
+main()

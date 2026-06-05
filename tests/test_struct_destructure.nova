@@ -1,0 +1,119 @@
+// R25A: struct destructure pattern — `let Foo { field: binder } = x`
+// (parser-time lowering to a temp + field-access chain) plus the
+// match-arm form `match v { Foo { field: pat } => body }` (parser-time
+// rewrite to a do-expr capturing the matchee in a fresh local with a
+// guarded wildcard arm per struct pattern).
+//
+// Both forms are pure parser-time desugaring — codegen sees only the
+// existing AST shapes (AST_FIELD_ACCESS, AST_LET_STMT, AST_DO_EXPR,
+// AST_MATCH_STMT with guarded wildcards), so cross-target behaviour is
+// the same as R23A baseline.
+
+// --- Let destructure: explicit binder syntax ---
+
+struct Box<T> {
+    value: T
+}
+
+let b = Box { value: 42 }
+let Box { value: v } = b
+assert(v == 42, "let Box { value: v } binds v == 42")
+
+// --- Let destructure: multi-field ---
+
+struct Point {
+    x: int,
+    y: int
+}
+
+let p = Point { x: 10, y: 20 }
+let Point { x: px, y: py } = p
+assert(px == 10, "let Point { x: px, y: py } binds px")
+assert(py == 20, "let Point { x: px, y: py } binds py")
+
+// --- Let destructure: field-name shorthand (`field` alone) ---
+
+let p2 = Point { x: 5, y: 7 }
+let Point { x, y } = p2
+assert(x == 5, "shorthand: x")
+assert(y == 7, "shorthand: y")
+
+// --- Let destructure: partial (with rest `..`) ---
+
+let p3 = Point { x: 100, y: 200 }
+let Point { x: px3, .. } = p3
+assert(px3 == 100, "partial: only x bound, rest skipped")
+
+// --- Match arm: literal field pattern ---
+
+let porigin = Point { x: 0, y: 0 }
+let mr1 = match porigin {
+    Point { x: 0, y: 0 } => 1
+    Point { x: 0, y: 1 } => 2
+    _ => 0
+}
+assert(mr1 == 1, "match Point { x: 0, y: 0 } literal arm")
+
+let pnoty = Point { x: 0, y: 5 }
+let mr2 = match pnoty {
+    Point { x: 0, y: 0 } => 1
+    Point { x: 0, y: 5 } => 2
+    _ => 0
+}
+assert(mr2 == 2, "match: second literal arm matches")
+
+let pmiss = Point { x: 9, y: 9 }
+let mr3 = match pmiss {
+    Point { x: 0, y: 0 } => 1
+    Point { x: 0, y: 5 } => 2
+    _ => 0
+}
+assert(mr3 == 0, "match: wildcard fallback when no literal arm matches")
+
+// --- Match arm: binding field pattern ---
+
+let pbind = Point { x: 30, y: 40 }
+let mr4 = match pbind {
+    Point { x: a, y: b } => a + b
+}
+assert(mr4 == 70, "match Point { x: a, y: b } => a + b")
+
+// --- Match arm: mixed literal + binder ---
+
+let pmix = Point { x: 0, y: 25 }
+let mr5 = match pmix {
+    Point { x: 0, y: a } => a + 100
+    _ => 0 - 1
+}
+assert(mr5 == 125, "match: literal x with binder y")
+
+// --- Match arm: wildcard field via `_` ---
+
+let pwc = Point { x: 7, y: 999 }
+let mr6 = match pwc {
+    Point { x: 7, y: _ } => "got 7"
+    _ => "miss"
+}
+assert(mr6 == "got 7", "match Point { x: 7, y: _ } skips y")
+
+// --- Match arm: shorthand binder (`field` alone, no colon) ---
+
+let psh = Point { x: 15, y: 25 }
+let mr7 = match psh {
+    Point { x, y } => x * y
+}
+assert(mr7 == 375, "shorthand match: x * y == 15 * 25 == 375")
+
+// --- Box destructure in let + match round-trip ---
+
+let bx2 = Box { value: 99 }
+let Box { value: bv } = bx2
+assert(bv == 99, "Box destructure: bv == 99")
+
+let mr8 = match bx2 {
+    Box { value: 99 } => "ok99"
+    Box { value: _ } => "other"
+}
+assert(mr8 == "ok99", "match Box { value: 99 } literal")
+
+println("test_struct_destructure.nova: all destructure assertions passed")

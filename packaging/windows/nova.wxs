@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v3 source for the Nova .msi installer.
+
+  Builds with:
+      candle nova.wxs -o nova.wixobj
+      light  -ext WixUIExtension -ext WixUtilExtension nova.wixobj -o nova.msi
+
+  Variables (overrideable on the candle command line):
+      ProductVersion   default 0.1.0      version segment of UpgradeCode-keyed releases
+      SourceDir        default ../..      path to repo root (relative to the .wxs)
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <?define ProductName    = "Nova" ?>
+    <?define ProductVersion = "0.1.0" ?>
+    <?define Manufacturer   = "Nova Project" ?>
+    <!-- UpgradeCode must be stable across releases so MSI upgrades work. -->
+    <?define UpgradeCode    = "8DA6F2C0-7D8E-4C5E-9B1A-1F9C0D7E2A11" ?>
+
+    <Product Id="*"
+             Name="$(var.ProductName)"
+             Language="1033"
+             Version="$(var.ProductVersion)"
+             Manufacturer="$(var.Manufacturer)"
+             UpgradeCode="$(var.UpgradeCode)">
+
+        <Package InstallerVersion="500"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 Description="Nova programming language compiler"
+                 Manufacturer="$(var.Manufacturer)" />
+
+        <!-- Refuse to downgrade. Major upgrades remove the previous version
+             before installing the new one. -->
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+
+        <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+        <!-- Directory layout: C:\Program Files\Nova\bin\nova.exe -->
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLDIR" Name="Nova">
+                    <Directory Id="BinDir" Name="bin">
+                        <Component Id="NovaExe"
+                                   Guid="A5B6E0D2-3F11-4E2F-9C00-2A3B7D9E10C1"
+                                   Win64="yes">
+                            <File Id="NovaExeFile"
+                                  Source="$(var.SourceDir)\bin\nova.exe"
+                                  Name="nova.exe"
+                                  KeyPath="yes"/>
+                        </Component>
+
+                        <!-- Add C:\Program Files\Nova\bin to system PATH. -->
+                        <Component Id="NovaPathEnv"
+                                   Guid="F71E2C0A-4DDE-4A89-9C44-09F8BE2E330C"
+                                   Win64="yes">
+                            <CreateFolder/>
+                            <Environment Id="NovaPathVar"
+                                         Name="PATH"
+                                         Value="[BinDir]"
+                                         Permanent="no"
+                                         Part="last"
+                                         Action="set"
+                                         System="yes"/>
+                            <!-- A no-op registry key gives the component a
+                                 KeyPath so MSI can track it across upgrades. -->
+                            <RegistryValue Root="HKLM"
+                                           Key="Software\NovaLang\Nova"
+                                           Name="PathInstalled"
+                                           Type="integer"
+                                           Value="1"
+                                           KeyPath="yes"/>
+                        </Component>
+                    </Directory>
+
+                    <Directory Id="DocDir" Name="doc">
+                        <Component Id="NovaDocs"
+                                   Guid="B3C7D4E1-9F2A-46BB-8C5C-2F7A3D9E8B11"
+                                   Win64="yes">
+                            <File Id="NovaReadme"
+                                  Source="$(var.SourceDir)\README.md"
+                                  Name="README.md"
+                                  KeyPath="yes"/>
+                            <File Id="NovaInstall"
+                                  Source="$(var.SourceDir)\INSTALL.md"
+                                  Name="INSTALL.md"/>
+                        </Component>
+                    </Directory>
+                </Directory>
+            </Directory>
+
+            <!-- Start menu shortcut. -->
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ProgramMenuNova" Name="Nova">
+                    <Component Id="NovaStartMenu"
+                               Guid="C9D8E7A6-1B2C-44E0-A6F1-3D4E5F60718D">
+                        <Shortcut Id="NovaShortcut"
+                                  Name="Nova Compiler"
+                                  Description="Open a command prompt with Nova on PATH"
+                                  Target="[%ComSpec]"
+                                  Arguments="/k echo Nova compiler ready. Try: nova --version"
+                                  WorkingDirectory="BinDir"/>
+                        <RemoveFolder Id="RemoveProgramMenuNova"
+                                      Directory="ProgramMenuNova"
+                                      On="uninstall"/>
+                        <RegistryValue Root="HKCU"
+                                       Key="Software\NovaLang\Nova"
+                                       Name="StartMenuInstalled"
+                                       Type="integer"
+                                       Value="1"
+                                       KeyPath="yes"/>
+                    </Component>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <Feature Id="Complete"
+                 Title="Nova Compiler"
+                 Description="The Nova compiler (nova.exe) + documentation + PATH update."
+                 Level="1"
+                 Display="expand"
+                 ConfigurableDirectory="INSTALLDIR">
+            <ComponentRef Id="NovaExe"/>
+            <ComponentRef Id="NovaPathEnv"/>
+            <ComponentRef Id="NovaDocs"/>
+            <ComponentRef Id="NovaStartMenu"/>
+        </Feature>
+
+        <Property Id="ARPHELPLINK" Value="https://github.com/nova-lang/nova"/>
+        <Property Id="ARPURLINFOABOUT" Value="https://github.com/nova-lang/nova"/>
+        <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR"/>
+        <UIRef Id="WixUI_InstallDir"/>
+        <UIRef Id="WixUI_ErrorProgressText"/>
+    </Product>
+</Wix>

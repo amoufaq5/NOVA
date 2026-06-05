@@ -226,3 +226,33 @@ fn io_input() {
     }
     return str_new(buf, n)
 }
+
+// Monotonic nanosecond clock via clock_gettime(CLOCK_MONOTONIC, &ts)
+// timespec layout: [int64 tv_sec, int64 tv_nsec] (16 bytes)
+fn _sys_clock_gettime_monotonic(ts) {
+    asm {
+        "mov rax, 228"
+        "mov rdi, 1"
+        "mov rsi, [rbp-8]"
+        "syscall"
+    }
+}
+
+// Raw integer multiply-add (bypasses _nova_mul / _nova_add pointer-threshold
+// dispatch so we can compose values above 0x100000 without triggering
+// str_repeat / str_concat). Computes a * b + c.
+fn _raw_imul_add(a, b, c) {
+    asm {
+        "mov rax, [rbp-8]"
+        "imul rax, [rbp-16]"
+        "add rax, [rbp-24]"
+    }
+}
+
+fn nanotime() {
+    let ts = alloc(16)
+    _sys_clock_gettime_monotonic(ts)
+    let sec = load64(ts)
+    let nsec = load64(ts + 8)
+    return _raw_imul_add(sec, 1000000000, nsec)
+}

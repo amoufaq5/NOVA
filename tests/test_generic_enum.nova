@@ -1,0 +1,131 @@
+// R21A: NOVA generic enum payload types — `Result<T, E>` truly parametric.
+//
+// NOVA's runtime is dynamically typed (tagged values), so generic type
+// parameters on enums are a parser-level feature: the parser accepts
+// `<T, E, ...>` on enum decls and `<int, str>` on type annotations,
+// validates the syntax, and erases them at codegen.  The same `enum`
+// body therefore supports any concrete payload type at construction
+// without re-declaration.
+//
+// Wire-level rep is unchanged from R17A: `Result::Ok(v)` -> `[0, v]`,
+// `Result::Err(e)` -> `[1, e]`.
+
+// --- Declaration with type parameters ---
+
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+// --- Two instantiations with different concrete types ---
+
+let a: Result<int, str> = Result::Ok(42)
+assert(a[0] == 0, "a: Result<int, str>::Ok tag == 0")
+assert(a[1] == 42, "a: Result<int, str>::Ok payload == 42")
+
+let b: Result<list, int> = Result::Err(0 - 1)
+assert(b[0] == 1, "b: Result<list, int>::Err tag == 1")
+assert(b[1] == 0 - 1, "b: Result<list, int>::Err payload == -1")
+
+// String payload still works — type erasure means the same enum decl
+// can hold any payload value.
+let s: Result<str, str> = Result::Ok("hello")
+assert(s[0] == 0, "s: Result<str, str>::Ok tag")
+assert(s[1] == "hello", "s: Result<str, str>::Ok payload")
+
+// List payload via Ok variant — Result<list, int> can hold a list.
+let lst = list_new()
+push(lst, 10)
+push(lst, 20)
+let l: Result<list, int> = Result::Ok(lst)
+assert(l[0] == 0, "l: Result<list, int>::Ok tag")
+assert(len(l[1]) == 2, "l: payload list len 2")
+assert(l[1][0] == 10, "l: payload[0] == 10")
+
+// --- Generic enum in match: arm destructures payload correctly ---
+
+let extracted = 0
+match a {
+    Result::Ok(v) => { extracted = v }
+    Result::Err(_) => { extracted = 0 - 999 }
+}
+assert(extracted == 42, "match Result<int, str>::Ok extracts 42")
+
+let err_branch = 0
+match b {
+    Result::Ok(_) => { err_branch = 1 }
+    Result::Err(e) => { err_branch = e }
+}
+assert(err_branch == 0 - 1, "match Result<list, int>::Err extracts -1")
+
+// --- Generic Result + R20A `?` operator: Ok unwraps ---
+
+fn unwrap_v(r) {
+    let n = r?
+    return n
+}
+
+let u = unwrap_v(Result::Ok(7))
+assert(u == 7, "Result::Ok(7)? evaluates to 7 (generic Result)")
+
+// --- Generic Result + `?` operator: Err propagates ---
+
+fn parse_num(s) {
+    if s == "" { return Result::Err("empty") }
+    if s == "neg" { return Result::Err("negative") }
+    return Result::Ok(42)
+}
+
+fn use_parse(s) {
+    let v = parse_num(s)?
+    return Result::Ok(v + 1)
+}
+
+let pgood = use_parse("ok")
+assert(pgood[0] == 0, "use_parse(ok) returned Ok")
+assert(pgood[1] == 43, "use_parse(ok) payload is 43 (42 + 1)")
+
+let pbad = use_parse("")
+assert(pbad[0] == 1, "use_parse('') propagated Err")
+assert(pbad[1] == "empty", "use_parse('') payload preserved")
+
+// --- Nested generic type annotation: Result<Result<int, str>, str> ---
+
+// Parser must consume the outer `<...>` correctly even when the inner
+// generic ends with TOK_GT (the par_skip_type depth tracker handles it).
+let outer: Result<Result<int, str>, str> = Result::Ok(Result::Ok(99))
+assert(outer[0] == 0, "outer Ok tag")
+// outer[1] IS the inner Result tuple [0, 99]
+let inner = outer[1]
+assert(inner[0] == 0, "inner Ok tag")
+assert(inner[1] == 99, "inner Ok payload == 99")
+
+// --- Three-parameter enum (more than two type params) ---
+
+enum Triple<A, B, C> {
+    First(A)
+    Second(B)
+    Third(C)
+}
+
+let t1: Triple<int, str, list> = Triple::First(1)
+assert(t1[0] == 0, "Triple::First tag")
+assert(t1[1] == 1, "Triple::First payload")
+
+let t2: Triple<int, str, list> = Triple::Second("hi")
+assert(t2[0] == 1, "Triple::Second tag")
+assert(t2[1] == "hi", "Triple::Second payload")
+
+// --- Generic enum with no payload types (just decl) still works ---
+
+enum Pair<T, U> {
+    Left(T)
+    Right(U)
+    Empty
+}
+
+let pe: Pair<int, str> = Pair::Empty
+assert(pe[0] == 2, "Pair::Empty tag == 2 (third variant)")
+assert(len(pe) == 1, "Pair::Empty length == 1 (no payload)")
+
+println("test_generic_enum.nova: all generic-enum assertions passed")

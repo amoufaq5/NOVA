@@ -10,6 +10,19 @@ let par_lambdas = 0
 let par_consts = 0
 let par_no_is = 0
 let par_source = ""
+// R25A: monotonic counter for parser-generated temp names used by struct
+// brace destructure (let) and match-arm struct patterns. Names of the
+// form `_struct_tmp_<N>` and `_struct_match_<N>` are guaranteed unique
+// across the program and unlikely to collide with user idents (leading
+// underscore + the `_struct_` token).
+let par_struct_tmp_count = 0
+// R32D: parser-time enum registry. Each entry is [enum_name, variants]
+// where variants follows the parse_enum shape ([[vname, arity, ptypes], ...]).
+// Populated as parse_enum runs so nested-variant patterns can resolve the
+// discriminant tag at parse time (instead of deferring to codegen). The
+// tc_check_program pass builds tc_enums independently — keeping the two
+// tables separate avoids ordering hazards between parse and typecheck.
+let par_enum_tags = 0
 
 fn par_init(tokens) {
     par_tokens = tokens
@@ -18,6 +31,8 @@ fn par_init(tokens) {
     par_lambda_count = 0
     par_lambdas = list_new()
     par_consts = list_new()
+    par_struct_tmp_count = 0
+    par_enum_tags = list_new()
 }
 
 fn par_set_source(src) {
@@ -175,6 +190,7 @@ fn token_type_name(t) {
     if t == 82 { return "%=" }
     if t == 83 { return "?" }
     if t == 84 { return "do" }
+    if t == 116 { return "::" }
     return concat("token(", concat(int_to_str(t), ")"))
 }
 
@@ -196,6 +212,35 @@ fn par_match(typ) {
 }
 
 fn par_skip_type() {
+    // R36C: tuple type `(int, str)` may appear anywhere par_skip_type is
+    // called (param/return annotations, generic args, etc.). Recursively
+    // consume nested types delimited by `,`, terminated by `)`. The empty
+    // tuple type `()` is accepted as a no-op (NOVA has no unit type
+    // today; this keeps the parser forward-compatible without committing
+    // to a runtime void value).
+    if par_peek_type() == TOK_LPAREN {
+        par_advance()
+        if par_peek_type() == TOK_RPAREN {
+            par_advance()
+        } else {
+            par_skip_type()
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN { break }
+                par_skip_type()
+            }
+            par_expect(TOK_RPAREN)
+        }
+        // After tuple type, also accept `-> U` for tuple-returning fn types.
+        if par_peek_type() == TOK_MINUS {
+            if par_peek_at_type(1) == TOK_GT {
+                par_advance()
+                par_advance()
+                par_skip_type()
+            }
+        }
+        return 0
+    }
     par_expect(TOK_IDENT)
     if par_peek_type() == TOK_LT {
         par_advance()
@@ -205,13 +250,162 @@ fn par_skip_type() {
             let tt = par_peek_type()
             if tt == TOK_LT { depth = depth + 1 }
             if tt == TOK_GT { depth = depth - 1 }
+            // R21A: tight nested generics produce TOK_SHR (`>>`) which
+            // closes two levels at once. `Box<Box<int>>` lexes as
+            // `Box`, `<`, `Box`, `<`, `int`, `>>` — without splitting,
+            // we'd think depth is 1 at the end.
+            if tt == TOK_SHR { depth = depth - 2 }
             if tt == TOK_EOF {
                 par_error("unexpected end of file in type annotation")
             }
-            if depth == 0 { tdone = 1 }
+            if depth <= 0 { tdone = 1 }
             par_advance()
         }
     }
+    // R22B: function-type syntax `T -> U` for parameters like
+    // `f: T -> U`. After consuming the input type `T`, if we see a
+    // thin arrow (`-` then `>`), consume it and recurse to skip the
+    // result type `U`. The two-token `->` pattern is recognised here
+    // because the lexer doesn't emit a dedicated TOK_THINARROW.
+    if par_peek_type() == TOK_MINUS {
+        if par_peek_at_type(1) == TOK_GT {
+            par_advance()
+            par_advance()
+            par_skip_type()
+        }
+    }
+}
+
+// R20A: disambiguate postfix `?` (Result-propagation) from the ternary
+// operator. After consuming an expression in parse_postfix and seeing a
+// `?`, the next token decides: if it can start a sub-expression (a
+// literal, identifier, opening paren, unary op, or `if`/`match`/`do`/
+// `try`/`fn` keyword), it's the ternary "then" expression and we leave
+// the `?` for parse_expr to handle. Otherwise — closer, binary op,
+// statement terminator, statement-keyword — it's Result propagation.
+fn par_q_is_try_propagate(next_type) {
+    if next_type == TOK_INT { return 0 }
+    if next_type == TOK_FLOAT { return 0 }
+    if next_type == TOK_STRING { return 0 }
+    if next_type == TOK_IDENT { return 0 }
+    if next_type == TOK_TRUE { return 0 }
+    if next_type == TOK_FALSE { return 0 }
+    if next_type == TOK_NONE { return 0 }
+    if next_type == TOK_LPAREN { return 0 }
+    if next_type == TOK_LBRACKET { return 0 }
+    if next_type == TOK_LBRACE { return 0 }
+    if next_type == TOK_BANG { return 0 }
+    if next_type == TOK_TILDE { return 0 }
+    if next_type == TOK_IF { return 0 }
+    if next_type == TOK_MATCH { return 0 }
+    if next_type == TOK_DO { return 0 }
+    if next_type == TOK_TRY { return 0 }
+    if next_type == TOK_FN { return 0 }
+    if next_type == TOK_AT { return 0 }
+    // TOK_MINUS / TOK_PLUS could be unary, but in `expr?+x` / `expr?-x`
+    // we resolve to Result propagation; explicit ternary should use
+    // parens around a unary then-expr (e.g. `cond ? (-1) : 1`).
+    return 1
+}
+
+// R25A: returns 1 iff the identifier name starts with an uppercase
+// letter (ASCII A-Z, 65..90). Used to disambiguate `Name { field: val }`
+// (struct brace-init) from `name { stmt }` (block expression / map
+// literal) at the IDENT branch of parse_primary. Struct names are
+// conventionally capitalised throughout the NOVA self-host source, so
+// the uppercase-first heuristic is safe in practice and avoids needing
+// a fully-built struct registry at parse time (which forward-references
+// would break anyway).
+fn par_ident_starts_uppercase(name) {
+    if name == "" { return 0 }
+    let c = char_at(name, 0)
+    if c >= 65 {
+        if c <= 90 { return 1 }
+    }
+    return 0
+}
+
+// R25A: peek forward across an optional `<...>` generic-type-args block
+// starting at par_pos. Returns the number of tokens consumed (0 if the
+// next token is not `<`, otherwise the count of tokens covered by the
+// balanced `<...>` block). Does NOT advance par_pos — caller uses the
+// returned count via par_pos += skip_n to commit, or discards to back
+// out. Treats `>>` (TOK_SHR) as TWO closing `>` per par_skip_type.
+fn par_peek_generic_args_len() {
+    if par_peek_type() != TOK_LT { return 0 }
+    let depth = 1
+    let p = par_pos + 1
+    while p < par_count {
+        let tk = par_tokens[p]
+        if tk == 0 { return 0 }
+        let tt = tk[0]
+        if tt == TOK_LT { depth = depth + 1 }
+        if tt == TOK_GT {
+            depth = depth - 1
+            if depth <= 0 { return p - par_pos + 1 }
+        }
+        if tt == TOK_SHR {
+            depth = depth - 2
+            if depth <= 0 { return p - par_pos + 1 }
+        }
+        if tt == TOK_EOF { return 0 }
+        // Tokens that obviously aren't part of a type-args block break
+        // the scan early (statement terminator / brace). This keeps the
+        // heuristic conservative: if anything weird shows up we bail.
+        if tt == TOK_SEMI { return 0 }
+        if tt == TOK_LBRACE { return 0 }
+        if tt == TOK_RBRACE { return 0 }
+        p = p + 1
+    }
+    return 0
+}
+
+// R25A: returns 1 iff what follows par_pos looks like a struct brace-
+// init body — `{` followed by `IDENT :` (the unambiguous field-name
+// signature) or `..` / `...` (rest pattern, match-arm path only).
+//
+// Notably we deliberately REJECT the empty body `{ }` here: an empty
+// brace can equally be an if-body / match-arm body / parse_block /
+// block statement (e.g. `if cond == TOK_RBRACE { }`). User code that
+// wants an empty struct value can still use the positional ctor `Foo()`
+// (R23A); the brace-init form requires at least one explicit field.
+//
+// `lbrace_offset` is the offset from par_pos to the opening `{` —
+// 0 if the `{` is the very next token, positive when generic args
+// intervene (Box<int> { value: 42 }).
+fn par_lbrace_is_struct_body(lbrace_offset) {
+    if par_peek_at_type(lbrace_offset) != TOK_LBRACE { return 0 }
+    let after = lbrace_offset + 1
+    let tt = par_peek_at_type(after)
+    if tt == TOK_DOTDOT { return 1 }
+    if tt == TOK_ELLIPSIS { return 1 }
+    if tt == TOK_IDENT {
+        // Need to peek across the IDENT to see if the next token is `:`.
+        if par_peek_at_type(after + 1) == TOK_COLON { return 1 }
+    }
+    return 0
+}
+
+// R25A: same as par_lbrace_is_struct_body but ALSO accepts the
+// shorthand binder syntax `IDENT ,` / `IDENT }` and the empty body
+// `{ }`. Used only in statement-position destructure paths (parse_let,
+// parse_match) where the `let Name {` / `Name { ... } =>` prefix has
+// already disambiguated against block expressions.
+fn par_lbrace_is_struct_pattern_body(lbrace_offset) {
+    if par_peek_at_type(lbrace_offset) != TOK_LBRACE { return 0 }
+    let after = lbrace_offset + 1
+    let tt = par_peek_at_type(after)
+    if tt == TOK_RBRACE { return 1 }
+    if tt == TOK_DOTDOT { return 1 }
+    if tt == TOK_ELLIPSIS { return 1 }
+    if tt == TOK_IDENT {
+        let after_id = par_peek_at_type(after + 1)
+        if after_id == TOK_COLON { return 1 }
+        if after_id == TOK_COMMA { return 1 }
+        if after_id == TOK_RBRACE { return 1 }
+        if after_id == TOK_SEMI { return 1 }
+    }
+    return 0
 }
 
 // --- String Interpolation ---
@@ -309,7 +503,13 @@ fn parse_primary() {
     if t == TOK_FLOAT {
         let tok = par_advance()
         let finfo = tok[1]
-        return ast_float(finfo[0], finfo[1], finfo[2])
+        // R38A: scientific notation. Lexer emits a 4-element tuple
+        // [int_v, frac_v, frac_len, exponent]; pre-R38A producers used a
+        // 3-element tuple. Detect by length and supply exponent=0 when
+        // the lexer didn't carry one.
+        let fexp = 0
+        if len(finfo) > 3 { fexp = finfo[3] }
+        return ast_float_exp(finfo[0], finfo[1], finfo[2], fexp)
     }
     if t == TOK_STRING {
         let tok = par_advance()
@@ -349,11 +549,98 @@ fn parse_primary() {
     }
     if t == TOK_IDENT {
         let tok = par_advance()
+        // R17A: sum-type variant path `Name::Variant(args)`. Lower to
+        // an enum-ctor AST node so codegen can emit `[tag, ...args]`.
+        // Nullary case `Name::Variant` (no following `(`) lowers to
+        // `[tag]` only.
+        if par_peek_type() == TOK_COLONCOLON {
+            par_advance()
+            let vtok = par_expect(TOK_IDENT)
+            let ctor_args = list_new()
+            if par_peek_type() == TOK_LPAREN {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN {
+                    par_advance()
+                } else {
+                    push(ctor_args, parse_expr())
+                    while par_peek_type() == TOK_COMMA {
+                        par_advance()
+                        if par_peek_type() == TOK_RPAREN { break }
+                        push(ctor_args, parse_expr())
+                    }
+                    par_expect(TOK_RPAREN)
+                }
+            }
+            return ast_enum_ctor(tok[1], vtok[1], ctor_args)
+        }
+        // R25A: struct brace-init `Name { field: val, ... }`. Gated by
+        // (1) name starts with an uppercase letter (struct/enum naming
+        // convention) and (2) the next token sequence looks like a
+        // struct body — either `{` directly or `<TypeArgs> {`. The
+        // inner body must start with `}`, `..`, or `IDENT :` to avoid
+        // grabbing a stray block / map literal. Lowered to AST_STRUCT_INIT
+        // carrying source-order values + field names; codegen reorders
+        // to declaration order.
+        if par_ident_starts_uppercase(tok[1]) == 1 {
+            let lb_off = 0
+            if par_peek_type() == TOK_LT {
+                let gen_n = par_peek_generic_args_len()
+                if gen_n > 0 { lb_off = gen_n }
+            }
+            if par_lbrace_is_struct_body(lb_off) == 1 {
+                // Commit: consume the `<TypeArgs>` block if any.
+                let skipped = 0
+                while skipped < lb_off {
+                    par_advance()
+                    skipped = skipped + 1
+                }
+                return parse_struct_brace_init(tok[1])
+            }
+        }
         return ast_ident(tok[1])
     }
     if t == TOK_LPAREN {
         par_advance()
+        // R36C: tuple literal — distinguish parenthesized expression from tuple literal.
+        // `(x)`       -> parenthesized expr (existing behaviour preserved)
+        // `(a, b)`    -> tuple literal `[a, b]`
+        // `(a, b,)`   -> tuple literal (trailing comma accepted)
+        // `(x,)`      -> singleton tuple — OUT OF SCOPE (R36C). To stay
+        //                forward-compatible with a future singleton-tuple
+        //                extension AND not regress R32D's `(x)` behaviour,
+        //                a trailing-comma-after-one-expr collapses to the
+        //                parenthesized expression (the trailing comma is
+        //                silently dropped). Document below; tests cover.
+        // `()`        -> unit / empty tuple — NOT MODELLED (NOVA has no
+        //                unit type today). The original `parse_expr` call
+        //                would error on `)` anyway; no behaviour change.
         let expr = parse_expr()
+        if par_peek_type() == TOK_COMMA {
+            // Either a tuple or a parenthesized-with-trailing-comma.
+            let r36c_elems = list_new()
+            push(r36c_elems, expr)
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN { break }
+                push(r36c_elems, parse_expr())
+            }
+            par_expect(TOK_RPAREN)
+            if len(r36c_elems) == 1 {
+                // `(x,)` — trailing comma after a single element. R36C
+                // does not ship singleton tuples; treat as parenthesized.
+                return r36c_elems[0]
+            }
+            // R36C: tuples lower to lists at the AST level. We emit
+            // AST_LIST_LIT directly so codegen never sees a tuple tag —
+            // the dozen-plus AST_LIST_LIT branches across codegen
+            // (gen_expr, fold_constants, dce, tc_walk, wasm, arm64, etc.)
+            // handle the runtime representation byte-identically. The
+            // AST_TUPLE_LIT tag in ast.nova is retained for tooling
+            // (nova-lsp / tree-sitter consumers can inspect the
+            // surface form via a future round) but the self-host
+            // compiler erases it at the parser boundary.
+            return ast_list(r36c_elems)
+        }
         par_expect(TOK_RPAREN)
         return expr
     }
@@ -454,20 +741,94 @@ fn parse_primary() {
                 let pinfo = parse_param_list()
                 let params = pinfo[0]
                 let defaults = pinfo[1]
+                let lam_ptypes = list_new()
+                if len(pinfo) > 3 { lam_ptypes = pinfo[3] }
                 par_expect(TOK_RPAREN)
-                if par_peek_type() == TOK_COLON {
-                    par_advance()
-                    par_skip_type()
-                }
+                par_skip_return_type()
                 let body = parse_block()
                 body = inject_defaults(body, defaults)
                 let lname = "_lambda_" + int_to_str(par_lambda_count)
                 par_lambda_count = par_lambda_count + 1
                 let fn_node = ast_fn_decl(lname, params, body)
+                // R24A: 4th slot = type_params (empty for lambdas);
+                //        5th slot = param_types (parallel to params).
+                push(fn_node, list_new())
+                push(fn_node, lam_ptypes)
                 push(par_lambdas, fn_node)
                 return ast_lambda(lname, params, body)
             }
         }
+    }
+    // R35C: closure literals.  `|x| body`, `|x, y| { stmt; ... }`, `|| 42`.
+    //
+    // Disambiguation vs `|` (bitwise OR) / `||` (logical OR): both of those
+    // are infix operators that are only reached from parse_bitwise /
+    // parse_or AFTER a left operand has already been consumed. parse_primary
+    // is only entered at the *start* of an expression, so a leading `|` or
+    // `||` here is unambiguously a closure literal — there is no left
+    // operand for it to be an infix operator of. Lowering reuses the
+    // existing `fn(...)` lambda machinery (par_lambdas + AST_LAMBDA +
+    // codegen capture analysis) so closure semantics, capture-by-value, and
+    // function-pointer emission all come for free.
+    if t == TOK_PIPE {
+        par_advance()
+        let cl_params = list_new()
+        let cl_ptypes = list_new()
+        if par_peek_type() == TOK_PIPE {
+            // empty param list, `||` token was lexed as two TOK_PIPE here
+            // (this branch is only reachable when the lexer emitted two
+            // separate TOK_PIPE — e.g. across a space `| |`; the `||`
+            // glyph itself is lexed as TOK_OR and handled below).
+        } else {
+            let cp1 = par_expect(TOK_IDENT)
+            push(cl_params, cp1[1])
+            let cpt1 = 0
+            if par_peek_type() == TOK_COLON {
+                par_advance()
+                cpt1 = par_collect_type()
+            }
+            push(cl_ptypes, cpt1)
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_PIPE { break }
+                let cpn = par_expect(TOK_IDENT)
+                push(cl_params, cpn[1])
+                let cptn = 0
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    cptn = par_collect_type()
+                }
+                push(cl_ptypes, cptn)
+            }
+        }
+        par_expect(TOK_PIPE)
+        par_skip_return_type()
+        let cl_body = par_parse_closure_body()
+        let cl_name = "_lambda_" + int_to_str(par_lambda_count)
+        par_lambda_count = par_lambda_count + 1
+        let cl_fn = ast_fn_decl(cl_name, cl_params, cl_body)
+        push(cl_fn, list_new())
+        push(cl_fn, cl_ptypes)
+        push(par_lambdas, cl_fn)
+        return ast_lambda(cl_name, cl_params, cl_body)
+    }
+    if t == TOK_OR {
+        // `||` at expression start: zero-parameter closure literal.  The
+        // logical-OR operator never reaches parse_primary because it is
+        // parsed as infix in parse_or, so a leading `||` here cannot mean
+        // anything else.
+        par_advance()
+        let zc_params = list_new()
+        let zc_ptypes = list_new()
+        par_skip_return_type()
+        let zc_body = par_parse_closure_body()
+        let zc_name = "_lambda_" + int_to_str(par_lambda_count)
+        par_lambda_count = par_lambda_count + 1
+        let zc_fn = ast_fn_decl(zc_name, zc_params, zc_body)
+        push(zc_fn, list_new())
+        push(zc_fn, zc_ptypes)
+        push(par_lambdas, zc_fn)
+        return ast_lambda(zc_name, zc_params, zc_body)
     }
     if t == TOK_DO {
         par_advance()
@@ -581,7 +942,18 @@ fn parse_postfix() {
                             let nf_tok = par_expect(TOK_IDENT)
                             expr = ast_null_access(expr, nf_tok[1])
                         } else {
-                            return expr
+                            // R20A: postfix `?` Result propagation. Distinguish
+                            // from the ternary operator by peeking at what
+                            // follows `?`. Ternary requires an expression-starting
+                            // token next (literal / ident / unary / `(` / etc.).
+                            // Anything else — closer, binary op, statement
+                            // terminator — means `?` is acting as Result `?`.
+                            if par_q_is_try_propagate(next_tok2[0]) == 1 {
+                                par_advance()
+                                expr = ast_try_propagate(expr)
+                            } else {
+                                return expr
+                            }
                         }
                     } else {
                         return expr
@@ -1035,6 +1407,15 @@ fn parse_if() {
     } else {
         par_expect(TOK_IF)
     }
+    // R33C: `if let PAT = EXPR { ... } [else ...]` shorthand. After the
+    // `if` (or `elif`) token, if the next token is `let`, parse the
+    // remainder as an if-let and lower to a two-arm match. The body
+    // returned is an AST_MATCH_STMT (or AST_DO_EXPR wrapping a match
+    // when the pattern is a struct / nested-variant pattern), reusing
+    // R17A / R31D / R32D codegen exactly. No new codegen cases.
+    if par_peek_type() == TOK_LET {
+        return parse_if_let()
+    }
     let cond = parse_expr()
     let then_body = parse_block()
     let else_body = 0
@@ -1054,6 +1435,230 @@ fn parse_if() {
     let nd = ast_if(cond, then_body, else_body)
     push(nd, if_line)
     return nd
+}
+
+// R33C: `if let PAT = EXPR { THEN } else { ELSE }` shorthand for the
+// single-arm match `match EXPR { PAT => THEN, _ => ELSE }`. Reuses
+// R17A / R31D / R32D pattern shapes — variant, nested variant, struct
+// destructure, wildcard, type pattern — by replicating the pattern
+// dispatch from parse_match and then handing the two synthesised arms
+// through the same struct / nested-variant rewrite path. Callers see
+// either an AST_MATCH_STMT directly, or an AST_DO_EXPR wrapping a
+// match (when the pattern requires the parser-time matchee-cache
+// rewrite). Either node is already understood by codegen verbatim.
+//
+// `else if let PAT2 = EXPR2 { ... }` chains by recursive descent: the
+// else branch becomes a nested if-let lowered the same way, producing
+// a tree of two-arm matches. `if let X = e { A }` without an else
+// supplies an implicit `_ => 0` arm so the value of a no-else-if-let
+// in expression position is 0 (consistent with the match no-arm
+// fallthrough at codegen).
+fn parse_if_let() {
+    par_expect(TOK_LET)
+    // R25A / R32D struct pattern detection — same lookahead chain as
+    // parse_match's arm-pattern dispatch. If the pattern is a struct or
+    // nested-variant pattern, we'll need a matchee temp to drive the
+    // post-parse rewrite below.
+    let pattern = 0
+    let saw_struct_pat = 0
+    let match_tmp_name = ""
+    let consumed_pat = 0
+    if par_peek_type() == TOK_IDENT {
+        let pk_tok = par_peek()
+        if pk_tok != 0 {
+            let pk_name = pk_tok[1]
+            if par_ident_starts_uppercase(pk_name) == 1 {
+                let lb_offm = 1
+                if par_peek_at_type(1) == TOK_LT {
+                    let saved_p = par_pos
+                    par_advance()
+                    let gnm = par_peek_generic_args_len()
+                    par_pos = saved_p
+                    if gnm > 0 { lb_offm = 1 + gnm }
+                }
+                if par_lbrace_is_struct_pattern_body(lb_offm) == 1 {
+                    match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                    par_struct_tmp_count = par_struct_tmp_count + 1
+                    saw_struct_pat = 1
+                    pattern = parse_struct_match_pattern(pk_name, lb_offm)
+                    consumed_pat = 1
+                }
+            }
+        }
+    }
+    if consumed_pat == 0 {
+        if par_peek_type() == TOK_UNDERSCORE {
+            par_advance()
+            pattern = ast_wildcard()
+        } else { if par_peek_type() == TOK_IS {
+            par_advance()
+            let tp_id = 0
+            let tp_tok = par_peek_type()
+            if tp_tok == TOK_NONE {
+                par_advance()
+                tp_id = 0
+            } else {
+                let tp_name = par_expect(TOK_IDENT)
+                let tpn = tp_name[1]
+                if tpn == "null" { tp_id = 0 }
+                if tpn == "int" { tp_id = 1 }
+                if tpn == "str" { tp_id = 2 }
+                if tpn == "string" { tp_id = 2 }
+                if tpn == "list" { tp_id = 3 }
+                if tpn == "map" { tp_id = 4 }
+            }
+            pattern = ast_type_pattern(tp_id)
+        } else {
+            // Variant pattern `Name::Variant(binders)` mirroring the
+            // same R17A / R32D parse_match dispatch. Nested sub-patterns
+            // emit AST_NESTED_VARIANT_PATTERN which the post-parse
+            // rewrite below handles via lower_nested_variant_match_arm.
+            if par_peek_type() == TOK_IDENT {
+                if par_peek_at_type(1) == TOK_COLONCOLON {
+                    let n1 = par_advance()
+                    par_advance()
+                    let n2 = par_expect(TOK_IDENT)
+                    let r33c_sub_patterns = list_new()
+                    let r33c_legacy_binders = list_new()
+                    let r33c_has_nested = 0
+                    if par_peek_type() == TOK_LPAREN {
+                        par_advance()
+                        if par_peek_type() == TOK_RPAREN {
+                            par_advance()
+                        } else {
+                            let r33c_first = parse_match_sub_pattern()
+                            push(r33c_sub_patterns, r33c_first)
+                            if r32d_pattern_is_legacy_binder(r33c_first) == 1 {
+                                push(r33c_legacy_binders, r32d_pattern_binder_name(r33c_first))
+                            } else {
+                                r33c_has_nested = 1
+                            }
+                            while par_peek_type() == TOK_COMMA {
+                                par_advance()
+                                if par_peek_type() == TOK_RPAREN { break }
+                                let r33c_nth = parse_match_sub_pattern()
+                                push(r33c_sub_patterns, r33c_nth)
+                                if r32d_pattern_is_legacy_binder(r33c_nth) == 1 {
+                                    push(r33c_legacy_binders, r32d_pattern_binder_name(r33c_nth))
+                                } else {
+                                    r33c_has_nested = 1
+                                }
+                            }
+                            par_expect(TOK_RPAREN)
+                        }
+                    }
+                    if r33c_has_nested == 1 {
+                        match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                        par_struct_tmp_count = par_struct_tmp_count + 1
+                        saw_struct_pat = 1
+                        pattern = ast_nested_variant_pattern(n1[1], n2[1], r33c_sub_patterns)
+                    } else {
+                        pattern = ast_enum_pattern(n1[1], n2[1], r33c_legacy_binders)
+                    }
+                } else {
+                    pattern = parse_expr()
+                }
+            } else {
+                pattern = parse_expr()
+            }
+        } }
+    }
+    par_expect(TOK_EQ)
+    let scrutinee = parse_expr()
+    let then_body = parse_block()
+    // Optional else / else-if / else-if-let.
+    let else_body = 0
+    if par_peek_type() == TOK_ELSE {
+        par_advance()
+        if par_peek_type() == TOK_IF {
+            // `else if ...` — recurse via parse_if which itself routes
+            // to parse_if_let when seeing `if let`. Wrap the resulting
+            // if/if-let node in an expr-stmt so it slots into the match
+            // arm body shape.
+            let sub_if = parse_if()
+            else_body = ast_expr_stmt(sub_if)
+        } else {
+            else_body = parse_block()
+        }
+    }
+    // Synthesise the two-arm match. The `_ => else_body` arm is omitted
+    // entirely when else_body is 0 — match codegen already yields 0 for
+    // an unmatched scrutinee, so an if-let without else is equivalent
+    // to `match e { Pat => then }` which falls through to 0.
+    let arms = list_new()
+    let arm1 = ast_match_arm(pattern, then_body)
+    push(arms, arm1)
+    if else_body == 0 {
+    } else {
+        let arm2 = ast_match_arm(ast_wildcard(), else_body)
+        push(arms, arm2)
+    }
+    // R32D parse-time typecheck for nested patterns, same convention
+    // parse_match uses (WARN, not ERROR).
+    r32d_tc_check_match_patterns(arms)
+    // R33C: an if-let is shorthand for `match e { Pat => then, _ =>
+    // else }` (with the wildcard arm omitted when no else is supplied,
+    // which means the synthetic match falls through to 0 and is
+    // intentionally exhaustiveness-quiet — like Rust's `if let X = e
+    // { ... }`). For the with-else case the second arm is an unguarded
+    // wildcard so r33c_check_exhaustive_raw will see has_wildcard=1
+    // and return without emitting a WARN. We always want to suppress
+    // the downstream passes from warning either way (a no-else if-let
+    // would otherwise be flagged), so we always tack on the visited
+    // flag, but call the raw check first to keep the path uniform
+    // with parse_match.
+    let raw_consumed_iflet = 0
+    if else_body == 0 {
+        // No-else if-let: skip the raw exhaustiveness check entirely
+        // — single-arm form is intentionally not exhaustive.
+        raw_consumed_iflet = 1
+    } else {
+        raw_consumed_iflet = r33c_check_exhaustive_raw(arms)
+        // If the raw check didn't see the enum (enum declared after
+        // the match), still suppress downstream WARNs because the
+        // unguarded wildcard arm makes the if-let trivially
+        // exhaustive — the downstream check would also see this and
+        // skip, but we want to be uniform with the no-else branch
+        // above.
+        raw_consumed_iflet = 1
+    }
+    // R25A / R32D rewrite: if the pattern needed a matchee temp,
+    // rewrite each arm to a wildcard + guard + prep-stmts form and
+    // wrap the whole thing in an AST_DO_EXPR caching the scrutinee.
+    // R31D / R32D codegen never sees AST_STRUCT_PATTERN /
+    // AST_NESTED_VARIANT_PATTERN directly so this keeps the existing
+    // codegen path byte-for-byte intact.
+    if saw_struct_pat == 1 {
+        let new_arms = list_new()
+        let ai = 0
+        while ai < len(arms) {
+            let arm0 = arms[ai]
+            let pat0 = arm0[1]
+            let body0 = arm0[2]
+            let old_guard = 0
+            if len(arm0) > 3 { old_guard = arm0[3] }
+            if ast_tag(pat0) == AST_STRUCT_PATTERN {
+                let lower_pair = lower_struct_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, lower_pair)
+            } else { if ast_tag(pat0) == AST_NESTED_VARIANT_PATTERN {
+                let nested_pair = lower_nested_variant_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, nested_pair)
+            } else {
+                push(new_arms, arm0)
+            } }
+            ai = ai + 1
+        }
+        let inner_match = ast_match(ast_ident(match_tmp_name), new_arms)
+        if raw_consumed_iflet == 1 { push(inner_match, 1) }
+        let init_stmts = list_new()
+        let cache_let = ast_let(match_tmp_name, scrutinee)
+        push(cache_let, 0)
+        push(init_stmts, cache_let)
+        return ast_do_expr(init_stmts, inner_match)
+    }
+    let nd_if_let = ast_match(scrutinee, arms)
+    if raw_consumed_iflet == 1 { push(nd_if_let, 1) }
+    return nd_if_let
 }
 
 fn parse_while_labeled(lbl) {
@@ -1124,6 +1729,47 @@ fn parse_let() {
     } else {
         par_expect(TOK_LET)
     }
+    // R36C: tuple destructure `let (a, b) = expr`. Lowers to the same
+    // AST_DESTRUCTURE node the `let [a, b]` (list-destructure) path emits
+    // — tuples are tagged lists at runtime so positional access via
+    // `tmp[i]` is identical. The leading `(` is unambiguous in let-stmt
+    // position (no other let form starts with `(`). Trailing comma after
+    // the last name is accepted; singleton `let (x,) = expr` falls back
+    // to a regular `let x = expr` (singleton tuples are out of scope).
+    // No rest-pattern (`...rest`) for tuples — that's a list-destructure
+    // feature and is excluded here on purpose.
+    if par_peek_type() == TOK_LPAREN {
+        par_advance()
+        let tdnames = list_new()
+        if par_peek_type() == TOK_RPAREN {
+            par_error("empty tuple destructure `let ()` — not supported (NOVA has no unit type)")
+        }
+        let tdfirst = par_expect(TOK_IDENT)
+        push(tdnames, tdfirst[1])
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            if par_peek_type() == TOK_RPAREN { break }
+            let tdnxt = par_expect(TOK_IDENT)
+            push(tdnames, tdnxt[1])
+        }
+        par_expect(TOK_RPAREN)
+        // R36C: tuple destructure also accepts an optional type annotation
+        // `: (T, U)` for symmetry with non-destructure lets. We collect
+        // it for the type-check pass to read but codegen ignores it.
+        if par_peek_type() == TOK_COLON {
+            par_advance()
+            let _tdannot = par_collect_type()
+        }
+        par_expect(TOK_EQ)
+        let tdvalue = parse_expr()
+        if len(tdnames) == 1 {
+            // `let (x) = expr` -> just `let x = expr` (parenthesized name
+            // is not a tuple). Maintains forward-compat with future
+            // singleton-tuple addition.
+            return ast_let(tdnames[0], tdvalue)
+        }
+        return ast_destructure(tdnames, tdvalue)
+    }
     if par_peek_type() == TOK_LBRACKET {
         par_advance()
         let dnames = list_new()
@@ -1158,11 +1804,72 @@ fn parse_let() {
         }
         return ast_destructure_rest(dnames, drest, dvalue)
     }
+    // R25A: struct destructure pattern in let-bindings:
+    //   let Point { x: px, y: py } = p
+    //   let Point { x, y } = p                  (shorthand)
+    //   let Point { x: px, .. } = p             (partial)
+    // Detected by an uppercase-leading IDENT followed by `{` (optionally
+    // with `<TypeArgs>` between). Lowered at parse time to a block that
+    // (1) caches the RHS in a fresh temp, then (2) binds each named field
+    // via `.field` access — codegen already handles AST_FIELD_ACCESS via
+    // struct_field_index, so no codegen changes needed.
+    if par_peek_type() == TOK_IDENT {
+        let peek_tok = par_peek()
+        if peek_tok != 0 {
+            let peek_name = peek_tok[1]
+            if par_ident_starts_uppercase(peek_name) == 1 {
+                let lb_off2 = 1
+                if par_peek_at_type(1) == TOK_LT {
+                    // Skip past `<TypeArgs>` to find `{`.
+                    let saved_pos = par_pos
+                    par_advance() // consume IDENT temporarily
+                    let gen2 = par_peek_generic_args_len()
+                    par_pos = saved_pos
+                    if gen2 > 0 { lb_off2 = 1 + gen2 }
+                }
+                if par_lbrace_is_struct_pattern_body(lb_off2) == 1 {
+                    return parse_struct_let_destructure(peek_name, lb_off2)
+                }
+                // R32D: enum-variant let-destructure:
+                //   let Enum::Variant(b1, b2, ...) = expr
+                // Detected by `IDENT :: IDENT (`. The lowering builds a
+                // block:
+                //   let _enum_tmp_N = expr
+                //   if _enum_tmp_N[0] != variant_tag { panic "let destructure: variant mismatch" }
+                //   let b1 = _enum_tmp_N[1]
+                //   let b2 = _enum_tmp_N[2]
+                //   ...
+                // If the enum has multiple variants, emit a typecheck
+                // WARN noting the pattern is refutable (could panic).
+                // Single-variant enums (e.g. struct-like) compile clean.
+                if par_peek_at_type(1) == TOK_COLONCOLON {
+                    if par_peek_at_type(2) == TOK_IDENT {
+                        // Confirm payload-list shape: optional `(...)` then `=`.
+                        let after_v = par_peek_at_type(3)
+                        if after_v == TOK_LPAREN {
+                            return parse_let_enum_destructure()
+                        }
+                        if after_v == TOK_EQ {
+                            // Nullary variant: `let Color::Red = c` — bind
+                            // nothing but still emit the tag check.
+                            return parse_let_enum_destructure()
+                        }
+                    }
+                }
+            }
+        }
+    }
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
+    // R23A: capture the type annotation (was: par_skip_type which
+    // discards). The annotation lives on the AST_LET_STMT's third slot
+    // as a [base_name, [type_args]] pair (recursive). Codegen ignores
+    // it; the lightweight type-check pass reads it back to check ctor
+    // arg literal types against the param binding.
+    let type_annot = 0
     if par_peek_type() == TOK_COLON {
         par_advance()
-        par_skip_type()
+        type_annot = par_collect_type()
     }
     if par_peek_type() == TOK_COMMA {
         let names = list_new()
@@ -1196,7 +1903,26 @@ fn parse_let() {
     if is_const_decl == 1 {
         push(par_consts, name)
     }
-    return ast_let(name, value)
+    let lnd = ast_let(name, value)
+    push(lnd, type_annot)
+    return lnd
+}
+
+// R35C: closure-literal body parser.  After `|params|` the body is
+// either a brace-block (multi-statement, returns final expression via
+// the implicit-return path in gen_function) or a single expression
+// (lowered to a synthetic block containing one AST_EXPR_STMT so the
+// same implicit-return path applies).  Returning AST_BLOCK in both
+// cases lets gen_function consume it byte-identically to the existing
+// `fn(...)` lambda code path.
+fn par_parse_closure_body() {
+    if par_peek_type() == TOK_LBRACE {
+        return parse_block()
+    }
+    let cb_expr = parse_expr()
+    let cb_stmts = list_new()
+    push(cb_stmts, ast_expr_stmt(cb_expr))
+    return ast_block(cb_stmts)
 }
 
 fn parse_param_list() {
@@ -1204,11 +1930,18 @@ fn parse_param_list() {
     let defaults = list_new()
     let has_rest = 0
     let rest_name = ""
+    // R24A: param-type annotations (parallel to `params`, one entry per
+    // param). Each entry is either a `[base_name, [type_args]]` pair (the
+    // shape returned by par_collect_type) OR 0 when the param has no
+    // annotation. Used by the lightweight type-check pass to warn on
+    // literal-arg mismatches at call sites. Codegen ignores this slot.
+    let param_types = list_new()
     if par_peek_type() == TOK_RPAREN {
         let result = list_new()
         push(result, params)
         push(result, defaults)
         push(result, rest_name)
+        push(result, param_types)
         return result
     }
     if par_peek_type() == TOK_ELLIPSIS {
@@ -1216,18 +1949,24 @@ fn parse_param_list() {
         let rt = par_expect(TOK_IDENT)
         rest_name = rt[1]
         push(params, rest_name)
+        // Rest params have no scalar type; push 0 placeholder so the
+        // parallel-index invariant holds with `params`.
+        push(param_types, 0)
         let result = list_new()
         push(result, params)
         push(result, defaults)
         push(result, rest_name)
+        push(result, param_types)
         return result
     }
     let p = par_expect(TOK_IDENT)
     push(params, p[1])
+    let pt1 = 0
     if par_peek_type() == TOK_COLON {
         par_advance()
-        par_skip_type()
+        pt1 = par_collect_type()
     }
+    push(param_types, pt1)
     if par_peek_type() == TOK_EQ {
         par_advance()
         let dv = parse_expr()
@@ -1244,18 +1983,22 @@ fn parse_param_list() {
             let rt = par_expect(TOK_IDENT)
             rest_name = rt[1]
             push(params, rest_name)
+            push(param_types, 0)
             let result = list_new()
             push(result, params)
             push(result, defaults)
             push(result, rest_name)
+            push(result, param_types)
             return result
         }
         let p2 = par_expect(TOK_IDENT)
         push(params, p2[1])
+        let pt2 = 0
         if par_peek_type() == TOK_COLON {
             par_advance()
-            par_skip_type()
+            pt2 = par_collect_type()
         }
+        push(param_types, pt2)
         if par_peek_type() == TOK_EQ {
             par_advance()
             let dv2 = parse_expr()
@@ -1269,6 +2012,7 @@ fn parse_param_list() {
     push(result, params)
     push(result, defaults)
     push(result, rest_name)
+    push(result, param_types)
     return result
 }
 
@@ -1300,6 +2044,190 @@ fn inject_defaults(body, defaults) {
     return ast_block(new_stmts)
 }
 
+// R22B: parser-only generic type parameter list after a fn or enum
+// name, e.g. `fn map<T, U>(...)` or `enum Result<T, E>`. NOVA's runtime
+// is dynamically typed (tagged values), so type parameters are erased
+// at codegen — we just accept the syntax and discard. Returns nothing;
+// caller decides whether to even look at the `<`.
+fn par_skip_generic_params() {
+    par_advance()  // consume the opening `<`
+    if par_peek_type() == TOK_GT {
+        par_advance()
+        return 0
+    }
+    if par_peek_type() == TOK_SHR {
+        // Empty params closed by `>>` — rare/weird; treat as one close
+        // and let par_skip_type's TOK_SHR handling close the outer.
+        par_advance()
+        return 0
+    }
+    par_expect(TOK_IDENT)
+    while par_peek_type() == TOK_COMMA {
+        par_advance()
+        if par_peek_type() == TOK_GT { break }
+        par_expect(TOK_IDENT)
+    }
+    let close_t = par_peek_type()
+    if close_t == TOK_GT {
+        par_advance()
+    } else { if close_t == TOK_SHR {
+        // Tight nested close — the outer level closes via TOK_SHR;
+        // caller must compensate (used only for enum decls today).
+        par_advance()
+    } else {
+        par_error("expected '>' to close generic type parameters")
+    } }
+    return 0
+}
+
+// R23A: same as par_skip_generic_params but returns the list of
+// type-parameter names (as strings). Used by parse_enum / parse_fn /
+// parse_struct_decl when we want to retain the names for the lightweight
+// type-check pass (R23A.2). Caller has already verified TOK_LT is next.
+fn par_collect_generic_params() {
+    let names = list_new()
+    par_advance()  // consume the opening `<`
+    if par_peek_type() == TOK_GT {
+        par_advance()
+        return names
+    }
+    if par_peek_type() == TOK_SHR {
+        par_advance()
+        return names
+    }
+    let n1 = par_expect(TOK_IDENT)
+    push(names, n1[1])
+    while par_peek_type() == TOK_COMMA {
+        par_advance()
+        if par_peek_type() == TOK_GT { break }
+        let nk = par_expect(TOK_IDENT)
+        push(names, nk[1])
+    }
+    let close_t = par_peek_type()
+    if close_t == TOK_GT {
+        par_advance()
+    } else { if close_t == TOK_SHR {
+        par_advance()
+    } else {
+        par_error("expected '>' to close generic type parameters")
+    } }
+    return names
+}
+
+// R23A: like par_skip_type() but returns the captured type as a pair
+// [base_name, [type_args]] where each arg is recursively the same shape.
+// Used by the lightweight type-check pass to read `let x: Enum<int, str>`
+// bindings without re-parsing the source. Returns 0 for malformed input
+// (caller treats as "no annotation"). NOTE: this duplicates par_skip_type
+// to avoid altering existing call-sites; the two MUST stay in sync.
+fn par_collect_type() {
+    // R36C: tuple type annotation `(int, str)`. Captured as an
+    // AST_TUPLE_TYPE node — the lightweight type-check pass currently
+    // ignores it (no per-slot enforcement), codegen never reads it.
+    // Empty tuple type `()` is not modelled — treated as a no-annotation
+    // sentinel (returns 0) since NOVA has no unit type today.
+    if par_peek_type() == TOK_LPAREN {
+        par_advance()
+        let tt_slots = list_new()
+        if par_peek_type() == TOK_RPAREN {
+            par_advance()
+            return 0
+        }
+        let tt_first = par_collect_type()
+        if tt_first != 0 { push(tt_slots, tt_first) }
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            if par_peek_type() == TOK_RPAREN { break }
+            let tt_nx = par_collect_type()
+            if tt_nx != 0 { push(tt_slots, tt_nx) }
+        }
+        par_expect(TOK_RPAREN)
+        // After the closing `)`, check for `-> T` (function returning a
+        // tuple-typed value used positionally). Matches par_collect_type's
+        // existing `T -> U` handling at the bottom of the IDENT branch.
+        if par_peek_type() == TOK_MINUS {
+            if par_peek_at_type(1) == TOK_GT {
+                par_advance()
+                par_advance()
+                let _tt_r = par_collect_type()
+            }
+        }
+        return ast_tuple_type(tt_slots)
+    }
+    if par_peek_type() != TOK_IDENT {
+        return 0
+    }
+    let base_tok = par_advance()
+    let base = base_tok[1]
+    let args = list_new()
+    if par_peek_type() == TOK_LT {
+        par_advance()
+        // Empty `<>` is allowed for symmetry with par_collect_generic_params.
+        if par_peek_type() == TOK_GT {
+            par_advance()
+        } else { if par_peek_type() == TOK_SHR {
+            // Tight nested close — let caller's outer level handle the
+            // overshoot. We've consumed the inner `>>` half.
+            par_advance()
+        } else {
+            let first = par_collect_type()
+            if first != 0 { push(args, first) }
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_GT { break }
+                if par_peek_type() == TOK_SHR { break }
+                let nxt = par_collect_type()
+                if nxt != 0 { push(args, nxt) }
+            }
+            let close_t = par_peek_type()
+            if close_t == TOK_GT {
+                par_advance()
+            } else { if close_t == TOK_SHR {
+                // Tight nested close `>>`. Outer caller compensates.
+                par_advance()
+            } else {
+                // Malformed — fall through; don't error since this is a
+                // best-effort collect path used by the type-check pass.
+            } }
+        } }
+    }
+    // R22B: function-type `T -> U`. We don't model the result type yet
+    // for type-check purposes; consume it and discard so the parser
+    // position advances correctly.
+    if par_peek_type() == TOK_MINUS {
+        if par_peek_at_type(1) == TOK_GT {
+            par_advance()
+            par_advance()
+            let _r = par_collect_type()
+        }
+    }
+    let r = list_new()
+    push(r, base)
+    push(r, args)
+    return r
+}
+
+// R22B: optional return-type annotation after a function's parameter
+// list. Accepts `: T` (legacy syntax) or `-> T` (Rust-like). Both are
+// purely parser-level metadata — discarded after par_skip_type.
+fn par_skip_return_type() {
+    let t = par_peek_type()
+    if t == TOK_COLON {
+        par_advance()
+        par_skip_type()
+        return 0
+    }
+    if t == TOK_MINUS {
+        if par_peek_at_type(1) == TOK_GT {
+            par_advance()
+            par_advance()
+            par_skip_type()
+            return 0
+        }
+    }
+    return 0
+}
+
 fn parse_fn() {
     par_expect(TOK_FN)
     let name_tok = par_expect(TOK_IDENT)
@@ -1308,32 +2236,55 @@ fn parse_fn() {
         par_advance()
         let mtok = par_expect(TOK_IDENT)
         let meth = mtok[1]
+        // R22B: method decls also accept generic type parameters,
+        // e.g. `fn Box.map<U>(self, f) { ... }`. Parser-only.
+        let mtype_params = list_new()
+        if par_peek_type() == TOK_LT {
+            mtype_params = par_collect_generic_params()
+        }
         par_expect(TOK_LPAREN)
         let pinfo = parse_param_list()
         let params = pinfo[0]
         let defaults = pinfo[1]
+        let mptypes = list_new()
+        if len(pinfo) > 3 { mptypes = pinfo[3] }
         par_expect(TOK_RPAREN)
-        if par_peek_type() == TOK_COLON {
-            par_advance()
-            par_skip_type()
-        }
+        par_skip_return_type()
         let body = parse_block()
         body = inject_defaults(body, defaults)
-        return ast_method_decl(name, meth, params, body)
+        let mnd = ast_method_decl(name, meth, params, body)
+        push(mnd, mtype_params)
+        // R24A: 6th slot on AST_METHOD_DECL = param_types (parallel to
+        // params). Codegen ignores; tc_check_call reads at call sites.
+        push(mnd, mptypes)
+        return mnd
+    }
+    // R22B: generic type parameters `<T, U, ...>` between the fn name
+    // and the parameter list: `fn map<T, U>(xs, f) { ... }`.
+    // R23A: now captured (4th slot on AST_FN_DECL) for the lightweight
+    // type-check pass. Codegen still ignores it.
+    let type_params = list_new()
+    if par_peek_type() == TOK_LT {
+        type_params = par_collect_generic_params()
     }
     par_expect(TOK_LPAREN)
     let pinfo = parse_param_list()
     let params = pinfo[0]
     let defaults = pinfo[1]
     let rest_name = pinfo[2]
+    let fnptypes = list_new()
+    if len(pinfo) > 3 { fnptypes = pinfo[3] }
     par_expect(TOK_RPAREN)
-    if par_peek_type() == TOK_COLON {
-        par_advance()
-        par_skip_type()
-    }
+    par_skip_return_type()
     let body = parse_block()
     body = inject_defaults(body, defaults)
-    return ast_fn_decl(name, params, body)
+    let fnd = ast_fn_decl(name, params, body)
+    push(fnd, type_params)
+    // R24A: 5th slot on AST_FN_DECL = param_types (parallel to params).
+    // Codegen ignores; tc_check_call reads at call sites for the
+    // lightweight type-check pass.
+    push(fnd, fnptypes)
+    return fnd
 }
 
 fn parse_return() {
@@ -1353,8 +2304,24 @@ fn parse_struct_decl() {
     par_expect(TOK_STRUCT)
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
+    // R23A: optional generic type parameters `<T, U, ...>` between the
+    // struct name and the body. Same pattern as R21A enums / R22B fns.
+    // Names captured for R23A.2 lightweight type-check pass; codegen
+    // ignores the third AST slot.
+    let type_params = list_new()
+    if par_peek_type() == TOK_LT {
+        type_params = par_collect_generic_params()
+    }
     par_expect(TOK_LBRACE)
     let fields = list_new()
+    // R24A: per-field type annotations, parallel to `fields`. Each
+    // entry is either a `[base_name, [type_args]]` pair (the shape
+    // returned by par_collect_type) OR 0 when the field has no
+    // annotation. Used by the lightweight type-check pass to warn
+    // on literal-arg mismatches at positional ctor sites (Box(value:
+    // 42) is parsed today as a plain AST_CALL whose callee is the
+    // struct name). Codegen ignores this slot.
+    let field_types = list_new()
     let struct_done = 0
     while struct_done == 0 {
         if par_peek_type() == TOK_RBRACE {
@@ -1362,14 +2329,305 @@ fn parse_struct_decl() {
         } else {
             if par_peek_type() == TOK_COMMA {
                 par_advance()
+            } else { if par_peek_type() == TOK_SEMI {
+                // R23A: allow `;` between fields (the task spec spelling).
+                // Treat identically to `,`.
+                par_advance()
             } else {
                 let f = par_expect(TOK_IDENT)
                 push(fields, f[1])
-            }
+                // R23A: optional field-type annotation `field: T` (or
+                // `field: List<T>`).
+                // R24A: captured (was: discarded via par_skip_type).
+                let ftann = 0
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    ftann = par_collect_type()
+                }
+                push(field_types, ftann)
+            } }
         }
     }
     par_expect(TOK_RBRACE)
-    return ast_struct_decl(name, fields)
+    let nd = ast_struct_decl(name, fields)
+    push(nd, type_params)
+    // R24A: 4th slot on AST_STRUCT_DECL = field_types (parallel to
+    // fields). Codegen ignores; tc_check_call reads at struct-ctor
+    // call sites.
+    push(nd, field_types)
+    return nd
+}
+
+// R25A: brace-init body `{ field: val, ... }`. Caller (parse_primary)
+// has already consumed the struct name, any `<TypeArgs>` block, and is
+// positioned on the opening `{`. Returns an AST_STRUCT_INIT node with
+// source-order field names + values; codegen reorders to declaration
+// order using cg_structs.
+fn parse_struct_brace_init(name) {
+    par_expect(TOK_LBRACE)
+    let field_names = list_new()
+    let field_values = list_new()
+    // R26A: optional functional update-syntax — a single `..base_expr`
+    // element copies remaining fields from `base_expr`. Stored on the
+    // AST_STRUCT_INIT node's slot 4 (always as an AST_IDENT — non-trivial
+    // base exprs get wrapped in a do-expr below that caches them in a
+    // fresh temp). Only one ..base is permitted; a second one errors.
+    let base_expr = 0
+    let saw_base = 0
+    let init_done = 0
+    while init_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            init_done = 1
+        } else {
+            if par_peek_type() == TOK_COMMA {
+                par_advance()
+            } else { if par_peek_type() == TOK_SEMI {
+                par_advance()
+            } else { if par_peek_type() == TOK_DOTDOT {
+                par_advance()
+                if saw_base == 1 {
+                    par_error("only one '..base' spread allowed in struct update-syntax")
+                }
+                base_expr = parse_expr()
+                saw_base = 1
+            } else { if par_peek_type() == TOK_ELLIPSIS {
+                par_advance()
+                if saw_base == 1 {
+                    par_error("only one '..base' spread allowed in struct update-syntax")
+                }
+                base_expr = parse_expr()
+                saw_base = 1
+            } else {
+                let fname_tok = par_expect(TOK_IDENT)
+                par_expect(TOK_COLON)
+                let fval = parse_expr()
+                push(field_names, fname_tok[1])
+                push(field_values, fval)
+            } } } }
+        }
+    }
+    par_expect(TOK_RBRACE)
+    // R26A: if base_expr is non-trivial (anything other than a bare
+    // AST_IDENT), wrap the whole construction in a do-expr so the base
+    // is evaluated exactly once and cached in a fresh temp. This keeps
+    // codegen's per-field `base.field` rewrites safe (no re-evaluation
+    // side effects, no double computation).
+    if saw_base == 1 {
+        if ast_tag(base_expr) == AST_IDENT {
+            let nd_direct = ast_struct_init(name, field_values, field_names)
+            nd_direct[4] = base_expr
+            return nd_direct
+        }
+        let tmp_name = "_struct_spread_tmp_" + int_to_str(par_struct_tmp_count)
+        par_struct_tmp_count = par_struct_tmp_count + 1
+        let tmp_let = ast_let(tmp_name, base_expr)
+        push(tmp_let, 0)
+        let stmts = list_new()
+        push(stmts, tmp_let)
+        let nd_inner = ast_struct_init(name, field_values, field_names)
+        nd_inner[4] = ast_ident(tmp_name)
+        return ast_do_expr(stmts, nd_inner)
+    }
+    return ast_struct_init(name, field_values, field_names)
+}
+
+// R25A: parser-time lowering of struct destructure in let-bindings.
+// Caller (parse_let) has identified an uppercase IDENT followed by
+// `{ IDENT : ... }` or `{ IDENT , ... }` or `{ }`. `lb_off` is the
+// offset from par_pos to the opening `{` (1 if no generic args, larger
+// when `<TypeArgs>` intervenes).
+//
+// Supported pattern shapes (each entry is one comma-separated item):
+//   * `field`               (shorthand: binds local `field` to value.field)
+//   * `field: binder`       (binds local `binder` to value.field)
+//   * `field: literal`      (NOT supported in let context — patterns with
+//                            literal field tests only make sense in match
+//                            arms; emitting a deferred runtime check here
+//                            would complicate the lowering. Such forms
+//                            error out.)
+//   * `..`  or  `...`       (rest: skip remaining fields silently)
+//
+// Lowering: emit a block containing
+//     let _struct_tmp_N = <rhs>
+//     let f1 = _struct_tmp_N.field1
+//     let f2 = _struct_tmp_N.field2
+//     ...
+// AST_FIELD_ACCESS resolves at codegen time via struct_field_index.
+fn parse_struct_let_destructure(struct_name, lb_off) {
+    // Consume the struct name token.
+    par_advance()
+    // Consume `<TypeArgs>` if present — `lb_off - 1` tokens between
+    // the IDENT and the `{`.
+    let skip_n = lb_off - 1
+    let si = 0
+    while si < skip_n {
+        par_advance()
+        si = si + 1
+    }
+    par_expect(TOK_LBRACE)
+    let names_src = list_new()
+    let binders = list_new()
+    let dest_done = 0
+    while dest_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            dest_done = 1
+        } else {
+            if par_peek_type() == TOK_COMMA {
+                par_advance()
+            } else { if par_peek_type() == TOK_SEMI {
+                par_advance()
+            } else { if par_peek_type() == TOK_DOTDOT {
+                // Rest pattern — skip remaining fields. Consume the
+                // `..` and let the closing `}` end the loop.
+                par_advance()
+            } else { if par_peek_type() == TOK_ELLIPSIS {
+                par_advance()
+            } else {
+                let fn_tok = par_expect(TOK_IDENT)
+                let fname = fn_tok[1]
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    // Binder may be `_` (skip) or an IDENT (bind).
+                    if par_peek_type() == TOK_UNDERSCORE {
+                        par_advance()
+                        push(names_src, fname)
+                        push(binders, "_")
+                    } else {
+                        let b_tok = par_expect(TOK_IDENT)
+                        push(names_src, fname)
+                        push(binders, b_tok[1])
+                    }
+                } else {
+                    // Shorthand: `field` binds to `field`.
+                    push(names_src, fname)
+                    push(binders, fname)
+                }
+            } } } }
+        }
+    }
+    par_expect(TOK_RBRACE)
+    par_expect(TOK_EQ)
+    let rhs = parse_expr()
+
+    // Build the lowered block: cache rhs in a fresh temp, then bind
+    // each field via AST_FIELD_ACCESS.
+    let tmp_name = "_struct_tmp_" + int_to_str(par_struct_tmp_count)
+    par_struct_tmp_count = par_struct_tmp_count + 1
+    let stmts = list_new()
+    let tmp_let = ast_let(tmp_name, rhs)
+    // Push placeholder type annotation slot so AST_LET_STMT length is
+    // consistent with the normal parse_let output (codegen reads it).
+    push(tmp_let, 0)
+    push(stmts, tmp_let)
+    let bi = 0
+    while bi < len(names_src) {
+        let bind_name = binders[bi]
+        if bind_name == "_" {
+        } else {
+            let fa = ast_field_access(ast_ident(tmp_name), names_src[bi])
+            let bl = ast_let(bind_name, fa)
+            push(bl, 0)
+            push(stmts, bl)
+        }
+        bi = bi + 1
+    }
+    let _unused_sn = struct_name
+    return ast_block(stmts)
+}
+
+// R32D: parse a `let Enum::Variant(b1, b2, ...) = expr` statement. The
+// lowering caches the RHS in a temp, emits a runtime tag-check that
+// panics on mismatch, then binds each payload slot to its corresponding
+// binder.
+//
+// Refutability: a pattern `Some(v)` against an `Option` is refutable
+// (could be None at runtime). We emit a typecheck WARN when the enum
+// has more than one variant. Single-variant enums compile silently.
+// The runtime check fires either way so the binding is always sound.
+fn parse_let_enum_destructure() {
+    // Expects current token to be the enum name (uppercase IDENT).
+    let enum_tok = par_expect(TOK_IDENT)
+    par_expect(TOK_COLONCOLON)
+    let variant_tok = par_expect(TOK_IDENT)
+    let binders = list_new()
+    if par_peek_type() == TOK_LPAREN {
+        par_advance()
+        if par_peek_type() == TOK_RPAREN {
+            par_advance()
+        } else {
+            if par_peek_type() == TOK_UNDERSCORE {
+                par_advance()
+                push(binders, "_")
+            } else {
+                let bt1 = par_expect(TOK_IDENT)
+                push(binders, bt1[1])
+            }
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN { break }
+                if par_peek_type() == TOK_UNDERSCORE {
+                    par_advance()
+                    push(binders, "_")
+                } else {
+                    let btn = par_expect(TOK_IDENT)
+                    push(binders, btn[1])
+                }
+            }
+            par_expect(TOK_RPAREN)
+        }
+    }
+    par_expect(TOK_EQ)
+    let rhs = parse_expr()
+
+    // Build the lowered block: cache rhs, emit tag check, bind payload.
+    let tmp_name = "_enum_tmp_" + int_to_str(par_struct_tmp_count)
+    par_struct_tmp_count = par_struct_tmp_count + 1
+    let stmts = list_new()
+    let tmp_let = ast_let(tmp_name, rhs)
+    push(tmp_let, 0)
+    push(stmts, tmp_let)
+
+    // Tag check: if _enum_tmp_N[0] != tag { println("..."); exit(1) }
+    let tag_idx_val = par_lookup_variant_index(enum_tok[1], variant_tok[1])
+    let tag_idx = ast_int(tag_idx_val)
+    let actual_tag = ast_index(ast_ident(tmp_name), ast_int(0))
+    let neq = ast_binop("!=", actual_tag, tag_idx)
+    let msg_args = list_new()
+    push(msg_args, ast_str("panic: let destructure: expected " + enum_tok[1] + "::" + variant_tok[1] + " variant"))
+    let println_call = ast_call(ast_ident("println"), msg_args)
+    let println_stmt = ast_expr_stmt(println_call)
+    let exit_args = list_new()
+    push(exit_args, ast_int(1))
+    let exit_call = ast_call(ast_ident("exit"), exit_args)
+    let exit_stmt = ast_expr_stmt(exit_call)
+    let panic_block_stmts = list_new()
+    push(panic_block_stmts, println_stmt)
+    push(panic_block_stmts, exit_stmt)
+    let panic_block = ast_block(panic_block_stmts)
+    let if_stmt = ast_if(neq, panic_block, 0)
+    push(stmts, if_stmt)
+
+    // Bind each payload slot.
+    let bi = 0
+    while bi < len(binders) {
+        let bname = binders[bi]
+        if bname == "_" {
+        } else {
+            let pay_idx = ast_index(ast_ident(tmp_name), ast_int(bi + 1))
+            let blet = ast_let(bname, pay_idx)
+            push(blet, 0)
+            push(stmts, blet)
+        }
+        bi = bi + 1
+    }
+
+    // Refutability warning. Emit at parse time so editors / LSP filters
+    // (same convention R23A / R31D adopted) can surface the diagnostic.
+    let variant_count = par_lookup_variant_count(enum_tok[1])
+    if variant_count > 1 {
+        println("warning: let destructure on " + enum_tok[1] + " is refutable (multi-variant enum; runtime panic if scrutinee is not " + variant_tok[1] + ")")
+    }
+    return ast_block(stmts)
 }
 
 fn parse_match() {
@@ -1377,12 +2635,81 @@ fn parse_match() {
     let expr = parse_expr()
     par_expect(TOK_LBRACE)
     let arms = list_new()
+    // R25A: if any arm has a struct pattern, we wrap the entire match in
+    // a block that caches the matchee in a fresh local so the struct
+    // pattern's field tests / binders can reference it by name. Allocate
+    // the tempname up-front (used only if at least one struct pattern is
+    // seen). par_struct_tmp_count is bumped lazily so non-struct matches
+    // don't waste an id.
+    let match_tmp_name = ""
+    let saw_struct_pat = 0
     while par_peek_type() != TOK_RBRACE {
         if par_peek_type() == TOK_EOF {
             par_error("unexpected end of file in match expression (missing closing '}')")
         }
         // Parse pattern
         let pattern = 0
+        // R25A: struct field-pattern detection lives BEFORE the
+        // ::Variant fallthrough — both start with TOK_IDENT, but the
+        // struct form has `Name {` (or `Name<T> {`) ahead. Falls
+        // through to the existing enum-pattern path if not a struct
+        // pattern.
+        let consumed_pat = 0
+        if par_peek_type() == TOK_IDENT {
+            let pk_tok = par_peek()
+            if pk_tok != 0 {
+                let pk_name = pk_tok[1]
+                if par_ident_starts_uppercase(pk_name) == 1 {
+                    let lb_offm = 1
+                    if par_peek_at_type(1) == TOK_LT {
+                        let saved_p = par_pos
+                        par_advance()
+                        let gnm = par_peek_generic_args_len()
+                        par_pos = saved_p
+                        if gnm > 0 { lb_offm = 1 + gnm }
+                    }
+                    if par_lbrace_is_struct_pattern_body(lb_offm) == 1 {
+                        // It's a struct pattern. Lazy-init the captured
+                        // matchee name on first sight.
+                        if saw_struct_pat == 0 {
+                            match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                            par_struct_tmp_count = par_struct_tmp_count + 1
+                            saw_struct_pat = 1
+                        }
+                        pattern = parse_struct_match_pattern(pk_name, lb_offm)
+                        consumed_pat = 1
+                    }
+                }
+            }
+        }
+        // R36C: tuple pattern detection MUST run before the general
+        // parse_expr fallthrough — `(0, _)` is a tuple pattern, not a
+        // parenthesized expression. The leading `(` paired with the
+        // presence of a comma inside the paren block disambiguates: if
+        // we see `(<sub-pat>,...)` with at least one comma at the same
+        // depth, it's a tuple pattern. The simpler check used here:
+        // `consumed_pat == 0 && TOK_LPAREN at the head` enters
+        // par_parse_tuple_match_pattern which itself rejects (returns 0)
+        // a single-element no-trailing-comma `(x)` so the existing
+        // expression-pattern fallthrough still handles parenthesized
+        // expressions like `(1 + 2)`. Tuple patterns flow through the
+        // same R32D-style match-rewrite below (saw_struct_pat is set so
+        // a `_struct_match_N` temp is allocated).
+        if consumed_pat == 0 {
+            if par_peek_type() == TOK_LPAREN {
+                let tp_node = par_parse_tuple_match_pattern()
+                if tp_node != 0 {
+                    if saw_struct_pat == 0 {
+                        match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                        par_struct_tmp_count = par_struct_tmp_count + 1
+                        saw_struct_pat = 1
+                    }
+                    pattern = tp_node
+                    consumed_pat = 1
+                }
+            }
+        }
+        if consumed_pat == 0 {
         if par_peek_type() == TOK_UNDERSCORE {
             par_advance()
             pattern = ast_wildcard()
@@ -1405,8 +2732,83 @@ fn parse_match() {
             }
             pattern = ast_type_pattern(tp_id)
         } else {
-            pattern = parse_expr()
+            // R17A: detect sum-type variant pattern `Name::Variant(binders)`.
+            // Binders are identifiers (or `_` for don't-care), not arbitrary
+            // expressions, so we hand-parse this case. Other patterns fall
+            // through to the general `parse_expr` lane (which still handles
+            // integer / string / ident value patterns plus the regular
+            // `Name::Variant(args)` constructor lowering — but for ctor
+            // *patterns* in a match arm the args are binder names, so we
+            // need this dedicated branch).
+            if par_peek_type() == TOK_IDENT {
+                if par_peek_at_type(1) == TOK_COLONCOLON {
+                    let n1 = par_advance()
+                    par_advance()
+                    let n2 = par_expect(TOK_IDENT)
+                    // R32D: parse the variant payload. The parser collects
+                    // each payload slot as a SUB-PATTERN node (AST_IDENT for
+                    // a binder, AST_WILDCARD for `_`, AST_ENUM_PATTERN /
+                    // AST_NESTED_VARIANT_PATTERN for a nested variant, or
+                    // AST_STRUCT_PATTERN for `Outer(Struct{...})`). When
+                    // every sub_pattern is a plain binder / wildcard, we
+                    // emit the legacy AST_ENUM_PATTERN node (preserving
+                    // R31D's tag-compare + binder-bind codegen path exactly
+                    // — this matters for the byte-identical-self-host
+                    // invariant). When at least one sub_pattern is a real
+                    // sub-pattern, emit AST_NESTED_VARIANT_PATTERN and let
+                    // the match-rewrite below turn the arm into a guarded
+                    // wildcard. R32D ONLY changes the wire shape for the
+                    // nested case; single-level patterns continue to flow
+                    // through the R17A / R31D code path.
+                    let r32d_sub_patterns = list_new()
+                    let r32d_legacy_binders = list_new()
+                    let r32d_has_nested = 0
+                    if par_peek_type() == TOK_LPAREN {
+                        par_advance()
+                        if par_peek_type() == TOK_RPAREN {
+                            par_advance()
+                        } else {
+                            let r32d_first = parse_match_sub_pattern()
+                            push(r32d_sub_patterns, r32d_first)
+                            if r32d_pattern_is_legacy_binder(r32d_first) == 1 {
+                                push(r32d_legacy_binders, r32d_pattern_binder_name(r32d_first))
+                            } else {
+                                r32d_has_nested = 1
+                            }
+                            while par_peek_type() == TOK_COMMA {
+                                par_advance()
+                                if par_peek_type() == TOK_RPAREN { break }
+                                let r32d_nth = parse_match_sub_pattern()
+                                push(r32d_sub_patterns, r32d_nth)
+                                if r32d_pattern_is_legacy_binder(r32d_nth) == 1 {
+                                    push(r32d_legacy_binders, r32d_pattern_binder_name(r32d_nth))
+                                } else {
+                                    r32d_has_nested = 1
+                                }
+                            }
+                            par_expect(TOK_RPAREN)
+                        }
+                    }
+                    if r32d_has_nested == 1 {
+                        // Lazy-init the matchee-temp on first nested-pattern
+                        // sighting, mirroring the AST_STRUCT_PATTERN path.
+                        if saw_struct_pat == 0 {
+                            match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                            par_struct_tmp_count = par_struct_tmp_count + 1
+                            saw_struct_pat = 1
+                        }
+                        pattern = ast_nested_variant_pattern(n1[1], n2[1], r32d_sub_patterns)
+                    } else {
+                        pattern = ast_enum_pattern(n1[1], n2[1], r32d_legacy_binders)
+                    }
+                } else {
+                    pattern = parse_expr()
+                }
+            } else {
+                pattern = parse_expr()
+            }
         } }
+        }
         let mg = 0
         if par_peek_type() == TOK_IF {
             par_advance()
@@ -1429,9 +2831,1099 @@ fn parse_match() {
             push(arm, mg)
         }
         push(arms, arm)
+        // R36C: optionally accept a `,` between arms. NOVA's pre-R36C
+        // match grammar tolerates no separator (arm boundaries are
+        // detected by parse_expr stopping at the first non-expression
+        // token — usually the next pattern's leading IDENT / INT / `_`).
+        // Tuple patterns break that heuristic because a bare-expression
+        // body followed by a `(`-starting tuple pattern is ambiguous
+        // (parse_postfix would treat the `(` as a call on the body).
+        // Accepting an explicit comma between arms lets users
+        // disambiguate `(0,0) => "origin", (0,_) => "y_axis"` cleanly
+        // without changing the rest of the grammar. The comma is
+        // consumed silently — arms without commas continue to parse
+        // byte-identically to the pre-R36C grammar for every existing
+        // test in the repo.
+        if par_peek_type() == TOK_COMMA { par_advance() }
     }
     par_expect(TOK_RBRACE)
-    return ast_match(expr, arms)
+    // R32D: parse-time typecheck for nested variant patterns. Walks every
+    // arm before the rewrite (so we still see the raw nested-pattern
+    // shape) and emits a WARN for any arm that references an unknown
+    // enum / variant / arity. Mirrors R31D's WARN-not-ERROR convention.
+    r32d_tc_check_match_patterns(arms)
+    // R33C: exhaustiveness must be computed on the RAW arms — once the
+    // R32D rewrite below collapses AST_NESTED_VARIANT_PATTERN into a
+    // wildcard-with-synthetic-guard, the existing
+    // cg_check_exhaustive / tc_check_match_exhaustive passes would
+    // either over-cover (treating the synthetic guard as a real catch-
+    // all) or under-cover (treating every nested arm as inconclusive).
+    // Running the check here against the RAW arm shapes lets a
+    // user-written guard (`Some(v) if v > 0 => ...`) opt OUT of
+    // covering its variant while preserving R32D's nested-pattern
+    // coverage for unguarded arms. The visited flag we tack onto the
+    // returned match node ([match_nd][3] = 1) silences both downstream
+    // passes from re-warning. The check returns 1 iff it took
+    // ownership of the diagnostic (enum found in par_enum_tags); a
+    // zero return means the enum wasn't visible at parse time so we
+    // defer to the later tc_check_match_exhaustive pass.
+    let raw_consumed = r33c_check_exhaustive_raw(arms)
+    // R25A: if any arm carried a struct pattern, rewrite the entire
+    // match into a `{ let _struct_match_N = expr; match _struct_match_N
+    // { rewritten arms } }` block. Each struct-pattern arm becomes a
+    // wildcard arm with an optional guard (for literal field tests) and
+    // a body prepended with `let binder = _struct_match_N.field` for
+    // every binder. Result: only AST node shapes the existing codegen
+    // already handles (no new codegen cases).
+    //
+    // R32D: the same rewrite handles AST_NESTED_VARIANT_PATTERN arms.
+    // The lowering recurses through each sub-pattern, emitting a guard
+    // chain like `tmp[0] == outer_tag && tmp[1][0] == inner_tag && ...`
+    // plus a `let binder = tmp[i][j]...` prep stmt for every binder.
+    // Struct sub-patterns nested inside a variant payload (e.g.
+    // `Ok(Point { x, y })`) reuse the same field-access strategy as
+    // R25A's standalone struct-pattern lowering.
+    if saw_struct_pat == 1 {
+        let new_arms = list_new()
+        let ai = 0
+        while ai < len(arms) {
+            let arm0 = arms[ai]
+            let pat0 = arm0[1]
+            let body0 = arm0[2]
+            let old_guard = 0
+            if len(arm0) > 3 { old_guard = arm0[3] }
+            if ast_tag(pat0) == AST_STRUCT_PATTERN {
+                let lower_pair = lower_struct_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, lower_pair)
+            } else { if ast_tag(pat0) == AST_NESTED_VARIANT_PATTERN {
+                let nested_pair = lower_nested_variant_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, nested_pair)
+            } else { if ast_tag(pat0) == AST_TUPLE_PATTERN {
+                // R36C: tuple match pattern. Lower to wildcard-with-guard
+                // identically to AST_NESTED_VARIANT_PATTERN, dispatching
+                // on positional slot equality rather than tag compare.
+                let tuple_pair = lower_tuple_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, tuple_pair)
+            } else {
+                push(new_arms, arm0)
+            } } }
+            ai = ai + 1
+        }
+        let inner_match = ast_match(ast_ident(match_tmp_name), new_arms)
+        // R33C: mark visited iff the raw check took ownership of the
+        // diagnostic. When raw_consumed == 0 (enum unknown at parse
+        // time) we leave the slot blank so the typecheck pass still
+        // gets to run its own exhaustiveness check.
+        if raw_consumed == 1 { push(inner_match, 1) }
+        // Wrap as AST_DO_EXPR so the rewritten match remains usable in
+        // expression position (e.g. `let x = match ... { Point { ... } }`).
+        // AST_DO_EXPR semantics: run init_stmts, then evaluate final_expr
+        // and return its value. The cache_let goes in init_stmts; the
+        // inner match is the final expression.
+        let init_stmts = list_new()
+        let cache_let = ast_let(match_tmp_name, expr)
+        push(cache_let, 0)
+        push(init_stmts, cache_let)
+        return ast_do_expr(init_stmts, inner_match)
+    }
+    let nd = ast_match(expr, arms)
+    // R33C: mark visited iff the raw check ran.
+    if raw_consumed == 1 { push(nd, 1) }
+    return nd
+}
+
+// R33C: raw exhaustiveness check. Runs on the RAW match-arm list
+// BEFORE R25A / R32D rewrites collapse struct- and nested-variant
+// patterns into wildcards-with-synthetic-guards. This lets us treat
+// `Some(v) if v > 0 => ...` (user guard) as NOT covering Some, while
+// preserving `Some(Some(v)) => ...` (no user guard) as covering Some.
+// Recognised patterns:
+//   * AST_WILDCARD (no user guard)           — catch-all, skip warn
+//   * AST_TYPE_PATTERN (no user guard)       — catch-all, skip warn
+//   * AST_ENUM_PATTERN (no user guard)       — covers the variant
+//   * AST_NESTED_VARIANT_PATTERN (no guard)  — covers the OUTER variant
+//                                              (same shallow rule the
+//                                               legacy check used)
+// Returns 1 if it took ownership of the exhaustiveness diagnostic for
+// this match (enum identified, parser-time tag table populated),
+// regardless of whether a WARN actually fired. The caller marks the
+// match node visited iff this returns 1 so downstream
+// cg_check_exhaustive / tc_check_match_exhaustive passes are
+// suppressed. Returns 0 when the parser couldn't find the enum (e.g.
+// it's declared AFTER the match site in source order); in that case
+// downstream typecheck-pass enum registry still gets a chance to warn.
+fn r33c_check_exhaustive_raw(arms) {
+    if arms == 0 { return 0 }
+    if type_of(arms) != 3 { return 0 }
+    let enum_name = ""
+    let has_wildcard = 0
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                if pat != 0 {
+                    if type_of(pat) == 3 {
+                        let pt = ast_tag(pat)
+                        let arm_has_guard = 0
+                        if len(arm) > 3 { arm_has_guard = 1 }
+                        if pt == AST_WILDCARD {
+                            if arm_has_guard == 0 { has_wildcard = 1 }
+                        }
+                        if pt == AST_TYPE_PATTERN {
+                            if arm_has_guard == 0 { has_wildcard = 1 }
+                        }
+                        if pt == AST_ENUM_PATTERN {
+                            if enum_name == "" { enum_name = pat[1] }
+                        }
+                        if pt == AST_NESTED_VARIANT_PATTERN {
+                            if enum_name == "" { enum_name = pat[1] }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    if enum_name == "" { return 0 }
+    let total = par_lookup_variant_count(enum_name)
+    if total == 0 { return 0 }
+    if has_wildcard == 1 { return 1 }
+    // Coverage map: covered[i] == 1 iff some unguarded arm names the
+    // i'th declared variant. Reuses par_lookup_variant_count + a per-
+    // index probe (tc_find_enum / variants list lookup style) to keep
+    // missing-variant ordering source-declaration order.
+    let covered = list_new()
+    let init = 0
+    while init < total {
+        push(covered, 0)
+        init = init + 1
+    }
+    ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                if pat != 0 {
+                    if type_of(pat) == 3 {
+                        let pt2 = ast_tag(pat)
+                        let arm_has_guard = 0
+                        if len(arm) > 3 { arm_has_guard = 1 }
+                        if arm_has_guard == 0 {
+                            if pt2 == AST_ENUM_PATTERN {
+                                let vidx = par_lookup_variant_index(enum_name, pat[2])
+                                if vidx >= 0 {
+                                    if vidx < total { covered[vidx] = 1 }
+                                }
+                            }
+                            if pt2 == AST_NESTED_VARIANT_PATTERN {
+                                let vidx2 = par_lookup_variant_index(enum_name, pat[2])
+                                if vidx2 >= 0 {
+                                    if vidx2 < total { covered[vidx2] = 1 }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    let count_covered = 0
+    let ci0 = 0
+    while ci0 < total {
+        if covered[ci0] == 1 { count_covered = count_covered + 1 }
+        ci0 = ci0 + 1
+    }
+    if count_covered >= total { return 1 }
+    // Assemble the missing-variant list in declaration order so the
+    // warn line matches the existing tc_check_match_exhaustive /
+    // cg_check_exhaustive format byte-for-byte.
+    let missing = ""
+    let vi1 = 0
+    let first = 1
+    while vi1 < total {
+        if covered[vi1] == 0 {
+            let vname1 = par_lookup_variant_name_at(enum_name, vi1)
+            if first == 1 {
+                missing = vname1
+                first = 0
+            } else {
+                missing = missing + ", " + vname1
+            }
+        }
+        vi1 = vi1 + 1
+    }
+    println("warning: non-exhaustive match on " + enum_name + " (missing: " + missing + ")")
+    return 1
+}
+
+// R33C: parser-time variant-name-at-index lookup. Returns the
+// declaration-order variant name at index `idx` for `enum_name`, or
+// the empty string when out of range / enum unknown. Used by the raw
+// exhaustiveness check above to assemble the missing-variant warn
+// message in source order. Mirrors par_lookup_variant_index's
+// par_enum_tags structure.
+fn par_lookup_variant_name_at(enum_name, idx) {
+    if par_enum_tags == 0 { return "" }
+    let i = 0
+    while i < len(par_enum_tags) {
+        let e = par_enum_tags[i]
+        if e[0] == enum_name {
+            let variants = e[1]
+            if idx >= 0 {
+                if idx < len(variants) { return variants[idx][0] }
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// R32D: parse one element of a variant payload's argument list. Each
+// element is treated as a SUB-PATTERN so it can recursively be another
+// variant pattern, a struct pattern, a wildcard, or a binder. Returns
+// the AST node representing that sub-pattern (which the caller stores
+// in r32d_sub_patterns). The returned shape is one of:
+//   * AST_WILDCARD             — `_`
+//   * AST_IDENT                — bare binder name `v`
+//   * AST_ENUM_PATTERN         — `Inner::Variant(b1, b2)` (single-level)
+//   * AST_NESTED_VARIANT_PATTERN — `Inner::Variant(Deeper::V(x))` etc.
+//   * AST_STRUCT_PATTERN       — `Inner { x, y }`
+fn parse_match_sub_pattern() {
+    if par_peek_type() == TOK_UNDERSCORE {
+        par_advance()
+        return ast_wildcard()
+    }
+    // R36C: tuple sub-pattern `(0, _, x)` nested inside another pattern.
+    // Same disambiguation as top-level tuple patterns: require >=2
+    // comma-separated sub-patterns; a single-element `(x)` falls through
+    // to parse_expr so existing literal-equality semantics stay byte-
+    // identical. par_parse_tuple_match_pattern returns 0 in the non-tuple
+    // case so the caller can try the next branch.
+    if par_peek_type() == TOK_LPAREN {
+        let tp_sub = par_parse_tuple_match_pattern()
+        if tp_sub != 0 { return tp_sub }
+    }
+    if par_peek_type() == TOK_IDENT {
+        // Possible forms:
+        //   IDENT                       -> binder
+        //   IDENT :: IDENT ( ... )      -> sub-variant (recurse)
+        //   IDENT :: IDENT              -> sub-variant nullary
+        //   IDENT { ... }               -> sub-struct (delegates to struct
+        //                                  pattern parser; requires the
+        //                                  identifier to start uppercase
+        //                                  and the lookahead to look like
+        //                                  a struct pattern body, exactly
+        //                                  as the top-level match arm
+        //                                  detector demands).
+        let nxt = par_peek_at_type(1)
+        if nxt == TOK_COLONCOLON {
+            let nsub1 = par_advance()
+            par_advance()
+            let nsub2 = par_expect(TOK_IDENT)
+            let sub_subs = list_new()
+            let sub_binders = list_new()
+            let sub_has_nested = 0
+            if par_peek_type() == TOK_LPAREN {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN {
+                    par_advance()
+                } else {
+                    let s1 = parse_match_sub_pattern()
+                    push(sub_subs, s1)
+                    if r32d_pattern_is_legacy_binder(s1) == 1 {
+                        push(sub_binders, r32d_pattern_binder_name(s1))
+                    } else {
+                        sub_has_nested = 1
+                    }
+                    while par_peek_type() == TOK_COMMA {
+                        par_advance()
+                        if par_peek_type() == TOK_RPAREN { break }
+                        let sn = parse_match_sub_pattern()
+                        push(sub_subs, sn)
+                        if r32d_pattern_is_legacy_binder(sn) == 1 {
+                            push(sub_binders, r32d_pattern_binder_name(sn))
+                        } else {
+                            sub_has_nested = 1
+                        }
+                    }
+                    par_expect(TOK_RPAREN)
+                }
+            }
+            if sub_has_nested == 1 {
+                return ast_nested_variant_pattern(nsub1[1], nsub2[1], sub_subs)
+            }
+            return ast_enum_pattern(nsub1[1], nsub2[1], sub_binders)
+        }
+        if nxt == TOK_LBRACE {
+            // Sub-struct pattern. Reuse parse_struct_match_pattern which
+            // expects the IDENT to be the current token and lb_off=1.
+            let peek_tok_sub = par_peek()
+            if peek_tok_sub != 0 {
+                let pks = peek_tok_sub[1]
+                if par_ident_starts_uppercase(pks) == 1 {
+                    if par_lbrace_is_struct_pattern_body(1) == 1 {
+                        return parse_struct_match_pattern(pks, 1)
+                    }
+                }
+            }
+        }
+        let bind_tok = par_advance()
+        return ast_ident(bind_tok[1])
+    }
+    // Unknown sub-pattern shape — fall back to parse_expr so literal
+    // values (rare in this position, but legal at the top level) still
+    // tokenize. Wrap in AST_IDENT-equivalent treatment by returning the
+    // expression node; the caller's legacy-binder check sees it as a
+    // non-binder and triggers the nested-rewrite path, which emits a
+    // literal-equality guard.
+    return parse_expr()
+}
+
+// R36C: parse a tuple match pattern `(p0, p1, ...)`. Returns 0 when the
+// leading `(` does NOT start a tuple pattern (single-element with no
+// trailing comma — caller must defer to the expression-pattern lane).
+// Returns an AST_TUPLE_PATTERN node otherwise. Each slot is collected as
+// a sub-pattern (recursive — nested tuples / variants / structs / literals
+// all work via parse_match_sub_pattern).
+//
+// Backtracking model: the only par_pos rewind point is right after the
+// opening `(`. If the inner is one expression with no comma, we restore
+// par_pos to the saved position so the caller's parse_expr fallthrough
+// re-parses the same `(expr)` as a parenthesized expression and the
+// pattern dispatcher proceeds byte-identically to pre-R36C.
+fn par_parse_tuple_match_pattern() {
+    let saved_pos = par_pos
+    par_expect(TOK_LPAREN)
+    if par_peek_type() == TOK_RPAREN {
+        // Empty `()` — NOVA has no unit type; restore + caller errors.
+        par_pos = saved_pos
+        return 0
+    }
+    let tp_first = parse_match_sub_pattern()
+    if par_peek_type() != TOK_COMMA {
+        // Single-element no-trailing-comma — not a tuple pattern. Roll
+        // back so the caller's parse_expr re-parses the parenthesized
+        // expression. Must restore par_pos because parse_match_sub_pattern
+        // already consumed the inner tokens; the rewind discards them
+        // and forces a fresh parse against the (`expr`) shape the
+        // expression-pattern lane handles natively.
+        par_pos = saved_pos
+        return 0
+    }
+    let tp_subs = list_new()
+    push(tp_subs, tp_first)
+    while par_peek_type() == TOK_COMMA {
+        par_advance()
+        if par_peek_type() == TOK_RPAREN { break }
+        let tp_nx = parse_match_sub_pattern()
+        push(tp_subs, tp_nx)
+    }
+    par_expect(TOK_RPAREN)
+    if len(tp_subs) < 2 {
+        // `(x,)` trailing comma after a single binder — R36C does not
+        // ship singleton tuple patterns; emit the lone sub-pattern as
+        // the arm's pattern (preserves binder semantics for `(x,)` ==
+        // `x`). The pattern dispatcher consumes it like any other pat.
+        return tp_subs[0]
+    }
+    return ast_tuple_pattern(tp_subs)
+}
+
+// R36C: lower a match arm whose pattern is AST_TUPLE_PATTERN into the
+// same wildcard-with-guard shape R32D's nested-variant rewrite emits.
+// Each slot becomes either a per-binder `let name = tmp[i]` prep stmt
+// (binder) or a `tmp[i] == lit` guard chain entry (literal). Wildcards
+// are skipped. Nested tuple sub-patterns recurse via r32d_lower_sub_pattern
+// (extended below to accept AST_TUPLE_PATTERN).
+fn lower_tuple_match_arm(tmp_name, tuple_pat, body, user_guard) {
+    let prep_stmts = list_new()
+    let tag_chain = 0
+    let sub_patterns = tuple_pat[1]
+    let si = 0
+    while si < len(sub_patterns) {
+        let sub = sub_patterns[si]
+        let slot_idx = ast_index(ast_ident(tmp_name), ast_int(si))
+        tag_chain = r32d_lower_sub_pattern(sub, slot_idx, prep_stmts, tag_chain)
+        si = si + 1
+    }
+    let final_guard = 0
+    if user_guard == 0 {
+        final_guard = tag_chain
+        let new_body = r32d_attach_prep(body, prep_stmts)
+        let arm = ast_match_arm(ast_wildcard(), new_body)
+        if final_guard == 0 {
+        } else {
+            push(arm, final_guard)
+        }
+        return arm
+    }
+    let guarded_do = ast_do_expr(prep_stmts, user_guard)
+    if tag_chain == 0 {
+        final_guard = guarded_do
+    } else {
+        final_guard = ast_and(tag_chain, guarded_do)
+    }
+    let new_body2 = r32d_attach_prep(body, prep_stmts)
+    let arm2 = ast_match_arm(ast_wildcard(), new_body2)
+    push(arm2, final_guard)
+    return arm2
+}
+
+// R32D: classify a sub-pattern as a legacy single-binder name that the
+// existing AST_ENUM_PATTERN form can carry without a wire-shape change.
+// Returns 1 when the sub-pattern is AST_IDENT (a binder), or AST_WILDCARD
+// (the `_` discard). All other shapes — nested variant, struct, literal
+// expressions — force the wrapper to emit AST_NESTED_VARIANT_PATTERN so
+// the parser-side lowering generates the corresponding guard / prep stmts.
+fn r32d_pattern_is_legacy_binder(sub) {
+    if sub == 0 { return 0 }
+    if type_of(sub) != 3 { return 0 }
+    let st = ast_tag(sub)
+    if st == AST_IDENT { return 1 }
+    if st == AST_WILDCARD { return 1 }
+    return 0
+}
+
+// R32D: extract the binder-name string from a legacy-binder sub-pattern.
+// AST_IDENT -> name; AST_WILDCARD -> "_". Caller has already gated on
+// r32d_pattern_is_legacy_binder == 1 so other shapes never reach here.
+fn r32d_pattern_binder_name(sub) {
+    let st = ast_tag(sub)
+    if st == AST_IDENT { return sub[1] }
+    return "_"
+}
+
+// R32D: lower a `Outer::Variant(SubPat0, SubPat1, ...) => body` arm
+// where at least one SubPat is itself a pattern (not just a binder) into
+// a wildcard arm referencing the cached scrutinee `tmp_name`. The lowering
+// walks each sub-pattern, building:
+//   * a guard-chain  `tmp[0] == outer_tag && <sub-pattern guards> && ...`
+//   * prep-stmts     `let binder = tmp[i+1]` for every binder anywhere
+//                    in the nest, addressed via a chain of AST_INDEX_EXPR
+//                    (or AST_FIELD_ACCESS for struct sub-patterns).
+// The returned arm is shaped like the regular parse_match output —
+// `[AST_MATCH_ARM, AST_WILDCARD, body, guard?]` — and reuses the same
+// AST_AND_EXPR / AST_DO_EXPR / AST_FIELD_ACCESS / AST_INDEX_EXPR nodes
+// codegen already understands. No new codegen cases needed.
+fn lower_nested_variant_match_arm(tmp_name, variant_pat, body, user_guard) {
+    let prep_stmts = list_new()
+    // R33C: when a user guard is present together with nested binders,
+    // the binders MUST be available when the user guard evaluates
+    // (otherwise `Some(Some(v)) if v == 0 => ...` reads v before it's
+    // assigned — see r32d_attach_prep). The synthetic tag-check chain
+    // is built FIRST (so wrong-typed values aren't dereferenced), then
+    // the user guard is folded in inside an AST_DO_EXPR that prepends
+    // the per-binder lets before evaluating the user guard. The
+    // ordering is:
+    //   (tag_chain) && do { let v = tmp[1][1]; ...; user_guard }
+    // When user_guard is 0 (no user guard) we keep the prior R32D
+    // shape exactly — bindings go on the body via r32d_attach_prep,
+    // guard_expr is the bare tag chain — preserving R32D byte-
+    // identical codegen for every arm that doesn't carry a guard.
+    let tag_chain = 0
+    // Outer tag check: tmp[0] == outer_tag.
+    let outer_enum = variant_pat[1]
+    let outer_variant = variant_pat[2]
+    let outer_tag_call = r32d_make_enum_tag_int(outer_enum, outer_variant)
+    let outer_idx = ast_index(ast_ident(tmp_name), ast_int(0))
+    let outer_eq = ast_binop("==", outer_idx, outer_tag_call)
+    tag_chain = r32d_and_merge(tag_chain, outer_eq)
+    // Walk each payload slot, building per-binder lets / per-tag guards.
+    let sub_patterns = variant_pat[3]
+    let si = 0
+    while si < len(sub_patterns) {
+        let sub = sub_patterns[si]
+        let payload_idx = ast_index(ast_ident(tmp_name), ast_int(si + 1))
+        tag_chain = r32d_lower_sub_pattern(sub, payload_idx, prep_stmts, tag_chain)
+        si = si + 1
+    }
+    let final_guard = 0
+    if user_guard == 0 {
+        // No user guard: keep the legacy R32D shape — bindings in the
+        // body via r32d_attach_prep, guard is the tag chain alone.
+        final_guard = tag_chain
+        let new_body = r32d_attach_prep(body, prep_stmts)
+        let arm = ast_match_arm(ast_wildcard(), new_body)
+        if final_guard == 0 {
+        } else {
+            push(arm, final_guard)
+        }
+        return arm
+    }
+    // User guard present: bind binders inside an AST_DO_EXPR so the
+    // guard sees them, then attach the SAME bindings to the body too
+    // (so the body can also read them — the function-frame locals
+    // were written by the guard's do-expr but the body's prep_stmts
+    // run again on a successful guard and overwrite with the same
+    // values, which is cheap and idempotent). prep_stmts is read but
+    // never mutated by either side, so the shared list is safe.
+    let guarded_do = ast_do_expr(prep_stmts, user_guard)
+    if tag_chain == 0 {
+        final_guard = guarded_do
+    } else {
+        final_guard = ast_and(tag_chain, guarded_do)
+    }
+    let new_body2 = r32d_attach_prep(body, prep_stmts)
+    let arm2 = ast_match_arm(ast_wildcard(), new_body2)
+    push(arm2, final_guard)
+    return arm2
+}
+
+// R32D: recursive sub-pattern lowering. `accessor` is the AST expression
+// that, when evaluated, yields the value being matched at this position
+// in the nest (e.g. `tmp[1]` for the outer's first payload slot, or
+// `tmp[1][2]` for a deeper slot). Each sub-pattern shape extends the
+// guard chain and / or appends a `let binder = accessor` prep stmt.
+// Returns the new guard_expr (potentially extended with this level's
+// tag-compare / equality checks).
+fn r32d_lower_sub_pattern(sub, accessor, prep_stmts, guard_expr) {
+    if sub == 0 { return guard_expr }
+    if type_of(sub) != 3 { return guard_expr }
+    let st = ast_tag(sub)
+    if st == AST_WILDCARD {
+        // Skip — no binder, no equality check.
+        return guard_expr
+    }
+    if st == AST_IDENT {
+        let bnm = sub[1]
+        if bnm == "_" { return guard_expr }
+        let blet = ast_let(bnm, accessor)
+        push(blet, 0)
+        push(prep_stmts, blet)
+        return guard_expr
+    }
+    if st == AST_ENUM_PATTERN {
+        // Sub-variant single-level. Add tag-compare then per-binder lets.
+        let sub_enum = sub[1]
+        let sub_variant = sub[2]
+        let sub_binders = sub[3]
+        let tag_call = r32d_make_enum_tag_int(sub_enum, sub_variant)
+        let tag_idx = ast_index(accessor, ast_int(0))
+        let tag_eq = ast_binop("==", tag_idx, tag_call)
+        let g2 = r32d_and_merge(guard_expr, tag_eq)
+        let bi = 0
+        while bi < len(sub_binders) {
+            let bn = sub_binders[bi]
+            if bn == "_" {
+            } else {
+                let pay_idx = ast_index(accessor, ast_int(bi + 1))
+                let bl = ast_let(bn, pay_idx)
+                push(bl, 0)
+                push(prep_stmts, bl)
+            }
+            bi = bi + 1
+        }
+        return g2
+    }
+    if st == AST_NESTED_VARIANT_PATTERN {
+        // Deeper nesting. Add tag-compare then recurse into each slot.
+        let n_enum = sub[1]
+        let n_variant = sub[2]
+        let n_sub_patterns = sub[3]
+        let n_tag_call = r32d_make_enum_tag_int(n_enum, n_variant)
+        let n_tag_idx = ast_index(accessor, ast_int(0))
+        let n_tag_eq = ast_binop("==", n_tag_idx, n_tag_call)
+        let g3 = r32d_and_merge(guard_expr, n_tag_eq)
+        let ni = 0
+        while ni < len(n_sub_patterns) {
+            let ns = n_sub_patterns[ni]
+            let inner_acc = ast_index(accessor, ast_int(ni + 1))
+            g3 = r32d_lower_sub_pattern(ns, inner_acc, prep_stmts, g3)
+            ni = ni + 1
+        }
+        return g3
+    }
+    if st == AST_TUPLE_PATTERN {
+        // R36C: tuple sub-pattern (e.g. `Some((a, b))` or nested
+        // `((0, x), _)`). Each slot of the inner tuple is accessed via
+        // `accessor[i]` and recursively lowered. No tag-compare is
+        // emitted here — tuples are tagged lists, not tagged unions,
+        // so a tuple position carries no discriminant. Wildcards skip
+        // silently; binders / literals / nested tuples thread through
+        // r32d_lower_sub_pattern. Caveat: tuple arity is NOT runtime-
+        // checked. If the scrutinee at this position has fewer slots
+        // than the pattern demands, the generated `accessor[i]` will
+        // panic at runtime via the list bounds check. This matches
+        // R36C's shallow lowering (no per-slot type discipline).
+        let tp_subs = sub[1]
+        let g5 = guard_expr
+        let tsi = 0
+        while tsi < len(tp_subs) {
+            let tsub = tp_subs[tsi]
+            let tslot_acc = ast_index(accessor, ast_int(tsi))
+            g5 = r32d_lower_sub_pattern(tsub, tslot_acc, prep_stmts, g5)
+            tsi = tsi + 1
+        }
+        return g5
+    }
+    if st == AST_STRUCT_PATTERN {
+        // Struct destructure inside a variant payload (e.g. `Ok(Point { x, y })`).
+        // Bind each field via AST_FIELD_ACCESS on the accessor expression.
+        // Literal sub-patterns within the struct emit equality checks
+        // against the field, mirroring R25A's lowering exactly.
+        let sf_names = sub[2]
+        let sf_subs = sub[3]
+        let g4 = guard_expr
+        let fi = 0
+        while fi < len(sf_names) {
+            let fnm = sf_names[fi]
+            let fsub = sf_subs[fi]
+            let fst = ast_tag(fsub)
+            // Each field's accessor: cache the payload accessor through
+            // AST_FIELD_ACCESS, then recurse. Note: `accessor` is reused
+            // by ast_field_access; codegen accepts arbitrary base exprs
+            // so the nested-index chain works as-is.
+            let f_acc = ast_field_access(accessor, fnm)
+            if fst == AST_IDENT {
+                let fbn = fsub[1]
+                if fbn == "_" {
+                } else {
+                    let fbl = ast_let(fbn, f_acc)
+                    push(fbl, 0)
+                    push(prep_stmts, fbl)
+                }
+            } else { if fst == AST_WILDCARD {
+            } else { if fst == AST_ENUM_PATTERN {
+                g4 = r32d_lower_sub_pattern(fsub, f_acc, prep_stmts, g4)
+            } else { if fst == AST_NESTED_VARIANT_PATTERN {
+                g4 = r32d_lower_sub_pattern(fsub, f_acc, prep_stmts, g4)
+            } else { if fst == AST_STRUCT_PATTERN {
+                g4 = r32d_lower_sub_pattern(fsub, f_acc, prep_stmts, g4)
+            } else {
+                // Literal sub-pattern — emit field-equality check.
+                let leq = ast_binop("==", f_acc, fsub)
+                g4 = r32d_and_merge(g4, leq)
+            } } } } }
+            fi = fi + 1
+        }
+        return g4
+    }
+    // Literal sub-pattern in a variant payload (e.g. `Some(42)` where
+    // 42 is a literal). Emit equality check.
+    let lit_eq = ast_binop("==", accessor, sub)
+    return r32d_and_merge(guard_expr, lit_eq)
+}
+
+// R32D: combine two guard expressions with logical AND. The first guard
+// may be 0 (no prior guard), in which case the new guard becomes the
+// chain root.
+fn r32d_and_merge(prev, next) {
+    if prev == 0 { return next }
+    return ast_and(prev, next)
+}
+
+// R32D: synthesize an AST_INT_LIT node whose value is the enum variant
+// discriminant index. We can resolve this at parse time by querying the
+// parser-time enum registry par_enum_tags, populated as each `enum`
+// declaration parses. Codegen's enum_variant_index() runs at codegen and
+// produces the same index — but the AST emitted from parse_match is
+// already shaped as `[base_expr][0] == <int_literal>` so the comparison
+// happens against a literal in the generated assembly. If the enum is
+// unknown at parse time (pattern uses an enum declared later in the file
+// — unusual but legal since parse runs left-to-right), tc_lookup returns
+// -1 and the guard reduces to a constant-false check at runtime — the
+// arm will simply never match. The typecheck pass also flags this case.
+fn r32d_make_enum_tag_int(enum_name, variant_name) {
+    let idx = par_lookup_variant_index(enum_name, variant_name)
+    return ast_int(idx)
+}
+
+// R32D: parser-time enum-variant discriminant lookup. Walks par_enum_tags
+// (populated by parse_enum) and returns the variant's declaration-order
+// index, or -1 if the enum / variant isn't found. Mirrors codegen's
+// enum_variant_index but operates on the parser-side table so it can run
+// during parse_match's lowering.
+fn par_lookup_variant_index(enum_name, variant_name) {
+    if par_enum_tags == 0 { return 0 - 1 }
+    let i = 0
+    while i < len(par_enum_tags) {
+        let e = par_enum_tags[i]
+        if e[0] == enum_name {
+            let variants = e[1]
+            let vi = 0
+            while vi < len(variants) {
+                if variants[vi][0] == variant_name { return vi }
+                vi = vi + 1
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// R32D: parser-time variant-count lookup. Returns the number of variants
+// on the named enum, or 0 if the enum is unknown (in which case let-
+// destructure-of-enum emits no warning). Used by parse_let_enum_destructure
+// to decide whether the irrefutable-binding pattern fires a typecheck
+// warning ("multi-variant enum, runtime mismatch panic possible").
+fn par_lookup_variant_count(enum_name) {
+    if par_enum_tags == 0 { return 0 }
+    let i = 0
+    while i < len(par_enum_tags) {
+        let e = par_enum_tags[i]
+        if e[0] == enum_name { return len(e[1]) }
+        i = i + 1
+    }
+    return 0
+}
+
+// R32D: parser-time payload arity lookup for a specific variant. Returns
+// the declared arity (e.g. `Some(int)` -> 1, `None` -> 0) or -1 if the
+// variant is unknown. Used by parse_let_enum_destructure to validate the
+// number of sub-patterns matches the variant's payload arity.
+fn par_lookup_variant_arity(enum_name, variant_name) {
+    if par_enum_tags == 0 { return 0 - 1 }
+    let i = 0
+    while i < len(par_enum_tags) {
+        let e = par_enum_tags[i]
+        if e[0] == enum_name {
+            let variants = e[1]
+            let vi = 0
+            while vi < len(variants) {
+                if variants[vi][0] == variant_name {
+                    return variants[vi][1]
+                }
+                vi = vi + 1
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// R32D: attach the per-binder prep stmts to the arm body. The body shape
+// determines whether we prepend stmts to a block or wrap an expression in
+// an AST_DO_EXPR. Mirrors R25A's lower_struct_match_arm body lowering.
+fn r32d_attach_prep(body, prep_stmts) {
+    if body == 0 {
+        return ast_block(prep_stmts)
+    }
+    let bt = ast_tag(body)
+    if bt == AST_EXPR_STMT {
+        let do_e = ast_do_expr(prep_stmts, body[1])
+        return ast_expr_stmt(do_e)
+    }
+    if bt == AST_BLOCK {
+        let new_body_stmts = list_new()
+        let pi = 0
+        while pi < len(prep_stmts) {
+            push(new_body_stmts, prep_stmts[pi])
+            pi = pi + 1
+        }
+        let bs = body[1]
+        let bj = 0
+        while bj < len(bs) {
+            push(new_body_stmts, bs[bj])
+            bj = bj + 1
+        }
+        return ast_block(new_body_stmts)
+    }
+    let new_body_stmts2 = list_new()
+    let pi2 = 0
+    while pi2 < len(prep_stmts) {
+        push(new_body_stmts2, prep_stmts[pi2])
+        pi2 = pi2 + 1
+    }
+    push(new_body_stmts2, body)
+    return ast_block(new_body_stmts2)
+}
+
+// R32D: parse-time typecheck for match arms with nested-variant patterns.
+// Walks every arm's pattern and emits a WARN for any unknown enum /
+// variant name, or for an arity mismatch (e.g. `Some(a, b)` against a
+// 1-arity variant). Mirrors R31D's WARN-not-ERROR convention so existing
+// runtime-fallthrough behaviour is preserved.
+fn r32d_tc_check_match_patterns(arms) {
+    if arms == 0 { return 0 }
+    if type_of(arms) != 3 { return 0 }
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                r32d_tc_check_pattern(pat)
+            }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R32D: recursive pattern validator. Handles AST_ENUM_PATTERN (legacy
+// single-level), AST_NESTED_VARIANT_PATTERN, and AST_STRUCT_PATTERN.
+// Other shapes (AST_WILDCARD, AST_IDENT, AST_TYPE_PATTERN, literals) are
+// trivially well-formed. Each call may emit one or more WARN lines but
+// never errors — non-fatal diagnostics keep R31D's editor / LSP filters
+// compatible without changes.
+fn r32d_tc_check_pattern(pat) {
+    if pat == 0 { return 0 }
+    if type_of(pat) != 3 { return 0 }
+    let t = ast_tag(pat)
+    if t == AST_ENUM_PATTERN {
+        let en = pat[1]
+        let vn = pat[2]
+        let arity_real = par_lookup_variant_arity(en, vn)
+        if arity_real < 0 {
+            println("warning: match arm references unknown variant " + en + "::" + vn)
+            return 0
+        }
+        let bnds = pat[3]
+        let got = 0
+        if bnds != 0 {
+            if type_of(bnds) == 3 { got = len(bnds) }
+        }
+        // Legacy AST_ENUM_PATTERN may carry zero binders even when the
+        // variant has payload arity > 0 (e.g. `Some(_)` parses as a
+        // single-binder "_"), so only warn if the binder count is
+        // non-zero AND mismatched. This preserves R31D's `Some(_)` shape
+        // exactly.
+        if got > 0 {
+            if got != arity_real {
+                println("warning: match arm " + en + "::" + vn + " arity mismatch: variant takes " + int_to_str(arity_real) + " arg(s) but pattern binds " + int_to_str(got))
+            }
+        }
+        return 0
+    }
+    if t == AST_NESTED_VARIANT_PATTERN {
+        let en2 = pat[1]
+        let vn2 = pat[2]
+        let arity2 = par_lookup_variant_arity(en2, vn2)
+        if arity2 < 0 {
+            println("warning: match arm references unknown variant " + en2 + "::" + vn2)
+            return 0
+        }
+        let subs2 = pat[3]
+        let got2 = 0
+        if subs2 != 0 {
+            if type_of(subs2) == 3 { got2 = len(subs2) }
+        }
+        if got2 != arity2 {
+            println("warning: match arm " + en2 + "::" + vn2 + " arity mismatch: variant takes " + int_to_str(arity2) + " arg(s) but pattern has " + int_to_str(got2) + " sub-pattern(s)")
+        }
+        // Recurse into each sub-pattern so nested-of-nested
+        // (`Some(Some(Some(v)))`) still gets validated.
+        let si = 0
+        while si < len(subs2) {
+            r32d_tc_check_pattern(subs2[si])
+            si = si + 1
+        }
+        return 0
+    }
+    if t == AST_STRUCT_PATTERN {
+        // R32D: only validate the struct exists; codegen will reject
+        // unknown field names at AST_FIELD_ACCESS time. Use tc_find_struct
+        // if it's already populated; otherwise rely on the field-access
+        // backend check. Conservative — no false WARN.
+        return 0
+    }
+    return 0
+}
+
+// R25A: struct match-arm pattern body parser. Caller (parse_match) has
+// identified an uppercase IDENT followed by `{ ... }` (optionally with
+// `<TypeArgs>` between). Builds and returns an AST_STRUCT_PATTERN node:
+//   [AST_STRUCT_PATTERN, struct_name, field_names, sub_patterns]
+// where sub_patterns[i] is one of:
+//   * AST_IDENT (binder; ident name binds to that field's value)
+//   * AST_WILDCARD (skip)
+//   * a literal AST node (AST_INT_LIT, AST_STR_LIT, AST_BOOL_LIT,
+//     AST_NONE_LIT, unary-minus on int) — codegen emits an equality test
+// The match wrapper later (parse_match) translates this node into a
+// guarded wildcard arm referencing the captured matchee tempname.
+fn parse_struct_match_pattern(struct_name, lb_off) {
+    par_advance()
+    let skip_n = lb_off - 1
+    let si = 0
+    while si < skip_n {
+        par_advance()
+        si = si + 1
+    }
+    par_expect(TOK_LBRACE)
+    let field_names = list_new()
+    let sub_patterns = list_new()
+    let has_rest = 0
+    let mpat_done = 0
+    while mpat_done == 0 {
+        if par_peek_type() == TOK_RBRACE {
+            mpat_done = 1
+        } else {
+            if par_peek_type() == TOK_COMMA {
+                par_advance()
+            } else { if par_peek_type() == TOK_SEMI {
+                par_advance()
+            } else { if par_peek_type() == TOK_DOTDOT {
+                par_advance()
+                has_rest = 1
+            } else { if par_peek_type() == TOK_ELLIPSIS {
+                par_advance()
+                has_rest = 1
+            } else {
+                let fnk_tok = par_expect(TOK_IDENT)
+                let fnk = fnk_tok[1]
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    // Sub-pattern may be: `_`, an IDENT (binder), or a
+                    // literal expr (int / str / bool / none / unary-minus
+                    // on int). Use parse_expr but disallow the broader
+                    // `is X` form by setting par_no_is.
+                    if par_peek_type() == TOK_UNDERSCORE {
+                        par_advance()
+                        push(field_names, fnk)
+                        push(sub_patterns, ast_wildcard())
+                    } else {
+                        let old_no_is = par_no_is
+                        par_no_is = 1
+                        let sub = parse_expr()
+                        par_no_is = old_no_is
+                        push(field_names, fnk)
+                        push(sub_patterns, sub)
+                    }
+                } else {
+                    // Shorthand: `field` binds local `field`.
+                    push(field_names, fnk)
+                    push(sub_patterns, ast_ident(fnk))
+                }
+            } } } }
+        }
+    }
+    par_expect(TOK_RBRACE)
+    let nd = list_new()
+    push(nd, AST_STRUCT_PATTERN)
+    push(nd, struct_name)
+    push(nd, field_names)
+    push(nd, sub_patterns)
+    push(nd, has_rest)
+    return nd
+}
+
+// R25A: lower a `Name { f: pat, ... } => body` arm into a wildcard arm
+// referencing `tmp_name`. Each literal sub-pattern contributes to a
+// guard `tmp_name.field == lit && ...` (AND-merged with any user guard).
+// Each binder sub-pattern contributes a `let binder = tmp_name.field`
+// statement prepended to the body. Returns an AST_MATCH_ARM list shaped
+// like the regular parse_match output: `[arm_tag, wildcard, body, guard?]`.
+fn lower_struct_match_arm(tmp_name, struct_pat, body, user_guard) {
+    let field_names = struct_pat[2]
+    let sub_patterns = struct_pat[3]
+    let prep_stmts = list_new()
+    // R33C: separate the synthetic literal-field equality chain from
+    // any user guard so we can wrap the user guard in an AST_DO_EXPR
+    // that binds the struct-field binders BEFORE evaluating the user
+    // guard. The R25A legacy shape put user_guard at the FRONT of the
+    // chain and the prep_stmts only in the body — that worked when
+    // the user guard didn't reference struct binders (R25A doesn't
+    // test that combo) but breaks for `Point { x, y } if x > 0` where
+    // x must be bound before the guard reads it.
+    let lit_chain = 0
+    let ki = 0
+    while ki < len(field_names) {
+        let fnm = field_names[ki]
+        let sub = sub_patterns[ki]
+        let st = ast_tag(sub)
+        let field_acc = ast_field_access(ast_ident(tmp_name), fnm)
+        if st == AST_IDENT {
+            // Binder: bind local name to field value.
+            let bnm = sub[1]
+            if bnm == "_" {
+            } else {
+                let blet = ast_let(bnm, field_acc)
+                push(blet, 0)
+                push(prep_stmts, blet)
+            }
+        } else { if st == AST_WILDCARD {
+            // Skip — wildcard sub-pattern.
+        } else {
+            // Treat as literal equality test: tmp.field == sub.
+            let eq_node = ast_binop("==", field_acc, sub)
+            if lit_chain == 0 {
+                lit_chain = eq_node
+            } else {
+                lit_chain = ast_and(lit_chain, eq_node)
+            }
+        } }
+        ki = ki + 1
+    }
+    // Merge the user guard. When user_guard is 0 the final guard is
+    // just the literal-equality chain — preserves R25A byte-identical
+    // shape. When user_guard is present we bind the struct binders
+    // inside an AST_DO_EXPR so the user guard reads them with the
+    // correct values; the literal chain still runs first (short-
+    // circuit prevents the do-expr from evaluating when the chain
+    // fails, which is fine — the binders only get assigned on a
+    // successful match).
+    let guard_expr = 0
+    if user_guard == 0 {
+        guard_expr = lit_chain
+    } else {
+        // Copy prep_stmts so r32d_attach_prep below can mutate /
+        // append to a fresh list without changing the do-expr's
+        // init_stmts (same pattern lower_nested_variant_match_arm
+        // uses for the body half).
+        let guard_do = ast_do_expr(prep_stmts, user_guard)
+        if lit_chain == 0 {
+            guard_expr = guard_do
+        } else {
+            guard_expr = ast_and(lit_chain, guard_do)
+        }
+    }
+    // Body lowering strategy depends on the original arm body shape:
+    //   * `=> expr`  body is AST_EXPR_STMT(expr) — lower to
+    //                  AST_EXPR_STMT(AST_DO_EXPR(prep_stmts, expr))
+    //                so the match arm still produces `expr`'s value.
+    //   * `=> { ... }` body is AST_BLOCK — preserve as AST_BLOCK with
+    //                  prep_stmts prepended; statement-position match
+    //                  arms don't need to produce a value.
+    let new_arm_body = 0
+    if body == 0 {
+        new_arm_body = ast_block(prep_stmts)
+    } else {
+        let bt = ast_tag(body)
+        if bt == AST_EXPR_STMT {
+            // Build AST_DO_EXPR(prep_stmts, expr) wrapped in AST_EXPR_STMT
+            // so the arm body remains a statement-shaped node but
+            // evaluates to the expr's value when codegen treats the arm
+            // body as an expression (typical for `=> expr` arms used in
+            // expression-position matches).
+            let do_e = ast_do_expr(prep_stmts, body[1])
+            new_arm_body = ast_expr_stmt(do_e)
+        } else { if bt == AST_BLOCK {
+            // Statement-block body: prepend prep_stmts to its stmts.
+            let new_body_stmts = list_new()
+            let pi = 0
+            while pi < len(prep_stmts) {
+                push(new_body_stmts, prep_stmts[pi])
+                pi = pi + 1
+            }
+            let bs = body[1]
+            let bj = 0
+            while bj < len(bs) {
+                push(new_body_stmts, bs[bj])
+                bj = bj + 1
+            }
+            new_arm_body = ast_block(new_body_stmts)
+        } else {
+            // Other body kinds — just prepend as a block.
+            let new_body_stmts2 = list_new()
+            let pi2 = 0
+            while pi2 < len(prep_stmts) {
+                push(new_body_stmts2, prep_stmts[pi2])
+                pi2 = pi2 + 1
+            }
+            push(new_body_stmts2, body)
+            new_arm_body = ast_block(new_body_stmts2)
+        } }
+    }
+    let arm = ast_match_arm(ast_wildcard(), new_arm_body)
+    if guard_expr == 0 {
+    } else {
+        push(arm, guard_expr)
+    }
+    return arm
 }
 
 fn parse_try() {
@@ -2231,6 +4723,14 @@ fn parse_enum() {
     par_expect(TOK_ENUM)
     let name_tok = par_expect(TOK_IDENT)
     let name = name_tok[1]
+    // R21A: generic type parameters `<T, E, ...>` on enum declarations.
+    // R23A: now captured (not discarded) so the lightweight type-check
+    // pass can read them. The list lives on the AST node's third slot;
+    // codegen ignores it.
+    let type_params = list_new()
+    if par_peek_type() == TOK_LT {
+        type_params = par_collect_generic_params()
+    }
     par_expect(TOK_LBRACE)
     let variants = list_new()
     let enum_done = 0
@@ -2242,12 +4742,55 @@ fn parse_enum() {
                 par_advance()
             } else {
                 let v = par_expect(TOK_IDENT)
-                push(variants, v[1])
+                // R17A: sum-type payload. `Variant(int, str)` declares
+                // a variant with arity 2. R23A: capture the per-arg
+                // type names (as [base, args] pairs) so the type-check
+                // pass can map e.g. `Ok(T)` -> "T" against the enum's
+                // type-param binding `<T, E>` at let-statement time.
+                let arity = 0
+                let payload_types = list_new()
+                if par_peek_type() == TOK_LPAREN {
+                    par_advance()
+                    if par_peek_type() == TOK_RPAREN {
+                        par_advance()
+                    } else {
+                        arity = 1
+                        let t1 = par_collect_type()
+                        if t1 != 0 { push(payload_types, t1) }
+                        while par_peek_type() == TOK_COMMA {
+                            par_advance()
+                            if par_peek_type() == TOK_RPAREN {
+                            } else {
+                                arity = arity + 1
+                                let tn = par_collect_type()
+                                if tn != 0 { push(payload_types, tn) }
+                            }
+                        }
+                        par_expect(TOK_RPAREN)
+                    }
+                }
+                let vent = list_new()
+                push(vent, v[1])
+                push(vent, arity)
+                push(vent, payload_types)
+                push(variants, vent)
             }
         }
     }
     par_expect(TOK_RBRACE)
-    return ast_enum_decl(name, variants)
+    let nd = ast_enum_decl(name, variants)
+    push(nd, type_params)
+    // R32D: register the [enum_name, variants] pair in a parser-time
+    // table so nested-variant-pattern lowering can resolve discriminant
+    // tags at parse time (the tc_register_enums pass runs LATER, in
+    // tc_check_program). Codegen ignores this table — it builds its own
+    // cg_enums when gen_program walks the AST. The redundancy is cheap
+    // and keeps the nested-pattern rewrite a pure parser operation.
+    let parsed_entry = list_new()
+    push(parsed_entry, name)
+    push(parsed_entry, variants)
+    push(par_enum_tags, parsed_entry)
+    return nd
 }
 
 fn parse_impl_block(decls) {
@@ -2282,6 +4825,923 @@ fn parse_impl_block(decls) {
     par_expect(TOK_RBRACE)
 }
 
+// R23A.2: lightweight type-check pass. Walks the AST after parsing,
+// builds a side table of enum decls (name + type-param names + per-
+// variant payload type-name lists), and for each `let x: Enum<T1,T2>
+// = Enum::Ctor(args)` site checks the static-literal type of each arg
+// against the variant's payload-type binding. Mismatches emit a single
+// `warning:` line to stdout — non-fatal, matches R17A's pattern.
+//
+// Conservative by design: we ONLY warn when the arg is a statically
+// obvious literal (int, str, list, bool, none). Free variables, fn
+// calls, and compound expressions are skipped to avoid false positives.
+
+let tc_enums = 0      // list of [name, variants, type_params]
+let tc_enum_count = 0
+
+// R24A: side tables for fn-call + struct-ctor type-check. Built by
+// tc_register_fns / tc_register_structs at the start of tc_check_program.
+// Entry shapes:
+//   tc_fns:     [name, type_params, param_names, param_types]
+//   tc_structs: [name, type_params, field_names, field_types]
+let tc_fns = 0
+let tc_fn_count = 0
+let tc_structs = 0
+let tc_struct_count = 0
+
+fn tc_register_enums(decls) {
+    tc_enums = list_new()
+    tc_enum_count = 0
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_ENUM_DECL {
+            let entry = list_new()
+            push(entry, d[1])       // name
+            push(entry, d[2])       // variants ([[name, arity, payload_types?], ...])
+            // type_params on slot 3 (R23A); fall back to empty for legacy.
+            let tps = list_new()
+            if len(d) > 3 { tps = d[3] }
+            push(entry, tps)
+            push(tc_enums, entry)
+            tc_enum_count = tc_enum_count + 1
+        }
+        i = i + 1
+    }
+}
+
+fn tc_find_enum(name) {
+    let i = 0
+    while i < tc_enum_count {
+        if tc_enums[i][0] == name { return tc_enums[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+// R24A: register every AST_FN_DECL by name -> [name, type_params,
+// param_names, param_types]. AST_FN_DECL layout:
+//   [0] tag, [1] name, [2] params, [3] body,
+//   [4] type_params (R23A), [5] param_types (R24A).
+// Lambdas push the same shape via parse_unary's TOK_FN branch.
+fn tc_register_fns(decls) {
+    tc_fns = list_new()
+    tc_fn_count = 0
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_FN_DECL {
+            let entry = list_new()
+            push(entry, d[1])      // name
+            let tps = list_new()
+            if len(d) > 4 { tps = d[4] }
+            push(entry, tps)        // type_params
+            push(entry, d[2])       // param_names
+            let ptypes = list_new()
+            if len(d) > 5 { ptypes = d[5] }
+            push(entry, ptypes)     // param_types
+            push(tc_fns, entry)
+            tc_fn_count = tc_fn_count + 1
+        }
+        i = i + 1
+    }
+}
+
+fn tc_find_fn(name) {
+    let i = 0
+    while i < tc_fn_count {
+        if tc_fns[i][0] == name { return tc_fns[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+// R24A: register every AST_STRUCT_DECL by name -> [name, type_params,
+// field_names, field_types]. AST_STRUCT_DECL layout:
+//   [0] tag, [1] name, [2] fields,
+//   [3] type_params (R23A), [4] field_types (R24A).
+fn tc_register_structs(decls) {
+    tc_structs = list_new()
+    tc_struct_count = 0
+    let i = 0
+    while i < len(decls) {
+        let d = decls[i]
+        if ast_tag(d) == AST_STRUCT_DECL {
+            let entry = list_new()
+            push(entry, d[1])      // name
+            let tps = list_new()
+            if len(d) > 3 { tps = d[3] }
+            push(entry, tps)
+            push(entry, d[2])       // field_names
+            let ftypes = list_new()
+            if len(d) > 4 { ftypes = d[4] }
+            push(entry, ftypes)
+            push(tc_structs, entry)
+            tc_struct_count = tc_struct_count + 1
+        }
+        i = i + 1
+    }
+}
+
+fn tc_find_struct(name) {
+    let i = 0
+    while i < tc_struct_count {
+        if tc_structs[i][0] == name { return tc_structs[i] }
+        i = i + 1
+    }
+    return 0
+}
+
+// Map a NOVA AST literal expression to its static "type name" or
+// empty string if not statically known. Used by the warn check.
+fn tc_literal_type(expr) {
+    if expr == 0 { return "" }
+    let t = ast_tag(expr)
+    if t == AST_INT_LIT { return "int" }
+    if t == AST_STR_LIT { return "str" }
+    if t == AST_FLOAT_LIT { return "float" }
+    if t == AST_BOOL_LIT { return "bool" }
+    if t == AST_NONE_LIT { return "none" }
+    if t == AST_LIST_LIT { return "list" }
+    if t == AST_MAP_LIT { return "map" }
+    // Unary minus on an int literal is still an int.
+    if t == AST_UNARY_OP {
+        let op = expr[1]
+        if op == "-" {
+            return tc_literal_type(expr[2])
+        }
+    }
+    // Everything else (idents, calls, field-access, enum_ctor, ...) is
+    // not statically known at this stage — return empty to skip.
+    return ""
+}
+
+// Resolve a type-name token to the canonical NOVA tag name. Treats
+// "string" as a synonym for "str" since both spellings appear in code.
+fn tc_canon_type(name) {
+    if name == "string" { return "str" }
+    if name == "Int" { return "int" }
+    if name == "Str" { return "str" }
+    if name == "String" { return "str" }
+    if name == "List" { return "list" }
+    if name == "Map" { return "map" }
+    if name == "Bool" { return "bool" }
+    if name == "Float" { return "float" }
+    return name
+}
+
+// Resolve a single payload-type slot (a [base, args] pair) against the
+// per-binding map `param_names -> bound_type_names`. Returns the
+// resolved canonical type name string, or "" if not resolvable.
+fn tc_resolve_type(payload_t, param_names, bound_types) {
+    if payload_t == 0 { return "" }
+    if type_of(payload_t) != 3 { return "" }
+    if len(payload_t) < 1 { return "" }
+    // R36C: tuple-type annotation has an integer-tag base (AST_TUPLE_TYPE).
+    // The lightweight type-check pass doesn't model per-slot tuple
+    // discipline yet — return "" to skip resolution rather than emit
+    // false positives. A future round can recurse into the slot list.
+    if type_of(payload_t[0]) == 1 { return "" }
+    let base = payload_t[0]
+    // Is `base` one of the enum's type-params? If so, substitute.
+    let pi = 0
+    while pi < len(param_names) {
+        if param_names[pi] == base {
+            if pi < len(bound_types) {
+                return tc_canon_type(bound_types[pi])
+            }
+            return ""
+        }
+        pi = pi + 1
+    }
+    return tc_canon_type(base)
+}
+
+// Walk one AST_LET_STMT with a type annotation and a value that's an
+// AST_ENUM_CTOR. Emit warnings for any arg whose static-literal type
+// disagrees with the resolved payload-type binding.
+fn tc_check_let_enum_ctor(let_nd) {
+    let annot = 0
+    if len(let_nd) > 3 { annot = let_nd[3] }
+    if annot == 0 { return 0 }
+    if type_of(annot) != 3 { return 0 }
+    if len(annot) < 2 { return 0 }
+    // R36C: tuple-type annotation `let p: (int, str) = ...` has shape
+    // [AST_TUPLE_TYPE, slots] — annot_base is an integer, not an enum/
+    // struct name. Skip the enum-ctor / struct-call check rather than
+    // chasing a non-existent enum named with an integer tag.
+    if type_of(annot[0]) == 1 { return 0 }
+    let annot_base = annot[0]
+    let annot_args = annot[1]
+    let value = let_nd[2]
+    if value == 0 { return 0 }
+    // R24A: dispatch on value shape — AST_ENUM_CTOR (R23A path) or
+    // AST_CALL whose callee names a struct (R24A path).
+    let vt = ast_tag(value)
+    if vt == AST_CALL {
+        let callee = value[1]
+        if callee != 0 {
+            if ast_tag(callee) == AST_IDENT {
+                let cname = callee[1]
+                if cname == annot_base {
+                    if tc_find_struct(cname) != 0 {
+                        tc_check_call_struct(value, annot_args)
+                        return 0
+                    }
+                }
+            }
+        }
+        return 0
+    }
+    if vt != AST_ENUM_CTOR { return 0 }
+    let ctor_enum = value[1]
+    if ctor_enum != annot_base { return 0 }
+    let ctor_variant = value[2]
+    let ctor_args = value[3]
+    let edef = tc_find_enum(annot_base)
+    if edef == 0 { return 0 }
+    let variants = edef[1]
+    let param_names = edef[2]
+    // Build bound_types: param_names[i] -> annot_args[i][0]
+    let bound_types = list_new()
+    let bi = 0
+    while bi < len(annot_args) {
+        let ta = annot_args[bi]
+        if type_of(ta) == 3 {
+            if len(ta) >= 1 { push(bound_types, ta[0]) } else { push(bound_types, "") }
+        } else {
+            push(bound_types, "")
+        }
+        bi = bi + 1
+    }
+    // Locate the matching variant entry.
+    let vi = 0
+    let payload_types = 0
+    while vi < len(variants) {
+        let vent = variants[vi]
+        if vent[0] == ctor_variant {
+            if len(vent) >= 3 { payload_types = vent[2] }
+            vi = len(variants) + 1
+        } else {
+            vi = vi + 1
+        }
+    }
+    if payload_types == 0 { return 0 }
+    let ai = 0
+    while ai < len(ctor_args) {
+        if ai < len(payload_types) {
+            let want = tc_resolve_type(payload_types[ai], param_names, bound_types)
+            let got = tc_literal_type(ctor_args[ai])
+            if want != "" {
+                if got != "" {
+                    if want != got {
+                        println("warning: type mismatch in " + ctor_enum + "::" + ctor_variant + " arg " + int_to_str(ai) + ": expected " + want + " but got " + got)
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R24A: Walk an AST_CALL whose callee is an AST_IDENT naming a known
+// fn-decl. For each LITERAL arg, compare the static literal type against
+// the param's type annotation. Handles two distinct cases:
+//
+//   1. Concrete primitive param type (e.g. `fn add(a: int, b: int)`).
+//      Check each literal arg directly against the annotation.
+//   2. Generic param type (e.g. `fn add<T>(a: T, b: T)`). Infer `T`
+//      from the FIRST literal arg whose param-type names T, then check
+//      subsequent literal args that also name T against the inferred
+//      binding. Mismatches on the SECOND-and-later occurrence emit a
+//      warning naming the variable-typed parameter index.
+//
+// Conservative: literal arity drift, non-ident callees, builtin fns,
+// free variables, and complex expressions all conservatively skip.
+fn tc_check_call_fn(call_nd) {
+    if call_nd == 0 { return 0 }
+    if type_of(call_nd) != 3 { return 0 }
+    if ast_tag(call_nd) != AST_CALL { return 0 }
+    let callee = call_nd[1]
+    if callee == 0 { return 0 }
+    if ast_tag(callee) != AST_IDENT { return 0 }
+    let fname = callee[1]
+    let fdef = tc_find_fn(fname)
+    if fdef == 0 { return 0 }
+    let type_params = fdef[1]
+    let param_names = fdef[2]
+    let param_types = fdef[3]
+    let args = call_nd[2]
+    if args == 0 { return 0 }
+    // Build a binding map for the fn's type-params, inferred from the
+    // first literal arg whose param-type-annotation names a type-param.
+    // bindings: parallel list to type_params; entry is either the
+    // canonical literal-type ("int"/"str"/...) or "" if not yet bound.
+    let bindings = list_new()
+    let tpi = 0
+    while tpi < len(type_params) {
+        push(bindings, "")
+        tpi = tpi + 1
+    }
+    let ai = 0
+    while ai < len(args) {
+        if ai < len(param_types) {
+            let pt = param_types[ai]
+            if pt == 0 {
+                // No annotation on this param — nothing to check.
+            } else { if type_of(pt) != 3 {
+            } else { if len(pt) < 1 {
+            } else { if type_of(pt[0]) == 1 {
+                // R36C: tuple-type annotation `(int, str)` has shape
+                // [AST_TUPLE_TYPE, slot_list] — pt[0] is an integer tag,
+                // not a base-name string. The type-check pass currently
+                // doesn't enforce per-slot tuple discipline, so skip the
+                // arg check rather than emit a false-positive warning.
+                // Future round: walk slot_list against args[ai] elements.
+                // (type_of returns 1 for integers, 2 for strings — a
+                // regular [base, args] annotation always has a string base.)
+            } else {
+                let pt_base = pt[0]
+                let got = tc_literal_type(args[ai])
+                // Is pt_base a type-param? (e.g. "T")
+                let is_tp = 0
+                let tpii = 0
+                while tpii < len(type_params) {
+                    if type_params[tpii] == pt_base {
+                        is_tp = 1
+                        if got != "" {
+                            if bindings[tpii] == "" {
+                                // First binding for T — record it.
+                                bindings[tpii] = got
+                            } else {
+                                if bindings[tpii] != got {
+                                    println("warning: type mismatch in " + fname + " arg " + int_to_str(ai) + ": expected " + bindings[tpii] + " but got " + got)
+                                }
+                            }
+                        }
+                        tpii = len(type_params) + 1
+                    } else {
+                        tpii = tpii + 1
+                    }
+                }
+                if is_tp == 0 {
+                    // Concrete annotation — direct check against the
+                    // canonical type name.
+                    let want = tc_canon_type(pt_base)
+                    if want != "" {
+                        if got != "" {
+                            if want != got {
+                                println("warning: type mismatch in " + fname + " arg " + int_to_str(ai) + ": expected " + want + " but got " + got)
+                            }
+                        }
+                    }
+                }
+            } } } }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R24A: Walk an AST_CALL whose callee is an AST_IDENT naming a known
+// struct-decl. Uses the surrounding let-annotation's type-args to bind
+// the struct's type-params, then for each LITERAL ctor arg compares the
+// static literal type against the corresponding field's annotation.
+// `annot_args` is the recursive [base, args] list captured by
+// par_collect_type for the surrounding let-binding (or 0 / empty for
+// unannotated ctors — in which case we still check concrete-typed
+// fields like `struct Point { x: int }`).
+fn tc_check_call_struct(call_nd, annot_args) {
+    if call_nd == 0 { return 0 }
+    if type_of(call_nd) != 3 { return 0 }
+    if ast_tag(call_nd) != AST_CALL { return 0 }
+    let callee = call_nd[1]
+    if callee == 0 { return 0 }
+    if ast_tag(callee) != AST_IDENT { return 0 }
+    let sname = callee[1]
+    let sdef = tc_find_struct(sname)
+    if sdef == 0 { return 0 }
+    let type_params = sdef[1]
+    let field_names = sdef[2]
+    let field_types = sdef[3]
+    let args = call_nd[2]
+    if args == 0 { return 0 }
+    // Build bound_types from annot_args (parallel to type_params). If
+    // the let-binding lacks an annotation OR its annotation has fewer
+    // args than type_params, the remaining params are unbound (left as
+    // "" — these fields conservatively skip).
+    let bound_types = list_new()
+    let bi = 0
+    while bi < len(type_params) {
+        let bt = ""
+        if annot_args != 0 {
+            if type_of(annot_args) == 3 {
+                if bi < len(annot_args) {
+                    let ta = annot_args[bi]
+                    if type_of(ta) == 3 {
+                        if len(ta) >= 1 { bt = ta[0] }
+                    }
+                }
+            }
+        }
+        push(bound_types, bt)
+        bi = bi + 1
+    }
+    let ai = 0
+    while ai < len(args) {
+        if ai < len(field_types) {
+            let ft = field_types[ai]
+            if ft != 0 {
+                let want = tc_resolve_type(ft, type_params, bound_types)
+                let got = tc_literal_type(args[ai])
+                if want != "" {
+                    if got != "" {
+                        if want != got {
+                            println("warning: type mismatch in " + sname + " arg " + int_to_str(ai) + ": expected " + want + " but got " + got)
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R24A: walk an expression and dispatch any AST_CALL nodes through the
+// fn-call / struct-ctor checker. Recurses into compound expressions so
+// nested call sites (e.g. `let x = foo(bar(1, "x"))`) all get checked.
+// Returns 0; mutations only happen via println of warn lines.
+fn tc_walk_expr(expr) {
+    if expr == 0 { return 0 }
+    if type_of(expr) != 3 { return 0 }
+    if len(expr) < 1 { return 0 }
+    let t = ast_tag(expr)
+    if t == AST_CALL {
+        // R24A: dispatch fn-call check at every call site (generic
+        // fn signatures live on AST_FN_DECL slot 5 / non-generic on
+        // the same slot — both checked). Struct-ctor checks are
+        // intentionally skipped here: they fire only from the
+        // let-statement annotated path (tc_check_let_enum_ctor), so
+        // `let cont = Container(0, 0)` followed by mutate-and-assign
+        // doesn't gain a spurious WARN. Struct fields with concrete
+        // types still fire when the let HAS an annotation matching
+        // the struct name.
+        let callee = expr[1]
+        if callee != 0 {
+            if ast_tag(callee) == AST_IDENT {
+                let cname = callee[1]
+                if tc_find_fn(cname) != 0 {
+                    tc_check_call_fn(expr)
+                }
+            }
+        }
+        // Recurse into the args.
+        let args = expr[2]
+        if args != 0 {
+            if type_of(args) == 3 {
+                let ai = 0
+                while ai < len(args) {
+                    tc_walk_expr(args[ai])
+                    ai = ai + 1
+                }
+            }
+        }
+        return 0
+    }
+    if t == AST_BIN_OP {
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        if len(expr) > 3 { tc_walk_expr(expr[3]) }
+        return 0
+    }
+    if t == AST_UNARY_OP {
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        return 0
+    }
+    if t == AST_AND_EXPR {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        return 0
+    }
+    if t == AST_OR_EXPR {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        return 0
+    }
+    if t == AST_TERNARY {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        if len(expr) > 3 { tc_walk_expr(expr[3]) }
+        return 0
+    }
+    if t == AST_INDEX_EXPR {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        if len(expr) > 2 { tc_walk_expr(expr[2]) }
+        return 0
+    }
+    if t == AST_FIELD_ACCESS {
+        if len(expr) > 1 { tc_walk_expr(expr[1]) }
+        return 0
+    }
+    if t == AST_LIST_LIT {
+        let els = expr[1]
+        if els != 0 {
+            if type_of(els) == 3 {
+                let ei = 0
+                while ei < len(els) {
+                    tc_walk_expr(els[ei])
+                    ei = ei + 1
+                }
+            }
+        }
+        return 0
+    }
+    if t == AST_ENUM_CTOR {
+        let ca = expr[3]
+        if ca != 0 {
+            if type_of(ca) == 3 {
+                let ei = 0
+                while ei < len(ca) {
+                    tc_walk_expr(ca[ei])
+                    ei = ei + 1
+                }
+            }
+        }
+        return 0
+    }
+    // R31D: match used in expression position (e.g. `let x = match v
+    // { ... }`). Delegate to tc_walk_stmt's AST_MATCH_STMT branch so
+    // the same two checks fire from both contexts without
+    // duplicating logic. The exhaustiveness check's visited-flag
+    // guarantees we still only warn once.
+    if t == AST_MATCH_STMT {
+        tc_walk_stmt(expr)
+        return 0
+    }
+    return 0
+}
+
+// Compatibility shim retained from R23A so older call paths still link.
+fn tc_check_call(call_nd) {
+    tc_check_call_fn(call_nd)
+    tc_check_call_struct(call_nd, 0)
+    return 0
+}
+
+// R31D: infer the static type of a match-arm body's final expression. An
+// arm body is either AST_EXPR_STMT (single-expression arm) or AST_BLOCK
+// (brace-delimited body — final stmt's expression is the value).
+// Returns the canonical type-name string ("int" / "str" / "float" /
+// "bool" / "list" / "map" / enum-name / struct-name) for statically
+// recognisable forms, or "" when the type can't be inferred at parse
+// time (binders, identifiers, calls, arithmetic on non-literals, etc.).
+//
+// The return is intentionally conservative: only emit warnings on
+// PROVABLE mismatches so codepaths that legitimately produce dynamic
+// values (e.g. an arm body that does `compute(v) + 1`) silently skip.
+fn tc_arm_body_type(body) {
+    if body == 0 { return "" }
+    if type_of(body) != 3 { return "" }
+    let bt = ast_tag(body)
+    if bt == AST_EXPR_STMT {
+        let e = body[1]
+        return tc_arm_expr_type(e)
+    }
+    if bt == AST_BLOCK {
+        let stmts = body[1]
+        if stmts == 0 { return "" }
+        if type_of(stmts) != 3 { return "" }
+        if len(stmts) == 0 { return "" }
+        let last = stmts[len(stmts) - 1]
+        if last == 0 { return "" }
+        if type_of(last) != 3 { return "" }
+        if ast_tag(last) == AST_EXPR_STMT {
+            return tc_arm_expr_type(last[1])
+        }
+        // Final stmt is a let / assign / if / while / return / ... —
+        // the block doesn't have a value (or its value isn't a literal
+        // we can statically recognise).
+        return ""
+    }
+    // Bare expression node — happens when the parser inlines a single
+    // expression as the body directly (legacy shape). Treat the same
+    // as the AST_EXPR_STMT case.
+    return tc_arm_expr_type(body)
+}
+
+// R31D: extension of tc_literal_type for the arm-body context. Beyond
+// raw literals, also recognises AST_ENUM_CTOR (whose type IS the enum
+// name) so an arm body that returns `Result::Ok(5)` reports "Result"
+// and can be compared against another arm's `Result::Err("x")`. Other
+// expression shapes still return "" (conservative).
+fn tc_arm_expr_type(e) {
+    if e == 0 { return "" }
+    if type_of(e) != 3 { return "" }
+    let t = ast_tag(e)
+    // R31D: enum constructor — type is the enum name itself.
+    if t == AST_ENUM_CTOR { return e[1] }
+    // Struct constructor under positional or brace-init shape.
+    if t == AST_STRUCT_INIT { return e[1] }
+    // Otherwise fall back to the existing literal classifier.
+    return tc_literal_type(e)
+}
+
+// R31D: arm-body type-agreement check. Walks every arm in the match,
+// infers each body's static type, and emits ONE warning per pair of
+// disagreeing arms. Conservative: arms whose body type is "" (unknown)
+// are skipped entirely so the check NEVER false-fires on dynamic
+// values. The first statically-typed arm establishes the expected type;
+// every subsequent statically-typed arm is compared against it.
+//
+// Output shape matches the existing R23A WARN convention so editor /
+// LSP filters that already grep for "warning: type mismatch" pick it
+// up without changes.
+fn tc_check_match_arm_types(match_nd) {
+    if match_nd == 0 { return 0 }
+    if type_of(match_nd) != 3 { return 0 }
+    let arms = match_nd[2]
+    if arms == 0 { return 0 }
+    if type_of(arms) != 3 { return 0 }
+    let expected = ""
+    let expected_arm = -1
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        let got = ""
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let body = arm[2]
+                got = tc_arm_body_type(body)
+            }
+        }
+        if got != "" {
+            if expected == "" {
+                expected = got
+                expected_arm = ai
+            } else {
+                if expected != got {
+                    println("warning: match arm bodies disagree on type: arm " + int_to_str(expected_arm) + " is " + expected + " but arm " + int_to_str(ai) + " is " + got)
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    return 0
+}
+
+// R31D: standalone parse-time exhaustiveness check, parallel to the
+// codegen pass cg_check_exhaustive but firing from the typecheck walk
+// so a non-exhaustive match against an enum reports its warning even
+// when the match is dead-code-eliminated before codegen reaches it.
+// The codegen-side check is retained for backwards-compatibility (the
+// duplicate warning is suppressed there via the visited-flag below).
+fn tc_check_match_exhaustive(match_nd) {
+    if match_nd == 0 { return 0 }
+    if type_of(match_nd) != 3 { return 0 }
+    // R33C: honour the parse_match-side visited flag the same way
+    // cg_check_exhaustive does. parse_match now runs the raw
+    // exhaustiveness check on the pre-rewrite arm list and marks the
+    // node visited iff it took ownership of the diagnostic; if so we
+    // must NOT re-run here or the warn line would be printed twice
+    // (once from the raw check, once from this pass).
+    if len(match_nd) > 3 {
+        if match_nd[3] == 1 { return 0 }
+    }
+    let arms = match_nd[2]
+    if arms == 0 { return 0 }
+    if type_of(arms) != 3 { return 0 }
+    let enum_name = ""
+    let has_wildcard = 0
+    let ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                if pat != 0 {
+                    if type_of(pat) == 3 {
+                        let pt = ast_tag(pat)
+                        if pt == AST_WILDCARD { has_wildcard = 1 }
+                        if pt == AST_TYPE_PATTERN { has_wildcard = 1 }
+                        if pt == AST_ENUM_PATTERN {
+                            if enum_name == "" { enum_name = pat[1] }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    if enum_name == "" { return 0 }
+    if has_wildcard == 1 {
+        // R31D: mark the match as already-checked so the codegen pass
+        // doesn't re-warn. Slot 3 (zero-based) on the match node is
+        // unused by AST_MATCH_STMT in parser-emitted nodes — we lazily
+        // append the flag.
+        if len(match_nd) < 4 { push(match_nd, 1) }
+        return 0
+    }
+    let edef = tc_find_enum(enum_name)
+    if edef == 0 { return 0 }
+    let variants = edef[1]
+    if variants == 0 { return 0 }
+    if type_of(variants) != 3 { return 0 }
+    let total = len(variants)
+    if total == 0 { return 0 }
+    // Build a coverage map: covered[v] = 1 iff some arm pattern names
+    // the v'th variant. Reuse `tc_find_enum`'s declaration order so the
+    // missing-variant report keeps source-order presentation.
+    let covered = list_new()
+    let init = 0
+    while init < total {
+        push(covered, 0)
+        init = init + 1
+    }
+    ai = 0
+    while ai < len(arms) {
+        let arm = arms[ai]
+        if arm != 0 {
+            if type_of(arm) == 3 {
+                let pat = arm[1]
+                if pat != 0 {
+                    if type_of(pat) == 3 {
+                        if ast_tag(pat) == AST_ENUM_PATTERN {
+                            let vname = pat[2]
+                            let vi0 = 0
+                            while vi0 < total {
+                                let vent = variants[vi0]
+                                if vent[0] == vname { covered[vi0] = 1 }
+                                vi0 = vi0 + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1
+    }
+    let count_covered = 0
+    let ci0 = 0
+    while ci0 < total {
+        if covered[ci0] == 1 { count_covered = count_covered + 1 }
+        ci0 = ci0 + 1
+    }
+    if count_covered >= total {
+        if len(match_nd) < 4 { push(match_nd, 1) }
+        return 0
+    }
+    // Assemble the missing-variant list in declaration order. Same
+    // shape as cg_check_exhaustive so the warn line is identical.
+    let missing = ""
+    let vi1 = 0
+    let first = 1
+    while vi1 < total {
+        if covered[vi1] == 0 {
+            let vname1 = variants[vi1][0]
+            if first == 1 {
+                missing = vname1
+                first = 0
+            } else {
+                missing = missing + ", " + vname1
+            }
+        }
+        vi1 = vi1 + 1
+    }
+    println("warning: non-exhaustive match on " + enum_name + " (missing: " + missing + ")")
+    // Mark visited so codegen does not re-emit the same warn.
+    if len(match_nd) < 4 { push(match_nd, 1) }
+    return 0
+}
+
+// Top-level: walk a list of statements and any nested blocks, calling
+// tc_check_let_enum_ctor at each AST_LET_STMT site.
+fn tc_walk_stmts(stmts) {
+    let i = 0
+    while i < len(stmts) {
+        tc_walk_stmt(stmts[i])
+        i = i + 1
+    }
+    return 0
+}
+
+fn tc_walk_stmt(nd) {
+    if nd == 0 { return 0 }
+    if type_of(nd) != 3 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_LET_STMT {
+        tc_check_let_enum_ctor(nd)
+        // R24A: also walk the let's value expression for any nested
+        // fn-call / struct-ctor sites (e.g. `let x = add(1, "x")` with
+        // no type annotation — still warns if `add<T>(a:T, b:T)`).
+        if len(nd) > 2 {
+            tc_walk_expr(nd[2])
+        }
+        return 0
+    }
+    if t == AST_BLOCK {
+        tc_walk_stmts(nd[1])
+        return 0
+    }
+    if t == AST_IF_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
+        if nd[2] != 0 { tc_walk_stmt(nd[2]) }
+        if nd[3] != 0 { tc_walk_stmt(nd[3]) }
+        return 0
+    }
+    if t == AST_WHILE_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
+        if nd[2] != 0 { tc_walk_stmt(nd[2]) }
+        return 0
+    }
+    if t == AST_FOR_STMT {
+        if nd[2] != 0 { tc_walk_expr(nd[2]) }
+        if nd[3] != 0 { tc_walk_stmt(nd[3]) }
+        return 0
+    }
+    if t == AST_FOR_INDEXED {
+        if nd[3] != 0 { tc_walk_expr(nd[3]) }
+        if nd[4] != 0 { tc_walk_stmt(nd[4]) }
+        return 0
+    }
+    if t == AST_FN_DECL {
+        if nd[3] != 0 { tc_walk_stmt(nd[3]) }
+        return 0
+    }
+    if t == AST_METHOD_DECL {
+        if nd[4] != 0 { tc_walk_stmt(nd[4]) }
+        return 0
+    }
+    if t == AST_DO_WHILE {
+        if nd[1] != 0 { tc_walk_stmt(nd[1]) }
+        if len(nd) > 2 { if nd[2] != 0 { tc_walk_expr(nd[2]) } }
+        return 0
+    }
+    if t == AST_TRY_CATCH {
+        if nd[1] != 0 { tc_walk_stmt(nd[1]) }
+        if nd[2] != 0 { tc_walk_stmt(nd[2]) }
+        return 0
+    }
+    if t == AST_EXPR_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
+        return 0
+    }
+    if t == AST_RETURN_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
+        return 0
+    }
+    if t == AST_ASSIGN_STMT {
+        if nd[2] != 0 { tc_walk_expr(nd[2]) }
+        return 0
+    }
+    // R31D: match expression / statement. Run the two static checks
+    // (exhaustiveness against enum variants, arm-body type agreement)
+    // and recurse into the scrutinee + every arm body so nested calls
+    // / struct ctors / nested matches inside an arm still get walked.
+    if t == AST_MATCH_STMT {
+        if nd[1] != 0 { tc_walk_expr(nd[1]) }
+        tc_check_match_exhaustive(nd)
+        tc_check_match_arm_types(nd)
+        let arms_tc = nd[2]
+        if arms_tc == 0 { return 0 }
+        if type_of(arms_tc) != 3 { return 0 }
+        let aix = 0
+        while aix < len(arms_tc) {
+            let arm_tc = arms_tc[aix]
+            if arm_tc != 0 {
+                if type_of(arm_tc) == 3 {
+                    let body_tc = arm_tc[2]
+                    if body_tc != 0 {
+                        if type_of(body_tc) == 3 {
+                            let bt2 = ast_tag(body_tc)
+                            if bt2 == AST_EXPR_STMT {
+                                if body_tc[1] != 0 { tc_walk_expr(body_tc[1]) }
+                            } else {
+                                tc_walk_stmt(body_tc)
+                            }
+                        }
+                    }
+                }
+            }
+            aix = aix + 1
+        }
+        return 0
+    }
+    return 0
+}
+
+// R23A.2 / R24A: entry point. Registers all enum / fn / struct decls,
+// then walks every top-level decl, emitting warnings for arg-type
+// mismatches at enum-ctor, fn-call, and struct-ctor sites.
+fn tc_check_program(prog) {
+    let decls = prog[1]
+    tc_register_enums(decls)
+    tc_register_fns(decls)
+    tc_register_structs(decls)
+    tc_walk_stmts(decls)
+    return 0
+}
+
 fn parse_program(tokens) {
     par_init(tokens)
     let decls = list_new()
@@ -2301,5 +5761,8 @@ fn parse_program(tokens) {
             }
         }
     }
-    return ast_program(decls)
+    let prog = ast_program(decls)
+    // R23A.2: lightweight type-check pass (warns, doesn't error).
+    tc_check_program(prog)
+    return prog
 }

@@ -1,0 +1,148 @@
+// R24A: lightweight type-check pass extended from R23A's let-annotated
+// enum-ctor case to function-call sites. Walks every AST_CALL node
+// inside expression positions, looks up the callee in the fn-decl side
+// table built at the start of tc_check_program, and warns when a literal
+// arg's static type disagrees with the param's type annotation.
+//
+// Generic fns: the first literal arg whose param-type names a type-
+// param T binds T to that literal's type, then subsequent args whose
+// param-type also names T are checked against the inferred binding.
+// Concrete-typed params (e.g. `fn add(a: int, b: int)`) check each
+// literal arg directly against the annotation.
+//
+// Conservative by design: only triggers on int/str/list/bool/none/
+// float literals (plus unary minus on int). Free variables, fn-call
+// results, and complex expressions skip silently to avoid false
+// positives — NOVA's runtime is dynamically typed, so a stricter
+// check would require flow-sensitive inference.
+//
+// The warning is non-fatal; this test compiles + runs to completion.
+// It exercises both the "should warn" cases (verified via the outer
+// test harness) and the "must NOT warn" cases (which fall through
+// silently into the runtime assertion lane below).
+
+// --- Concrete-typed fn ---
+
+fn add_int(a: int, b: int) {
+    return a + b
+}
+
+// Case 1: matching ints — no warn.
+let r1 = add_int(10, 20)
+assert(r1 == 30, "add_int(10, 20) == 30")
+
+// Case 2: matching ints (negative literal) — no warn.
+let r2 = add_int(0 - 5, 7)
+assert(r2 == 2, "add_int(-5, 7) == 2")
+
+// Case 3: free variable — SKIPPED, no warn.
+let some_var = 42
+let r3 = add_int(some_var, 100)
+assert(r3 == 142, "add_int(free var, 100) accepted silently")
+
+// Case 4: int expected, str provided — WARN.
+// At runtime int + str is a NOVA error, so we only invoke fns where
+// the resulting `+` is legal. Use a passthrough that returns the
+// first arg to side-step the runtime arithmetic.
+fn passthrough_int(a: int, b: int) {
+    return a
+}
+
+let r4 = passthrough_int("hello", 99)
+assert(r4 == "hello", "passthrough_int(str, int): runtime value preserved")
+
+// Case 5: int expected, str provided (second arg) — WARN.
+let r5 = passthrough_int(99, "world")
+assert(r5 == 99, "passthrough_int(int, str): runtime value preserved")
+
+// --- Generic fn ---
+
+fn pick_first<T>(a: T, b: T) {
+    return a
+}
+
+// Case 6: both ints — first binds T=int, second matches.
+let p1 = pick_first(1, 2)
+assert(p1 == 1, "pick_first(1, 2) == 1")
+
+// Case 7: both strs — first binds T=str, second matches.
+let p2 = pick_first("a", "b")
+assert(p2 == "a", "pick_first(\"a\", \"b\") == \"a\"")
+
+// Case 8: first arg int, second str — T binds to int, mismatch — WARN.
+let p3 = pick_first(42, "hello")
+assert(p3 == 42, "pick_first(int, str) runtime value preserved")
+
+// Case 9: first arg str, second int — T binds to str, mismatch — WARN.
+let p4 = pick_first("hi", 99)
+assert(p4 == "hi", "pick_first(str, int) runtime value preserved")
+
+// --- Generic fn with three same-T params ---
+
+fn triple_eq<T>(a: T, b: T, c: T) {
+    return a
+}
+
+// Case 10: all int — no warn.
+let q1 = triple_eq(1, 2, 3)
+assert(q1 == 1, "triple_eq(1, 2, 3) == 1")
+
+// Case 11: first two int, third str — WARN on arg 2 (after T binds via arg 0).
+let q2 = triple_eq(10, 20, "thirty")
+assert(q2 == 10, "triple_eq with mismatched 3rd preserved")
+
+// --- Multi-param generic with different T params ---
+
+fn pair_swap<T, U>(a: T, b: U) {
+    return b
+}
+
+// Case 12: different concrete types, each fits its T/U binding — no warn.
+let s1 = pair_swap(42, "hello")
+assert(s1 == "hello", "pair_swap(int, str) returns str")
+
+// Case 13: both ints — T=int, U=int; no warn.
+let s2 = pair_swap(1, 2)
+assert(s2 == 2, "pair_swap(int, int) returns 2nd")
+
+// --- Concrete + free variable mix ---
+
+fn require_str(s: str) {
+    return s
+}
+
+// Case 14: str literal — no warn.
+let r14 = require_str("hello")
+assert(r14 == "hello", "require_str(\"hello\")")
+
+// Case 15: int literal — WARN.
+let r15 = require_str(42)
+assert(r15 == 42, "require_str(42) runtime preserved")
+
+// Case 16: list literal — WARN (str expected).
+let r16 = require_str([1, 2, 3])
+assert(len(r16) == 3, "require_str([1,2,3]) runtime preserved")
+
+// --- No-annotation fn (the baseline R22B case) — must not warn ---
+
+fn plain_add(a, b) {
+    return a + b
+}
+
+let p_a = plain_add(1, 2)
+assert(p_a == 3, "plain_add(1, 2) == 3")
+
+let p_b = plain_add("x", "y")
+assert(p_b == "xy", "plain_add(\"x\", \"y\") concatenates")
+
+// --- Generic fn inside a larger expression — call still checked ---
+
+fn double_t<T>(a: T, b: T) {
+    return a
+}
+
+// Case 17: arg result used inside arithmetic — WARN should still fire.
+let big = double_t(1, "two") + 10
+assert(big == 11, "double_t mismatch still computes at runtime")
+
+println("test_fn_call_type_check.nova: all assertions passed (8 WARN lines expected)")

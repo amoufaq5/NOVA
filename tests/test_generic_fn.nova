@@ -1,0 +1,132 @@
+// R22B: NOVA generic function signatures — extend R21A from enums to fns.
+//
+// Same parser-only, zero-cost approach as R21A's generic enums. NOVA's
+// runtime is dynamically typed (every value carries its own tag), so
+// type parameters on functions are documentation + light type-check;
+// codegen does not need to monomorphize. The parser accepts:
+//
+//   * `<T, U, ...>` between the fn name and the parameter list,
+//   * `: T` parameter type annotations (already supported pre-R22B),
+//   * `-> T` return type annotations (new in R22B; `: T` still works
+//     as a legacy spelling),
+//   * `T -> U` function-type syntax for higher-order parameters like
+//     `f: T -> U` — par_skip_type now consumes the trailing `-> U`.
+//
+// All erased at codegen time, so the body executes against dynamic
+// values regardless of the annotations.
+
+// --- Identity: simplest generic fn ---
+
+fn identity<T>(x: T) -> T {
+    return x
+}
+
+assert(identity(42) == 42, "identity<int>(42) == 42")
+assert(identity("hello") == "hello", "identity<str>(\"hello\") == \"hello\"")
+assert(identity(0 - 7) == 0 - 7, "identity<int>(-7) == -7")
+
+let lst = list_new()
+push(lst, 100)
+push(lst, 200)
+let lst2 = identity(lst)
+assert(len(lst2) == 2, "identity<list>(lst) preserves len")
+assert(lst2[0] == 100, "identity<list>(lst) preserves payload[0]")
+
+// --- Two-parameter generic: map<T, U> ---
+
+fn map<T, U>(xs, f) {
+    let r = list_new()
+    let i = 0
+    while i < len(xs) {
+        push(r, f(xs[i]))
+        i = i + 1
+    }
+    return r
+}
+
+let nums = list_new()
+push(nums, 1)
+push(nums, 2)
+push(nums, 3)
+let doubled = map(nums, fn(x) { return x * 2 })
+assert(len(doubled) == 3, "map produces same-length list")
+assert(doubled[0] == 2, "map: 1*2 == 2")
+assert(doubled[1] == 4, "map: 2*2 == 4")
+assert(doubled[2] == 6, "map: 3*2 == 6")
+
+// map int -> str via int_to_str — same generic decl, different concrete types
+let strs = map(nums, fn(x) { return int_to_str(x) })
+assert(strs[0] == "1", "map int->str: 1 stringifies to \"1\"")
+assert(strs[2] == "3", "map int->str: 3 stringifies to \"3\"")
+
+// --- Higher-order with function-type annotation `f: T -> U` ---
+
+fn apply<T, U>(x: T, f: T -> U) -> U {
+    return f(x)
+}
+
+assert(apply(5, fn(n) { return n + 10 }) == 15, "apply<int,int>(5, +10) == 15")
+assert(apply(3, fn(n) { return n * n }) == 9, "apply<int,int>(3, square) == 9")
+
+// --- Three-parameter generic ---
+
+fn first_of<A, B, C>(a, b, c) {
+    return a
+}
+
+assert(first_of(1, 2, 3) == 1, "first_of three ints")
+assert(first_of("a", "b", "c") == "a", "first_of three strs")
+
+// --- Backward compat: legacy `: T` return-type still works ---
+
+fn legacy_add(a: int, b: int): int {
+    return a + b
+}
+
+assert(legacy_add(3, 4) == 7, "legacy fn with `: int` return-type still works")
+
+// --- Backward compat: no generics, no annotations (the common case) ---
+
+fn plain(x) {
+    return x + 1
+}
+
+assert(plain(10) == 11, "plain fn without generics or annotations still compiles")
+
+// --- Generic fn + generic enum together (the R21A x R22B interplay) ---
+
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+fn unwrap<T, E>(r: Result<T, E>) -> T {
+    match r {
+        Result::Ok(x) => { return x }
+        _ => { return 0 }
+    }
+}
+
+let r1: Result<int, str> = Result::Ok(42)
+assert(unwrap(r1) == 42, "unwrap<int,str>(Ok(42)) == 42")
+
+let r2: Result<int, str> = Result::Err("oops")
+assert(unwrap(r2) == 0, "unwrap<int,str>(Err(_)) == 0 (default arm)")
+
+// Nested-generic type annotation on a generic fn
+fn nested<T>(x: Result<Result<T, str>, str>) -> T {
+    match x {
+        Result::Ok(inner) => {
+            match inner {
+                Result::Ok(v) => { return v }
+                _ => { return 0 }
+            }
+        }
+        _ => { return 0 }
+    }
+}
+
+let nest: Result<Result<int, str>, str> = Result::Ok(Result::Ok(99))
+assert(nested(nest) == 99, "nested<int>(Ok(Ok(99))) == 99")
+
+println("All generic fn tests passed!")

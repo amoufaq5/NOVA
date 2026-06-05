@@ -1,0 +1,239 @@
+================================================================================
+R25A: let destructure with explicit binder names
+================================================================================
+
+let Point { x: px, y: py } = p
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (struct_pattern
+      type: (identifier)
+      (struct_pattern_field_list
+        (struct_pattern_field
+          name: (identifier)
+          pattern: (identifier))
+        (struct_pattern_field
+          name: (identifier)
+          pattern: (identifier))))
+    value: (identifier)))
+
+================================================================================
+R25A: let destructure shorthand `Point { x, y }`
+================================================================================
+
+let Point { x, y } = p
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (struct_pattern
+      type: (identifier)
+      (struct_pattern_field_list
+        (struct_pattern_field
+          name: (identifier))
+        (struct_pattern_field
+          name: (identifier))))
+    value: (identifier)))
+
+================================================================================
+R25A: let destructure partial with `..` rest
+================================================================================
+
+let Point { x: px, .. } = p
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (struct_pattern
+      type: (identifier)
+      (struct_pattern_field_list
+        (struct_pattern_field
+          name: (identifier)
+          pattern: (identifier))
+        (rest_field_pattern)))
+    value: (identifier)))
+
+================================================================================
+R25A: let destructure of Box single-field
+================================================================================
+
+let Box { value: v } = b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (struct_pattern
+      type: (identifier)
+      (struct_pattern_field_list
+        (struct_pattern_field
+          name: (identifier)
+          pattern: (identifier))))
+    value: (identifier)))
+
+================================================================================
+R25A: match arm with struct-pattern literal field values
+================================================================================
+
+let r = match p {
+    Point { x: 0, y: 0 } => 1
+    Point { x: 0, y: 1 } => 2
+    _ => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (struct_pattern
+          type: (identifier)
+          (struct_pattern_field_list
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (number))
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (number))))
+        value: (number))
+      (match_arm
+        pattern: (struct_pattern
+          type: (identifier)
+          (struct_pattern_field_list
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (number))
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (number))))
+        value: (number))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (number)))))
+
+================================================================================
+R25A: match arm with binder field pattern
+================================================================================
+
+let r = match p {
+    Point { x: a, y: b } => a + b
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (struct_pattern
+          type: (identifier)
+          (struct_pattern_field_list
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (identifier))
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (identifier))))
+        value: (binary_expression
+          left: (identifier)
+          right: (identifier))))))
+
+================================================================================
+R25A: match arm with mixed literal + binder field pattern
+================================================================================
+
+let r = match p {
+    Point { x: 0, y: a } => a + 100
+    _ => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (struct_pattern
+          type: (identifier)
+          (struct_pattern_field_list
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (number))
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (identifier))))
+        value: (binary_expression
+          left: (identifier)
+          right: (number)))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (number)))))
+
+================================================================================
+R25A: match arm with wildcard `_` field pattern
+================================================================================
+
+let r = match p {
+    Point { x: 7, y: _ } => "got 7"
+    _ => "miss"
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (struct_pattern
+          type: (identifier)
+          (struct_pattern_field_list
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (number))
+            (struct_pattern_field
+              name: (identifier)
+              pattern: (wildcard_pattern))))
+        value: (string_literal))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (string_literal)))))
+
+================================================================================
+R25A: match arm with shorthand binder fields (no colon)
+================================================================================
+
+let r = match p {
+    Point { x, y } => x * y
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (struct_pattern
+          type: (identifier)
+          (struct_pattern_field_list
+            (struct_pattern_field
+              name: (identifier))
+            (struct_pattern_field
+              name: (identifier))))
+        value: (binary_expression
+          left: (identifier)
+          right: (identifier))))))

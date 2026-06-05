@@ -1,0 +1,109 @@
+// R23A: NOVA generic struct payload types — parser-only feature, same
+// pattern as R21A (generic enums) and R22B (generic fns). NOVA's runtime
+// is dynamically typed (tagged values), so type parameters on structs
+// are erased at codegen — the parser accepts `<T, U, ...>` and `field:
+// T` annotations, validates the syntax, and codegen sees the same AST
+// as the no-annotation case.
+//
+// Wire-level rep is unchanged: a struct value is a list `[field0,
+// field1, ...]` constructed via positional call `Box(42)`. Brace-init
+// syntax `Box { value: 42 }` is reserved for a future round.
+
+// --- Single type parameter ---
+
+struct Box<T> {
+    value: T
+}
+
+let b = Box(42)
+assert(b.value == 42, "Box(42).value == 42")
+
+let bs = Box("hello")
+assert(bs.value == "hello", "Box(\"hello\").value == \"hello\"")
+
+// Annotation on the binding works too — purely parser-level metadata.
+let b2: Box<int> = Box(100)
+assert(b2.value == 100, "Box<int>(100).value == 100")
+
+// --- Multiple type parameters ---
+
+struct Pair<A, B> {
+    first: A,
+    second: B
+}
+
+let p = Pair(1, "two")
+assert(p.first == 1, "Pair(1, \"two\").first == 1")
+assert(p.second == "two", "Pair(1, \"two\").second == \"two\"")
+
+let p2: Pair<str, int> = Pair("hello", 42)
+assert(p2.first == "hello", "Pair<str,int>(\"hello\", 42).first")
+assert(p2.second == 42, "Pair<str,int>(\"hello\", 42).second")
+
+// --- Semicolon separator (the task-spec spelling) ---
+
+struct Triple<A, B, C> {
+    a: A;
+    b: B;
+    c: C
+}
+
+let t = Triple(1, "two", 3)
+assert(t.a == 1, "Triple field a")
+assert(t.b == "two", "Triple field b")
+assert(t.c == 3, "Triple field c")
+
+// --- Nested generic in the binding annotation ---
+
+let nest: Box<Box<int>> = Box(Box(99))
+assert(nest.value.value == 99, "Box<Box<int>> nested field access")
+
+// --- Backward compat: non-generic struct still works ---
+
+struct PlainPoint {
+    x,
+    y
+}
+
+let pt = PlainPoint(3, 4)
+assert(pt.x == 3, "PlainPoint(3,4).x")
+assert(pt.y == 4, "PlainPoint(3,4).y")
+
+// --- Backward compat: typed-fields without generics ---
+
+struct Typed {
+    name: str,
+    count: int
+}
+
+let typ = Typed("widgets", 7)
+assert(typ.name == "widgets", "Typed.name")
+assert(typ.count == 7, "Typed.count")
+
+// --- Generic struct with methods ---
+
+struct Container<T> {
+    items: list,
+    size: int
+}
+
+fn Container.get(self, i) {
+    return self.items[i]
+}
+
+fn Container.count(self) {
+    return self.size
+}
+
+let cont = Container(0, 0)
+let items = list_new()
+push(items, 10)
+push(items, 20)
+push(items, 30)
+cont.items = items
+cont.size = 3
+assert(cont.count() == 3, "Container.count() == 3")
+assert(cont.get(0) == 10, "Container.get(0)")
+assert(cont.get(2) == 30, "Container.get(2)")
+
+println("test_generic_struct.nova: all generic-struct assertions passed")

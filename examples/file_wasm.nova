@@ -1,0 +1,52 @@
+// File I/O round-trip smoke test for the WebAssembly (WASI) codegen path.
+//
+// Pipeline (driven by `make smoke-wasm-file`):
+//     bin/nova examples/file_wasm.nova --target=wasm -o /tmp/file_wasm.wat
+//     wat2wasm /tmp/file_wasm.wat -o bin/file_wasm.wasm
+//     node --experimental-wasi-unstable-preview1 ... preopens={'/tmp':'/tmp'}
+//
+// The program:
+//   1. write_file("/tmp/out.txt", "nova") -> creates /tmp/out.txt via
+//      WASI path_open(O_CREAT|O_TRUNC) + fd_write + fd_close.
+//   2. read_file("/tmp/out.txt") -> opens the same file via WASI
+//      path_open(O_RDONLY) + fd_read + fd_close, returning a NOVA string.
+//   3. Verifies the round-trip by comparing the returned content to the
+//      string we wrote. Exits 0 on success, 1 on mismatch.
+//
+// In node WASI, preopens={'/tmp': '/tmp'} maps the host's /tmp into the
+// WASM sandbox at directory fd 3 (stdin=0, stdout=1, stderr=2, first
+// preopen=3). The compiler's emitted _nova_wasi_path_offset strips the
+// "/tmp/" prefix before passing the path to path_open, so the host-side
+// path looks the same to the user as in the native (Linux/macOS/Win32)
+// build of NOVA -- they all call read_file("/tmp/out.txt"); the WASM
+// runtime just routes through path_open(dirfd=3, "out.txt", ...).
+
+fn main() {
+    let path = "/tmp/out.txt"
+    let payload = "nova"
+
+    let wrote = write_file(path, payload)
+    if wrote == 0 {
+        println("FAIL: write_file returned 0 (path_open failed)")
+        exit(1)
+    }
+
+    let got = read_file(path)
+    if got == 0 {
+        println("FAIL: read_file returned 0 (path_open failed)")
+        exit(1)
+    }
+
+    if str_eq(got, payload) == 0 {
+        println("FAIL: round-trip mismatch")
+        print("  expected: ")
+        println(payload)
+        print("  got:      ")
+        println(got)
+        exit(1)
+    }
+
+    println("OK: wasm file round-trip succeeded")
+}
+
+main()

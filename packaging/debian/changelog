@@ -1,0 +1,11 @@
+nova (0.1.0-1) unstable; urgency=low
+
+  * Initial Debian package.
+  * Single-binary Nova compiler (~700KB), self-hosting through two
+    stages from boot/nova_boot.s.
+  * Supports linux-x86_64 host and cross-compilation to windows-x86_64,
+    windows-arm64, macos-x86_64, arm64-linux, wasm/wasi targets.
+  * Ships /usr/local/bin/nova, nova(1) manual page, and a curated
+    examples tree under /usr/share/doc/nova/.
+
+ -- Nova Project <maintainers@nova-lang.org>  Mon, 01 Jun 2026 00:00:00 +0000

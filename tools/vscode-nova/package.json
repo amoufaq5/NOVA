@@ -1,0 +1,246 @@
+{
+  "name": "nova-language",
+  "displayName": "NOVA Language",
+  "description": "NOVA programming language support for Visual Studio Code: syntax highlighting, LSP client (nova-lsp), and DAP debugger (nova-dap), bundled into a single installable extension.",
+  "version": "0.1.0",
+  "publisher": "crossengin",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers",
+    "Snippets"
+  ],
+  "keywords": [
+    "nova",
+    "nova-lang",
+    "self-hosting",
+    "agi",
+    "moment-signal"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amoufaq5/NOVA.git",
+    "directory": "tools/vscode-nova"
+  },
+  "homepage": "https://github.com/amoufaq5/NOVA/blob/main/docs/IDE_SETUP.md",
+  "bugs": {
+    "url": "https://github.com/amoufaq5/NOVA/issues"
+  },
+  "activationEvents": [
+    "onLanguage:nova",
+    "onDebug",
+    "onDebugResolve:nova"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "nova",
+        "aliases": [
+          "NOVA",
+          "Nova",
+          "nova"
+        ],
+        "extensions": [
+          ".nova"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nova",
+        "scopeName": "source.nova",
+        "path": "./syntaxes/nova.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[nova]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "editor.detectIndentation": false
+      }
+    },
+    "configuration": {
+      "title": "NOVA",
+      "properties": {
+        "nova.python.path": {
+          "type": "string",
+          "default": "python3",
+          "description": "Path to the Python interpreter used to launch nova-lsp and nova-dap. Point this at the venv where `pip install -e tools/nova-lsp tools/nova-dap` was run."
+        },
+        "nova.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the NOVA language server (nova-lsp)."
+        },
+        "nova.lsp.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments passed to `python -m nova_lsp`."
+        },
+        "nova.lsp.module": {
+          "type": "string",
+          "default": "nova_lsp",
+          "description": "Python module to launch as the language server (default: nova_lsp)."
+        },
+        "nova.dap.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments passed to `python -m nova_dap`."
+        },
+        "nova.dap.module": {
+          "type": "string",
+          "default": "nova_dap",
+          "description": "Python module to launch as the debug adapter (default: nova_dap)."
+        },
+        "nova.compiler.path": {
+          "type": "string",
+          "default": "nova",
+          "description": "Path to the NOVA compiler binary (used by nova-lsp for --check diagnostics)."
+        },
+        "nova.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace LSP traffic between VS Code and nova-lsp."
+        }
+      }
+    },
+    "breakpoints": [
+      {
+        "language": "nova"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "nova",
+        "label": "NOVA Debugger",
+        "languages": [
+          "nova"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the compiled NOVA binary (built with DWARF debug info).",
+                "default": "${workspaceFolder}/build/${workspaceFolderBasename}"
+              },
+              "args": {
+                "type": "array",
+                "description": "Command-line arguments passed to the NOVA program.",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the debugged program.",
+                "default": "${workspaceFolder}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Automatically stop on entry (currently best-effort; see nova-dap README for the supported request matrix).",
+                "default": false
+              },
+              "console": {
+                "type": "string",
+                "enum": [
+                  "integratedTerminal",
+                  "internalConsole"
+                ],
+                "default": "integratedTerminal",
+                "description": "Where to display program output."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "nova",
+            "request": "launch",
+            "name": "Launch NOVA program",
+            "program": "${workspaceFolder}/build/${workspaceFolderBasename}",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false,
+            "console": "integratedTerminal"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "NOVA: Launch program",
+            "description": "Launch a NOVA binary under nova-dap (requires gdb + objdump).",
+            "body": {
+              "type": "nova",
+              "request": "launch",
+              "name": "Launch NOVA program",
+              "program": "^\"\\${workspaceFolder}/build/\\${workspaceFolderBasename}\"",
+              "args": [],
+              "cwd": "^\"\\${workspaceFolder}\"",
+              "stopOnEntry": false,
+              "console": "integratedTerminal"
+            }
+          }
+        ]
+      }
+    ],
+    "snippets": [
+      {
+        "language": "nova",
+        "path": "./snippets/nova.snippets.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "nova.restartLanguageServer",
+        "title": "NOVA: Restart Language Server",
+        "category": "NOVA"
+      },
+      {
+        "command": "nova.showOutput",
+        "title": "NOVA: Show Language Server Log",
+        "category": "NOVA"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package --no-dependencies",
+    "build:vsix": "bash scripts/build-vsix.sh",
+    "test:py": "python3 -m unittest discover tests"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.18.0",
+    "@typescript-eslint/parser": "^6.18.0",
+    "@vscode/vsce": "^2.22.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  }
+}

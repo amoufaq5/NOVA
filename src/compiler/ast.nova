@@ -66,6 +66,87 @@ let AST_SOUL = 61
 let AST_SYSTEM = 62
 let AST_CONFIDENCE = 63
 let AST_IMPL_BLOCK = 64
+// R17A: sum-type variant construction (`Option::Some(42)`) and
+// variant patterns inside `match` arms (`Option::Some(n) => ...`).
+// Wire representation: each variant value is a tagged tuple
+//   `[tag_int, field0, field1, ...]`
+// where `tag_int` is the declaration-order index of the variant.
+let AST_ENUM_CTOR = 65
+let AST_ENUM_PATTERN = 66
+// R20A: postfix `?` Result propagation. `expr?` evaluates `expr` to a
+// tagged tuple `[tag, ...payload]`; when `tag == 0` (Ok) the node's
+// value is `payload[0]`, otherwise the enclosing function returns
+// `expr` unchanged (which IS the Err Result). The single child is the
+// inner expression being unwrapped.
+let AST_TRY_PROPAGATE = 67
+// R25A: struct field-pattern used in match arms only
+// (`Point { x: 0, y: a } => ...`). Wire shape:
+//   [tag, struct_name, field_names, sub_patterns, has_rest]
+// where each sub_patterns[i] is either AST_IDENT (binder), AST_WILDCARD
+// (skip), or a literal expression node tested for equality at the arm's
+// dispatch site. parse_match rewrites the surrounding `match` into a
+// block `{ let _struct_match_N = expr; match _struct_match_N { ... } }`
+// where each AST_STRUCT_PATTERN arm becomes a guarded wildcard arm —
+// codegen never sees AST_STRUCT_PATTERN directly.
+let AST_STRUCT_PATTERN = 68
+// R32D: nested variant pattern (e.g. `Some(Some(v))` or `Ok(Point { x, y })`).
+// The single-level `Some(v)` form continues to emit AST_ENUM_PATTERN
+// (preserving R31D's tag-compare + binder-bind codegen path byte-for-byte).
+// AST_NESTED_VARIANT_PATTERN fires ONLY when at least one payload slot is
+// itself a sub-pattern (another AST_NESTED_VARIANT_PATTERN, AST_ENUM_PATTERN,
+// or AST_STRUCT_PATTERN). Wire shape:
+//   [tag, enum_name, variant_name, sub_patterns]
+// where each sub_patterns[i] is one of:
+//   * a string (legacy binder name carried through)  — never used in the
+//     wrapper-emitting path; included for shape uniformity if needed.
+//   * AST_IDENT (binder)
+//   * AST_WILDCARD (skip)
+//   * AST_ENUM_PATTERN (single-level inner variant pattern)
+//   * AST_NESTED_VARIANT_PATTERN (deeper nesting)
+//   * AST_STRUCT_PATTERN (struct destructure within the variant payload)
+// parse_match rewrites the entire match into a wildcard arm with a guard
+// chain `tmp[0] == outer_tag && tmp[1][0] == inner_tag && ...` plus a
+// `let v = tmp[1][...]` prep stmt for every binder. The wrapping AST_DO_EXPR
+// is reused from the AST_STRUCT_PATTERN codepath so codegen never sees a
+// new pattern shape.
+let AST_NESTED_VARIANT_PATTERN = 69
+// R36C: tuple literal `(a, b, c)`. NOVA does NOT add a distinct runtime
+// representation for tuples — they lower to lists at codegen (the path of
+// least resistance: `[a, b, c]`). The node carries an `elements` list of
+// expression nodes; the parser only emits AST_TUPLE_LIT when at least
+// two expressions are present (`(x)` stays a parenthesized expression).
+// Wire shape: [tag, elements].
+//
+// Why a distinct AST tag if we lower to AST_LIST_LIT anyway? Two reasons:
+//   (1) keeps the parser's intent visible for future passes that may want
+//       to enforce per-slot type discipline (currently AST-level only —
+//       see par_collect_type's tuple-type branch).
+//   (2) tooling (nova-lsp / tree-sitter) can distinguish tuples from
+//       lists without re-parsing — once those modules add tuple support
+//       in a future round, the AST tag tells them which surface form to
+//       suggest in completions / hover.
+// Codegen treats AST_TUPLE_LIT identically to AST_LIST_LIT (one branch
+// near the AST_LIST_LIT cases per pass — see cg gen_expr / tc_walk_expr /
+// collect_comp_vars / cg_fold_constants / cg_dce_expr / etc.).
+let AST_TUPLE_LIT = 70
+// R36C: tuple type annotation `(int, str)`. Captured by par_collect_type
+// for the lightweight type-check pass; codegen never reads it. Wire shape:
+// [tag, slot_types] where slot_types is a list of `[base, [type_args]]`
+// pairs (the par_collect_type shape). The empty-tuple type `()` is NOT
+// modelled (NOVA has no unit type; deferred to a future round).
+let AST_TUPLE_TYPE = 71
+// R36C: tuple match pattern `(0, _) => ...`. Parser-time lowering: each
+// arm with an AST_TUPLE_PATTERN is rewritten into a wildcard arm with a
+// guard chain `tmp[0] == lit0 && tmp[1] == lit1 && ...` plus a per-binder
+// `let name = tmp[i]` prep stmt — mirrors the R32D nested-variant lowering
+// so codegen never sees AST_TUPLE_PATTERN directly. Wire shape:
+// [tag, sub_patterns] where each sub_patterns[i] is one of:
+//   * AST_IDENT (binder name)
+//   * AST_WILDCARD (skip)
+//   * AST_TUPLE_PATTERN (nested tuple)
+//   * any expression node (literal value; compared by equality at the
+//     dispatch site).
+let AST_TUPLE_PATTERN = 72
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -178,12 +259,31 @@ fn ast_int(value) {
     return n
 }
 
+// R38A: AST_FLOAT_LIT shape is [tag, int_part, frac_part, frac_digits,
+// exponent]. The 4th slot (exponent) is the signed integer exponent from
+// scientific notation (`1.0e-3` -> exponent=-3, `5E10` -> exponent=10,
+// `3.14` -> exponent=0). The pre-R38A 4-slot shape [tag, ip, fp, fd] is
+// still accepted by codegen via a length check (any node missing the
+// exponent slot is treated as exponent=0) so any external producers (none
+// in-tree today) continue to work.
 fn ast_float(int_part, frac_part, frac_digits) {
     let n = list_new()
     push(n, AST_FLOAT_LIT)
     push(n, int_part)
     push(n, frac_part)
     push(n, frac_digits)
+    push(n, 0)
+    return n
+}
+
+// R38A: variant that also carries the scientific-notation exponent.
+fn ast_float_exp(int_part, frac_part, frac_digits, exponent) {
+    let n = list_new()
+    push(n, AST_FLOAT_LIT)
+    push(n, int_part)
+    push(n, frac_part)
+    push(n, frac_digits)
+    push(n, exponent)
     return n
 }
 
@@ -573,6 +673,119 @@ fn ast_confidence(expr, level) {
     push(n, AST_CONFIDENCE)
     push(n, expr)
     push(n, level)
+    return n
+}
+
+// R17A: sum-type variant construction. `enum_name` and `variant_name`
+// are the dotted-path components; `args` is the list of payload exprs
+// (empty list for nullary variants like `Option::None`). Lowered by
+// codegen to a fresh list whose first slot is the variant tag.
+fn ast_enum_ctor(enum_name, variant_name, args) {
+    let n = list_new()
+    push(n, AST_ENUM_CTOR)
+    push(n, enum_name)
+    push(n, variant_name)
+    push(n, args)
+    return n
+}
+
+// R17A: `match` arm pattern matching a sum-type variant. `binders` is
+// the list of identifier names introduced by destructuring the variant
+// payload (e.g. `Option::Some(n)` -> binders=["n"]). Bindings are
+// installed in the arm body's scope; the discriminant is matched by
+// comparing `value[0]` against the variant's tag.
+fn ast_enum_pattern(enum_name, variant_name, binders) {
+    let n = list_new()
+    push(n, AST_ENUM_PATTERN)
+    push(n, enum_name)
+    push(n, variant_name)
+    push(n, binders)
+    return n
+}
+
+// R32D: nested variant pattern. `sub_patterns` is a list where each entry
+// is itself a pattern node (AST_IDENT for a binder, AST_WILDCARD for `_`,
+// or AST_ENUM_PATTERN / AST_NESTED_VARIANT_PATTERN / AST_STRUCT_PATTERN
+// for a sub-pattern that recursively destructures the corresponding
+// payload slot). Lowered by parse_match into a wildcard arm with a guard
+// chain + per-binder prep `let` stmts referencing the cached scrutinee
+// temp; codegen never sees this node directly.
+fn ast_nested_variant_pattern(enum_name, variant_name, sub_patterns) {
+    let n = list_new()
+    push(n, AST_NESTED_VARIANT_PATTERN)
+    push(n, enum_name)
+    push(n, variant_name)
+    push(n, sub_patterns)
+    return n
+}
+
+// R20A: postfix `?` Result-propagation. Wraps an expression whose value
+// is a Result-shaped tagged tuple. Codegen lowers to: evaluate inner;
+// if `value[0] == 0` (Ok) replace with `value[1]`; otherwise return the
+// whole `value` from the enclosing function (it IS the Err Result).
+fn ast_try_propagate(inner) {
+    let n = list_new()
+    push(n, AST_TRY_PROPAGATE)
+    push(n, inner)
+    return n
+}
+
+// R25A: brace-init struct construction `Foo { field: val, ... }`. Wire
+// representation matches the existing positional ctor (`Foo(val)`): a
+// struct value is `[v0, v1, ...]` in declaration order. The parser-emitted
+// node carries values in source order plus the parallel list of field
+// names; codegen reorders to declaration order using cg_structs.
+//   nd[0] = AST_STRUCT_INIT (tag 27)
+//   nd[1] = struct_name (string)
+//   nd[2] = source-order value expressions (list)
+//   nd[3] = source-order field names (list, parallel to nd[2])
+//   nd[4] = optional base expression for R26A spread `..base` (0 if none)
+//          When non-zero, codegen fills any field not present in nd[3]
+//          by emitting `base.field` (AST_FIELD_ACCESS) — i.e. functional
+//          update-syntax `Point { x: 10, ..p }`. Parser ensures `base`
+//          is always an AST_IDENT (wrapping non-trivial exprs in a
+//          do-expr that caches them in a fresh temp) so codegen only
+//          ever sees a cheap identifier reference.
+fn ast_struct_init(name, values, names) {
+    let n = list_new()
+    push(n, AST_STRUCT_INIT)
+    push(n, name)
+    push(n, values)
+    push(n, names)
+    push(n, 0)
+    return n
+}
+
+// R36C: tuple literal `(a, b, c)`. Carries the element list; codegen
+// lowers identically to AST_LIST_LIT (tuples are tagged lists in the
+// shallow R36C implementation — no distinct runtime representation).
+fn ast_tuple_lit(elements) {
+    let n = list_new()
+    push(n, AST_TUPLE_LIT)
+    push(n, elements)
+    return n
+}
+
+// R36C: tuple type annotation `(int, str)`. `slot_types` is a list of
+// `[base, [type_args]]` pairs as returned by par_collect_type. Codegen
+// never reads this; the type-check pass uses it only for documentation
+// today (a future round could enforce per-slot discipline).
+fn ast_tuple_type(slot_types) {
+    let n = list_new()
+    push(n, AST_TUPLE_TYPE)
+    push(n, slot_types)
+    return n
+}
+
+// R36C: tuple match pattern `(0, _, x)`. `sub_patterns` is the list of
+// per-slot sub-patterns — binders, wildcards, nested tuples, or literal
+// expression nodes. parse_match lowers AST_TUPLE_PATTERN arms into a
+// wildcard arm with guard chain + per-binder prep stmts referencing the
+// cached scrutinee temp; codegen never sees this tag directly.
+fn ast_tuple_pattern(sub_patterns) {
+    let n = list_new()
+    push(n, AST_TUPLE_PATTERN)
+    push(n, sub_patterns)
     return n
 }
 

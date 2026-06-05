@@ -1,0 +1,26 @@
+#!/usr/bin/make -f
+# debian/rules for nova.
+#
+# This is a binary-only Debian package: we ship the pre-built nova
+# compiler (built upstream via `make bin/nova`) rather than rebuilding
+# from source inside the dpkg-buildpackage environment. That keeps the
+# .deb reproducible from the bin/nova that came out of the release
+# pipeline.
+#
+# If you want a full source build, run `make bin/nova && make self-host`
+# first, then `scripts/build-deb.sh`.
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Nothing to build: bin/nova is provided by the upstream Makefile.
+
+override_dh_auto_install:
+	install -D -m 0755 bin/nova $(CURDIR)/debian/nova/usr/local/bin/nova
+	install -D -m 0644 packaging/man/nova.1 \
+	    $(CURDIR)/debian/nova/usr/share/man/man1/nova.1
+	mkdir -p $(CURDIR)/debian/nova/usr/share/doc/nova/examples
+	cp examples/hello.nova examples/hello_macos.nova examples/hello_wasm.nova \
+	    $(CURDIR)/debian/nova/usr/share/doc/nova/examples/ 2>/dev/null || true
+	cp README.md INSTALL.md $(CURDIR)/debian/nova/usr/share/doc/nova/ 2>/dev/null || true

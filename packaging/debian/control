@@ -1,0 +1,25 @@
+Package: nova
+Version: 0.1.0
+Section: devel
+Priority: optional
+Architecture: amd64
+Depends: binutils, libc6
+Recommends: gcc
+Maintainer: Nova Project <maintainers@nova-lang.org>
+Homepage: https://github.com/nova-lang/nova
+Description: Self-hosting Nova programming language compiler
+ Nova is a self-hosting compiled language that targets x86-64 (Linux,
+ Windows, macOS) and ARM64 (Linux, Android, iOS, Windows) without a
+ libc dependency. It emits GAS-syntax assembly which is then handed
+ off to the GNU binutils assembler and linker.
+ .
+ Highlights:
+  * Single-binary toolchain (~700KB).
+  * Two-stage self-hosting build (stage2 bit-equal to stage3).
+  * Multiple codegen targets (Linux/Windows/macOS x86-64, ARM64,
+    WASM/WASI, Windows ARM64).
+  * Direct syscall runtime - no libc, no allocator, no GC.
+ .
+ This package installs the compiler binary to /usr/local/bin/nova,
+ the manual page to /usr/share/man/man1/, and a curated set of
+ example programs to /usr/share/doc/nova/examples/.

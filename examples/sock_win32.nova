@@ -1,0 +1,103 @@
+// Windows-only smoke for socket round-trip (P0.3).
+// Single-process loopback: bind a listen socket, fork (spawn a copy)
+// or use a connecting client, exchange one message, exit.
+//
+// To keep this self-contained and Wine-friendly, we use a single thread:
+// open a listening socket, then open a non-listening connect-back socket
+// in the same process, accept, exchange a short string, exit.
+//
+// Compile:
+//   bin/nova examples/sock_win32.nova --target=windows -o /tmp/sw.s
+//   x86_64-w64-mingw32-as -o /tmp/sw.o /tmp/sw.s
+//   x86_64-w64-mingw32-ld -o bin/sock_win32.exe /tmp/sw.o \
+//       -L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32
+//
+// Run:
+//   XDG_RUNTIME_DIR=/tmp/xdg-runtime wine bin/sock_win32.exe
+//
+// Expected:
+//   socket ok
+//   bind ok
+//   listen ok
+//   connect ok
+//   accept ok
+//   send ok n=15
+//   recv ok n=15 'hello from win32'
+//   done
+
+fn main() {
+    // Use a high random-ish port to avoid conflicts.
+    let port = 41973
+
+    let srv = socket(2, 1, 0)
+    if srv < 0 {
+        println("socket FAIL")
+        return
+    }
+    println("socket ok")
+
+    let addr = make_sockaddr_in(port, 0)
+    let b = bind_socket(srv, addr, 16)
+    if b != 0 {
+        println("bind FAIL")
+        return
+    }
+    println("bind ok")
+
+    let l = listen_socket(srv, 1)
+    if l != 0 {
+        println("listen FAIL")
+        return
+    }
+    println("listen ok")
+
+    // Open a client socket that connects to loopback (127.0.0.1).
+    // 127.0.0.1 in network byte order is 0x0100007F.
+    let cli = socket(2, 1, 0)
+    if cli < 0 {
+        println("cli socket FAIL")
+        return
+    }
+    let caddr = make_sockaddr_in(port, 16777343)
+    let c = connect_socket(cli, caddr, 16)
+    if c != 0 {
+        println("connect FAIL")
+        return
+    }
+    println("connect ok")
+
+    // Accept on server side (returns the accepted socket fd).
+    let conn = accept_conn(srv, 0, 0)
+    if conn < 0 {
+        println("accept FAIL")
+        return
+    }
+    println("accept ok")
+
+    let msg = "hello from win32"
+    let n = send_data(cli, msg, 16)
+    print("send ok n=")
+    println(int_to_str(n))
+
+    let buf = alloc(64)
+    let rn = recv_data(conn, buf, 63)
+    if rn > 0 {
+        // NUL-terminate.
+        // (alloc returns zeroed memory, but be safe.)
+        print("recv ok n=")
+        print(int_to_str(rn))
+        print(" '")
+        print(buf)
+        println("'")
+    } else {
+        print("recv FAIL n=")
+        println(int_to_str(rn))
+    }
+
+    close_fd(conn)
+    close_fd(cli)
+    close_fd(srv)
+    println("done")
+}
+
+main()

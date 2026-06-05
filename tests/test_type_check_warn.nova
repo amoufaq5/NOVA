@@ -1,0 +1,106 @@
+// R23A.2: lightweight type-check pass. Walks the AST after parsing
+// and emits a single-line `warning:` to stdout for any `let x: Enum<...>
+// = Enum::Ctor(literal)` site where the literal's static type
+// disagrees with the resolved payload-type binding.
+//
+// Conservative: only triggers when the arg is a statically obvious
+// literal. Free variables, function-call results, and compound exprs
+// are skipped to avoid false positives (no constraint propagation in
+// this round).
+//
+// The warning is non-fatal (mirrors R17A exhaustiveness-warn pattern),
+// so this test compiles + runs to completion. It exercises BOTH the
+// "should warn" cases (verified by capturing compiler stdout in the
+// outer test harness — see comments below) and the "must NOT warn"
+// cases (which fall through silently into the runtime assertion lane).
+
+enum Option<T> {
+    Some(T)
+    None
+}
+
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+// --- Case 1: matching int -> no warn ---
+let ok_int: Option<int> = Option::Some(42)
+assert(ok_int[0] == 0, "Option::Some(42) tag == 0")
+assert(ok_int[1] == 42, "Option::Some(42) payload == 42")
+
+// --- Case 2: matching str -> no warn ---
+let ok_str: Option<str> = Option::Some("hello")
+assert(ok_str[0] == 0, "Option::Some(\"hello\") tag")
+assert(ok_str[1] == "hello", "Option::Some(\"hello\") payload")
+
+// --- Case 3: matching list -> no warn ---
+let mylst = list_new()
+push(mylst, 1)
+push(mylst, 2)
+let ok_lst: Option<list> = Option::Some(mylst)
+assert(ok_lst[0] == 0, "Option::Some(list) tag")
+assert(len(ok_lst[1]) == 2, "Option::Some(list) payload len")
+
+// --- Case 4: free variable -> SKIPPED (no warn, conservative) ---
+let x = 999
+let ok_var: Option<int> = Option::Some(x)
+assert(ok_var[1] == 999, "Option::Some(free var) accepted silently")
+
+// --- Case 5: fn-call result -> SKIPPED ---
+fn get_val() {
+    return 42
+}
+let ok_call: Option<int> = Option::Some(get_val())
+assert(ok_call[1] == 42, "Option::Some(fn call) accepted silently")
+
+// --- Case 6: Result with matching Ok payload ---
+let r_ok: Result<int, str> = Result::Ok(7)
+assert(r_ok[0] == 0, "Result::Ok(7) tag")
+assert(r_ok[1] == 7, "Result::Ok(7) payload")
+
+// --- Case 7: Result with matching Err payload ---
+let r_err: Result<int, str> = Result::Err("oops")
+assert(r_err[0] == 1, "Result::Err tag")
+assert(r_err[1] == "oops", "Result::Err payload")
+
+// --- Case 8: Non-annotated let -> no type-check possible -> no warn ---
+let raw = Option::Some("anything goes")
+assert(raw[1] == "anything goes", "non-annotated Option::Some accepted")
+
+// --- Case 9: nullary variant has no args to check ---
+let n: Option<int> = Option::None
+assert(n[0] == 1, "Option::None tag == 1")
+assert(len(n) == 1, "Option::None length == 1")
+
+// --- Case 10: int literal passes int check ---
+let i2: Option<int> = Option::Some(0 - 5)
+assert(i2[1] == 0 - 5, "Option::Some(-5) payload")
+
+// --- The "should warn" cases live below. They produce a `warning:`
+// line on stdout at compile time. The runtime semantics are unchanged
+// (NOVA is dynamically typed), so the assertions still hold — the
+// warning is the only externally visible effect. ---
+
+// --- Case 11: int expected, str provided -> WARN ---
+let bad1: Option<int> = Option::Some("not an int")
+assert(bad1[1] == "not an int", "WARN-case 1: runtime value still set")
+
+// --- Case 12: str expected, int provided -> WARN ---
+let bad2: Option<str> = Option::Some(42)
+assert(bad2[1] == 42, "WARN-case 2: runtime value still set")
+
+// --- Case 13: Result Err payload mismatch -> WARN ---
+let bad3: Result<int, str> = Result::Err(123)
+assert(bad3[0] == 1, "WARN-case 3: Err tag still 1")
+assert(bad3[1] == 123, "WARN-case 3: Err payload still set")
+
+// --- Case 14: Result Ok payload mismatch -> WARN ---
+let bad4: Result<list, int> = Result::Ok(7)
+assert(bad4[1] == 7, "WARN-case 4: Ok payload still set")
+
+// --- Case 15: list expected, str provided -> WARN ---
+let bad5: Option<list> = Option::Some("oops")
+assert(bad5[1] == "oops", "WARN-case 5: runtime value still set")
+
+println("test_type_check_warn.nova: 15 assertions passed (5 WARN lines expected)")

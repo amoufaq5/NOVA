@@ -1,0 +1,48 @@
+// Windows-only smoke for argv parsing (P0.2) + getenv from envp (P0.4).
+// Compile:
+//   bin/nova examples/win32_argv_envp.nova --target=windows -o /tmp/aev.s
+//   x86_64-w64-mingw32-as -o /tmp/aev.o /tmp/aev.s
+//   x86_64-w64-mingw32-ld -o bin/win32_argv_envp.exe /tmp/aev.o \
+//       -L/usr/x86_64-w64-mingw32/lib -lkernel32 -lws2_32
+//
+// Run under wine:
+//   XDG_RUNTIME_DIR=/tmp/xdg-runtime wine bin/win32_argv_envp.exe one two three
+//
+// Expected:
+//   arg0=<exe path>
+//   arg1=one
+//   arg2=two
+//   arg3=three
+//   PATH_first40=<wine PATH>
+//   MISSING_VAR=(unset)
+
+fn main() {
+    let i = 0
+    while i < 5 {
+        let a = __arg(i)
+        print("arg")
+        print(int_to_str(i))
+        print("=")
+        println(a)
+        i = i + 1
+    }
+
+    let p = getenv("PATH")
+    if p == 0 {
+        println("PATH=(unset)")
+    } else {
+        print("PATH_first40=")
+        let truncated = substr(p, 0, 40)
+        println(truncated)
+    }
+
+    let m = getenv("MISSING_VAR_THAT_SHOULD_NOT_EXIST_xyzzy")
+    if m == 0 {
+        println("MISSING_VAR=(unset)")
+    } else {
+        print("MISSING_VAR=")
+        println(m)
+    }
+}
+
+main()

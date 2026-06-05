@@ -1,0 +1,45 @@
+// Minimal Windows ARM64 smoke test for secure_random.
+//
+// Exercises the BCryptGenRandom (BCRYPT.dll) import on the PE32+
+// ARM64 target. The standalone Windows ARM64 codegen path mirrors
+// the standalone Linux ARM64 path — AST-walking, integer-only
+// builtins, no list/map runtime — so the full-fidelity
+// tests/test_secure_random.nova (which uses alloc/load8/int_add)
+// does not assemble here. This is the import-resolution + happy-
+// path check.
+//
+// Build:
+//   bin/nova examples/hello_secure_random_winarm64.nova \
+//       --target=windows-arm64 -o /tmp/sr_winarm64.s
+//   clang -target aarch64-windows-gnu -c /tmp/sr_winarm64.s \
+//       -o /tmp/sr_winarm64.o
+//   llvm-dlltool -m arm64 -d bcrypt.def -l libbcrypt-arm64.a
+//   llvm-dlltool -m arm64 -d kernel32.def -l libkernel32-arm64.a
+//   lld-link /machine:arm64 /subsystem:console \
+//       /entry:mainCRTStartup /out:bin/secure_random_winarm64.exe \
+//       /tmp/sr_winarm64.o libkernel32-arm64.a libbcrypt-arm64.a
+//
+// Runtime check (on a real ARM64 Windows host): the program prints
+// "secure_random winarm64: OK" and exits 0 on a healthy system.
+
+fn main() {
+    // Call BCryptGenRandom with cbBuffer=0 to exercise the import
+    // resolution + call-through-IAT sequence without needing a
+    // writable buffer in .rdata. STATUS_SUCCESS == 0 means the
+    // import resolved and the call completed.
+    //
+    // pbBuffer is documented as required-non-NULL but with
+    // cbBuffer==0 most NTSTATUS RNG implementations accept the
+    // call as a no-op. For an actual buffer fill, the
+    // tests/test_secure_random.nova path on the Windows x86-64
+    // target covers it end-to-end via wine.
+    let n = secure_random(0, 0)
+    if n == 0 {
+        println("secure_random winarm64: import OK")
+    } else {
+        println("secure_random winarm64: nonzero return")
+    }
+    println("done")
+}
+
+main()

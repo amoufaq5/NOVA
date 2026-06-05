@@ -1,0 +1,124 @@
+// WASI low-level file round-trip (R8A).
+//
+// Exercises the raw wasi_* builtins -- wasi_open, wasi_write, wasi_close,
+// wasi_open (re-open), wasi_read, wasi_seek, wasi_filestat -- so a NOVA
+// program can drive the WASI snapshot_preview1 surface directly without
+// going through the convenience read_file / write_file builtins.
+//
+// Why a separate test from examples/file_wasm.nova:
+//
+//   * file_wasm.nova covers the high-level read_file/write_file path that
+//     is the day-to-day NOVA serverless API. It allocates a 512 KiB
+//     buffer up front and is fine for small artefacts.
+//
+//   * THIS file covers the low-level API a NOVA program wants when it
+//     needs streaming I/O, partial reads, in-place updates, or filestat
+//     metadata (size + mtime + kind). Those are the building blocks for
+//     CrossEngin's on-disk caches and the upcoming WASM CDN-edge handler.
+//
+// Pipeline (driven by `make smoke-wasi-preopens`):
+//
+//   bin/nova examples/wasi_file_roundtrip.nova --target=wasm \
+//       -o bin/wasi_file_roundtrip.wat
+//   wat2wasm bin/wasi_file_roundtrip.wat -o bin/wasi_file_roundtrip.wasm
+//   wasmtime run --dir=/tmp bin/wasi_file_roundtrip.wasm
+//
+// The program:
+//   1. wasi_open("/tmp/wasi_rt.txt", CREAT|TRUNC) -> fd
+//   2. wasi_write(fd, payload, len) writes "hello wasi"
+//   3. wasi_close(fd)
+//   4. wasi_filestat("/tmp/wasi_rt.txt") -> [size, mtime, kind]
+//      Assert size == 10, kind == 4 (regular file).
+//   5. wasi_open("/tmp/wasi_rt.txt", 0) -> fd (read-only)
+//   6. wasi_read(fd, buf, 10) -> nread == 10
+//   7. wasi_close(fd)
+//   8. Verify the bytes round-tripped exactly.
+//
+// Exits 0 on success, 1 on any failure (with a FAIL: line that names the
+// specific assertion). Designed to be readable by a CI grep.
+
+fn main() {
+    let path = "/tmp/wasi_rt.txt"
+    let payload = "hello wasi"
+    let payload_len = 10
+
+    // ---- Step 1-3: open + write + close --------------------------------
+    // CREAT|TRUNC -> WASI oflag bits 0|3 = 9 (matches write_file's path).
+    let wfd = wasi_open(path, 9)
+    if wfd < 0 {
+        println("FAIL: wasi_open(CREAT|TRUNC) returned -1")
+        exit(1)
+    }
+
+    let nw = wasi_write(wfd, payload, payload_len)
+    if nw != payload_len {
+        println("FAIL: wasi_write nbytes mismatch")
+        exit(1)
+    }
+
+    let cw = wasi_close(wfd)
+    if cw != 0 {
+        println("FAIL: wasi_close (write fd) returned -1")
+        exit(1)
+    }
+
+    // ---- Step 4: filestat ----------------------------------------------
+    let stat = wasi_filestat(path)
+    if stat == 0 {
+        println("FAIL: wasi_filestat returned nil")
+        exit(1)
+    }
+    let sz = stat[0]
+    let kind = stat[2]
+    if sz != payload_len {
+        println("FAIL: wasi_filestat size mismatch")
+        exit(1)
+    }
+    if kind != 4 {
+        println("FAIL: wasi_filestat kind != regular_file (4)")
+        exit(1)
+    }
+
+    // ---- Step 5-7: re-open + read + close ------------------------------
+    // Re-open read-only (flags=0 -> base O_RDWR on Linux; WASI ignores
+    // bit 1/2 since we don't pass them).
+    let rfd = wasi_open(path, 0)
+    if rfd < 0 {
+        println("FAIL: wasi_open(read) returned -1")
+        exit(1)
+    }
+
+    let buf = alloc(64)
+    let nr = wasi_read(rfd, buf, payload_len)
+    if nr != payload_len {
+        println("FAIL: wasi_read nbytes mismatch")
+        exit(1)
+    }
+
+    let cr = wasi_close(rfd)
+    if cr != 0 {
+        println("FAIL: wasi_close (read fd) returned -1")
+        exit(1)
+    }
+
+    // ---- Step 8: byte-by-byte verify -----------------------------------
+    // The 10 bytes of "hello wasi" are at offsets 0..9. We use char_at,
+    // which reads an unsigned byte at offset i from a string-like ptr.
+    // The bracketing test (first + last byte) is a tight signal that
+    // both the open/write side and the open/read side moved data
+    // correctly past the WASI iovec boundary.
+    let first = char_at(buf, 0)
+    let last  = char_at(buf, 9)
+    if first != 104 {   // 'h' = 0x68
+        println("FAIL: read buf[0] != 'h'")
+        exit(1)
+    }
+    if last != 105 {    // 'i' = 0x69
+        println("FAIL: read buf[9] != 'i'")
+        exit(1)
+    }
+
+    println("OK: wasi low-level round-trip succeeded")
+}
+
+main()

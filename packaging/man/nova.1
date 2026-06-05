@@ -1,0 +1,92 @@
+.TH NOVA 1 "June 2026" "nova 0.1.0" "Nova Manual"
+.SH NAME
+nova \- self-hosting Nova programming language compiler
+.SH SYNOPSIS
+.B nova
+.RI [ options ]
+.IR source.nova \ \-o\  out.s
+.PP
+.B nova \-\-version
+.PP
+.B nova \-\-help
+.SH DESCRIPTION
+.B nova
+compiles Nova source files to native machine code via GAS assembly.
+The compiler emits architecture-specific assembly that is then handed
+off to
+.B as
+and
+.B ld
+(or the cross-toolchain equivalent for the selected target).
+.PP
+Nova is self-hosting: the compiler is written in Nova and bootstraps
+itself in two stages through a minimal assembly trampoline at
+.IR boot/nova_boot.s .
+There is no libc dependency at runtime; the compiler issues Linux
+syscalls directly.
+.SH OPTIONS
+.TP
+.B \-\-version
+Print the compiler version and exit.
+.TP
+.B \-\-help
+Print a usage summary and exit.
+.TP
+.BI \-o " file"
+Write the emitted assembly to
+.IR file .
+The default target is the native Linux x86-64 ABI.
+.TP
+.BI \-\-target= name
+Cross-compile for an alternate target. Recognised names include
+.IR linux ,
+.IR windows ,
+.IR windows\-arm64 ,
+.IR macos ,
+.IR arm64 ,
+.IR wasm .
+.TP
+.B \-\-link\-libc
+Emit a startup stub that links against libc / libdl for FFI support.
+The default is a libc-free direct-syscall runtime.
+.SH FILES
+.TP
+.I /usr/local/bin/nova
+Compiler binary.
+.TP
+.I /usr/share/doc/nova/examples/
+Example Nova programs shipped with the package.
+.TP
+.I /usr/share/man/man1/nova.1
+This manual page.
+.SH EXAMPLES
+Compile and run a hello-world program:
+.PP
+.RS
+.nf
+nova hello.nova \-o /tmp/hello.s
+as \-o /tmp/hello.o /tmp/hello.s
+ld \-o /tmp/hello /tmp/hello.o
+/tmp/hello
+.fi
+.RE
+.PP
+Cross-compile to Windows:
+.PP
+.RS
+.nf
+nova hello.nova \-\-target=windows \-o /tmp/hello.s
+x86_64\-w64\-mingw32\-as \-o /tmp/hello.o /tmp/hello.s
+x86_64\-w64\-mingw32\-ld \-o hello.exe /tmp/hello.o \-lkernel32 \-lmsvcrt
+.fi
+.RE
+.SH SEE ALSO
+.BR as (1),
+.BR ld (1),
+.BR gcc (1).
+.PP
+Project homepage:
+.UR https://github.com/nova\-lang/nova
+.UE
+.SH AUTHORS
+The Nova project. Licensed under the MIT license.

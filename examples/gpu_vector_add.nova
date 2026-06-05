@@ -1,0 +1,82 @@
+// Cross-platform smoke test for GPU compute.
+//
+// NOVA's compiler does not (yet) emit SPIR-V or WGSL bytecode; the
+// minimum-viable path is to emit a WGSL shader as a *string* plus the
+// dispatch parameters as a text config file, then hand both off to a
+// small Rust shim that drives the wgpu crate.
+//
+// The smoke does the GPU-side equivalent of `c[i] = a[i] + b[i]` for
+// 1M int32 elements. NOVA writes:
+//   - bin/gpu_vector_add.wgsl    -- the compute shader (WGSL)
+//   - bin/gpu_vector_add.cfg     -- "n=<count>" on one line,
+//                                   "workgroup=<count>" on the next
+//
+// The shim (scripts/wgpu_dispatch) reads both, allocates host arrays
+// with the same deterministic fill pattern, dispatches the shader,
+// reads back the result, compares against CPU baseline, and prints
+// timing. See GPU_AUDIT.md for the full design + alternatives.
+//
+// Run via:
+//   make smoke-gpu
+
+fn main() {
+    println("=== NOVA WGSL/wgpu vector-add smoke ===")
+
+    let n = 1000000
+    let workgroup = 64
+
+    // The WGSL kernel. Three storage buffers (a, b read; c read_write),
+    // one workgroup of 64 threads, classic SIMT vector-add. The same
+    // shader source compiles down to SPIR-V on Vulkan, MSL on Metal,
+    // HLSL on D3D12, or WGSL bytecode on WebGPU; the Rust shim does
+    // the host-side dispatch.
+    let shader = "@group(0) @binding(0) var<storage, read>       a: array<i32>;\n"
+    shader = shader + "@group(0) @binding(1) var<storage, read>       b: array<i32>;\n"
+    shader = shader + "@group(0) @binding(2) var<storage, read_write> c: array<i32>;\n"
+    shader = shader + "\n"
+    shader = shader + "@compute @workgroup_size(64)\n"
+    shader = shader + "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n"
+    shader = shader + "    let i = gid.x;\n"
+    shader = shader + "    if (i >= arrayLength(&a)) { return; }\n"
+    shader = shader + "    c[i] = a[i] + b[i];\n"
+    shader = shader + "}\n"
+
+    // Dispatch config. The shim parses simple "key=value" lines so it
+    // does not need a JSON / TOML parser dependency.
+    let cfg = "n="
+    cfg = cfg + int_to_str(n)
+    cfg = cfg + "\nworkgroup="
+    cfg = cfg + int_to_str(workgroup)
+    cfg = cfg + "\n"
+
+    let shader_path = "bin/gpu_vector_add.wgsl"
+    let cfg_path = "bin/gpu_vector_add.cfg"
+
+    let w1 = write_file(shader_path, shader)
+    if w1 == 1 {
+        print("  wrote ")
+        println(shader_path)
+    } else {
+        println("  write_file failed for shader")
+    }
+
+    let w2 = write_file(cfg_path, cfg)
+    if w2 == 1 {
+        print("  wrote ")
+        println(cfg_path)
+    } else {
+        println("  write_file failed for cfg")
+    }
+
+    print("  n = ")
+    print_int(n)
+    println("")
+    print("  workgroup_size = ")
+    print_int(workgroup)
+    println("")
+    println("  next step: ./scripts/wgpu_dispatch/target/release/wgpu_dispatch \\")
+    println("             bin/gpu_vector_add.wgsl bin/gpu_vector_add.cfg")
+    println("done")
+}
+
+main()

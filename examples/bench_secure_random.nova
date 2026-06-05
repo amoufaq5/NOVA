@@ -1,0 +1,113 @@
+// Benchmark: measure secure_random throughput in bytes/second.
+//
+// Strategy: allocate one 1 MB buffer, fill it ITER times via
+// secure_random, measure wall-clock time around the loop with a
+// CLOCK_MONOTONIC nanosecond reader (inline asm, same shape as
+// src/runtime/io.nova:nanotime), then report total bytes / total
+// seconds.
+//
+// Per-target source of entropy:
+//   Linux x86-64: getrandom syscall #318 (no /dev/urandom fallback
+//                 needed on >=3.17 kernels, which is everything
+//                 modern in 2026)
+//   macOS:        BSD getentropy #500 in 256-byte chunks
+//   Windows:      BCryptGenRandom (bcrypt.dll)
+//
+// Typical throughput numbers (kernel-bound, not CPU-bound):
+//   - Linux getrandom on modern x86-64: tens of MB/s for the urandom
+//     pool, capped at the CRNG drain rate.
+//   - macOS getentropy: lower because of the 256-byte ceiling
+//     (more syscalls per MB).
+//   - BCryptGenRandom: typically the fastest of the three.
+
+let ONE_MB = 1048576
+let ITER = 8
+
+// Monotonic-clock nanosecond reader. Mirrors src/runtime/io.nova:
+// nanotime() but kept local so the benchmark stands alone (no import).
+fn _sys_clock_gettime_monotonic(ts) {
+    asm {
+        "mov rax, 228"
+        "mov rdi, 1"
+        "mov rsi, [rbp-8]"
+        "syscall"
+    }
+}
+
+// Multiply-add that bypasses _nova_mul / _nova_add pointer-threshold
+// dispatch so we can compose values above 0x100000 without triggering
+// str_repeat / str_concat. Computes a * b + c.
+fn _raw_imul_add(a, b, c) {
+    asm {
+        "mov rax, [rbp-8]"
+        "imul rax, [rbp-16]"
+        "add rax, [rbp-24]"
+    }
+}
+
+fn nano_now() {
+    let ts = alloc(16)
+    _sys_clock_gettime_monotonic(ts)
+    let sec = load64(ts)
+    let nsec = load64(int_add(ts, 8))
+    return _raw_imul_add(sec, 1000000000, nsec)
+}
+
+fn main() {
+    println("=== secure_random throughput benchmark ===")
+    print("Iterations: ")
+    print_int(ITER)
+    print(" x ")
+    print_int(ONE_MB)
+    println(" bytes")
+
+    let big = alloc(ONE_MB)
+
+    // Warmup: one fill so the entropy pool has primed.
+    let warm = secure_random(big, ONE_MB)
+    if warm != ONE_MB {
+        println("WARMUP FAILED: secure_random returned wrong byte count")
+        exit(1)
+    }
+
+    let t_start = nano_now()
+    let i = 0
+    while i < ITER {
+        let n = secure_random(big, ONE_MB)
+        if n != ONE_MB {
+            println("FAIL: short fill mid-bench")
+            exit(1)
+        }
+        i = i + 1
+    }
+    let t_end = nano_now()
+
+    let total_bytes = int_mul(ITER, ONE_MB)
+    let elapsed_ns = t_end - t_start
+
+    print("Total bytes:    ")
+    print_int(total_bytes)
+    println("")
+    print("Elapsed ns:     ")
+    print_int(elapsed_ns)
+    println("")
+
+    // Throughput in MB/s. Scale carefully to stay in i64:
+    //   total_bytes  ~ 8 MB        = 8e6  (small)
+    //   elapsed_ns   ~ 1e8 .. 1e9 (small)
+    //   bytes_per_sec = total_bytes * 1e9 / elapsed_ns
+    // Use int_div / int_mul (escape hatches around PTR_THRESHOLD).
+    if elapsed_ns > 0 {
+        let scaled = int_mul(total_bytes, 1000000000)
+        let bytes_per_sec = int_div(scaled, elapsed_ns)
+        let mb_per_sec = int_div(bytes_per_sec, 1000000)
+        print("Throughput:     ")
+        print_int(bytes_per_sec)
+        print(" bytes/s (")
+        print_int(mb_per_sec)
+        println(" MB/s)")
+    }
+    println("done.")
+}
+
+main()

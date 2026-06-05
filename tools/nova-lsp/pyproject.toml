@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nova-lsp"
+version = "0.1.0"
+description = "Language Server Protocol implementation for the Nova programming language."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Nova Language Authors" }]
+keywords = ["nova", "lsp", "language-server"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Compilers",
+  "Programming Language :: Python :: 3",
+]
+
+[project.scripts]
+nova-lsp = "nova_lsp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nova_lsp*"]

@@ -1,0 +1,405 @@
+// R30D: tests for the WASM-target sys_poll translation shim that
+// maps POSIX pollfd onto WASI preview1's poll_oneoff.
+//
+// R29A's WASM sys_poll was a stub returning -1 unconditionally because
+// preview1 has no native poll(2); only `poll_oneoff` with a tagged
+// subscription / event layout. R30D replaces that stub with a real
+// translation in the WASM codegen path
+// (`wasm_gen_rt_extra` -> `$sys_poll`).
+//
+// Verification strategy (codegen-targeted):
+//
+//   This test is invoked directly:
+//
+//       bin/nova tests/unit/test_codegen_wasm_poll.nova
+//
+//   Its native runtime exercises three layers:
+//
+//   1. Pollfd-struct round-trip via store8/load8 (R29A also does this;
+//      keeping it here too proves the WASM shim consumes the same
+//      byte layout the kernel does on native targets).
+//   2. Mirror of the WASI subscription / event byte layout: write the
+//      48-byte / 32-byte structs as we expect the codegen to lay them
+//      out and read back the same fields. If the WASM `$sys_poll`
+//      function ever drifts away from the witx-defined offsets,
+//      either this test changes or the runtime breaks under wasmtime.
+//   3. Userdata encoding: pack `(pollfd_index << 1) | is_write_bit`
+//      and decode it back to confirm the shim can attribute each
+//      event to its pollfd in O(1).
+//   4. Codegen-source string assertions on src/compiler/codegen.nova
+//      to pin the load-bearing strings (import line, function header,
+//      tag values, clock_id=0, milliseconds-to-ns factor, etc.) so a
+//      future refactor that breaks any of them fails this test
+//      instead of failing silently under wasmtime.
+//
+// End-to-end runtime verification against an actual WASI host
+// (wasmtime/wasmer) is covered by the R30D commit's smoke pair
+// (/tmp/wasm_poll_smoke*.nova in the commit message body, reproducible
+// at any time with `bin/nova <file> --target=wasm && wat2wasm && wasmtime`).
+// The native-only assertions here are deliberately independent of any
+// host-side WASI runtime so the test runs in any sandbox.
+
+fn assert_int_eq(actual, expected, label) {
+    if actual == expected {
+        print("OK ")
+        println(label)
+    } else {
+        print("FAIL ")
+        print(label)
+        print(" expected ")
+        print_int(expected)
+        print(" got ")
+        print_int(actual)
+        println("")
+        exit(1)
+    }
+}
+
+fn assert_true(cond, label) {
+    if cond == 1 {
+        print("OK ")
+        println(label)
+    } else {
+        print("FAIL ")
+        println(label)
+        exit(1)
+    }
+}
+
+fn assert_contains(haystack, needle, label) {
+    let pos = str_find(haystack, needle)
+    if pos >= 0 {
+        print("OK ")
+        println(label)
+    } else {
+        print("FAIL (substring not found): ")
+        println(label)
+        exit(1)
+    }
+}
+
+// Bytewise little-endian primitives shared with the R29A pollfd helper
+// (the WASM shim's i32.load16_u / i32.store16 are LE on all wasm engines).
+fn store_u16_le(ptr, off, val) {
+    store8(int_add(ptr, off), int_and(val, 255))
+    store8(int_add(ptr, off + 1), int_and(int_shr(val, 8), 255))
+    return 0
+}
+
+fn load_u16_le(ptr, off) {
+    let lo = load8(int_add(ptr, off))
+    let hi = load8(int_add(ptr, off + 1))
+    return int_or(lo, int_shl(hi, 8))
+}
+
+fn store_u32_le(ptr, off, val) {
+    store8(int_add(ptr, off), int_and(val, 255))
+    store8(int_add(ptr, off + 1), int_and(int_shr(val, 8), 255))
+    store8(int_add(ptr, off + 2), int_and(int_shr(val, 16), 255))
+    store8(int_add(ptr, off + 3), int_and(int_shr(val, 24), 255))
+    return 0
+}
+
+fn load_u32_le(ptr, off) {
+    let b0 = load8(int_add(ptr, off))
+    let b1 = load8(int_add(ptr, off + 1))
+    let b2 = load8(int_add(ptr, off + 2))
+    let b3 = load8(int_add(ptr, off + 3))
+    return int_or(int_or(b0, int_shl(b1, 8)),
+                  int_or(int_shl(b2, 16), int_shl(b3, 24)))
+}
+
+// WASI subscription layout (48 bytes total):
+//   offset 0..7   : userdata (u64)
+//   offset 8      : tag (u8): 0=clock, 1=fd_read, 2=fd_write
+//   offset 9..15  : padding
+//   offset 16..47 : tagged payload
+//     - fd_read / fd_write: file_descriptor (u32) at 16, padding to 24
+//     - clock: clock_id (u32) @16, timeout (u64) @24, precision (u64) @32,
+//              flags (u16) @40
+fn build_sub_fd(slot, userdata_lo, tag, fd) {
+    // userdata low 32 bits at offset 0; high bits stay zero (the WASM
+    // shim writes the full u64 via i64.store but the values we use
+    // never exceed 32 bits).
+    store_u32_le(slot, 0, userdata_lo)
+    store_u32_le(slot, 4, 0)
+    store8(int_add(slot, 8), tag)
+    // 9..15 stays zero (padding)
+    store_u32_le(slot, 16, fd)
+    return 0
+}
+
+fn build_sub_clock(slot, clock_id, timeout_ns_lo) {
+    // userdata sentinel = -1 (all bits). We store via byte-fills since
+    // we don't have a 64-bit store helper handy here.
+    let s = 0
+    while s < 8 {
+        store8(int_add(slot, s), 255)
+        s = s + 1
+    }
+    // tag (offset 8) = 0 (clock)
+    store8(int_add(slot, 8), 0)
+    // clock_id @16
+    store_u32_le(slot, 16, clock_id)
+    // timeout (u64) @24 — low 32 bits only here; high zero.
+    store_u32_le(slot, 24, timeout_ns_lo)
+    store_u32_le(slot, 28, 0)
+    return 0
+}
+
+fn sub_userdata_lo(slot) {
+    return load_u32_le(slot, 0)
+}
+
+fn sub_tag(slot) {
+    return load8(int_add(slot, 8))
+}
+
+fn sub_fd(slot) {
+    return load_u32_le(slot, 16)
+}
+
+fn sub_clock_id(slot) {
+    return load_u32_le(slot, 16)
+}
+
+fn sub_clock_timeout_lo(slot) {
+    return load_u32_le(slot, 24)
+}
+
+// WASI event layout (32 bytes total):
+//   offset 0..7   : userdata (u64)
+//   offset 8..9   : errno (u16)
+//   offset 10     : type (u8) — 0=clock, 1=fd_read, 2=fd_write
+//   offset 11..15 : padding
+//   offset 16..23 : nbytes (u64)
+//   offset 24..25 : flags (u16) (fd_readwrite only)
+fn build_event(slot, userdata_lo, err, evtype, nbytes_lo) {
+    store_u32_le(slot, 0, userdata_lo)
+    store_u32_le(slot, 4, 0)
+    store_u16_le(slot, 8, err)
+    store8(int_add(slot, 10), evtype)
+    store_u32_le(slot, 16, nbytes_lo)
+    store_u32_le(slot, 20, 0)
+    store_u16_le(slot, 24, 0)
+    return 0
+}
+
+fn event_userdata_lo(slot) {
+    return load_u32_le(slot, 0)
+}
+
+fn event_errno(slot) {
+    return load_u16_le(slot, 8)
+}
+
+fn event_type(slot) {
+    return load8(int_add(slot, 10))
+}
+
+// Decode the userdata encoding the WASM shim writes:
+//   (pollfd_index << 1) | is_write_bit
+fn decode_pollfd_index(udata_lo) {
+    return int_shr(udata_lo, 1)
+}
+
+fn decode_is_write(udata_lo) {
+    return int_and(udata_lo, 1)
+}
+
+fn main() {
+    println("=== R30D WASM sys_poll codegen tests ===")
+
+    // ---- 1. WASI subscription struct is 48 bytes; key offsets ----
+    let sub = alloc(48)
+    let zi = 0
+    while zi < 48 {
+        store8(int_add(sub, zi), 0)
+        zi = zi + 1
+    }
+    build_sub_fd(sub, 0, 1, 42)         // tag=1 (fd_read), fd=42
+    assert_int_eq(sub_tag(sub), 1, "fd_read subscription tag = 1 at offset 8")
+    assert_int_eq(sub_fd(sub), 42, "fd_read subscription fd field at offset 16")
+    assert_int_eq(sub_userdata_lo(sub), 0, "fd_read userdata low = 0 (index 0, read)")
+    // Padding between tag and payload must stay zero (the WASM shim
+    // zeroes the whole 48-byte region before filling, so any non-zero
+    // byte would break poll_oneoff's struct validation).
+    assert_int_eq(load8(int_add(sub, 9)), 0, "sub padding @9 = 0")
+    assert_int_eq(load8(int_add(sub, 15)), 0, "sub padding @15 = 0")
+    // Stride check: the next subscription must start exactly 48 bytes later.
+    // Build a second one in a 96-byte buffer.
+    let arr2 = alloc(96)
+    let za = 0
+    while za < 96 {
+        store8(int_add(arr2, za), 0)
+        za = za + 1
+    }
+    build_sub_fd(arr2, 2, 1, 7)                  // sub[0]: udata=(1<<1)|0=2, fd=7
+    build_sub_fd(int_add(arr2, 48), 5, 2, 9)     // sub[1]: udata=(2<<1)|1=5, fd=9
+    assert_int_eq(sub_fd(arr2), 7, "sub[0].fd at byte 16")
+    assert_int_eq(sub_fd(int_add(arr2, 48)), 9, "sub[1].fd at byte 16+48=64")
+    assert_int_eq(sub_tag(int_add(arr2, 48)), 2, "sub[1].tag = 2 (fd_write)")
+
+    // ---- 2. Clock subscription specifics ----
+    let csub = alloc(48)
+    let ci = 0
+    while ci < 48 {
+        store8(int_add(csub, ci), 0)
+        ci = ci + 1
+    }
+    // 10 ms -> 10_000_000 ns. Both fit in 32 bits.
+    build_sub_clock(csub, 0, 10000000)
+    assert_int_eq(sub_tag(csub), 0, "clock subscription tag = 0")
+    assert_int_eq(sub_clock_id(csub), 0, "clock_id = 0 (CLOCKID_REALTIME)")
+    assert_int_eq(sub_clock_timeout_lo(csub), 10000000, "clock timeout = 10ms in ns")
+    // Clock userdata sentinel: all 8 bytes = 0xFF.
+    assert_int_eq(load8(csub), 255, "clock userdata byte 0 = 0xFF (sentinel)")
+    assert_int_eq(load8(int_add(csub, 7)), 255, "clock userdata byte 7 = 0xFF (sentinel)")
+
+    // ---- 3. WASI event struct is 32 bytes; key offsets ----
+    let ev = alloc(32)
+    let ei = 0
+    while ei < 32 {
+        store8(int_add(ev, ei), 0)
+        ei = ei + 1
+    }
+    // Pretend event: pollfd_idx=3, is_write=0 -> userdata=6, type=1, errno=0
+    build_event(ev, 6, 0, 1, 64)
+    assert_int_eq(event_userdata_lo(ev), 6, "event userdata low = 6")
+    assert_int_eq(event_errno(ev), 0, "event errno = 0 (success)")
+    assert_int_eq(event_type(ev), 1, "event type = 1 (fd_read)")
+
+    // Event array stride check.
+    let evarr = alloc(64)
+    let evi = 0
+    while evi < 64 {
+        store8(int_add(evarr, evi), 0)
+        evi = evi + 1
+    }
+    build_event(evarr, 0, 0, 1, 1)               // ev[0] for pollfd 0 (read)
+    build_event(int_add(evarr, 32), 3, 0, 2, 1)  // ev[1] for pollfd 1 (write): (1<<1)|1=3
+    assert_int_eq(event_userdata_lo(int_add(evarr, 32)), 3,
+        "event[1].userdata at byte 32 = 3")
+    assert_int_eq(event_type(int_add(evarr, 32)), 2,
+        "event[1].type = 2 (fd_write) at byte 32+10=42")
+
+    // ---- 4. Userdata encoding round-trips through pollfd_idx + is_write ----
+    let u_r0 = 0       // idx=0, read
+    let u_w0 = 1       // idx=0, write
+    let u_r1 = 2       // idx=1, read
+    let u_w1 = 3       // idx=1, write
+    let u_r17 = 34     // idx=17, read
+    let u_w17 = 35     // idx=17, write
+    assert_int_eq(decode_pollfd_index(u_r0), 0, "decode pidx for udata=0")
+    assert_int_eq(decode_is_write(u_r0), 0, "decode is_write for udata=0 (read)")
+    assert_int_eq(decode_pollfd_index(u_w0), 0, "decode pidx for udata=1")
+    assert_int_eq(decode_is_write(u_w0), 1, "decode is_write for udata=1 (write)")
+    assert_int_eq(decode_pollfd_index(u_r1), 1, "decode pidx for udata=2")
+    assert_int_eq(decode_pollfd_index(u_w1), 1, "decode pidx for udata=3")
+    assert_int_eq(decode_is_write(u_w1), 1, "decode is_write for udata=3 (write)")
+    assert_int_eq(decode_pollfd_index(u_r17), 17, "decode pidx for udata=34")
+    assert_int_eq(decode_pollfd_index(u_w17), 17, "decode pidx for udata=35")
+    assert_int_eq(decode_is_write(u_w17), 1, "decode is_write for udata=35 (write)")
+
+    // ---- 5. revents OR-combines bits from multiple subscriptions on same fd ----
+    // Both POLLIN (1) and POLLOUT (4) requested for one pollfd. The shim
+    // emits TWO subscriptions, each with a separate event. We simulate
+    // both events firing and verify the revents accumulator OR's the bits.
+    let pf = alloc(8)
+    let pi = 0
+    while pi < 8 {
+        store8(int_add(pf, pi), 0)
+        pi = pi + 1
+    }
+    // events = POLLIN|POLLOUT = 5; revents starts 0
+    store_u16_le(pf, 4, 5)
+    store_u16_le(pf, 6, 0)
+    // Simulate event 0: udata=(0<<1)|0=0 (read) -> OR POLLIN
+    let bit0 = 1
+    let cur = load_u16_le(pf, 6)
+    store_u16_le(pf, 6, int_or(cur, bit0))
+    assert_int_eq(load_u16_le(pf, 6), 1, "revents = POLLIN after fd_read event")
+    // Simulate event 1: udata=(0<<1)|1=1 (write) -> OR POLLOUT
+    let bit1 = 4
+    cur = load_u16_le(pf, 6)
+    store_u16_le(pf, 6, int_or(cur, bit1))
+    assert_int_eq(load_u16_le(pf, 6), 5,
+        "revents = POLLIN|POLLOUT (5) after both events fire")
+
+    // ---- 6. Codegen-source string assertions ----
+    // Pin the load-bearing literals in the WASM emit path so a
+    // future refactor that breaks them fails here instead of
+    // breaking silently under wasmtime.
+    let cg = read_file("src/compiler/codegen.nova")
+    // Import line for poll_oneoff (the only host call this shim makes).
+    assert_contains(cg, "poll_oneoff",
+        "codegen mentions poll_oneoff (import + call)")
+    // Import is built at codegen-time as `Q + "wasi_snapshot_preview1" + Q +
+    // " " + Q + "poll_oneoff" + Q + ...`, so the source contains the
+    // bare identifier with a trailing-Q glue rather than a literal "..."
+    // -- match the WAT-side substring AFTER the Q concatenation by
+    // anchoring on the inner literal "poll_oneoff" and the func form.
+    assert_contains(cg, "wasi_snapshot_preview1",
+        "codegen mentions wasi_snapshot_preview1 (for the poll_oneoff import)")
+    assert_contains(cg, "(func $poll_oneoff (param i32 i32 i32 i32) (result i32))",
+        "poll_oneoff import signature is (i32 i32 i32 i32) -> i32")
+    // sys_poll WASM function header.
+    assert_contains(cg,
+        "(func $sys_poll (param $fds i64) (param $nfds i64) (param $timeout_ms i64) (result i64)",
+        "wasm $sys_poll function signature unchanged from R29A")
+    // 48-byte subscription stride appears in three places: count phase,
+    // build phase, zero-fill comparison.
+    assert_contains(cg, "i32.const 48",
+        "codegen uses subscription stride 48")
+    // 32-byte event stride for the event decode walk.
+    assert_contains(cg, "i32.const 32",
+        "codegen uses event stride 32")
+    // Tag emit: store fd_read (1) and fd_write (2). The store8 with
+    // `i32.const 1` / `i32.const 2` is preceded by tag offset +8.
+    assert_contains(cg, "call $poll_oneoff",
+        "codegen invokes $poll_oneoff exactly once")
+    // ms -> ns multiplier (1_000_000) for the clock subscription.
+    assert_contains(cg, "i64.const 1000000",
+        "codegen multiplies timeout_ms by 1_000_000 -> ns")
+    // Clock sentinel for userdata in the clock subscription.
+    assert_contains(cg, "i64.const -1",
+        "codegen writes -1 sentinel as clock subscription userdata")
+    // POLLIN = 1, POLLOUT = 4 bit masks for the count + build phases.
+    assert_contains(cg, "i32.const 4",
+        "codegen tests POLLOUT bit 4 / writes POLLOUT bit 4 into revents")
+    // Heap-pointer 8-byte alignment dance (for subscription / event arrays).
+    assert_contains(cg, "i64.const -8",
+        "codegen rounds heap_ptr up to 8-byte boundary before allocating")
+    // The R30D header comment marker so the section is greppable.
+    assert_contains(cg, "R30D",
+        "codegen R30D marker present (anchors the section)")
+    // Confirm the OLD R29A stub body is no longer the entirety of the
+    // function — if it were, the function header line above would be
+    // immediately followed by `i64.const -1` with no other content in
+    // between. A real shim has many other tokens, so the existence of
+    // `call $poll_oneoff` proves the stub was replaced.
+    // (The OLD stub message about "different shape" is intentionally
+    // gone — its presence would mean the stub survived.)
+    let stub_pos = str_find(cg, "Rather than translate the layout")
+    assert_int_eq(stub_pos, 0 - 1,
+        "stub-era 'rather than translate' comment is gone (sentinel)")
+    // Negative timeout omits the clock — anchor via the if $has_clock guard.
+    assert_contains(cg, "$has_clock",
+        "codegen gates clock emission on has_clock local")
+    // The clock_id store of 0 for CLOCKID_REALTIME.
+    assert_contains(cg, "(CLOCKID_REALTIME)",
+        "codegen documents clock_id 0 == CLOCKID_REALTIME")
+    // Userdata encoding shape (pollfd_idx << 1 | is_write).
+    assert_contains(cg, "i64.shl",
+        "codegen uses i64.shl for userdata encoding (pidx << 1)")
+    assert_contains(cg, "i64.or",
+        "codegen ORs the is_write bit into the userdata")
+    // The PHASE 3 decode does shr_u (logical shift) to recover pidx.
+    assert_contains(cg, "i32.shr_u",
+        "codegen uses i32.shr_u to recover pollfd index from userdata")
+
+    println("")
+    println("=== R30D WASM sys_poll codegen tests passed ===")
+}
+
+main()

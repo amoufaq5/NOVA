@@ -1,0 +1,323 @@
+================================================================================
+R33C: simple if let with else (statement form)
+================================================================================
+
+fn extract(o) {
+    if let Option::Some(v) = o {
+        return v
+    } else {
+        return -1
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_let_statement
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (identifier))
+        value: (identifier)
+        consequence: (block
+          (return_statement
+            value: (identifier)))
+        alternative: (block
+          (return_statement
+            value: (unary_expression
+              operand: (number))))))))
+
+================================================================================
+R33C: if let with no else (statement form)
+================================================================================
+
+fn first_some(o) {
+    if let Option::Some(v) = o {
+        return v
+    }
+    return 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_let_statement
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (identifier))
+        value: (identifier)
+        consequence: (block
+          (return_statement
+            value: (identifier))))
+      (return_statement
+        value: (number)))))
+
+================================================================================
+R33C: if let with bare-ident variant pattern
+================================================================================
+
+fn extract(o) {
+    if let Some(v) = o {
+        return v
+    } else {
+        return -1
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_let_statement
+        pattern: (variant_pattern
+          path: (identifier)
+          (identifier))
+        value: (identifier)
+        consequence: (block
+          (return_statement
+            value: (identifier)))
+        alternative: (block
+          (return_statement
+            value: (unary_expression
+              operand: (number))))))))
+
+================================================================================
+R33C: if let with nested variant pattern
+================================================================================
+
+fn deep(o) {
+    if let OptOpt::SS(Option::Some(v)) = o {
+        return v
+    } else {
+        return -200
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_let_statement
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (variant_pattern
+            path: (path_expression
+              type: (identifier)
+              member: (identifier))
+            (identifier)))
+        value: (identifier)
+        consequence: (block
+          (return_statement
+            value: (identifier)))
+        alternative: (block
+          (return_statement
+            value: (unary_expression
+              operand: (number))))))))
+
+================================================================================
+R33C: if let / else if let chain
+================================================================================
+
+fn dispatch(o, r) {
+    if let Option::Some(v) = o {
+        return v
+    } else if let Result::Ok(w) = r {
+        return w
+    } else {
+        return -1
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_let_statement
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (identifier))
+        value: (identifier)
+        consequence: (block
+          (return_statement
+            value: (identifier)))
+        alternative: (if_let_statement
+          pattern: (variant_pattern
+            path: (path_expression
+              type: (identifier)
+              member: (identifier))
+            (identifier))
+          value: (identifier)
+          consequence: (block
+            (return_statement
+              value: (identifier)))
+          alternative: (block
+            (return_statement
+              value: (unary_expression
+                operand: (number)))))))))
+
+================================================================================
+R33C: nested if let inside if let
+================================================================================
+
+fn double(o) {
+    if let Option::Some(v) = o {
+        if let Option::None = o {
+            return -1
+        }
+        return v
+    }
+    return 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_let_statement
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (identifier))
+        value: (identifier)
+        consequence: (block
+          (if_let_statement
+            pattern: (path_expression
+              type: (identifier)
+              member: (identifier))
+            value: (identifier)
+            consequence: (block
+              (return_statement
+                value: (unary_expression
+                  operand: (number)))))
+          (return_statement
+            value: (identifier))))
+      (return_statement
+        value: (number)))))
+
+================================================================================
+R33C: if let mixed with plain else if
+================================================================================
+
+fn extract(o, flag) {
+    if let Option::Some(v) = o {
+        return v
+    } else if flag == 1 {
+        return 99
+    } else {
+        return -1
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier))
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_let_statement
+        pattern: (variant_pattern
+          path: (path_expression
+            type: (identifier)
+            member: (identifier))
+          (identifier))
+        value: (identifier)
+        consequence: (block
+          (return_statement
+            value: (identifier)))
+        alternative: (if_statement
+          condition: (binary_expression
+            left: (identifier)
+            right: (number))
+          consequence: (block
+            (return_statement
+              value: (number)))
+          alternative: (block
+            (return_statement
+              value: (unary_expression
+                operand: (number)))))))))
+
+================================================================================
+R33C: if let with struct pattern
+================================================================================
+
+fn extract(p) {
+    if let Point { x, y } = p {
+        return x + y
+    } else {
+        return 0
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (if_let_statement
+        pattern: (struct_pattern
+          type: (identifier)
+          (struct_pattern_field_list
+            (struct_pattern_field
+              name: (identifier))
+            (struct_pattern_field
+              name: (identifier))))
+        value: (identifier)
+        consequence: (block
+          (return_statement
+            value: (binary_expression
+              left: (identifier)
+              right: (identifier))))
+        alternative: (block
+          (return_statement
+            value: (number)))))))

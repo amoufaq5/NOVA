@@ -1,0 +1,141 @@
+================================================================================
+R32D: let-destructure with tuple-like variant pattern (bare ident)
+================================================================================
+
+let Pair(a, b) = pair
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (variant_pattern
+      path: (identifier)
+      (identifier)
+      (identifier))
+    value: (identifier)))
+
+================================================================================
+R32D: let-destructure with path-qualified variant pattern
+================================================================================
+
+let Option::Some(x) = opt
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (variant_pattern
+      path: (path_expression
+        type: (identifier)
+        member: (identifier))
+      (identifier))
+    value: (identifier)))
+
+================================================================================
+R32D: let-destructure with nested variant pattern (Some(Some(v)))
+================================================================================
+
+let Some(Some(v)) = nested
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (variant_pattern
+      path: (identifier)
+      (variant_pattern
+        path: (identifier)
+        (identifier)))
+    value: (identifier)))
+
+================================================================================
+R32D: let-destructure mixing variant and struct patterns
+================================================================================
+
+let Ok(Point { x: px, y: py }) = res
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (variant_pattern
+      path: (identifier)
+      (struct_pattern
+        type: (identifier)
+        (struct_pattern_field_list
+          (struct_pattern_field
+            name: (identifier)
+            pattern: (identifier))
+          (struct_pattern_field
+            name: (identifier)
+            pattern: (identifier)))))
+    value: (identifier)))
+
+================================================================================
+R32D: let-destructure with wildcard binder
+================================================================================
+
+let Pair(a, _) = pair
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (variant_pattern
+      path: (identifier)
+      (identifier)
+      (wildcard_pattern))
+    value: (identifier)))
+
+================================================================================
+R32D: three-level deep nested variant pattern
+================================================================================
+
+let Outer(Mid(Inner(v))) = nested
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (variant_pattern
+      path: (identifier)
+      (variant_pattern
+        path: (identifier)
+        (variant_pattern
+          path: (identifier)
+          (identifier))))
+    value: (identifier)))
+
+================================================================================
+R32D: nested variant pattern in a match arm
+================================================================================
+
+let r = match outer {
+    Some(Some(v)) => v
+    Some(None) => 0
+    None => -1
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (variant_pattern
+          path: (identifier)
+          (variant_pattern
+            path: (identifier)
+            (identifier)))
+        value: (identifier))
+      (match_arm
+        pattern: (variant_pattern
+          path: (identifier)
+          (identifier))
+        value: (number))
+      (match_arm
+        pattern: (identifier)
+        value: (unary_expression
+          operand: (number))))))

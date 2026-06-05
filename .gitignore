@@ -2,11 +2,47 @@
 *.o
 *.s
 !boot/*.s
+!examples/hello_arm64_*_reference.s
 a.out
 output
 output.s
 bin/nova
 bin/nova.exe
+bin/hello_win32.exe
+bin/sock_win32.exe
+bin/pipe_win32.exe
+bin/win32_argv_envp.exe
+bin/nova_macos.s
+bin/hello_macos
+bin/hello.wat
+bin/hello.wasm
+bin/hello_android.o
+bin/hello_ios.o
+bin/hello_arm64.s
+bin/gpu_vector_add.wgsl
+bin/gpu_vector_add.cfg
+bin/hello_dwarf
+bin/file_wasm.wasm
+bin/file_wasm.wat
+bin/nova_windows.o
+bin/nova_windows.s
+bin/secure_random.exe
+bin/secure_random_macos
+bin/hello_secure_random.wasm
+bin/hello_winarm64.exe
+bin/secure_random_winarm64.exe
+bin/wasi_file_roundtrip.wat
+bin/wasi_file_roundtrip.wasm
+
+# release-dry-run.sh output (matches GH Actions release artifact layout)
+dist/
+
+# Smoke-test scratch outputs (write_file/read_file roundtrip artifacts).
+hello_win32_scratch.txt
+
+# Rust build artifacts for the GPU compute dispatch shim
+scripts/wgpu_dispatch/target/
+scripts/wgpu_dispatch/Cargo.lock
 
 # Bootstrap build intermediates
 boot/nova_boot.o
@@ -35,3 +71,25 @@ package.json
 # OS files
 .DS_Store
 Thumbs.db
+core
+core.*
+
+# IDE tooling artifacts
+tools/nova-lsp/__pycache__/
+tools/nova-lsp/**/__pycache__/
+tools/nova-lsp/*.egg-info/
+tools/nova-lsp/build/
+tools/nova-lsp/dist/
+tools/vscode-nova/*.vsix
+tools/vscode-nova/node_modules/
+
+# tree-sitter build artifacts (the grammar's own .gitignore covers the
+# in-tree generated src/parser.c et al; these patterns catch builds
+# triggered from the repo root by IDE bundle scripts).
+tools/tree-sitter-nova/build/
+tools/tree-sitter-nova/node_modules/
+tools/tree-sitter-nova/prebuilds/
+tools/tree-sitter-nova/src/parser.c
+tools/tree-sitter-nova/src/grammar.json
+tools/tree-sitter-nova/src/node-types.json
+tools/tree-sitter-nova/src/tree_sitter/

@@ -1,0 +1,382 @@
+// R37E: stdlib list combinators unit suite.
+//
+// Exercises every function defined in `src/stdlib/list.nova`:
+//
+//   list_map, list_filter, list_fold, list_take, list_drop,
+//   list_concat, list_zip, list_enumerate, list_find, list_any,
+//   list_all, list_reverse, list_sum
+//
+// Plus composition tests (chains of stdlib calls) demonstrating that
+// the R35C closures + R36C tuples flow through cleanly as library
+// values.
+//
+// Lives under tests/unit/ so the tests/run_tests.sh glob does NOT
+// pick it up — invoke directly via:
+//
+//   cat src/stdlib/list.nova tests/unit/test_stdlib_list.nova \
+//     > /tmp/stdlib_list_combined.nova
+//   bin/nova /tmp/stdlib_list_combined.nova -o /tmp/stdlib_list.s
+//   as -o /tmp/stdlib_list.o /tmp/stdlib_list.s
+//   ld -o /tmp/stdlib_list /tmp/stdlib_list.o
+//   /tmp/stdlib_list
+//
+// The concatenation is intentional: NOVA's import system already
+// works for self-host builds, but for unit testing we keep the same
+// single-file glue pattern test_closures / test_tuples use.
+
+let ok_count = 0
+let fail_count = 0
+
+fn check(cond, label) {
+    if cond == 1 {
+        ok_count = ok_count + 1
+        print("OK ")
+        println(label)
+    } else {
+        fail_count = fail_count + 1
+        print("FAIL ")
+        println(label)
+    }
+    return 0
+}
+
+// --- 1. list_map: applies fn to each element ---
+
+let m1 = list_map([1, 2, 3], |x| x * x)
+check(m1[0] == 1, "list_map square: m1[0] == 1")
+check(m1[1] == 4, "list_map square: m1[1] == 4")
+check(m1[2] == 9, "list_map square: m1[2] == 9")
+check(len(m1) == 3, "list_map square: len == 3")
+
+let m2 = list_map([], |x| x * 2)
+check(len(m2) == 0, "list_map on empty: len == 0")
+
+let m3 = list_map([5], |x| x)
+check(m3[0] == 5, "list_map identity on [5]: m3[0] == 5")
+check(len(m3) == 1, "list_map identity on [5]: len == 1")
+
+let m4 = list_map([10, 20, 30], |x| x + 1)
+check(m4[0] == 11, "list_map +1 on [10,20,30]: m4[0] == 11")
+check(m4[1] == 21, "list_map +1 on [10,20,30]: m4[1] == 21")
+check(m4[2] == 31, "list_map +1 on [10,20,30]: m4[2] == 31")
+
+// --- 2. list_filter: keep elements where pred(elt) is truthy ---
+
+let f1 = list_filter([1, 3, 7, 9, 4], |x| x > 5)
+check(f1[0] == 7, "list_filter >5 on [1,3,7,9,4]: f1[0] == 7")
+check(f1[1] == 9, "list_filter >5: f1[1] == 9")
+check(len(f1) == 2, "list_filter >5: len == 2")
+
+let f2 = list_filter([1, 2, 3], |x| x > 100)
+check(len(f2) == 0, "list_filter pred matches none: len == 0")
+
+let f3 = list_filter([1, 2, 3], |x| x > 0)
+check(f3[0] == 1, "list_filter pred matches all: f3[0] == 1")
+check(f3[1] == 2, "list_filter pred matches all: f3[1] == 2")
+check(f3[2] == 3, "list_filter pred matches all: f3[2] == 3")
+check(len(f3) == 3, "list_filter pred matches all: len == 3")
+
+let f4 = list_filter([], |x| x > 0)
+check(len(f4) == 0, "list_filter on empty: len == 0")
+
+// --- 3. list_fold: left fold with seeded accumulator ---
+
+let sum_red = |acc, x| acc + x
+check(list_fold([1, 2, 3, 4], 0, sum_red) == 10, "list_fold sum [1,2,3,4] init 0 -> 10")
+
+let prod_red = |acc, x| acc * x
+check(list_fold([1, 2, 3, 4], 1, prod_red) == 24, "list_fold product [1,2,3,4] init 1 -> 24")
+
+check(list_fold([], 0, sum_red) == 0, "list_fold sum on empty: returns init 0")
+check(list_fold([], 42, sum_red) == 42, "list_fold sum on empty: returns init 42")
+
+let strcat_red = |acc, x| concat(acc, x)
+let folded = list_fold(["a", "b", "c"], "", strcat_red)
+check(str_eq(folded, "abc") == 1, "list_fold strcat [a,b,c] init \"\" -> \"abc\"")
+
+let max_red = |acc, x| if x > acc { x } else { acc }
+check(list_fold([3, 1, 4, 1, 5, 9, 2, 6], 0, max_red) == 9, "list_fold max [3,1,4,1,5,9,2,6] init 0 -> 9")
+
+// --- 4. list_take: first n elements (or all if shorter) ---
+
+let t1 = list_take([1, 2, 3, 4], 2)
+check(t1[0] == 1, "list_take 2 of [1,2,3,4]: t1[0] == 1")
+check(t1[1] == 2, "list_take 2 of [1,2,3,4]: t1[1] == 2")
+check(len(t1) == 2, "list_take 2 of [1,2,3,4]: len == 2")
+
+let t2 = list_take([1, 2, 3, 4], 0)
+check(len(t2) == 0, "list_take 0: len == 0")
+
+let t3 = list_take([1, 2], 100)
+check(t3[0] == 1, "list_take 100 of [1,2] saturates: t3[0] == 1")
+check(t3[1] == 2, "list_take 100 of [1,2] saturates: t3[1] == 2")
+check(len(t3) == 2, "list_take 100 of [1,2] saturates: len == 2")
+
+let t4 = list_take([], 5)
+check(len(t4) == 0, "list_take 5 of empty: len == 0")
+
+// --- 5. list_drop: skip first n elements ---
+
+let d1 = list_drop([1, 2, 3, 4], 2)
+check(d1[0] == 3, "list_drop 2 of [1,2,3,4]: d1[0] == 3")
+check(d1[1] == 4, "list_drop 2 of [1,2,3,4]: d1[1] == 4")
+check(len(d1) == 2, "list_drop 2 of [1,2,3,4]: len == 2")
+
+let d2 = list_drop([1, 2, 3, 4], 0)
+check(d2[0] == 1, "list_drop 0: input copy d2[0] == 1")
+check(d2[3] == 4, "list_drop 0: input copy d2[3] == 4")
+check(len(d2) == 4, "list_drop 0: len == 4")
+
+let d3 = list_drop([1, 2], 100)
+check(len(d3) == 0, "list_drop 100 of [1,2]: len == 0")
+
+let d4 = list_drop([], 5)
+check(len(d4) == 0, "list_drop 5 of empty: len == 0")
+
+// --- 6. list_concat: append b's elements to a's ---
+
+let c1 = list_concat([1, 2], [3, 4])
+check(c1[0] == 1, "list_concat [1,2] ++ [3,4]: c1[0] == 1")
+check(c1[1] == 2, "list_concat: c1[1] == 2")
+check(c1[2] == 3, "list_concat: c1[2] == 3")
+check(c1[3] == 4, "list_concat: c1[3] == 4")
+check(len(c1) == 4, "list_concat: len == 4")
+
+let c2 = list_concat([], [1, 2, 3])
+check(c2[0] == 1, "list_concat empty ++ [1,2,3]: c2[0] == 1")
+check(c2[2] == 3, "list_concat empty ++ [1,2,3]: c2[2] == 3")
+check(len(c2) == 3, "list_concat empty ++ [1,2,3]: len == 3")
+
+let c3 = list_concat([1, 2, 3], [])
+check(c3[0] == 1, "list_concat [1,2,3] ++ empty: c3[0] == 1")
+check(c3[2] == 3, "list_concat [1,2,3] ++ empty: c3[2] == 3")
+check(len(c3) == 3, "list_concat [1,2,3] ++ empty: len == 3")
+
+// list_concat does NOT mutate the left input.
+let c4_src = [9, 8]
+let c4 = list_concat(c4_src, [7])
+check(len(c4_src) == 2, "list_concat preserves left input length")
+check(c4_src[0] == 9, "list_concat preserves left input element 0")
+check(len(c4) == 3, "list_concat result has correct len")
+
+// --- 7. list_zip: pair-wise combine into list of tuples ---
+
+let z1 = list_zip([1, 2, 3], [10, 20, 30])
+check(z1[0][0] == 1, "list_zip ([1,2,3],[10,20,30]): z1[0][0] == 1")
+check(z1[0][1] == 10, "list_zip: z1[0][1] == 10")
+check(z1[1][0] == 2, "list_zip: z1[1][0] == 2")
+check(z1[1][1] == 20, "list_zip: z1[1][1] == 20")
+check(z1[2][0] == 3, "list_zip: z1[2][0] == 3")
+check(z1[2][1] == 30, "list_zip: z1[2][1] == 30")
+check(len(z1) == 3, "list_zip equal-length: len == 3")
+
+let z2 = list_zip([1, 2, 3, 4], [10, 20])
+check(z2[0][0] == 1, "list_zip unequal-truncated: z2[0][0] == 1")
+check(z2[1][0] == 2, "list_zip unequal-truncated: z2[1][0] == 2")
+check(z2[1][1] == 20, "list_zip unequal-truncated: z2[1][1] == 20")
+check(len(z2) == 2, "list_zip unequal -> shorter len == 2")
+
+let z3 = list_zip([1, 2], [10, 20, 30, 40])
+check(len(z3) == 2, "list_zip unequal (B longer): len == 2")
+check(z3[0][1] == 10, "list_zip B-longer: z3[0][1] == 10")
+
+let z4 = list_zip([], [1, 2, 3])
+check(len(z4) == 0, "list_zip empty A: len == 0")
+
+let z5 = list_zip([1, 2], [])
+check(len(z5) == 0, "list_zip empty B: len == 0")
+
+// --- 8. list_enumerate: pair each element with its index ---
+
+let e1 = list_enumerate(["a", "b", "c"])
+check(e1[0][0] == 0, "list_enumerate strs: e1[0][0] == 0")
+check(str_eq(e1[0][1], "a") == 1, "list_enumerate strs: e1[0][1] == \"a\"")
+check(e1[1][0] == 1, "list_enumerate strs: e1[1][0] == 1")
+check(str_eq(e1[1][1], "b") == 1, "list_enumerate strs: e1[1][1] == \"b\"")
+check(e1[2][0] == 2, "list_enumerate strs: e1[2][0] == 2")
+check(str_eq(e1[2][1], "c") == 1, "list_enumerate strs: e1[2][1] == \"c\"")
+check(len(e1) == 3, "list_enumerate strs: len == 3")
+
+let e2 = list_enumerate([])
+check(len(e2) == 0, "list_enumerate empty: len == 0")
+
+let e3 = list_enumerate([100, 200])
+check(e3[0][0] == 0, "list_enumerate ints: e3[0][0] == 0")
+check(e3[0][1] == 100, "list_enumerate ints: e3[0][1] == 100")
+check(e3[1][0] == 1, "list_enumerate ints: e3[1][0] == 1")
+check(e3[1][1] == 200, "list_enumerate ints: e3[1][1] == 200")
+
+// --- 9. list_find: index of first elt where pred(elt), or -1 ---
+
+check(list_find([1, 3, 7, 9], |x| x > 5) == 2, "list_find >5 in [1,3,7,9] -> 2")
+check(list_find([1, 2, 3], |x| x > 100) == 0 - 1, "list_find not found -> -1")
+check(list_find([], |x| x > 0) == 0 - 1, "list_find empty -> -1")
+check(list_find([5, 5, 5], |x| x == 5) == 0, "list_find first match at 0")
+check(list_find([1, 2, 3, 4, 5], |x| x == 3) == 2, "list_find ==3 in [1..5] -> 2")
+check(list_find([10, 20, 30], |x| x == 30) == 2, "list_find last elt -> 2")
+
+// --- 10. list_any: 1 if any element matches, else 0 ---
+
+check(list_any([1, 3, 7], |x| x > 5) == 1, "list_any >5 in [1,3,7] -> 1")
+check(list_any([1, 2, 3], |x| x > 5) == 0, "list_any >5 in [1,2,3] -> 0")
+check(list_any([], |x| x > 0) == 0, "list_any on empty -> 0 (vacuously false)")
+check(list_any([0, 0, 0, 1], |x| x == 1) == 1, "list_any last-elem match -> 1")
+check(list_any([1, 0, 0], |x| x == 1) == 1, "list_any first-elem match -> 1")
+
+// --- 11. list_all: 1 if every element matches, else 0 ---
+
+check(list_all([1, 2, 3], |x| x > 0) == 1, "list_all >0 in [1,2,3] -> 1")
+check(list_all([1, 0 - 2, 3], |x| x > 0) == 0, "list_all >0 in [1,-2,3] -> 0")
+check(list_all([], |x| x > 0) == 1, "list_all on empty -> 1 (vacuous truth)")
+check(list_all([0 - 1, 0 - 2, 0 - 3], |x| x < 0) == 1, "list_all <0 in [-1,-2,-3] -> 1")
+check(list_all([0 - 1, 5, 0 - 3], |x| x < 0) == 0, "list_all <0 with positive elt -> 0")
+
+// --- 12. list_reverse: returns new list with order reversed ---
+
+let r1 = list_reverse([1, 2, 3])
+check(r1[0] == 3, "list_reverse [1,2,3]: r1[0] == 3")
+check(r1[1] == 2, "list_reverse: r1[1] == 2")
+check(r1[2] == 1, "list_reverse: r1[2] == 1")
+check(len(r1) == 3, "list_reverse: len == 3")
+
+let r2 = list_reverse([])
+check(len(r2) == 0, "list_reverse empty: len == 0")
+
+let r3 = list_reverse([42])
+check(r3[0] == 42, "list_reverse singleton: r3[0] == 42")
+check(len(r3) == 1, "list_reverse singleton: len == 1")
+
+// list_reverse must NOT mutate input
+let r4_src = [1, 2, 3, 4]
+let r4 = list_reverse(r4_src)
+check(r4_src[0] == 1, "list_reverse does not mutate input")
+check(r4_src[3] == 4, "list_reverse preserves input order")
+
+// --- 13. list_sum: integer sum of all elements ---
+
+check(list_sum([1, 2, 3, 4]) == 10, "list_sum [1,2,3,4] == 10")
+check(list_sum([]) == 0, "list_sum empty == 0")
+check(list_sum([42]) == 42, "list_sum singleton [42] == 42")
+check(list_sum([0 - 1, 0 - 2, 3]) == 0, "list_sum [-1,-2,3] == 0")
+check(list_sum([100, 200, 300]) == 600, "list_sum [100,200,300] == 600")
+
+// --- Composition tests (chains of stdlib calls) ---
+//
+// These demonstrate the value of having a uniform library shape: the
+// chain reads top-to-bottom and the closure + tuple values flow
+// without any ABI shim between stages.
+
+// 14a: filter then sum. Sum of elements > 3 in [1..6] is 4+5+6 == 15.
+check(list_sum(list_filter([1, 2, 3, 4, 5, 6], |x| x > 3)) == 15,
+    "compose: list_sum(list_filter([1..6], |x| x > 3)) == 15")
+
+// 14b: zip + map with tuple slot access (R36C). Element-wise add of
+// two parallel lists via a tuple-aware closure.
+let za = list_zip([1, 2, 3], [10, 20, 30])
+let zsum = list_map(za, |t| t[0] + t[1])
+check(zsum[0] == 11, "compose: list_map(list_zip([1,2,3],[10,20,30]), |t| t[0]+t[1])[0] == 11")
+check(zsum[1] == 22, "compose: ...[1] == 22")
+check(zsum[2] == 33, "compose: ...[2] == 33")
+check(len(zsum) == 3, "compose: zip+map produces 3 results")
+
+// 14c: enumerate + fold summing indices. enumerate produces tuples
+// (i, v); the fold's reducer takes (acc, t) and reads t[0] (the
+// index). For ["a","b","c"] indices sum to 0+1+2 == 3.
+let enum_idx_sum = list_fold(list_enumerate(["a", "b", "c"]), 0, |acc, t| acc + t[0])
+check(enum_idx_sum == 3, "compose: list_fold(list_enumerate([a,b,c]), 0, |acc,t| acc+t[0]) == 3")
+
+// 14d: take + reverse chain. Reverse the first 3 elements.
+let t_rev = list_reverse(list_take([10, 20, 30, 40, 50], 3))
+check(t_rev[0] == 30, "compose: list_reverse(list_take([10..50], 3))[0] == 30")
+check(t_rev[1] == 20, "compose: ...[1] == 20")
+check(t_rev[2] == 10, "compose: ...[2] == 10")
+check(len(t_rev) == 3, "compose: take+reverse len == 3")
+
+// 14e: drop + map. Drop 2, then double the rest.
+let dm = list_map(list_drop([1, 2, 3, 4, 5], 2), |x| x * 2)
+check(dm[0] == 6, "compose: list_map(list_drop([1..5],2), |x| x*2)[0] == 6")
+check(dm[2] == 10, "compose: ...[2] == 10")
+check(len(dm) == 3, "compose: drop+map len == 3")
+
+// 14f: any composed with a filtered tuple-projection. Use list_zip +
+// list_any to ask "is there any pair where lhs == rhs?".
+let zpairs = list_zip([1, 2, 3], [9, 2, 9])
+check(list_any(zpairs, |t| t[0] == t[1]) == 1,
+    "compose: list_any(list_zip([1,2,3],[9,2,9]), |t| t[0]==t[1]) == 1 (middle pair matches)")
+
+// 14g: list_find composed with list_enumerate. Find the index of the
+// first negative element by enumerating then checking value slot.
+let mixed = [4, 5, 0 - 7, 8]
+let first_neg = list_find(list_enumerate(mixed), |t| t[1] < 0)
+check(first_neg == 2, "compose: list_find(list_enumerate([4,5,-7,8]), |t| t[1]<0) == 2")
+
+// 14h: list_all composed with list_map. All squares of [1,2,3] are
+// positive.
+check(list_all(list_map([1, 2, 3], |x| x * x), |y| y > 0) == 1,
+    "compose: list_all(list_map([1,2,3], |x| x*x), |y| y>0) == 1")
+
+// 14i: concat then fold (sum).
+check(list_sum(list_concat([1, 2], [3, 4])) == 10,
+    "compose: list_sum(list_concat([1,2],[3,4])) == 10")
+
+// 14j: classic pipeline — square odds, then sum. Filter for odd
+// (x % 2 == 1), map to square, then sum.
+//
+// For [1,2,3,4,5]: odds are [1,3,5]; squares [1,9,25]; sum 35.
+let odds = list_filter([1, 2, 3, 4, 5], |x| x - (x / 2) * 2 == 1)
+let odd_sq = list_map(odds, |x| x * x)
+check(list_sum(odd_sq) == 35,
+    "compose: sum(map(filter([1..5], odd), square)) == 35")
+
+// --- Source pin: stdlib file exists and exposes every public fn ---
+//
+// Mirrors test_tuples' `assert_contains` pattern so a future refactor
+// that accidentally drops or renames a stdlib function fails loudly.
+
+fn assert_contains(haystack, needle, label) {
+    let i = 0
+    let hl = len(haystack)
+    let nl = len(needle)
+    let found = 0
+    while i + nl <= hl {
+        let j = 0
+        let ok = 1
+        while j < nl {
+            if char_at(haystack, i + j) != char_at(needle, j) { ok = 0  j = nl } else { j = j + 1 }
+        }
+        if ok == 1 { found = 1  i = hl } else { i = i + 1 }
+    }
+    check(found, label)
+    return 0
+}
+
+let stdlib_src = read_file("src/stdlib/list.nova")
+assert_contains(stdlib_src, "fn list_map", "src/stdlib/list.nova defines list_map")
+assert_contains(stdlib_src, "fn list_filter", "src/stdlib/list.nova defines list_filter")
+assert_contains(stdlib_src, "fn list_fold", "src/stdlib/list.nova defines list_fold")
+assert_contains(stdlib_src, "fn list_take", "src/stdlib/list.nova defines list_take")
+assert_contains(stdlib_src, "fn list_drop", "src/stdlib/list.nova defines list_drop")
+assert_contains(stdlib_src, "fn list_concat", "src/stdlib/list.nova defines list_concat")
+assert_contains(stdlib_src, "fn list_zip", "src/stdlib/list.nova defines list_zip")
+assert_contains(stdlib_src, "fn list_enumerate", "src/stdlib/list.nova defines list_enumerate")
+assert_contains(stdlib_src, "fn list_find", "src/stdlib/list.nova defines list_find")
+assert_contains(stdlib_src, "fn list_any", "src/stdlib/list.nova defines list_any")
+assert_contains(stdlib_src, "fn list_all", "src/stdlib/list.nova defines list_all")
+assert_contains(stdlib_src, "fn list_reverse", "src/stdlib/list.nova defines list_reverse")
+assert_contains(stdlib_src, "fn list_sum", "src/stdlib/list.nova defines list_sum")
+assert_contains(stdlib_src, "R37E", "src/stdlib/list.nova carries R37E marker")
+
+// --- Summary ---
+
+print("ok=")
+print_int(ok_count)
+print(" fail=")
+print_int(fail_count)
+println("")
+
+if fail_count == 0 {
+    println("R37E stdlib list unit suite PASS")
+} else {
+    println("R37E stdlib list unit suite FAIL")
+    exit(1)
+}

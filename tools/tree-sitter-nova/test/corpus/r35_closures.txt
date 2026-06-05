@@ -1,0 +1,192 @@
+================================================================================
+R35C: single-argument closure with single-expression body
+================================================================================
+
+let f = |x| x + 1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (closure_expr
+      parameters: (closure_params
+        (closure_param
+          name: (identifier)))
+      body: (binary_expression
+        left: (identifier)
+        right: (number)))))
+
+================================================================================
+R35C: multi-argument closure
+================================================================================
+
+let g = |x, y| x + y
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (closure_expr
+      parameters: (closure_params
+        (closure_param
+          name: (identifier))
+        (closure_param
+          name: (identifier)))
+      body: (binary_expression
+        left: (identifier)
+        right: (identifier)))))
+
+================================================================================
+R35C: zero-argument closure (|| form)
+================================================================================
+
+let h = || 42
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (closure_expr
+      body: (number))))
+
+================================================================================
+R35C: closure with block body
+================================================================================
+
+let f = |x| { let t = x * 2; t + 1 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (closure_expr
+      parameters: (closure_params
+        (closure_param
+          name: (identifier)))
+      body: (block
+        (let_decl
+          name: (identifier)
+          value: (binary_expression
+            left: (identifier)
+            right: (number)))
+        (expression_statement
+          (binary_expression
+            left: (identifier)
+            right: (number)))))))
+
+================================================================================
+R35C: closure capturing an outer identifier
+================================================================================
+
+let f = |x| x + outer
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (closure_expr
+      parameters: (closure_params
+        (closure_param
+          name: (identifier)))
+      body: (binary_expression
+        left: (identifier)
+        right: (identifier)))))
+
+================================================================================
+R35C: closure passed as a call argument
+================================================================================
+
+list_map([1, 2, 3], |x| x * 2)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (expression_statement
+    (call_expression
+      function: (identifier)
+      arguments: (argument_list
+        (list_literal
+          (number)
+          (number)
+          (number))
+        (closure_expr
+          parameters: (closure_params
+            (closure_param
+              name: (identifier)))
+          body: (binary_expression
+            left: (identifier)
+            right: (number)))))))
+
+================================================================================
+R35C: nested closure (closure returning a closure)
+================================================================================
+
+let g = |k| |x| x + k
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (closure_expr
+      parameters: (closure_params
+        (closure_param
+          name: (identifier)))
+      body: (closure_expr
+        parameters: (closure_params
+          (closure_param
+            name: (identifier)))
+        body: (binary_expression
+          left: (identifier)
+          right: (identifier))))))
+
+================================================================================
+R35C: closure in return position
+================================================================================
+
+fn make() -> int {
+    return |x| x + 1
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    return_type: (type_expression
+      (identifier))
+    body: (block
+      (return_statement
+        value: (closure_expr
+          parameters: (closure_params
+            (closure_param
+              name: (identifier)))
+          body: (binary_expression
+            left: (identifier)
+            right: (number)))))))
+
+================================================================================
+R35C: closure with type-annotated parameter
+================================================================================
+
+let f = |x: int| x + 1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (closure_expr
+      parameters: (closure_params
+        (closure_param
+          name: (identifier)
+          type: (type_expression
+            (identifier))))
+      body: (binary_expression
+        left: (identifier)
+        right: (number)))))

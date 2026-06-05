@@ -1,0 +1,33 @@
+[package]
+name = "wgpu_dispatch"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny GPU-compute dispatcher for NOVA's WGSL smoke test. Reads a WGSL shader plus a key=value config file emitted by examples/gpu_vector_add.nova, dispatches the vector-add kernel via the `wgpu` crate, compares the result to a CPU baseline, and prints timings. See GPU_AUDIT.md for the full design."
+
+# Single standalone binary. The whole point is to be the minimum-viable
+# host shim for NOVA -> WGSL until NOVA can emit SPIR-V directly.
+[[bin]]
+name = "wgpu_dispatch"
+path = "src/main.rs"
+
+[dependencies]
+# wgpu 0.20 is the Rust wrapper around WebGPU. It compiles WGSL down to
+# SPIR-V (Vulkan), MSL (Metal), HLSL (D3D12), or WGSL bytecode (WebGPU)
+# depending on which backend the runtime picks at startup. We do NOT
+# pin a backend: wgpu auto-detects whatever the host exposes.
+wgpu = "0.20"
+
+# pollster turns wgpu's async APIs into blocking calls. It pulls in no
+# tokio / no executor / no transitive monster -- a single executor.
+pollster = "0.3"
+
+# bytemuck lets us cast &[i32] <-> &[u8] without unsafe, for the
+# `Queue::write_buffer` calls. POD-only, no runtime cost.
+bytemuck = { version = "1.16", features = ["derive"] }
+
+[profile.release]
+# Smaller binary; the smoke is not perf-critical and we want a tight
+# `target/release/wgpu_dispatch` for `make smoke-gpu`.
+lto = "thin"
+opt-level = 3
+codegen-units = 1

@@ -98156,13 +98156,13 @@ _str_1249:
 _str_1250:
     .asciz "    mov r12, rax"
 _str_1251:
-    .asciz "    mov rdi, 524288"
+    .asciz "    mov rdi, 4194304"
 _str_1252:
     .asciz "    mov [rbp - 24], rax"
 _str_1253:
     .asciz "    mov rcx, r12"
 _str_1254:
-    .asciz "    mov r8d, 524287"
+    .asciz "    mov r8d, 4194303"
 _str_1255:
     .asciz "    call [rip + __imp_ReadFile]"
 _str_1256:
@@ -98184,7 +98184,7 @@ _str_1263:
 _str_1264:
     .asciz "    mov rdi, r12"
 _str_1265:
-    .asciz "    mov rdx, 524287"
+    .asciz "    mov rdx, 4194303"
 _str_1266:
     .asciz "    mov byte ptr [rsi+rax], 0"
 _str_1267:
@@ -102782,12 +102782,12 @@ _nova_read_file:
     cmp rax, 0
     jl .rf_fail
     mov r12, rax
-    mov rdi, 524288
+    mov rdi, 4194304
     call _nova_alloc
     push rax
     mov rdi, r12
     mov rsi, rax
-    mov rdx, 524287
+    mov rdx, 4194303
     xor eax, eax
     syscall
     pop rsi

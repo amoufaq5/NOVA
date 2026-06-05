@@ -1,26 +1,39 @@
 // Nova Runtime: String Operations
-// Strings are length-prefixed byte sequences: [len: 8 bytes][...chars...]
-// Immutable once created. Operations return new strings.
-
-let STR_LEN_OFFSET = 0
-let STR_DATA_OFFSET = 8
+//
+// Strings are NUL-terminated byte sequences: `[bytes...][0]`. This matches the
+// representation the native `len()` builtin scans for (`_nova_len` in
+// `src/compiler/codegen.nova` walks bytes until it hits 0), and the format
+// string literals already have. All helpers here read/produce that same format,
+// so values from `str_new` interoperate with the language operators (`len(s)`,
+// `s + t`, `println(s)`, etc.).
+//
+// Historical note: this module previously stored an 8-byte length prefix at
+// offset 0; that disagreed with `_nova_len`, so `len(str_new(buf, 11))` walked
+// the length bytes and stopped at the second byte (a NUL), reporting length 1.
+// That manifested visibly as `io_input()` returning a 1-byte string regardless
+// of the actual read size. Switching the helpers to NUL-terminated reconciles
+// the two and makes stdin reading work end-to-end.
 
 fn str_new(data_ptr, length) {
-    let s = alloc(8 + length + 1)
-    store64(s, length)
+    let s = alloc(length + 1)
     if data_ptr != 0 {
-        memcpy_raw(s + 8, data_ptr, length)
+        memcpy_raw(s, data_ptr, length)
     }
-    store8(s + 8 + length, 0)
+    store8(s + length, 0)
     return s
 }
 
 fn str_len(s) {
-    return load64(s)
+    if s == 0 { return 0 }
+    let i = 0
+    while load8(s + i) != 0 {
+        i = i + 1
+    }
+    return i
 }
 
 fn str_data(s) {
-    return s + 8
+    return s
 }
 
 fn str_char_at(s, index) {
@@ -34,18 +47,17 @@ fn str_char_at(s, index) {
     if index >= length {
         return -1
     }
-    return load8(s + 8 + index)
+    return load8(s + index)
 }
 
 fn str_concat(a, b) {
     let len_a = str_len(a)
     let len_b = str_len(b)
     let total = len_a + len_b
-    let s = alloc(8 + total + 1)
-    store64(s, total)
-    memcpy_raw(s + 8, str_data(a), len_a)
-    memcpy_raw(s + 8 + len_a, str_data(b), len_b)
-    store8(s + 8 + total, 0)
+    let s = alloc(total + 1)
+    memcpy_raw(s, a, len_a)
+    memcpy_raw(s + len_a, b, len_b)
+    store8(s + total, 0)
     return s
 }
 
@@ -63,7 +75,7 @@ fn str_slice(s, start, end) {
         return str_new(0, 0)
     }
     let slice_len = end - start
-    return str_new(str_data(s) + start, slice_len)
+    return str_new(s + start, slice_len)
 }
 
 fn rt_str_eq(a, b) {
@@ -74,7 +86,7 @@ fn rt_str_eq(a, b) {
     }
     let i = 0
     while i < len_a {
-        if load8(str_data(a) + i) != load8(str_data(b) + i) {
+        if load8(a + i) != load8(b + i) {
             return 0
         }
         i = i + 1
@@ -89,8 +101,8 @@ fn str_cmp(a, b) {
     if len_b < min_len { min_len = len_b }
     let i = 0
     while i < min_len {
-        let ca = load8(str_data(a) + i)
-        let cb = load8(str_data(b) + i)
+        let ca = load8(a + i)
+        let cb = load8(b + i)
         if ca < cb { return -1 }
         if ca > cb { return 1 }
         i = i + 1
@@ -111,7 +123,7 @@ fn rt_str_find(haystack, needle) {
         let matched = 1
         let j = 0
         while j < n_len {
-            if load8(str_data(haystack) + i + j) != load8(str_data(needle) + j) {
+            if load8(haystack + i + j) != load8(needle + j) {
                 matched = 0
                 j = n_len
             } else {
@@ -136,7 +148,7 @@ fn str_starts_with(s, prefix) {
     if p_len > s_len { return 0 }
     let i = 0
     while i < p_len {
-        if load8(str_data(s) + i) != load8(str_data(prefix) + i) {
+        if load8(s + i) != load8(prefix + i) {
             return 0
         }
         i = i + 1
@@ -151,7 +163,7 @@ fn str_ends_with(s, suffix) {
     let offset = s_len - sf_len
     let i = 0
     while i < sf_len {
-        if load8(str_data(s) + offset + i) != load8(str_data(suffix) + i) {
+        if load8(s + offset + i) != load8(suffix + i) {
             return 0
         }
         i = i + 1
@@ -169,7 +181,7 @@ fn str_split(s, delim) {
         let matched = 1
         let j = 0
         while j < d_len {
-            if load8(str_data(s) + i + j) != load8(str_data(delim) + j) {
+            if load8(s + i + j) != load8(delim + j) {
                 matched = 0
                 j = d_len
             } else {
@@ -192,13 +204,13 @@ fn rt_str_trim(s) {
     let length = str_len(s)
     let start = 0
     while start < length {
-        let c = load8(str_data(s) + start)
+        let c = load8(s + start)
         if c == 32 | c == 9 | c == 10 | c == 13 {
             start = start + 1
         } else {
             let end = length
             while end > start {
-                let c2 = load8(str_data(s) + end - 1)
+                let c2 = load8(s + end - 1)
                 if c2 == 32 | c2 == 9 | c2 == 10 | c2 == 13 {
                     end = end - 1
                 } else {
@@ -217,14 +229,14 @@ fn rt_str_to_int(s) {
     let negative = 0
     let i = 0
     if length > 0 {
-        let first = load8(str_data(s))
+        let first = load8(s)
         if first == 45 {
             negative = 1
             i = 1
         }
     }
     while i < length {
-        let c = load8(str_data(s) + i)
+        let c = load8(s + i)
         if c >= 48 {
             if c <= 57 {
                 result = result * 10 + (c - 48)

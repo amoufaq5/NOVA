@@ -1,0 +1,40 @@
+// Nova: hello_dwarf — exercises the DWARF .debug_line + .debug_info MVPs.
+//
+// Compile to a Linux ELF binary with `make smoke-dwarf`, then inspect
+// the embedded line table with:
+//
+//     objdump --dwarf=decodedline bin/hello_dwarf
+//
+// Each PC range should map back to a (file, line) tuple in this source.
+// GDB can then set source-level breakpoints:
+//
+//     gdb bin/hello_dwarf -ex 'b main' -ex 'r' -ex 'where'
+//
+// The .debug_info MVP additionally emits DW_TAG_subprogram + DW_TAG_variable
+// DIEs so `info locals` / `p localvar` work at NOVA breakpoints, and the
+// DAP server (tools/nova-dap) now sees a non-empty `variables` array on
+// the wire. Inspect with:
+//
+//     objdump --dwarf=info bin/hello_dwarf
+//     gdb bin/hello_dwarf -ex 'b main' -ex 'r' -ex 'info locals' -ex 'q'
+//
+// See DWARF_AUDIT.md for the full scope (Linux ELF only in this MVP;
+// Windows PE / macOS Mach-O DWARF is deferred).
+
+fn greet(who) {
+    let prefix = "Hello, "
+    println(concat(prefix, who))
+}
+
+fn main() {
+    let a = 1
+    let b = 2
+    let sum = a + b
+    let scaled = sum * 10
+    let label = "DWARF"
+    greet(label)
+    println(concat("sum = ", int_to_str(sum)))
+    println(concat("scaled = ", int_to_str(scaled)))
+}
+
+main()

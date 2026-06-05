@@ -1,0 +1,16 @@
+# Local ignore for the vscode-nova extension.
+# (Root .gitignore already covers `node_modules/` and `*.vsix`.)
+
+# TypeScript build output
+out/
+
+# npm lock (regenerated on each `npm install`)
+package-lock.json
+
+# Python test artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# vsce ephemera
+.vsix.tmp/

@@ -1,0 +1,255 @@
+// R33C: `if let PAT = expr { ... } [else ...]` shorthand for the
+// single-arm match `match expr { PAT => then, _ => else }`.
+//
+// Lives under tests/unit/ so the tests/test_*.nova glob in
+// tests/run_tests.sh doesn't pick it up — invoke directly via
+// `bin/nova tests/unit/test_if_let.nova`. The R32D nested-pattern
+// rewrite, the R31D arm-body type check, and the R23A enum / fn /
+// struct typechecks all apply to if-let exactly as they would to
+// the equivalent match expression.
+
+enum Option {
+    Some(int)
+    None
+}
+
+enum Result {
+    Ok(int)
+    Err(str)
+}
+
+enum Color {
+    Red
+    Green
+    Blue
+}
+
+enum OptOpt {
+    SS(Option)
+    NN
+}
+
+struct Point {
+    x: int
+    y: int
+}
+
+let ok_count = 0
+let fail_count = 0
+
+fn check(cond, label) {
+    if cond == 1 {
+        ok_count = ok_count + 1
+        print("OK ")
+        println(label)
+    } else {
+        fail_count = fail_count + 1
+        print("FAIL ")
+        println(label)
+    }
+    return 0
+}
+
+// --- 1. Basic Some / None match ---
+
+fn extract(o) {
+    let result = -1
+    if let Option::Some(v) = o {
+        result = v
+    } else {
+        result = -2
+    }
+    return result
+}
+
+check(extract(Option::Some(7)) == 7, "if let Option::Some(v) binds v on Some")
+check(extract(Option::Some(0)) == 0, "if let Option::Some(v) zero payload preserved")
+check(extract(Option::Some(-42)) == -42, "if let Option::Some(v) negative payload")
+check(extract(Option::None) == -2, "if let Option::Some(v) else branch taken on None")
+
+// --- 2. No-else case: then-block runs or falls through to 0 ---
+
+fn first_some(o) {
+    let r = 999
+    if let Option::Some(v) = o {
+        r = v
+    }
+    return r
+}
+
+check(first_some(Option::Some(33)) == 33, "no-else if-let: Some(v) sets r=v")
+check(first_some(Option::None) == 999, "no-else if-let: None leaves r at original 999")
+
+// --- 3. Result::Ok / Err with binder ---
+
+fn unwrap_or(r, d) {
+    let out = d
+    if let Result::Ok(v) = r {
+        out = v
+    }
+    return out
+}
+
+check(unwrap_or(Result::Ok(100), -1) == 100, "if let Result::Ok(v) binds v on Ok")
+check(unwrap_or(Result::Err("bad"), -1) == -1, "if let Result::Ok(v) falls to default on Err")
+check(unwrap_or(Result::Ok(0), 77) == 0, "if let Result::Ok(0) zero payload preserved (not default)")
+
+// --- 4. Nested variant: Some(Some(v)) ---
+
+fn deep(o) {
+    let r = -100
+    if let OptOpt::SS(Option::Some(v)) = o {
+        r = v
+    } else {
+        r = -200
+    }
+    return r
+}
+
+check(deep(OptOpt::SS(Option::Some(50))) == 50, "if let nested SS(Some(v)) -> 50")
+check(deep(OptOpt::SS(Option::Some(0))) == 0, "if let nested SS(Some(0)) -> 0 (zero preserved)")
+check(deep(OptOpt::SS(Option::None)) == -200, "if let nested SS(Some(v)) falls to else on SS(None)")
+check(deep(OptOpt::NN) == -200, "if let nested SS(Some(v)) falls to else on NN")
+
+// --- 5. else-if-let chain (nested form) ---
+
+fn classify(o) {
+    let s = "unknown"
+    if let Option::Some(v) = o {
+        s = "some"
+    } else {
+        if let Option::None = o {
+            s = "none"
+        }
+    }
+    return s
+}
+
+check(classify(Option::Some(5)) == "some", "else-if-let chain: Some hits first arm")
+check(classify(Option::None) == "none", "else-if-let chain: None hits second arm")
+
+// --- 5b. else-if-let chain (single-line form) ---
+
+fn classify_chain(o, r) {
+    let s = "default"
+    if let Option::Some(v) = o {
+        s = "opt-some"
+    } else if let Result::Ok(w) = r {
+        s = "res-ok"
+    } else if let Result::Err(e) = r {
+        s = "res-err"
+    } else {
+        s = "none"
+    }
+    return s
+}
+
+check(classify_chain(Option::Some(1), Result::Err("e")) == "opt-some", "if-let chain: first matches")
+check(classify_chain(Option::None, Result::Ok(2)) == "res-ok", "if-let chain: second matches when first doesn't")
+check(classify_chain(Option::None, Result::Err("x")) == "res-err", "if-let chain: third matches when first two don't")
+
+// --- 6. if let on Color enum (nullary variants) ---
+
+fn is_red(c) {
+    if let Color::Red = c {
+        return 1
+    }
+    return 0
+}
+
+check(is_red(Color::Red) == 1, "if let Color::Red on Red -> 1")
+check(is_red(Color::Green) == 0, "if let Color::Red on Green -> 0")
+check(is_red(Color::Blue) == 0, "if let Color::Red on Blue -> 0")
+
+// --- 7. if let with struct pattern ---
+
+fn point_sum(p) {
+    let total = -1
+    if let Point { x, y } = p {
+        total = x + y
+    }
+    return total
+}
+
+let p1 = Point { x: 10, y: 20 }
+check(point_sum(p1) == 30, "if let Point { x, y } binds x+y = 30")
+let p2 = Point { x: -5, y: 5 }
+check(point_sum(p2) == 0, "if let Point { x, y } -5+5 = 0")
+
+// --- 8. if let with wildcard payload ---
+
+fn just_matches(o) {
+    if let Option::Some(_) = o {
+        return 1
+    }
+    return 0
+}
+
+check(just_matches(Option::Some(99)) == 1, "if let Option::Some(_) matches Some")
+check(just_matches(Option::Some(0)) == 1, "if let Option::Some(_) matches Some(0)")
+check(just_matches(Option::None) == 0, "if let Option::Some(_) doesn't match None")
+
+// --- 9. binder is visible only in then-block scope (function-frame in NOVA) ---
+
+fn binder_arith(o) {
+    if let Option::Some(v) = o {
+        return v * v
+    }
+    return -1
+}
+
+check(binder_arith(Option::Some(5)) == 25, "if-let binder usable in arithmetic: 5*5 = 25")
+check(binder_arith(Option::Some(-3)) == 9, "if-let binder negative: -3 * -3 = 9")
+check(binder_arith(Option::None) == -1, "if-let binder None falls to else")
+
+// --- 10. if let in expression position via let / return ---
+
+fn get_or_default(o, d) {
+    if let Option::Some(v) = o {
+        return v
+    }
+    return d
+}
+
+check(get_or_default(Option::Some(11), 0) == 11, "if let in fn body: Some path returns")
+check(get_or_default(Option::None, 88) == 88, "if let in fn body: None falls to default")
+
+// --- 11. Parser source pin: parse_if_let function exists ---
+
+fn assert_contains(haystack, needle, label) {
+    let i = 0
+    let hl = len(haystack)
+    let nl = len(needle)
+    let found = 0
+    while i + nl <= hl {
+        let j = 0
+        let ok = 1
+        while j < nl {
+            if haystack[i + j] != needle[j] { ok = 0  j = nl } else { j = j + 1 }
+        }
+        if ok == 1 { found = 1  i = hl } else { i = i + 1 }
+    }
+    check(found, label)
+    return 0
+}
+
+let par_src = read_file("src/compiler/parser.nova")
+assert_contains(par_src, "fn parse_if_let",
+    "parser.nova defines parse_if_let")
+assert_contains(par_src, "R33C: `if let",
+    "parser.nova carries the R33C if-let header comment")
+
+// --- Summary ---
+
+print("ok=")
+print_int(ok_count)
+print(" fail=")
+print_int(fail_count)
+println("")
+
+if fail_count == 0 {
+    println("R33C if-let unit suite PASS")
+} else {
+    println("R33C if-let unit suite FAIL")
+    exit(1)
+}

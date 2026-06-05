@@ -1,0 +1,411 @@
+// R18A -- simd_mul_acc_byte_signed_byte / simd_mul_acc_signed_signed_byte
+// correctness test.
+//
+// Two primitives:
+//
+//   simd_mul_acc_byte_signed_byte(a_u8_ptr, b_i8_ptr, n_bytes) -> int
+//     Sum a[i] * b[i] over n bytes where a is treated as unsigned u8
+//     (0..255) and b is treated as signed i8 (-128..127). Closes
+//     R17C's LK ceiling on the byte->i32 staging cost for asymmetric
+//     pixel * gradient correlation kernels.
+//
+//   simd_mul_acc_signed_signed_byte(a_i8_ptr, b_i8_ptr, n_bytes) -> int
+//     Sum a[i] * b[i] where both are signed i8. Direct shape for the
+//     5 LK accumulator math kernels (Sum Ix*Ix, Sum Iy*Iy, Sum Ix*Iy,
+//     Sum Ix*It, Sum Iy*It): Ix/Iy/It are signed gradients.
+//
+// Lowering verified by this test:
+//   Linux x86-64 : AVX2 inline at call site
+//                  (vpmovzxbw / vpmovsxbw / vpmaddwd / vpaddd / horiz),
+//                  16-byte vector iter, scalar tail. No saturation
+//                  (vpmaddwd is i16*i16 -> i32, never overflows i32 for
+//                  any i16 pair sum since 2*32767^2 < 2^31).
+//   macOS / Windows x86-64 : scalar a*b loop fallback via runtime label.
+//   Linux/Windows ARM64    : NEON helper (ushll/sshll widen + smull/smull2
+//                            + add accumulate), 8-byte vector iter.
+//   WASM v128              : i16x8.extend_low/high + i32x4.dot_i16x8_s,
+//                            16-byte vector iter.
+//
+// Exercises:
+//   * All-ones / all-zeros / known-multiply.
+//   * Asymmetric signed values (negative b, positive a; both negative).
+//   * Multi-chunk + tail (n=33, 100, 17).
+//   * n_bytes = 0 -> 0 (no segfault).
+//   * Tail-only (n_bytes < 16) hits scalar path only.
+//   * Exact-chunk multiples (n=16, 32, 48, 64) hit vector loop only.
+//   * Boundary u8/i8 (255 vs -128) -- proves correct signed/unsigned
+//     interpretation, especially for the asymmetric byte_signed_byte case.
+//   * Multiple back-to-back calls (fresh-label correctness when inlined).
+//   * Tight loop accumulator (100 iters * 1280 = 128000).
+//   * Large buffer (>16 KiB) crossing memory pages.
+//   * Pseudo-textured pattern vs scalar oracle (full path equivalence).
+
+import "std/io"
+
+// ---------- helpers ---------------------------------------------------------
+
+fn fill_inc(buf, n, start) {
+    let i = 0
+    while i < n {
+        store8(buf + i, (start + i) % 256)
+        i = i + 1
+    }
+}
+
+fn fill_const(buf, n, v) {
+    let i = 0
+    while i < n {
+        store8(buf + i, v)
+        i = i + 1
+    }
+}
+
+// Store signed i8 in [-128, 127] as raw byte (two's complement).
+fn store_i8(buf, i, v) {
+    let raw = v
+    if raw < 0 { raw = raw + 256 }
+    store8(buf + i, raw)
+}
+
+fn fill_i8_const(buf, n, v) {
+    let i = 0
+    while i < n {
+        store_i8(buf, i, v)
+        i = i + 1
+    }
+}
+
+// ---------- minimal test framework -----------------------------------------
+
+let passes = 0
+let fails = 0
+
+fn check(label, got, want) {
+    if got == want {
+        passes = passes + 1
+    } else {
+        fails = fails + 1
+        print("  FAIL ")
+        print(label)
+        print(": got ")
+        print_int(got)
+        print(", want ")
+        print_int(want)
+        println("")
+    }
+}
+
+// ---------- tests: byte_signed_byte ----------------------------------------
+
+fn test_us_identical_ones() {
+    // a = b = 1, n = 32. Sum = 1*1 * 32 = 32.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 1)
+    fill_const(b, 32, 1)
+    check("us all-ones 32B", simd_mul_acc_byte_signed_byte(a, b, 32), 32)
+}
+
+fn test_us_all_zeros() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 0)
+    fill_const(b, 32, 0)
+    check("us all-zeros 32B", simd_mul_acc_byte_signed_byte(a, b, 32), 0)
+    fill_const(a, 32, 100)
+    fill_const(b, 32, 0)
+    check("us a-pos b-zero 32B", simd_mul_acc_byte_signed_byte(a, b, 32), 0)
+}
+
+fn test_us_known_multiply() {
+    // a = 5 (u8), b = 7 (i8). Sum = 5*7 * 32 = 1120.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 5)
+    fill_i8_const(b, 32, 7)
+    check("us 5*7 32B", simd_mul_acc_byte_signed_byte(a, b, 32), 1120)
+}
+
+fn test_us_negative_b() {
+    // a = 200 (u8 = 200), b = -50 (i8). Sum = 200 * -50 * 32 = -320000.
+    // CRUCIAL: a must be interpreted as 200 (unsigned), NOT -56 (signed).
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 200)
+    fill_i8_const(b, 32, 0 - 50)
+    check("us 200*-50 32B", simd_mul_acc_byte_signed_byte(a, b, 32), 0 - 320000)
+}
+
+fn test_us_boundary_max() {
+    // a = 255 (u8 max), b = -128 (i8 min). Sum = 255*-128 * 32 = -1044480.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 255)
+    fill_i8_const(b, 32, 0 - 128)
+    check("us 255 * -128 32B", simd_mul_acc_byte_signed_byte(a, b, 32),
+          0 - 1044480)
+    // a = 255, b = 127 (i8 max). Sum = 255*127 * 32 = 1036320.
+    fill_i8_const(b, 32, 127)
+    check("us 255 * 127 32B", simd_mul_acc_byte_signed_byte(a, b, 32),
+          1036320)
+}
+
+fn test_us_zero_n() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_const(a, 32, 100)
+    fill_i8_const(b, 32, 50)
+    // n_bytes = 0 must short-circuit (no segfault, returns 0).
+    check("us n_bytes = 0", simd_mul_acc_byte_signed_byte(a, b, 0), 0)
+}
+
+fn test_us_tail_only() {
+    // n < 16: vector loop skipped, only scalar tail runs.
+    let a = alloc(16)
+    let b = alloc(16)
+    fill_const(a, 16, 10)
+    fill_i8_const(b, 16, 3)
+    // 10*3 = 30 per byte; n=5 -> 150.
+    check("us tail-only n=5", simd_mul_acc_byte_signed_byte(a, b, 5), 150)
+    // n=1: 30.
+    check("us tail-only n=1", simd_mul_acc_byte_signed_byte(a, b, 1), 30)
+    // n=15 (max tail-only): 15 * 30 = 450.
+    check("us tail-only n=15", simd_mul_acc_byte_signed_byte(a, b, 15), 450)
+}
+
+fn test_us_chunk_only() {
+    // n = exact multiple of 16: no tail loop.
+    let a = alloc(64)
+    let b = alloc(64)
+    fill_const(a, 64, 9)
+    fill_i8_const(b, 64, 0 - 11)
+    // 9*-11 = -99 per byte; n=16 -> -1584, n=32 -> -3168, n=48 -> -4752,
+    // n=64 -> -6336.
+    check("us chunk n=16",  simd_mul_acc_byte_signed_byte(a, b, 16), 0 - 1584)
+    check("us chunk n=32",  simd_mul_acc_byte_signed_byte(a, b, 32), 0 - 3168)
+    check("us chunk n=48",  simd_mul_acc_byte_signed_byte(a, b, 48), 0 - 4752)
+    check("us chunk n=64",  simd_mul_acc_byte_signed_byte(a, b, 64), 0 - 6336)
+}
+
+fn test_us_chunks_with_tail() {
+    // 33 bytes = 2 full chunks (16+16=32) + 1 byte tail.
+    let a = alloc(40)
+    let b = alloc(40)
+    fill_const(a, 40, 6)
+    fill_i8_const(b, 40, 4)
+    // 6*4 = 24 per byte; 33 * 24 = 792.
+    check("us 33B = 2 chunks + 1 tail", simd_mul_acc_byte_signed_byte(a, b, 33), 792)
+    // 100 bytes = 6 chunks + 4 tail.
+    let a2 = alloc(100)
+    let b2 = alloc(100)
+    fill_const(a2, 100, 3)
+    fill_i8_const(b2, 100, 5)
+    check("us 100B = 6 chunks + 4 tail", simd_mul_acc_byte_signed_byte(a2, b2, 100), 1500)
+}
+
+fn test_us_back_to_back() {
+    // 3 inlined calls in the same fn body -- verifies fresh-label
+    // generation via new_label() per call site.
+    let a = alloc(16)
+    let b = alloc(16)
+    fill_const(a, 16, 7)
+    fill_i8_const(b, 16, 0 - 2)
+    let s1 = simd_mul_acc_byte_signed_byte(a, b, 16)
+    let s2 = simd_mul_acc_byte_signed_byte(a, b, 16)
+    let s3 = simd_mul_acc_byte_signed_byte(a, b, 16)
+    // Each call: 7 * -2 * 16 = -224.
+    check("us 3-call s1", s1, 0 - 224)
+    check("us 3-call s2", s2, 0 - 224)
+    check("us 3-call s3", s3, 0 - 224)
+    check("us 3-call sum", s1 + s2 + s3, 0 - 672)
+}
+
+// ---------- tests: signed_signed_byte --------------------------------------
+
+fn test_ss_identical_ones() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_i8_const(a, 32, 1)
+    fill_i8_const(b, 32, 1)
+    check("ss all-ones 32B", simd_mul_acc_signed_signed_byte(a, b, 32), 32)
+}
+
+fn test_ss_all_zeros() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_i8_const(a, 32, 0)
+    fill_i8_const(b, 32, 0)
+    check("ss all-zeros 32B", simd_mul_acc_signed_signed_byte(a, b, 32), 0)
+}
+
+fn test_ss_known_multiply() {
+    // a = -5, b = 7. Sum = -5*7 * 32 = -1120.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_i8_const(a, 32, 0 - 5)
+    fill_i8_const(b, 32, 7)
+    check("ss -5*7 32B", simd_mul_acc_signed_signed_byte(a, b, 32), 0 - 1120)
+}
+
+fn test_ss_both_negative() {
+    // a = -10, b = -3. Sum = (-10)*(-3) * 32 = 960.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_i8_const(a, 32, 0 - 10)
+    fill_i8_const(b, 32, 0 - 3)
+    check("ss both negative 32B", simd_mul_acc_signed_signed_byte(a, b, 32), 960)
+}
+
+fn test_ss_boundary_min_max() {
+    // a = -128, b = 127. Sum = -128*127 * 32 = -520192.
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_i8_const(a, 32, 0 - 128)
+    fill_i8_const(b, 32, 127)
+    check("ss -128 * 127 32B", simd_mul_acc_signed_signed_byte(a, b, 32),
+          0 - 520192)
+    // a = -128, b = -128. Sum = -128*-128 * 32 = 524288.
+    fill_i8_const(a, 32, 0 - 128)
+    fill_i8_const(b, 32, 0 - 128)
+    check("ss -128 * -128 32B", simd_mul_acc_signed_signed_byte(a, b, 32),
+          524288)
+}
+
+fn test_ss_zero_n() {
+    let a = alloc(32)
+    let b = alloc(32)
+    fill_i8_const(a, 32, 50)
+    fill_i8_const(b, 32, 0 - 30)
+    check("ss n_bytes = 0", simd_mul_acc_signed_signed_byte(a, b, 0), 0)
+}
+
+fn test_ss_tail_only() {
+    let a = alloc(16)
+    let b = alloc(16)
+    fill_i8_const(a, 16, 4)
+    fill_i8_const(b, 16, 0 - 6)
+    // 4*-6 = -24; n=5 -> -120, n=15 -> -360.
+    check("ss tail-only n=5",  simd_mul_acc_signed_signed_byte(a, b, 5),  0 - 120)
+    check("ss tail-only n=15", simd_mul_acc_signed_signed_byte(a, b, 15), 0 - 360)
+}
+
+fn test_ss_chunks_with_tail() {
+    // 17 bytes = 1 chunk + 1 tail.
+    let a = alloc(20)
+    let b = alloc(20)
+    fill_i8_const(a, 20, 0 - 8)
+    fill_i8_const(b, 20, 11)
+    check("ss 17B = 1 chunk + 1 tail",
+          simd_mul_acc_signed_signed_byte(a, b, 17), 0 - 1496)
+}
+
+fn test_ss_in_tight_loop() {
+    // 100 iters of mul-acc on a 64-byte buffer.
+    let a = alloc(64)
+    let b = alloc(64)
+    fill_i8_const(a, 64, 5)
+    fill_i8_const(b, 64, 4)
+    let acc = 0
+    let i = 0
+    while i < 100 {
+        acc = acc + simd_mul_acc_signed_signed_byte(a, b, 64)
+        i = i + 1
+    }
+    // Per call: 5*4 * 64 = 1280; 100 iters -> 128000.
+    check("ss tight-loop 100 iters", acc, 128000)
+}
+
+fn test_ss_large_buffer() {
+    // 16387-byte buffer = 1024 chunks + 3 tail.
+    let n = 16387
+    let a = alloc(n)
+    let b = alloc(n)
+    fill_i8_const(a, n, 3)
+    fill_i8_const(b, n, 7)
+    // 3*7 = 21 per byte; 16387*21 = 344127.
+    check("ss large buffer 16387B",
+          simd_mul_acc_signed_signed_byte(a, b, n), 344127)
+}
+
+fn test_ss_mixed_pattern() {
+    // Pseudo-LK gradient pattern vs scalar oracle.
+    let a = alloc(64)
+    let b = alloc(64)
+    let i = 0
+    let want = 0
+    while i < 64 {
+        // a = (i*37+5) signed to [-128,127]; b = (i*31-11) signed.
+        let va = ((int_mul(i, 37) + 5) % 200) - 100
+        let vb = ((int_mul(i, 31) + 11) % 200) - 100
+        store_i8(a, i, va)
+        store_i8(b, i, vb)
+        want = want + int_mul(va, vb)
+        i = i + 1
+    }
+    check("ss mixed pattern (scalar oracle)",
+          simd_mul_acc_signed_signed_byte(a, b, 64), want)
+}
+
+fn test_us_mixed_pattern() {
+    // Pseudo image pixel * gradient pattern vs scalar oracle.
+    let a = alloc(64)
+    let b = alloc(64)
+    let i = 0
+    let want = 0
+    while i < 64 {
+        let pa = (int_mul(i, 13) + 7) % 256                  // u8 [0,255]
+        let gb = ((int_mul(i, 19) + 3) % 200) - 100          // i8 [-100,99]
+        store8(a + i, pa)                                    // raw u8
+        store_i8(b, i, gb)                                   // i8 stored
+        // Treat a as unsigned, b as signed for the scalar oracle.
+        want = want + int_mul(pa, gb)
+        i = i + 1
+    }
+    check("us mixed pattern (scalar oracle)",
+          simd_mul_acc_byte_signed_byte(a, b, 64), want)
+}
+
+fn main() {
+    println("=== R18A simd_mul_acc correctness ===")
+
+    println("-- byte_signed_byte (u8 * i8) --")
+    test_us_identical_ones()
+    test_us_all_zeros()
+    test_us_known_multiply()
+    test_us_negative_b()
+    test_us_boundary_max()
+    test_us_zero_n()
+    test_us_tail_only()
+    test_us_chunk_only()
+    test_us_chunks_with_tail()
+    test_us_back_to_back()
+
+    println("-- signed_signed_byte (i8 * i8) --")
+    test_ss_identical_ones()
+    test_ss_all_zeros()
+    test_ss_known_multiply()
+    test_ss_both_negative()
+    test_ss_boundary_min_max()
+    test_ss_zero_n()
+    test_ss_tail_only()
+    test_ss_chunks_with_tail()
+    test_ss_in_tight_loop()
+    test_ss_large_buffer()
+    test_ss_mixed_pattern()
+
+    println("-- mixed-pattern us --")
+    test_us_mixed_pattern()
+
+    print("  passed: ")
+    print_int(passes)
+    print("/")
+    print_int(passes + fails)
+    println("")
+    if fails > 0 {
+        println("FAIL: simd_mul_acc produced wrong results")
+        exit(1)
+    }
+    println("ALL R18A SIMD_MUL_ACC TESTS PASSED")
+}
+
+main()

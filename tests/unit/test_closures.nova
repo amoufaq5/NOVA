@@ -1,0 +1,408 @@
+// R37A: closure literals (`|x| x + 1`, `|x, y| { ... }`, `|| 42`) with
+// per-instance environments + by-reference capture.
+//
+// R37A lowers a closure value to a 2-element tuple `[fn_ptr, captures_list]`:
+//
+//   * fn_ptr: function-pointer to the lambda's synthesized top-level
+//     `_lambda_N` function (R35C-style; the synthetic fn gets a hidden
+//     captures_list as its FIRST parameter).
+//   * captures_list: a fresh NOVA list, one slot per captured variable;
+//     each slot is a 1-element BOX whose [0] cell holds the captured
+//     variable's storage. Boxes are SHARED with the enclosing scope so
+//     a write in either side is observable from both: this gives by-
+//     reference semantics for free.
+//
+// At call time `c(arg1, arg2)` extracts `fn_ptr = c[0]`, `captures_list = c[1]`
+// and dispatches `fn_ptr(captures_list, arg1, arg2)`. The lambda body reads
+// captures via `captures_list[i][0]` (box deref). The enclosing scope, when
+// it declares a local that's captured by a nested lambda, allocates the box
+// at let-stmt time and all source-scope reads/writes go through the same
+// box — that's how `let x = 5; let f = || x; x = 10; f() == 10` works.
+//
+// Higher-order runtime builtins (`map_list`, `filter`, `reduce`, `foreach`,
+// `any`, `all`, `flat_map`) detect closure tuples at entry by inspecting
+// the magic word `[rsi] == -1` (list marker), unpacking when present and
+// falling back to the legacy raw fn-pointer ABI otherwise.
+//
+// Closure body lowering is unchanged from R35C: single-expression bodies
+// are wrapped as `{ AST_EXPR_STMT(expr) }`; the implicit-return path emits
+// the right code without any extra codegen branch.
+//
+// Disambiguation vs `|` (bitwise OR): the bitwise-OR operator is parsed
+// in parse_bitwise() as INFIX, so it only fires AFTER a left operand
+// has been consumed.  parse_primary() is only entered at the start of
+// an expression; a leading `|` token there cannot be infix and is
+// unambiguously a closure literal.  The same logic applies to `||`
+// (TOK_OR): logical OR is infix-only via parse_or(), so a leading `||`
+// in primary position is a zero-parameter closure literal.
+//
+// R35C -> R37A breaking changes:
+//
+//   1. PER-INSTANCE captures.  Each call to `make_adder` (or any closure-
+//      returning fn) allocates a fresh captures_list, so `add5` and
+//      `add7` no longer clobber each other. The R35C "last write wins"
+//      test below is flipped to assert per-instance correctness.
+//
+//   2. BY-REFERENCE captures.  Capture slots hold a box pointer shared
+//      with the enclosing scope; mutating the source local after the
+//      closure was created propagates into the closure's view (and
+//      vice-versa). The R35C "by-value snapshot" test below is flipped
+//      to assert the new by-ref behaviour.
+//
+// Globals (compute_captures still excludes top-level `let` names) are
+// already live-bindings through `[rip + _g_<name>]`; that behaviour is
+// preserved unchanged.
+
+let ok_count = 0
+let fail_count = 0
+
+fn check(cond, label) {
+    if cond == 1 {
+        ok_count = ok_count + 1
+        print("OK ")
+        println(label)
+    } else {
+        fail_count = fail_count + 1
+        print("FAIL ")
+        println(label)
+    }
+    return 0
+}
+
+// --- 1. Zero captures: simplest single-expression closure ---
+
+let f1 = |x| x + 1
+check(f1(5) == 6, "|x| x + 1 with arg 5 -> 6")
+check(f1(0) == 1, "|x| x + 1 with arg 0 -> 1")
+check(f1(-3) == -2, "|x| x + 1 with negative arg -> -2")
+
+let f1b = |x| x * x
+check(f1b(4) == 16, "|x| x * x with arg 4 -> 16")
+check(f1b(0) == 0, "|x| x * x with arg 0 -> 0")
+
+// --- 2. Single capture from enclosing global scope ---
+
+let k1 = 10
+let f2 = |x| x + k1
+check(f2(5) == 15, "single capture k=10: |x| x + k with 5 -> 15")
+check(f2(0) == 10, "single capture k=10: |x| x + k with 0 -> 10")
+
+// --- 3. Multi-capture ---
+
+let a3 = 3
+let b3 = 4
+let f3 = |x| x * a3 + b3
+check(f3(5) == 19, "multi-capture: |x| x*3 + 4 with 5 -> 19")
+check(f3(0) == 4, "multi-capture: |x| x*3 + 4 with 0 -> 4")
+check(f3(1) == 7, "multi-capture: |x| x*3 + 4 with 1 -> 7")
+
+// --- 4. Multi-parameter closures ---
+
+let sub = |x, y| x - y
+check(sub(10, 3) == 7, "|x, y| x - y with (10,3) -> 7")
+check(sub(0, 5) == -5, "|x, y| x - y with (0,5) -> -5")
+check(sub(100, 100) == 0, "|x, y| x - y with (100,100) -> 0")
+
+let triple_add = |a, b, c| a + b + c
+check(triple_add(1, 2, 3) == 6, "|a,b,c| a+b+c with (1,2,3) -> 6")
+check(triple_add(10, 20, 30) == 60, "|a,b,c| a+b+c with (10,20,30) -> 60")
+
+// --- 5. Zero-parameter closure `|| 42` ---
+
+let const_42 = || 42
+check(const_42() == 42, "|| 42 -> 42")
+check(const_42() == 42, "|| 42 called twice still -> 42")
+
+let const_sum = || (1 + 2 + 3)
+check(const_sum() == 6, "|| (1+2+3) -> 6")
+
+// --- 6. Block-body closure with let inside ---
+
+let blk1 = |x| { let t = x * 2; t + 1 }
+check(blk1(5) == 11, "block-body |x| { let t = x*2; t+1 } with 5 -> 11")
+check(blk1(0) == 1, "block-body |x| { let t = x*2; t+1 } with 0 -> 1")
+check(blk1(-4) == -7, "block-body |x| { let t = x*2; t+1 } with -4 -> -7")
+
+// Multi-statement block body.
+let blk2 = |x, y| { let t1 = x * 2; let t2 = y * 3; t1 + t2 }
+check(blk2(5, 4) == 22, "block-body |x,y| { 2x + 3y } with (5,4) -> 22")
+check(blk2(0, 0) == 0, "block-body |x,y| { 2x + 3y } with (0,0) -> 0")
+check(blk2(10, 1) == 23, "block-body |x,y| { 2x + 3y } with (10,1) -> 23")
+
+// --- 7. Closure passed as argument (map_list) — the canonical
+//        higher-order pattern that closures unlock. ---
+
+let nums = [1, 2, 3, 4, 5]
+let doubled = map_list(nums, |x| x * 2)
+check(doubled[0] == 2, "map_list with closure: doubled[0] == 2")
+check(doubled[1] == 4, "map_list with closure: doubled[1] == 4")
+check(doubled[2] == 6, "map_list with closure: doubled[2] == 6")
+check(doubled[3] == 8, "map_list with closure: doubled[3] == 8")
+check(doubled[4] == 10, "map_list with closure: doubled[4] == 10")
+check(len(doubled) == 5, "map_list with closure: length preserved")
+
+// R35C stdlib helper: `list_map` (Nova-level wrapper around map_list).
+let squared = list_map(nums, |x| x * x)
+check(squared[0] == 1, "list_map with closure: squared[0] == 1")
+check(squared[1] == 4, "list_map with closure: squared[1] == 4")
+check(squared[2] == 9, "list_map with closure: squared[2] == 9")
+check(squared[3] == 16, "list_map with closure: squared[3] == 16")
+check(squared[4] == 25, "list_map with closure: squared[4] == 25")
+
+// Closure with multi-capture used in map_list.
+let bias = 7
+let factor = 3
+let scaled = map_list(nums, |x| x * factor + bias)
+check(scaled[0] == 10, "map_list with multi-capture closure: scaled[0] == 10")
+check(scaled[1] == 13, "map_list with multi-capture closure: scaled[1] == 13")
+check(scaled[2] == 16, "map_list with multi-capture closure: scaled[2] == 16")
+check(scaled[4] == 22, "map_list with multi-capture closure: scaled[4] == 22")
+
+// --- 8. Capture semantics: globals are live-bindings (capture-by-
+//        REFERENCE), locals are captured by VALUE into a static slot. ---
+//
+// Globals: compute_captures treats top-level `let` names as globals and
+// EXCLUDES them from the capture set, so the closure body reads them
+// directly from `[rip + _g_<name>]` on every call.  Mutating a global
+// after the closure was created IS visible inside the closure.
+
+let v_glob = 100
+let capt_glob = |x| x + v_glob
+v_glob = 200
+check(capt_glob(5) == 205, "global capture is live: v_glob mutated 100->200, capt(5) reads new value")
+v_glob = 100
+check(capt_glob(5) == 105, "global capture is live: v_glob set back to 100, capt(5) sees it")
+
+// Locals: captured BY REFERENCE via a boxed cell shared between the
+// source scope and the closure (R37A breaking change vs R35C). Reading
+// the captured value AFTER the source local was reassigned shows the
+// LATEST value, not the snapshot at creation time. Closure mutations
+// propagate back to the source scope and vice-versa.
+
+fn local_capture_test() {
+    let p = 50
+    let q = |n| n + p
+    let first = q(10)
+    p = 999
+    let second = q(10)
+    let pair = list_new()
+    push(pair, first)
+    push(pair, second)
+    return pair
+}
+
+let lc_result = local_capture_test()
+check(lc_result[0] == 60, "local capture: q(10) at creation with p=50 -> 60")
+// R35C -> R37A FLIPPED: was "by-value 60", now by-ref so q(10) sees p=999 -> 1009.
+check(lc_result[1] == 1009, "R37A by-ref: p mutated to 999 -> q(10) reads new value -> 1009")
+
+// --- 9. Closure-returning-closure (single-instance) ---
+
+fn make_adder(k) {
+    return |x| x + k
+}
+
+let add5 = make_adder(5)
+check(add5(3) == 8, "make_adder(5)(3) -> 8 (single instance)")
+check(add5(0) == 5, "make_adder(5)(0) -> 5 (single instance)")
+check(add5(-2) == 3, "make_adder(5)(-2) -> 3 (single instance)")
+
+// R37A: per-instance environments. Each call to `make_adder`
+// allocates a fresh captures_list, so `add5` and `add7` have
+// INDEPENDENT k boxes. The R35C "last write wins" hazard is
+// fixed: add5(3) still reads k=5 -> 8, add7(3) reads k=7 -> 10.
+let add7 = make_adder(7)
+// R35C -> R37A FLIPPED: was "static slot clobbered -> 10", now per-instance -> 8.
+check(add5(3) == 8, "R37A multi-instance: add5(3) keeps its k=5 -> 8 after add7 was made")
+check(add7(3) == 10, "R37A multi-instance: add7(3) -> 10 (independent k=7)")
+
+// Closure literal directly returning a closure literal (sequential
+// lambda creation does NOT trigger the multi-instance hazard above
+// because each call to the outer lambda re-evaluates the inner lambda
+// — the inner re-writes the same static slot, but there is only one
+// "live" instance at a time as long as we use it immediately).
+let make_mul = |k| |x| x * k
+let mul3_now = make_mul(3)
+check(mul3_now(4) == 12, "closure-returning-closure direct: |k| |x| x*k applied (3)(4) -> 12")
+
+// --- 10. Closure inside an if-branch ---
+
+let pick = 1
+let chosen = if pick == 1 { |x| x + 100 } else { |x| x + 200 }
+check(chosen(5) == 105, "closure literal inside if-then arm: 5+100 == 105")
+
+// --- 11. Closure captures a struct field via the enclosing local ---
+
+let pair = [10, 20]
+let pair_sum = |x| x + pair[0] + pair[1]
+check(pair_sum(5) == 35, "closure captures list local: 5 + 10 + 20 == 35")
+
+// --- 12. Builtin call inside closure body ---
+
+let to_str_n = |x| int_to_str(x + 1)
+let s_result = to_str_n(41)
+check(str_eq(s_result, "42") == 1, "closure body calls builtin: int_to_str(41+1) == \"42\"")
+
+// --- 13. Single-expression closure with chained ops ---
+
+let chained = |x, y, z| x + y * z - 1
+check(chained(2, 3, 4) == 13, "|x,y,z| x + y*z - 1 with (2,3,4) -> 13")
+check(chained(0, 1, 1) == 0, "|x,y,z| x + y*z - 1 with (0,1,1) -> 0")
+
+// --- 14. Closures with no parameters and zero captures: pure constant
+//         closures distinct from each other. ---
+
+let lazy_pi = || 314
+let lazy_e = || 271
+check(lazy_pi() == 314, "lazy_pi() == 314")
+check(lazy_e() == 271, "lazy_e() == 271")
+check(lazy_pi() + lazy_e() == 585, "lazy_pi() + lazy_e() == 585")
+
+// --- 15. R37A by-reference capture: source-local mutation visible. ---
+
+fn r37a_byref_source_mut() {
+    let x = 5
+    let f = || x
+    let before = f()
+    x = 10
+    let after = f()
+    let pair = list_new()
+    push(pair, before)
+    push(pair, after)
+    return pair
+}
+
+let r37a_br = r37a_byref_source_mut()
+check(r37a_br[0] == 5, "R37A by-ref: f() before mutation reads x=5")
+check(r37a_br[1] == 10, "R37A by-ref: source x=10 mutation propagates to closure -> 10")
+
+// --- 16. R37A by-reference capture: closure mutates source. ---
+
+fn r37a_byref_closure_mut() {
+    let counter = 0
+    let inc = || { counter = counter + 1; counter }
+    let r1 = inc()
+    let r2 = inc()
+    let r3 = inc()
+    let pair = list_new()
+    push(pair, r1)
+    push(pair, r2)
+    push(pair, r3)
+    push(pair, counter)
+    return pair
+}
+
+let r37a_cm = r37a_byref_closure_mut()
+check(r37a_cm[0] == 1, "R37A by-ref: inc() #1 -> 1")
+check(r37a_cm[1] == 2, "R37A by-ref: inc() #2 -> 2")
+check(r37a_cm[2] == 3, "R37A by-ref: inc() #3 -> 3")
+check(r37a_cm[3] == 3, "R37A by-ref: source counter sees closure's mutations -> 3")
+
+// --- 17. R37A multi-instance: independent captures for each instance. ---
+
+let add5_b = make_adder(5)
+let add100 = make_adder(100)
+let add_neg = make_adder(-3)
+check(add5_b(3) == 8, "R37A multi-instance: add5(3) -> 8")
+check(add100(3) == 103, "R37A multi-instance: add100(3) -> 103")
+check(add_neg(3) == 0, "R37A multi-instance: add(-3)(3) -> 0")
+// Reuse from earlier instances — captures don't bleed.
+check(add5_b(7) == 12, "R37A multi-instance: add5(7) still -> 12 after later instances")
+check(add100(50) == 150, "R37A multi-instance: add100(50) still -> 150")
+
+// --- 18. R37A multi-instance nested closure (closure-returning-closure). ---
+
+let mul3 = make_mul(3)
+let mul7 = make_mul(7)
+check(mul3(4) == 12, "R37A nested multi-instance: mul3(4) -> 12")
+check(mul7(4) == 28, "R37A nested multi-instance: mul7(4) -> 28")
+check(mul3(5) == 15, "R37A nested multi-instance: mul3(5) -> 15 (independent of mul7)")
+check(mul7(5) == 35, "R37A nested multi-instance: mul7(5) -> 35")
+
+// --- 19. R37A 3-level nested closure: |k| |x| |y| x + y + k. ---
+
+let make_add3 = |k| |x| |y| x + y + k
+let stage1 = make_add3(100)
+let stage2 = stage1(3)
+check(stage2(4) == 107, "R37A 3-level nested: 100 + 3 + 4 -> 107")
+check(stage2(0) == 103, "R37A 3-level nested: 100 + 3 + 0 -> 103")
+// Independent 3-level instances.
+let stage1b = make_add3(1000)
+let stage2b = stage1b(50)
+check(stage2b(2) == 1052, "R37A 3-level multi-instance: 1000 + 50 + 2 -> 1052")
+check(stage2(4) == 107, "R37A 3-level multi-instance: original stage2 still -> 107")
+
+// --- 20. R37A by-ref with nested closures: mutate captured via inner. ---
+
+fn r37a_nested_byref_test() {
+    let n = 10
+    let outer = || {
+        let inner = || n
+        return inner()
+    }
+    let r1 = outer()
+    n = 99
+    let r2 = outer()
+    let pair = list_new()
+    push(pair, r1)
+    push(pair, r2)
+    return pair
+}
+
+let r37a_nb = r37a_nested_byref_test()
+check(r37a_nb[0] == 10, "R37A nested by-ref: outer()->inner()->n=10")
+check(r37a_nb[1] == 99, "R37A nested by-ref: after n=99, outer()->inner()->n=99")
+
+// --- 21. R37A accumulator pattern: HoF-friendly closure capturing list. ---
+
+fn r37a_make_collector() {
+    let items = list_new()
+    let push_item = |x| { push(items, x); len(items) }
+    let n1 = push_item(10)
+    let n2 = push_item(20)
+    let n3 = push_item(30)
+    let result = list_new()
+    push(result, n1)
+    push(result, n2)
+    push(result, n3)
+    push(result, items[0])
+    push(result, items[1])
+    push(result, items[2])
+    push(result, len(items))
+    return result
+}
+
+let r37a_col = r37a_make_collector()
+check(r37a_col[0] == 1, "R37A collector: push_item(10) returns len 1")
+check(r37a_col[1] == 2, "R37A collector: push_item(20) returns len 2")
+check(r37a_col[2] == 3, "R37A collector: push_item(30) returns len 3")
+check(r37a_col[3] == 10, "R37A collector: items[0] visible to source scope -> 10")
+check(r37a_col[4] == 20, "R37A collector: items[1] visible to source scope -> 20")
+check(r37a_col[5] == 30, "R37A collector: items[2] visible to source scope -> 30")
+check(r37a_col[6] == 3, "R37A collector: source-scope items has length 3")
+
+// --- Final summary ---
+
+print("Total assertions: ")
+println(int_to_str(ok_count + fail_count))
+print("Passed: ")
+println(int_to_str(ok_count))
+print("Failed: ")
+println(int_to_str(fail_count))
+
+if fail_count == 0 {
+    println("ALL CLOSURE TESTS PASSED")
+} else {
+    println("CLOSURE TESTS FAILED")
+}
+
+// R35C: stdlib helper `list_map(list, closure) -> new_list`.  Thin
+// wrapper around the existing built-in `map_list` so that user code
+// can refer to it via a name that matches the rest of the closure-
+// friendly stdlib (`list_map`, `list_filter`, `list_fold` in future
+// rounds).  Defined at the bottom of the test file so the test body
+// above can use it; in a self-host build this same body lives in
+// src/core/system.nova (see R35C stdlib hook).
+fn list_map(xs, f) {
+    return map_list(xs, f)
+}

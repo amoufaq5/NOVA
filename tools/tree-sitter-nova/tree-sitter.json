@@ -1,0 +1,38 @@
+{
+  "grammars": [
+    {
+      "name": "nova",
+      "camelcase": "Nova",
+      "scope": "source.nova",
+      "path": ".",
+      "file-types": [
+        "nova"
+      ],
+      "highlights": [
+        "queries/highlights.scm"
+      ],
+      "injection-regex": "^nova$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "tree-sitter grammar for the NOVA programming language",
+    "authors": [
+      {
+        "name": "NOVA contributors"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/nova-lang/nova"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": false,
+    "node": true,
+    "python": false,
+    "rust": true,
+    "swift": false
+  }
+}

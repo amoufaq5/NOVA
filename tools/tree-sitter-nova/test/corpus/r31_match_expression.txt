@@ -1,0 +1,258 @@
+================================================================================
+R31D: simple match expression with bare-ident variant patterns
+================================================================================
+
+let r = match v {
+    Some(x) => x
+    None => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (variant_pattern
+          path: (identifier)
+          (identifier))
+        value: (identifier))
+      (match_arm
+        pattern: (identifier)
+        value: (number)))))
+
+================================================================================
+R31D: match expression with wildcard catch-all
+================================================================================
+
+let r = match v {
+    Ok(x) => x
+    Err(e) => -1
+    _ => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (variant_pattern
+          path: (identifier)
+          (identifier))
+        value: (identifier))
+      (match_arm
+        pattern: (variant_pattern
+          path: (identifier)
+          (identifier))
+        value: (unary_expression
+          operand: (number)))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (number)))))
+
+================================================================================
+R31D: match expression on literal-pattern arms
+================================================================================
+
+let r = match n {
+    1 => "one"
+    2 => "two"
+    _ => "many"
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (number)
+        value: (string_literal))
+      (match_arm
+        pattern: (number)
+        value: (string_literal))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (string_literal)))))
+
+================================================================================
+R31D: match as a statement (expression-statement form)
+================================================================================
+
+fn dispatch(v) {
+    match v {
+        Some(x) => print(x)
+        None => print("none")
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)))
+    body: (block
+      (expression_statement
+        (match_expression
+          scrutinee: (identifier)
+          (match_arm
+            pattern: (variant_pattern
+              path: (identifier)
+              (identifier))
+            value: (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (identifier))))
+          (match_arm
+            pattern: (identifier)
+            value: (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (string_literal)))))))))
+
+================================================================================
+R31D: match arm with block body
+================================================================================
+
+let r = match v {
+    Some(x) => {
+        let y = x + 1
+        y
+    }
+    None => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (variant_pattern
+          path: (identifier)
+          (identifier))
+        value: (block
+          (let_decl
+            name: (identifier)
+            value: (binary_expression
+              left: (identifier)
+              right: (number)))
+          (expression_statement
+            (identifier))))
+      (match_arm
+        pattern: (identifier)
+        value: (number)))))
+
+================================================================================
+R33C: match arm with wildcard guard
+================================================================================
+
+let r = match n {
+    _ if n > 100 => "huge"
+    _ if n > 10 => "big"
+    _ => "small"
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (wildcard_pattern)
+        guard: (binary_expression
+          left: (identifier)
+          right: (number))
+        value: (string_literal))
+      (match_arm
+        pattern: (wildcard_pattern)
+        guard: (binary_expression
+          left: (identifier)
+          right: (number))
+        value: (string_literal))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (string_literal)))))
+
+================================================================================
+R33C: match arm guard on variant pattern
+================================================================================
+
+let r = match v {
+    Some(x) if x > 0 => x
+    Some(x) => -x
+    None => 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (variant_pattern
+          path: (identifier)
+          (identifier))
+        guard: (binary_expression
+          left: (identifier)
+          right: (number))
+        value: (identifier))
+      (match_arm
+        pattern: (variant_pattern
+          path: (identifier)
+          (identifier))
+        value: (unary_expression
+          operand: (identifier)))
+      (match_arm
+        pattern: (identifier)
+        value: (number)))))
+
+================================================================================
+R33C: match arm guard on value pattern
+================================================================================
+
+let r = match mode {
+    1 => "one"
+    2 if strict == 1 => "two-strict"
+    2 => "two-relaxed"
+    _ => "other"
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (identifier)
+      (match_arm
+        pattern: (number)
+        value: (string_literal))
+      (match_arm
+        pattern: (number)
+        guard: (binary_expression
+          left: (identifier)
+          right: (number))
+        value: (string_literal))
+      (match_arm
+        pattern: (number)
+        value: (string_literal))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (string_literal)))))
