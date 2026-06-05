@@ -305,6 +305,52 @@ class ScopeIndex:
             cur = cur.parent
         return None
 
+    # -- enumeration ---------------------------------------------------------
+
+    def visible_at(
+        self, line: int, col: int = 0
+    ) -> List[Tuple[str, str, int]]:
+        """Return every binding visible at ``(line, col)``.
+
+        R38E: completion needs to enumerate every in-scope name (locals
+        + fn params + top-level fns/lets) so the autocomplete dropdown
+        can rank them. ``visible_at`` walks the scope-at -> parent chain
+        and collects ``(name, scope_kind, decl_line)`` triples for every
+        binding with a declaration line at or before ``line``. Top-
+        level (FILE-scope) bindings are always included because NOVA
+        hoists top-level ``fn`` declarations — a forward call from
+        early in the file resolves to a fn defined later.
+
+        Returns the bindings in inside-out order (most-nested scope
+        first) and de-duplicates by name keeping the innermost — this
+        matches Python / Rust lexical-shadow semantics so a local
+        ``x`` masks an outer ``x``.
+
+        Used by ``handle_text_document_completion`` to populate the
+        in-scope identifier list.
+        """
+        out: List[Tuple[str, str, int]] = []
+        seen: Set[str] = set()
+        cur: Optional[Scope] = self.scope_at(line, col)
+        while cur is not None:
+            for name, decl_line in cur.bindings.items():
+                if name in seen:
+                    continue
+                if cur.kind == SCOPE_FILE:
+                    # Top-level fns/lets are hoisted — always visible.
+                    seen.add(name)
+                    out.append((name, cur.kind, decl_line))
+                    continue
+                # FN-scope parameters are declared on the fn's start
+                # line. BLOCK + FN-local lets are visible only after
+                # their decl_line — forward-ref exclusion is a soft
+                # policy that matches NOVA's semantics.
+                if decl_line <= line:
+                    seen.add(name)
+                    out.append((name, cur.kind, decl_line))
+            cur = cur.parent
+        return out
+
     # -- range queries -------------------------------------------------------
 
     def live_at_range(

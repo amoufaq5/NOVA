@@ -1,5 +1,105 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R38E — nova-lsp `textDocument/completion` (keywords + scope-aware identifiers + snippets)
+
+**Status: complete** — the autocomplete dropdown surface adds modern
+IDE polish to nova-lsp's existing completion handler. Layered on top
+of R24E's type-aware completion (which still preempts for `Name::` /
+`var.` / `let x: ` / fn-param `(p: ` / `Box<` triggers) AND on top of
+the legacy text-based fallback (builtins + user `fn`/`let` from the
+open buffer + transitively imported files).
+
+### What R38E adds
+
+- **Keywords** — 20 NOVA control-flow + declaration + literal
+  keywords (`fn`, `let`, `if`, `else`, `while`, `for`, `match`,
+  `return`, `import`, `enum`, `struct`, `true`, `false`, `break`,
+  `continue`, `nil`, `and`, `or`, `not`, `in`). Each surfaces as a
+  `CompletionItemKind.Keyword (14)` item.
+- **Primitive types** — 8 type names (`int`, `str`, `bool`, `list`,
+  `float`, `map`, `any`, `nil`). Float is the R38A addition.
+- **Snippets** (8) — multi-placeholder skeletons using VS-Code-style
+  `${N:placeholder}` syntax with `insertTextFormat: 2`. Coverage:
+  `fn` / `let` / `if` / `match` / `while` / `import` / `enum` /
+  `closure`. The `match` snippet ships with 4 placeholders
+  (`${1:expr}`, `${2:pat}`, `${3:result}`, `${4:default}`); `fn`
+  ships with 3 (`name`, `params`, `body`); etc.
+- **In-scope identifiers** — uses R36D's `ScopeIndex` extended with a
+  single new method `visible_at(line, col) -> List[(name, scope_kind,
+  decl_line)]` that enumerates every binding visible at a position.
+  Walks the scope-at -> parent chain and collects bindings with
+  `decl_line <= line` (the soft forward-decl exclusion policy; top-
+  level fn/let bindings exempt because NOVA hoists). Inside-out
+  ordering so lexical shadows dedupe correctly.
+- **Imported modules** — every `import "path/file.nova"` directive
+  resolves against the current file's directory (or absolute); the
+  imported file's top-level `fn` declarations surface as
+  `CompletionItemKind.Function (3)` items. The `///` doc-comment
+  block above each declaration populates the `documentation` field.
+- **Stdlib combinators** (R37E) — `list_map`, `list_filter`,
+  `list_fold`, `list_take`, `list_drop`, `list_concat`, `list_zip`,
+  `list_enumerate`, `list_find`, `list_any`, `list_all`,
+  `list_reverse`, `list_sum`. Hardcoded so the suggestion fires even
+  before the user has explicitly imported `src/stdlib/list.nova`.
+- **User-declared enum + struct names** — surface from the current
+  buffer's `enum X { ... }` / `struct Y { ... }` declarations.
+
+### Trigger characters
+
+`completionProvider.triggerCharacters` extended from `[".", "("]` to
+`[".", "(", ":", " "]`. Adding `:` lets `Name::` trigger after the
+second colon; adding ` ` lets `let x = ` re-trigger in expression
+position.
+
+### Member access `.field`
+
+**Deferred.** R24E already handles `var.` for known-struct variables
+(returns the struct's field list). R38E does NOT extend this to
+"infer the receiver's type from arbitrary expressions" — that needs
+a type inferencer the LSP doesn't currently own. The deferred work
+ticket is "completion: member-access on chained / inferred
+expressions".
+
+### Resolution model
+
+`resolveProvider: false` (each CompletionItem is fully populated up
+front). A future round can flip this to true for lazy-loading
+documentation on hover.
+
+### ScopeIndex extension
+
+R36D's `ScopeIndex` exposes a new method `visible_at(line, col)`. No
+existing R36D API was refactored — the addition is purely additive.
+
+### Files touched
+
+- `tools/nova-lsp/nova_lsp/completion.py` (new, ~600 lines): R38E
+  enrichment module (keywords + primitives + snippets + stdlib +
+  in-scope identifiers + imported-fn enumeration + context
+  detection + fuzzy-match helpers).
+- `tools/nova-lsp/nova_lsp/server.py`: wires `compute_r38e_completions`
+  into the existing `handle_completion` dispatcher (between R24E
+  preempt and the legacy fallback), advertises the expanded trigger
+  characters in `server_capabilities`.
+- `tools/nova-lsp/nova_lsp/scope_index.py`: adds the new
+  `ScopeIndex.visible_at` method.
+- `tools/nova-lsp/tests/test_completion_r38e.py` (new, ~700 lines):
+  142 new assertions covering pure helpers + context detection +
+  document scan + entry-point + wire tests through `dispatch`.
+- `tools/nova-lsp/tests/test_scope_index.py`: +5 new tests (9
+  assertions) for `visible_at`.
+
+### Honest design caveat
+
+The R38E enrichment is *additive* on top of the legacy text-based
+fallback rather than a replacement — the completion list grows from
+~155 items (legacy) to ~200 items (R38E). De-duplication is by
+`(kind, label)` so the snippet `fn` and the keyword `fn` and the
+user-declared `fn main()` all coexist (different kinds). Editors
+fuzzy-filter by typed prefix so the larger list isn't a UX
+problem, but a future polish could prune the legacy stdlib entries
+already covered by R38E's hardcoded list.
+
 ## R37A — closures lower to `[fn_ptr, captures_list]` tuples + by-reference capture
 
 **Status: complete** — closures shift from R35C's static-slot

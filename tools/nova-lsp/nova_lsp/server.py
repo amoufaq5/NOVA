@@ -10,8 +10,12 @@ using only the Python standard library. Supports:
     * `textDocument/completion` (builtins + fn/let from doc + imports;
       R24E adds context-aware suggestions: `Name::` -> enum variants,
       `var.` -> struct fields, `let x: ` / fn-param `(p: ` / `Box<` ->
-      enum + struct + primitive type names; falls back to the legacy
-      text-based list when no trigger applies)
+      enum + struct + primitive type names; R38E layers keywords +
+      snippets + R37E stdlib + in-scope identifiers from R36D's
+      ScopeIndex + imported-module fn names on top of the legacy
+      text-based fallback; falls back to the legacy text-based list
+      when neither the type-aware trigger nor the R38E enrichment
+      apply)
     * `textDocument/definition` (intra-file + transitively imported fns/lets)
     * `textDocument/prepareRename` (R32E — validates the cursor sits on
       a renameable identifier before the editor pops the rename dialog;
@@ -99,6 +103,10 @@ from nova_lsp.call_hierarchy import (
     prepare_call_hierarchy,
 )
 from nova_lsp.code_lens import compute_code_lenses, resolve_code_lens
+from nova_lsp.completion import (
+    compute_r38e_completions,
+    detect_context as detect_completion_context,
+)
 from nova_lsp.document_link import compute_document_links
 from nova_lsp.document_symbols import compute_document_symbols
 from nova_lsp.exhaustiveness_fix import (
@@ -792,17 +800,22 @@ def handle_completion(
 ) -> Dict[str, Any]:
     """Return a `CompletionList` for the cursor at ``params.position``.
 
-    Behaviour is two-layered:
+    Behaviour is three-layered:
 
-      1. *Type-aware*: if the cursor follows a recognised trigger
-         (``Name::``, ``var.``, ``let x: ``, fn-param ``(p: ``,
-         ``Box<``) we return a focused list — enum variants, struct
-         fields, or known type names. The generic builtin / fn / let
-         list is NOT appended in this case because mixing in unrelated
-         entries would defeat the trigger's purpose. (R24E)
-      2. *Text-based fallback*: otherwise we return the legacy union of
-         builtins + top-level ``fn`` / ``let`` reachable from the open
-         buffer. The editor filters this against the typed prefix."""
+      1. *Type-aware* (R24E): if the cursor follows a recognised
+         trigger (``Name::``, ``var.``, ``let x: ``, fn-param
+         ``(p: ``, ``Box<``) we return a focused list — enum variants,
+         struct fields, or known type names. The generic list is NOT
+         appended in this case because mixing in unrelated entries
+         would defeat the trigger's purpose.
+      2. *R38E enrichment*: otherwise we layer keywords + snippets +
+         R37E stdlib + in-scope identifiers from R36D's ScopeIndex +
+         imported-module fn declarations on top of the legacy list.
+         This is the "modern IDE autocomplete dropdown" surface.
+      3. *Text-based fallback*: the legacy union of builtins +
+         top-level ``fn`` / ``let`` reachable from the open buffer.
+         R38E layers on top of this so the builtins remain reachable
+         alongside the new categories."""
     uri = params.get("textDocument", {}).get("uri", "")
     doc = state.documents.get(uri)
     items: List[Dict[str, Any]] = []
@@ -827,11 +840,37 @@ def handle_completion(
         # Trigger recognised — return the focused list verbatim.
         return {"isIncomplete": False, "items": type_aware}
 
+    # --- R38E enrichment: keywords + snippets + scope-aware ----
+    # in-scope identifiers + stdlib + imported-fn names. Built on
+    # top of the legacy fallback so builtins remain reachable.
+    doc_path = uri_to_path(doc.uri)
+    try:
+        r38e_items = compute_r38e_completions(
+            uri=uri,
+            doc_text=doc.text,
+            doc_path=doc_path,
+            position=position,
+        )
+    except Exception as e:
+        _log(f"R38E completion error: {e!r}")
+        r38e_items = []
+
+    # Track which labels R38E already covered so we don't duplicate
+    # them in the legacy layer. We keep duplicate labels when the
+    # `kind` differs (e.g. snippet ``fn`` vs keyword ``fn``).
+    seen_kind_label: Set[Tuple[int, str]] = set()
+    for it in r38e_items:
+        items.append(it)
+        seen_kind_label.add((int(it.get("kind", 0)), it["label"]))
+
     # --- Generic fallback: builtins + user fn/let -------------------
     fns, lets = collect_symbols(doc, state)
 
     # builtins first (so users discover them in autocomplete)
     for name in sorted(BUILTIN_FUNCTIONS):
+        key = (COMPLETION_KIND_FN, name)
+        if key in seen_kind_label:
+            continue
         items.append(
             {
                 "label": name,
@@ -843,9 +882,13 @@ def handle_completion(
                 },
             }
         )
+        seen_kind_label.add(key)
 
     for name in sorted(fns):
         sym = fns[name]
+        key = (COMPLETION_KIND_FN, name)
+        if key in seen_kind_label:
+            continue
         items.append(
             {
                 "label": name,
@@ -853,9 +896,13 @@ def handle_completion(
                 "detail": sym.signature,
             }
         )
+        seen_kind_label.add(key)
 
     for name in sorted(lets):
         sym = lets[name]
+        key = (COMPLETION_KIND_VAR, name)
+        if key in seen_kind_label:
+            continue
         items.append(
             {
                 "label": name,
@@ -863,6 +910,7 @@ def handle_completion(
                 "detail": sym.signature,
             }
         )
+        seen_kind_label.add(key)
 
     return {"isIncomplete": False, "items": items}
 
@@ -2374,8 +2422,13 @@ def server_capabilities() -> Dict[str, Any]:
             "save": {"includeText": True},
         },
         "hoverProvider": True,
+        # R38E: extends the legacy `.` / `(` trigger set with `:` (so
+        # `Name::` enum variant lookup fires after the second colon)
+        # and ` ` (so `let x = ` triggers completion in expression
+        # position). `resolveProvider: false` keeps every item fully
+        # populated up front — a future round can lazy-load docs.
         "completionProvider": {
-            "triggerCharacters": [".", "("],
+            "triggerCharacters": [".", "(", ":", " "],
             "resolveProvider": False,
         },
         "definitionProvider": True,

@@ -602,6 +602,79 @@ def test_multiple_fns_each_has_independent_scope() -> None:
 
 
 # ---------------------------------------------------------------------------
+# R38E visible_at — enumerate every binding visible at a position.
+# ---------------------------------------------------------------------------
+
+
+def test_visible_at_file_scope() -> None:
+    """Top-level fn name is visible at the FILE scope."""
+    src = "fn alpha() { return 1 }\n"
+    idx = build_scope_index(src)
+    visible = idx.visible_at(0, 0)
+    names = {n for n, _kind, _line in visible}
+    assert_("alpha" in names, "alpha visible at file scope")
+
+
+def test_visible_at_fn_body_sees_params_and_top_levels() -> None:
+    """Inside a fn body the params + every top-level fn name are
+    visible."""
+    src = (
+        "fn helper(x) { return x }\n"          # 0
+        "fn main(payload) {\n"                  # 1
+        "  let cursor = 1\n"                    # 2
+        "}\n"                                   # 3
+    )
+    idx = build_scope_index(src)
+    visible = idx.visible_at(2, 14)
+    names = {n for n, _kind, _line in visible}
+    assert_("helper" in names, "top-level helper visible")
+    assert_("main" in names, "top-level main visible")
+    assert_("payload" in names, "fn param payload visible")
+    assert_("cursor" in names, "earlier let cursor visible")
+
+
+def test_visible_at_excludes_later_let() -> None:
+    """A let bound AFTER the cursor's line isn't yet visible."""
+    src = (
+        "fn run() {\n"                          # 0
+        "  let here = 1\n"                      # 1
+        "  let LATER = 2\n"                     # 2
+        "}\n"                                   # 3
+    )
+    idx = build_scope_index(src)
+    visible = idx.visible_at(1, 14)
+    names = {n for n, _kind, _line in visible}
+    assert_("here" in names, "earlier let visible")
+    assert_("LATER" not in names, "later let excluded")
+
+
+def test_visible_at_deduplicates_shadows() -> None:
+    """When an inner scope shadows an outer name, visible_at returns
+    the inner binding (de-duplicated to one entry)."""
+    src = (
+        "fn run() {\n"                          # 0
+        "  let x = 1\n"                         # 1
+        "  if 1 {\n"                            # 2
+        "    let x = 2\n"                       # 3
+        "    let probe = 0\n"                   # 4
+        "  }\n"                                 # 5
+        "}\n"                                   # 6
+    )
+    idx = build_scope_index(src)
+    visible = idx.visible_at(4, 14)
+    names = [n for n, _kind, _line in visible]
+    # `x` appears exactly once.
+    assert_eq(names.count("x"), 1, "x de-duplicated to single entry")
+
+
+def test_visible_at_empty_doc() -> None:
+    """Empty document returns no names — but doesn't crash."""
+    idx = build_scope_index("")
+    visible = idx.visible_at(0, 0)
+    assert_eq(visible, [], "empty doc -> empty visible list")
+
+
+# ---------------------------------------------------------------------------
 # Driver.
 # ---------------------------------------------------------------------------
 
@@ -645,6 +718,12 @@ def main() -> int:
         test_string_literal_brace_does_not_open_scope,
         test_line_comment_brace_does_not_open_scope,
         test_multiple_fns_each_has_independent_scope,
+        # R38E visible_at
+        test_visible_at_file_scope,
+        test_visible_at_fn_body_sees_params_and_top_levels,
+        test_visible_at_excludes_later_let,
+        test_visible_at_deduplicates_shadows,
+        test_visible_at_empty_doc,
     ]
     failed = 0
     for t in tests:
