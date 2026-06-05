@@ -1,5 +1,124 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R37E — stdlib: list combinators consuming R35C closures + R36C tuples
+
+**Status: complete** — `src/stdlib/list.nova` becomes the first user-
+facing module under the new `src/stdlib/` directory. It exposes 13
+idiomatic higher-order list combinators that USE the closures shipped
+in R35C and the tuples shipped in R36C as their argument / result
+shapes. This is pure library code — no parser, codegen, or AST
+changes — so it consumes the closure ABI as-is and remains stable
+across the R37A closure-lowering migration (the call site `f(x)` /
+`g(acc, x)` is unchanged whether closures lower to static `_cap_*`
+slots (R35C) or `[fn_ptr, env_list]` tuples (R37A).
+
+### What R37E delivers
+
+- **`src/stdlib/list.nova`** — 13 combinators:
+  - `list_map(lst, f)` — apply `f` to each element, returns new list
+    (wraps `map_list` builtin).
+  - `list_filter(lst, pred)` — keep elements where `pred(elt)` is
+    truthy (wraps `filter` builtin).
+  - `list_fold(lst, init, f)` — left fold with seeded accumulator;
+    reorders the builtin `reduce(lst, f, init)` so callers can
+    read seed next to the input list.
+  - `list_take(lst, n)` — first `n` elements; saturates at `len(lst)`
+    when `n` exceeds the list length; returns empty when `n <= 0`.
+  - `list_drop(lst, n)` — skip first `n` elements; returns full copy
+    on `n <= 0`, empty on `n >= len(lst)`.
+  - `list_concat(lst_a, lst_b)` — `a ++ b` returning a new list;
+    copies `a` first (the builtin `append_list` mutates its first
+    arg in place, so `list_concat` does NOT mutate the input).
+  - `list_zip(lst_a, lst_b)` — `[(a[0], b[0]), ...]` truncated to
+    shorter input length. **Returns tuples** — the pairs are R36C
+    tuples (2-element lists at runtime) so `t[0]` / `t[1]` work in
+    downstream chains like `list_map(zip_result, |t| t[0] + t[1])`.
+  - `list_enumerate(lst)` — `[(0, lst[0]), (1, lst[1]), ...]`.
+  - `list_find(lst, pred)` — index of first elt where `pred(elt)` is
+    truthy, `-1` otherwise; implemented as a closure-call loop (the
+    builtin `index_of` does value-equality only).
+  - `list_any(lst, pred)` — `1` if any element matches, `0` else.
+  - `list_all(lst, pred)` — `1` if every element matches, `0` else;
+    vacuously `1` on empty lists.
+  - `list_reverse(lst)` — new reversed list (wraps the builtin
+    `reverse`, which returns a NEW list — distinct from the
+    in-place mutator of the same name in `src/runtime/list.nova`).
+  - `list_sum(lst)` — integer sum of all elements; `0` on empty.
+
+- **`tests/unit/test_stdlib_list.nova`** — 144 assertions covering:
+  - Each function with multiple cases (happy path, empty input, edge
+    cases like `take 100` on a 2-element list).
+  - 10 composition chains: `list_sum(list_filter(...))`,
+    `list_map(list_zip(...), |t| t[0] + t[1])` (tuple slot access),
+    `list_fold(list_enumerate(...), 0, |acc, t| acc + t[0])`
+    (closure + tuple in one expression), plus drop+map, take+reverse,
+    concat+sum, find+enumerate, all+map, and the classic
+    `sum(map(filter(odd), square))` pipeline.
+  - Source-pin assertions verify each `fn list_*` is present in
+    `src/stdlib/list.nova` and the R37E marker is in place.
+
+### Honest expectations the R37E brief flagged
+
+- **Naming collision with builtins**. NOVA already has unprefixed
+  `filter` / `reduce` / `zip` / `enumerate` / `any` / `all` / `sum`
+  / `reverse` builtins. The brief mandated the `list_*` prefix to
+  avoid clobbering them; this also makes composition chains read
+  uniformly (`list_map(list_filter(...))` rather than mixing
+  `map_list(filter(...))`).
+
+- **Argument order divergence**. `list_fold(lst, init, f)` puts the
+  seed BEFORE the reducer (Haskell `foldl'` ordering, more readable
+  for chains), whereas the builtin `reduce(lst, f, init)` puts the
+  reducer first. `list_fold` adapts to the conventional order
+  without breaking `reduce` callers.
+
+- **`list_reverse` shadowing**. `src/runtime/list.nova` already
+  defines `list_reverse(lst)` as an IN-PLACE mutator returning
+  nothing. `src/stdlib/list.nova::list_reverse` returns a new list.
+  Since `src/runtime/list.nova` is opt-in (not auto-included) and
+  `src/stdlib/list.nova` is also opt-in, the two are NOT meant to
+  be concatenated together — users pick one List flavour at a time.
+  The stdlib file's top comment documents this explicitly.
+
+- **Tuple representation**. R36C tuples lower to tagged 2-element
+  lists at runtime, so `list_zip` / `list_enumerate` can wrap the
+  existing `zip` / `enumerate` builtins directly — they already
+  return list-of-lists, which the language now treats as tuples.
+
+### Invocation
+
+```bash
+# combined-file pattern (mirrors test_closures / test_tuples invocation)
+cat src/stdlib/list.nova tests/unit/test_stdlib_list.nova \
+  > /tmp/stdlib_list_combined.nova
+bin/nova /tmp/stdlib_list_combined.nova -o /tmp/stdlib_list.s
+as -o /tmp/stdlib_list.o /tmp/stdlib_list.s
+ld -o /tmp/stdlib_list /tmp/stdlib_list.o
+/tmp/stdlib_list
+# Expected: ok=144 fail=0 / "R37E stdlib list unit suite PASS"
+```
+
+R37E adds 144 new assertions on top of the existing 326-assertion
+unit-test baseline (57 R35C closures + 70 R36C tuples + 33 if-let +
+38 let-destructure + 83 match-expr + 45 match-guards). `make
+self-host` confirms stage2 == stage3 (R37E only adds a library file
+in `src/stdlib/` and a unit test under `tests/unit/`; neither is in
+`$(COMPILER_SRC)`, so the self-host build is byte-identical).
+
+### What R37E intentionally does NOT do
+
+- Add esoteric helpers (`groupby`, `partition`, `scan`, `chunk`).
+  Brief restricted scope to the 13 listed combinators.
+- Modify any builtin. `filter` / `reduce` / `zip` etc. stay exactly
+  as they were — the `list_*` wrappers are additive.
+- Auto-include `src/stdlib/list.nova` in the test runner. Users opt
+  in by concatenating with their source (the same pattern
+  `test_runtime` / `test_csv` etc. already use).
+- Change the closure ABI. R37E's closures are passed in via the
+  standard call site syntax `f(x)`; whatever lowering R37A lands
+  (static slots vs `[fn_ptr, env_list]` tuples) the surface remains
+  byte-identical to user code.
+
 ## R37D — tools: VS Code extension skeleton bundling nova-lsp + nova-dap + syntax highlighting
 
 **Status: complete** — `tools/vscode-nova/` becomes a real installable

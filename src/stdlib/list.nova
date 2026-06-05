@@ -1,0 +1,197 @@
+// R37E: NOVA stdlib list combinators — closure + tuple consumers.
+//
+// This module is a curated, idiomatic stdlib of higher-order list
+// operations that USE the closure literals shipped in R35C and the
+// tuple literals shipped in R36C. Every function takes a NOVA list
+// (the built-in [length, capacity, data_ptr] triple created by
+// `list_new()` and grown by `push()`) and a closure value when a
+// predicate / transform is needed; the closures are called via the
+// standard NOVA call syntax (`f(x)`, `g(acc, x)`), which keeps this
+// file stable across closure-lowering migrations (R37A may transition
+// from static `_cap_lambda_N_*` slots to `[fn_ptr, env_list]` tuples;
+// the call site is unchanged in both lowerings).
+//
+// Naming. NOVA already has unprefixed builtins for some of these
+// operations: `filter`, `reduce`, `zip`, `enumerate`, `any`, `all`,
+// `sum`, `reverse`. The `list_*` prefix here:
+//
+//   1. Avoids collision with the unprefixed builtins so user code that
+//      currently calls `filter([1,2,3], pred)` keeps working.
+//
+//   2. Establishes a single, predictable naming scheme so library
+//      composition reads `list_map(list_filter(...))` rather than
+//      mixing `map_list(filter(...))`.
+//
+//   3. Documents the argument order the brief specifies. In
+//      particular `list_fold(lst, init, fn)` puts the seed BEFORE the
+//      reducer (Haskell `foldl'`-like ordering), whereas the builtin
+//      `reduce(lst, fn, init)` puts the reducer first. `list_fold`
+//      adapts to the conventional order without breaking `reduce`
+//      callers.
+//
+// Notes on memory + mutation. Every transforming combinator returns a
+// fresh list — the input is never mutated. `list_concat` copies the
+// first argument before appending the second (the builtin `append_list`
+// mutates its first arg in-place). `list_reverse` wraps the builtin
+// `reverse` which already returns a new list (distinct from the
+// in-place `src/runtime/list.nova::list_reverse` — see compatibility
+// note below).
+//
+// Compatibility note. `src/runtime/list.nova` defines a separate raw-
+// memory List abstraction (`list_new` / `list_push` / `list_get` /
+// `list_reverse` in-place / etc.) that is opt-in and NOT auto-included.
+// The stdlib defined here operates on the BUILT-IN list value (created
+// by `list_new()` and used by the unit tests + every existing R35C /
+// R36C example) — when this file is concatenated with the runtime/list
+// module it would shadow the runtime helpers with the same name, so
+// `src/stdlib/list.nova` is intended to be opted in INSTEAD of, not
+// alongside, `src/runtime/list.nova`.
+
+// --- list_map: apply f to each element, return new list ---
+//
+// Thin wrapper around the existing `map_list` builtin so user code can
+// say `list_map(xs, |x| x * x)` and consume the same closure-friendly
+// surface name everywhere. Parameter is `f` (not `fn`) because `fn` is
+// a reserved NOVA keyword.
+fn list_map(lst, f) {
+    return map_list(lst, f)
+}
+
+// --- list_filter: keep elements where pred(elt) is truthy ---
+//
+// Thin wrapper around `filter`. Predicate is called as `pred(elt)`;
+// non-zero return values keep the element, zero drops it.
+fn list_filter(lst, pred) {
+    return filter(lst, pred)
+}
+
+// --- list_fold: left fold with seeded accumulator ---
+//
+// Order: `list_fold(lst, init, f)`. `f(acc, elt) -> new_acc` runs
+// left-to-right; the final accumulator is returned. Reorders the
+// builtin `reduce(lst, f, init)` parameters so callers can read the
+// seed value adjacent to the input list.
+fn list_fold(lst, init, f) {
+    return reduce(lst, f, init)
+}
+
+// --- list_take: first n elements (saturates at len) ---
+//
+// `list_take(lst, n)` returns the first `n` elements as a new list. If
+// `n` exceeds `len(lst)`, the entire list is returned (a copy). If
+// `n` is zero or negative, an empty list is returned.
+fn list_take(lst, n) {
+    if n <= 0 {
+        return list_new()
+    }
+    let total = len(lst)
+    let stop = n
+    if stop > total {
+        stop = total
+    }
+    return list_slice(lst, 0, stop)
+}
+
+// --- list_drop: skip first n elements ---
+//
+// `list_drop(lst, n)` returns a copy of `lst` with the first `n`
+// elements removed. If `n` is zero or negative, a full copy is
+// returned. If `n` exceeds `len(lst)`, an empty list is returned.
+fn list_drop(lst, n) {
+    let total = len(lst)
+    if n <= 0 {
+        return list_slice(lst, 0, total)
+    }
+    if n >= total {
+        return list_new()
+    }
+    return list_slice(lst, n, total)
+}
+
+// --- list_concat: a ++ b, returning a new list ---
+//
+// `list_concat(lst_a, lst_b)` produces a new list whose elements are
+// `lst_a`'s followed by `lst_b`'s. Neither input is mutated — the
+// helper copies `lst_a` first, then appends `lst_b` to the copy via
+// the builtin `append_list` (which mutates its first argument, hence
+// the explicit copy).
+fn list_concat(lst_a, lst_b) {
+    let out = list_copy(lst_a)
+    append_list(out, lst_b)
+    return out
+}
+
+// --- list_zip: pair-wise combine two lists into a list of tuples ---
+//
+// `list_zip(lst_a, lst_b)` returns `[(a[0], b[0]), (a[1], b[1]), ...]`
+// truncated to the SHORTER input length. The returned pairs are
+// tuples in the R36C sense — they lower to 2-element lists at runtime
+// so `t[0]` / `t[1]` work for downstream `list_map(..., |t| t[0] +
+// t[1])` composition. Thin wrapper around the builtin `zip` which
+// already returns list-of-2-element-lists.
+fn list_zip(lst_a, lst_b) {
+    return zip(lst_a, lst_b)
+}
+
+// --- list_enumerate: pair each element with its index ---
+//
+// `list_enumerate(lst)` returns `[(0, lst[0]), (1, lst[1]), ...]`. As
+// with `list_zip`, the pairs are R36C tuples (2-element lists at
+// runtime) so `t[0]` extracts the index and `t[1]` the value. Thin
+// wrapper around the builtin `enumerate`.
+fn list_enumerate(lst) {
+    return enumerate(lst)
+}
+
+// --- list_find: index of first elt where pred(elt), or -1 ---
+//
+// Walks `lst` and calls `pred(elt)` on each element; returns the
+// first index where the predicate returns a non-zero value, or `-1`
+// if none match. The builtin `index_of(lst, value)` does value
+// equality only, so we implement the predicate variant inline.
+fn list_find(lst, pred) {
+    let i = 0
+    let total = len(lst)
+    while i < total {
+        if pred(lst[i]) {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// --- list_any: 1 if any element matches predicate, else 0 ---
+//
+// Thin wrapper around the builtin `any`. Returns `1` if at least one
+// element of `lst` causes `pred(elt)` to return non-zero, else `0`.
+// On an empty list returns `0` (vacuously false).
+fn list_any(lst, pred) {
+    return any(lst, pred)
+}
+
+// --- list_all: 1 if every element matches predicate, else 0 ---
+//
+// Thin wrapper around the builtin `all`. Returns `1` if every
+// element of `lst` causes `pred(elt)` to return non-zero, else `0`.
+// On an empty list returns `1` (vacuous truth).
+fn list_all(lst, pred) {
+    return all(lst, pred)
+}
+
+// --- list_reverse: new list with order reversed (input untouched) ---
+//
+// Thin wrapper around the builtin `reverse` (which already returns a
+// NEW reversed list — distinct from the in-place mutator of the same
+// name in `src/runtime/list.nova`; see compatibility note at top).
+fn list_reverse(lst) {
+    return reverse(lst)
+}
+
+// --- list_sum: integer sum of all elements ---
+//
+// Thin wrapper around the builtin `sum`. Returns `0` for an empty
+// list. Special case of `list_fold(lst, 0, |acc, x| acc + x)`.
+fn list_sum(lst) {
+    return sum(lst)
+}

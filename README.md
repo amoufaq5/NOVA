@@ -13,7 +13,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 > evolution), ADR 0004 (LSP/DAP/tree-sitter strategy), ADR 0005
 > (R35C static-slot closure lowering + R37+ migration plan).
 
-## Status (through R37D)
+## Status (through R37E)
 
 | Track | Latest round | What landed |
 |---|---|---|
@@ -21,6 +21,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | Pattern matching | R17A / R21A / R31D / R32D / R33C | enums to if-let + arm guards (ADR 0003). |
 | Tuples | R36C | first-class tuple literals `(a, b, c)`, tuple type annotations `(int, str)`, let-destructure `let (a, b) = pair`, match patterns `(0, _) => ...`. Lowers to tagged lists at runtime — AST-level type-discipline only; documented in NEXT_SESSION.md. |
 | Closures | R35C | static-slot capture; multi-instance "last write wins" documented; R37+ migration planned (ADR 0005). |
+| Stdlib (list combinators) | R37E | `src/stdlib/list.nova` ships 13 idiomatic higher-order list functions consuming R35C closures + R36C tuples: `list_map`, `list_filter`, `list_fold`, `list_take`, `list_drop`, `list_concat`, `list_zip`, `list_enumerate`, `list_find`, `list_any`, `list_all`, `list_reverse`, `list_sum`. Library code only — no parser/codegen change. Stable across R37A's closure-lowering migration. 144 new unit assertions in `tests/unit/test_stdlib_list.nova`. |
 | LSP (Python / pygls) | R3 .. R35F | hover / goto / rename (R32E) / inlay (R30E) / documentLink + codeLens (R33D) / code actions (R35F) / scope-aware extract-function (R36D). |
 | DAP (Python over gdb-mi) | R17F .. R35E | source / function / exception (R33F) / instruction (R17F+R35E) breakpoints; conditional + hit-count (R29E); reverse debug (R31E); profiler (R28F); disassembly (R34F). |
 | Tree-sitter grammar | R34E | match + nested patterns + let destructure + if-let + arm guards; **closure literals (R35C) deferred**. |
