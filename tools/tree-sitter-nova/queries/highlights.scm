@@ -78,6 +78,11 @@
 (parameter (identifier) @variable.parameter)
 (parameter (type_expression (identifier) @type))
 
+; R37B / R35C: closure parameters highlight as variable.parameter; the
+; surrounding `|` pipes carry the closure delimiter scope.
+(closure_param name: (identifier) @variable.parameter)
+(closure_param type: (type_expression (identifier) @type))
+
 ; Named arguments: highlight name as parameter, value through normal rules.
 (named_argument
   name: (identifier) @variable.parameter)
@@ -109,6 +114,19 @@
 ; constructor so editor users see it as the same colour as enum
 ; variants declared in an `enum` body.
 (variant_pattern path: (identifier) @constructor)
+
+; R37B / R35C: closure literal delimiters `|...|` and zero-arg `||`.
+; Tagged as @punctuation.special so editors render them distinctly
+; from the surrounding bitwise-OR `|` / logical-OR `||` binary
+; operators (which keep the @operator scope from the punctuation
+; list below).
+(closure_expr "|" @punctuation.special)
+(closure_expr "||" @punctuation.special)
+
+; R37B / R36C: tuple type element identifiers highlight as types.
+(tuple_type
+  (type_expression
+    (identifier) @type))
 
 ; Type parameters
 (type_parameter name: (identifier) @type.parameter)

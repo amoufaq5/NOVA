@@ -17,10 +17,9 @@ The grammar produces a concrete syntax tree (CST) directly usable by:
 
 This grammar handles every everyday NOVA construct plus the
 declarative cognitive-DSL surface used by `mind`/`soul`/`system`
-examples. The R34E revision extends R26B's R17A/R23A/R25A coverage
-with the R31D match expression, R32D nested patterns + let
-destructure for variant + struct patterns, and R33C `if let` +
-match-arm guards:
+examples. The R37B revision extends R34E's R31D/R32D/R33C match-
+pattern coverage with R35C closure literals (`|x| x + 1`) and R36C
+tuple literals + tuple types + tuple destructure patterns:
 
 | Construct                       | Status          |
 | ------------------------------- | --------------- |
@@ -63,6 +62,12 @@ match-arm guards:
 | `let Pair(a, b) = pair` / `let Some(Some(v)) = e` destructure | full (R32D) |
 | `if let PAT = expr { ... } else { ... }` | full (R33C) |
 | `if let PAT = e { ... } else if let ... else if ...` chain | full (R33C) |
+| `\|x\| x + 1`, `\|x, y\| { ... }`, `\|\| 42` closure literals | full (R35C) |
+| `\|x: int\| body` typed closure parameter | full (R35C) |
+| `(a, b)`, `(a, b, c)` tuple literal (incl. trailing comma) | full (R36C) |
+| `(int, str)` tuple type annotation | full (R36C) |
+| `let (a, b) = pair` tuple destructure at let head | full (R36C) |
+| `match v { (0, 0) => ... }` tuple match scrutinee | full (R36C) |
 | `is T` / `in xs` / `not in xs`  | full            |
 | `..` / `..=` range operators    | full            |
 | `\|>` pipe operator             | full            |
@@ -128,13 +133,30 @@ a follow-up revision:
 These five files require either an external scanner or a token-level
 redesign that the editor experience does not need today.
 
+### R37B known limitation: tuple match arm with wildcard binder
+
+A tuple pattern at match-arm head that contains a `_` wildcard
+binder (e.g. `match (x, y) { (0, _) => ... }`) parses to a
+`tuple_expr` node rather than a `tuple_pattern` node. The LR parser
+commits to the `_pattern -> _expression -> tuple_expr` reading at
+the leading `(` token before the inner `_` is seen, and tree-sitter
+cannot disambiguate without an external scanner or a token-level
+context flag. The inner `_` is captured as an `identifier` rather
+than a `wildcard_pattern`; editor-side syntax highlighting still
+colours the position consistently, and structural search still finds
+both arm shapes via the outer `match_arm` node.
+
+`let`-head tuple destructure (`let (a, b) = pair`) is unaffected —
+the dedicated `let_decl` tuple-pattern branch resolves cleanly via
+the parser's dynamic-precedence machinery.
+
 ## Build
 
 ```bash
 cd tools/tree-sitter-nova
 npm install                           # installs tree-sitter-cli
 npx tree-sitter generate              # writes src/parser.c
-npx tree-sitter test                  # 131 corpus tests should pass
+npx tree-sitter test                  # 150 corpus tests should pass
 npx tree-sitter parse path/to.nova    # print the CST for a file
 ```
 

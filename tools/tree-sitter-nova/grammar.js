@@ -76,6 +76,36 @@
  *     onward (no grammar change needed for R33C); R34E ships the
  *     dedicated corpus snapshot suite.
  *
+ * R37B extensions (this round):
+ *   * R35C closure literals `|x| x + 1`, `|x, y| { ... }`, `|| 42` —
+ *     a new `closure_expr` rule sitting in `_expression`. Lookahead
+ *     disambiguation vs the bitwise OR `|` / logical OR `||` binary
+ *     operators relies on tree-sitter's GLR parser exploring both
+ *     parses in parallel: `|` / `||` in primary position (the start
+ *     of an expression) has no left operand, so `binary_expression`
+ *     can't fire and the closure parse wins. After a binary LHS the
+ *     `|` / `||` token is consumed by `binary_expression` first. A
+ *     dynamic-precedence bump on `closure_expr` ensures the GLR parser
+ *     commits to the closure parse whenever it succeeds — i.e. when
+ *     a matching second `|` is found before any closing delimiter.
+ *     Closure params accept an optional `: Type` annotation (parser
+ *     surface only — the compiler ignores it pre-R37). Single-
+ *     expression body `|x| x + 1` and block body `|x| { ... }` are
+ *     both supported. Zero-param `|| 42` uses the dedicated `||`
+ *     token form.
+ *   * R36C tuple literals `(a, b)`, tuple types `(int, str)`, tuple
+ *     destructure patterns `let (a, b) = pair`, `match v { (0, _) =>
+ *     ... }`. Tree-sitter disambiguates the leading `(` between a
+ *     parenthesized expression `(x)` and a tuple expression `(x, y)`
+ *     via the trailing comma — the `tuple_expr` rule requires
+ *     `'(' expr (',' expr)+ ','? ')'` so `(x)` cannot match. Singleton
+ *     `(x,)` is out of scope (R36C deferred); the grammar parses it
+ *     as a parenthesized_expression with a stray comma, which is
+ *     a syntax error — the compiler-side parser also rejects this.
+ *     Tuple types live alongside `_simple_type` / `function_type` in
+ *     `type_expression`. Tuple patterns live alongside the other
+ *     pattern shapes in `_pattern`.
+ *
  * The grammar intentionally accepts more than the compiler's strict
  * recursive-descent parser — tree-sitter is a tolerant CST builder used
  * by editors for syntax highlighting, structural search, code-folding,
@@ -123,6 +153,17 @@ const PREC = {
   // is bumped over `binary_expression` so `a < Foo::Bar` does not get
   // mis-parsed as a chained comparison candidate.
   path_qualified: 2,
+  // R37B: closure literal `|x| x + 1`. Static precedence is 0 (lowest
+  // among prefix forms) because a closure body extends as far right
+  // as possible — e.g. `|x| x + 1 * 2` parses as `|x| (x + 1 * 2)`,
+  // not `(|x| x) + 1 * 2`. The single-expr body is right-associative.
+  // Dynamic precedence is bumped on the rule itself so the GLR parser
+  // prefers the closure parse over a hypothetical binary continuation.
+  closure: 0,
+  // R37B: tuple-literal precedence — sits above parenthesized_expression
+  // so the GLR parser prefers `tuple_expr` when the second token is a
+  // `,` (forcing the multi-element shape).
+  tuple: 2,
 };
 
 function commaSep(rule) {
@@ -377,6 +418,11 @@ module.exports = grammar({
     // -----------------------------------------------------------------
     type_expression: $ => choice(
       $.function_type,
+      // R37B / R36C: tuple type `(int, str)`, `(int, str, bool)`.
+      // Sits at the same level as function_type so it composes inside
+      // a fn return-type slot, a parameter annotation, or a let-type
+      // annotation. Two-or-more elements; trailing comma accepted.
+      $.tuple_type,
       $._simple_type,
     ),
 
@@ -388,6 +434,20 @@ module.exports = grammar({
       // Path: `Result::Ok`, `Option::None`.
       $.path_qualified_type,
     ),
+
+    // R37B / R36C: tuple type `(T, U)`, `(T, U, V)`. Two-or-more
+    // elements; `(T)` is intentionally NOT a tuple type — type
+    // annotations like `(int)` collapse to a parenthesized type form
+    // that is not separately modelled (the LR parser falls through
+    // to `_simple_type` via the identifier branch). Trailing comma
+    // allowed for codegen-tool convenience.
+    tuple_type: $ => prec(PREC.tuple, seq(
+      '(',
+      $.type_expression,
+      repeat1(seq(',', $.type_expression)),
+      optional(','),
+      ')',
+    )),
 
     generic_type: $ => prec(1, seq(
       field('base', $.identifier),
@@ -473,6 +533,16 @@ module.exports = grammar({
         // share this branch via `variant_pattern`'s own grammar.
         prec.dynamic(20, seq(
           field('pattern', $.variant_pattern),
+          '=',
+          field('value', $._expression),
+        )),
+        // R37B / R36C: `let (a, b) = pair`, `let (a, b, c) = triple`.
+        // Tuple-destructure pattern at let head. Same dynamic
+        // precedence as struct_pattern / variant_pattern (20) so the
+        // parser commits to the tuple_pattern reading over the
+        // fall-through parenthesized/tuple-expression reading.
+        prec.dynamic(20, seq(
+          field('pattern', $.tuple_pattern),
           '=',
           field('value', $._expression),
         )),
@@ -739,6 +809,11 @@ module.exports = grammar({
       $.if_let_expression,
       $.match_expression,
       $.lambda_expression,
+      // R37B / R35C: closure literal `|x| x + 1`, `|x, y| { ... }`,
+      // `|| 42`. Listed before call_expression so the GLR parser
+      // attempts the closure parse first when the leading token is
+      // `|` or `||` in primary position.
+      $.closure_expr,
       $.call_expression,
       // R25A: `Point { x: 1, y: 2 }` brace-init. Sits at call-level
       // precedence so `Point { x: 1 }.x` field-access chains work.
@@ -747,6 +822,11 @@ module.exports = grammar({
       $.slice_expression,
       $.field_expression,
       $.parenthesized_expression,
+      // R37B / R36C: tuple literal `(a, b)`. Listed after
+      // parenthesized_expression so single-element `(x)` falls through
+      // to parenthesized; the GLR parser keeps both parses alive until
+      // the second `,` token forces tuple_expr.
+      $.tuple_expr,
       $.path_expression,        // R17A: `Type::Variant` constructor base
       $.list_literal,
       $.map_literal,
@@ -769,6 +849,66 @@ module.exports = grammar({
       optional(seq(choice('->', ':'), field('return_type', $.type_expression))),
       field('body', $.block),
     ),
+
+    // R37B / R35C: closure literal.
+    //
+    //   closure_expr := '|' closure_params? '|' (block | _expression)
+    //                |  '||' (block | _expression)
+    //
+    // Lookahead disambiguation vs the bitwise OR `|` / logical OR `||`
+    // operators relies on tree-sitter's GLR parser exploring both
+    // parses in parallel: in primary position (no LHS), `binary_expression`
+    // cannot fire, so the closure parse wins. After a binary LHS the
+    // `|` / `||` token is consumed by `binary_expression` first. The
+    // dynamic-precedence bump on closure_expr nudges the GLR parser
+    // toward the closure reading when both succeed.
+    //
+    // Body is right-associative so `|x| x + 1` parses as `|x| (x + 1)`,
+    // not `(|x| x) + 1`. Block bodies (`|x| { ... }`) are unambiguous —
+    // the `{` token unambiguously starts a block.
+    //
+    // Zero-param `|| 42` uses the `||` token directly (same lexeme as
+    // logical-OR); in primary position the parser disambiguates by
+    // absence of a LHS.
+    closure_expr: $ => prec.dynamic(30, prec.right(PREC.closure, choice(
+      // Standard form: `| params | body`.
+      seq(
+        '|',
+        field('parameters', optional($.closure_params)),
+        '|',
+        field('body', choice($.block, $._expression)),
+      ),
+      // Zero-param shorthand: `|| body`.
+      seq(
+        '||',
+        field('body', choice($.block, $._expression)),
+      ),
+    ))),
+
+    closure_params: $ => seq(
+      $.closure_param,
+      repeat(seq(',', $.closure_param)),
+      optional(','),
+    ),
+
+    closure_param: $ => seq(
+      field('name', $.identifier),
+      // Optional `: Type` annotation — parser surface only; the
+      // compiler's R35C lowering ignores the annotation.
+      optional(seq(':', field('type', $.type_expression))),
+    ),
+
+    // R37B / R36C: tuple literal `(a, b)`. The `repeat1` of `(',' expr)`
+    // enforces a minimum of TWO elements, so `(x)` cannot match
+    // tuple_expr and falls through to parenthesized_expression.
+    // Trailing comma allowed.
+    tuple_expr: $ => prec(PREC.tuple, seq(
+      '(',
+      $._expression,
+      repeat1(seq(',', $._expression)),
+      optional(','),
+      ')',
+    )),
 
     // R15-era `if cond { ... } else { ... }` used in expression
     // position. We model it explicitly so the CST can distinguish
@@ -832,6 +972,20 @@ module.exports = grammar({
       // the generic `_expression` fallback so a `Type { ... }` arm
       // resolves to struct_pattern, not struct_init_expression.
       $.struct_pattern,
+      // R37B / R36C: tuple destructure pattern `(a, b)`, `((a, b), c)`
+      // nested. Sub-patterns reuse the full `_pattern` rule.
+      //
+      // CAVEAT: In match-arm head, `(0, _) =>` parses as `(tuple_expr
+      // (number) (identifier))` rather than `(tuple_pattern (number)
+      // (wildcard_pattern))` because the LR parser commits to the
+      // `_pattern → _expression` reading at the leading `(` token
+      // before the inner `_` token is seen. Editor-side highlighting
+      // and structural search still work — the inner positions are
+      // captured as expressions rather than patterns. For at-let-head
+      // contexts (`let (a, b) = pair`), the let_decl rule has a
+      // dedicated tuple_pattern branch with prec.dynamic(20) that
+      // wins, so destructure-let works as expected.
+      $.tuple_pattern,
       // Other patterns: bare literal / identifier / path constructor
       // with no binders. We re-use the expression rule so number/string
       // literals and `Option::None` (no parens) all parse as patterns.
@@ -873,6 +1027,30 @@ module.exports = grammar({
     ),
 
     wildcard_pattern: $ => '_',
+
+    // R37B / R36C: tuple destructure pattern. Two-or-more elements,
+    // trailing comma accepted. Sub-patterns reuse the full `_pattern`
+    // rule, so nested tuple / variant / struct patterns compose.
+    // Singleton `(x,)` is out of scope (R36C deferred) — the rule
+    // demands at least one comma followed by a second pattern.
+    //
+    // Used by:
+    //   * let_decl's tuple_pattern branch with prec.dynamic(20) —
+    //     `let (a, b) = pair` resolves cleanly to tuple_pattern.
+    //   * _pattern's choice — `match v { (a, b) => ... }`. See the
+    //     CAVEAT on the _pattern rule above: when the inner positions
+    //     contain a wildcard `_`, the LR parser commits to the
+    //     `_pattern → _expression → tuple_expr` reading first; the
+    //     CST captures inner positions as expressions rather than
+    //     patterns. Editor-side highlighting and structural search
+    //     still work; semantic checking is the LSP / compiler's job.
+    tuple_pattern: $ => prec.dynamic(20, seq(
+      '(',
+      $._pattern,
+      repeat1(seq(',', $._pattern)),
+      optional(','),
+      ')',
+    )),
 
     parenthesized_expression: $ => seq('(', $._expression, ')'),
 

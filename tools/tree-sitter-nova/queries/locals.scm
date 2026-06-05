@@ -26,6 +26,12 @@
 (extern_fn_decl) @local.scope
 (lambda_expression) @local.scope
 
+; R37B / R35C: closure literal opens a new scope. The closure
+; parameters are visible inside its body; bindings outside the
+; closure remain accessible via lexical capture (captures are
+; tracked by the LSP / compiler, not by tree-sitter locals).
+(closure_expr) @local.scope
+
 ; Bodies of structured control flow open a fresh inner scope so that
 ; `let` introduced in (e.g.) a `while` body is shadowed correctly.
 (block) @local.scope
@@ -58,6 +64,10 @@
 
 ; Parameters of fn / extern fn / lambda — visible inside the body.
 (parameter
+  name: (identifier) @local.definition.parameter)
+
+; R37B / R35C: closure parameter binders.
+(closure_param
   name: (identifier) @local.definition.parameter)
 
 ; `let name = expr` — binds `name`.
@@ -99,6 +109,13 @@
 (struct_pattern_field
   name: (identifier) @local.definition.var
   !pattern)
+
+; R37B / R36C: tuple destructure pattern binds inner identifiers.
+; `let (a, b) = pair` introduces `a` and `b` as locals. Nested
+; positions are still handled recursively because tuple_pattern's
+; inner uses `_pattern` — captures at any level.
+(tuple_pattern
+  (identifier) @local.definition.var)
 
 ; enum variants — declaration-scoped constructor definitions.
 (enum_variant

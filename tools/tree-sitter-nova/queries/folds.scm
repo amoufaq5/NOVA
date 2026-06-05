@@ -22,6 +22,10 @@
 (lambda_expression
   body: (block) @fold)
 
+; R37B / R35C: closure literal with block body folds the inner block.
+(closure_expr
+  body: (block) @fold)
+
 (struct_decl
   (struct_field_list) @fold)
 

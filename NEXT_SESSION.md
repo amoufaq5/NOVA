@@ -1,5 +1,113 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R37B — tree-sitter-nova: closure literals + tuple literals + tuple types + tuple patterns
+
+**Status: complete** — the editor-facing tree-sitter grammar at
+`tools/tree-sitter-nova` catches up to the NOVA surface syntax
+shipped in R35C (closure literals) and R36C (tuple literals + tuple
+types + tuple destructure patterns). Editor tooling (syntax
+highlighting, folding, structural search, locals-based goto-def in
+nvim-treesitter / Helix / Emacs) no longer breaks on the new
+constructs.
+
+### Grammar additions
+
+```
+closure_expr   := '|' closure_params? '|' (block | _expression)
+                |  '||' (block | _expression)
+closure_params := closure_param (',' closure_param)* ','?
+closure_param  := identifier (':' type)?
+
+tuple_expr     := '(' _expression (',' _expression)+ ','? ')'
+tuple_type     := '(' type_expression (',' type_expression)+ ','? ')'
+tuple_pattern  := '(' _pattern (',' _pattern)+ ','? ')'
+```
+
+Tuple types live in `type_expression`'s top-level choice, alongside
+`function_type` and `_simple_type`. Tuple patterns live in
+`_pattern`'s choice next to `struct_pattern` / `variant_pattern` /
+`wildcard_pattern`, AND get a dedicated `let_decl` branch (same
+dynamic-precedence shape as the R32D variant-pattern let-head
+branch) so destructure `let (a, b) = pair` resolves cleanly.
+
+### Closure vs binary-OR disambiguation
+
+The `|` token is shared with bitwise-OR and `||` with logical-OR.
+Disambiguation relies on tree-sitter's GLR machinery: in primary
+expression position (no LHS), `binary_expression` cannot fire, so
+the `closure_expr` parse wins. After a binary LHS the `|` / `||`
+token is consumed by `binary_expression` first. `closure_expr`
+carries a dynamic-precedence bump (30) on top of `prec.right` so the
+single-expression body extends as far right as possible — `|x| x + 1
+* 2` parses as `|x| (x + 1 * 2)`, not `(|x| x) + 1 * 2`.
+
+### Known limitation — match-arm tuple pattern with wildcard
+
+`match (x, y) { (0, _) => ... }` parses the arm pattern as a
+`tuple_expr` node rather than a `tuple_pattern` node — the LR parser
+commits to the `_pattern -> _expression -> tuple_expr` reading at
+the leading `(` token before the inner `_` is seen. The inner `_`
+is captured as an `identifier` (still a valid token, semantically
+wrong). Editor-side syntax highlighting and structural search still
+work. let-head tuple destructure (`let (a, b) = pair`) is unaffected
+— its dedicated dynamic-precedence branch resolves correctly.
+
+### Tests
+
+`test/corpus/r35_closures.txt` adds 9 closure cases:
+
+  - single-arg `|x| x + 1`
+  - multi-arg `|x, y| x + y`
+  - zero-arg `|| 42`
+  - block body `|x| { let t = x * 2; t + 1 }`
+  - capture from outer `|x| x + outer`
+  - closure as argument `list_map([1,2,3], |x| x * 2)`
+  - nested closure `|k| |x| x + k`
+  - closure in return position `fn f() -> int { return |x| x + 1 }`
+  - typed param `|x: int| x + 1`
+
+`test/corpus/r36_tuples.txt` adds 10 tuple cases:
+
+  - 2-tuple `(1, 2)`, 3-tuple `(1, 2, 3)`, nested `((1,2), (3,4))`
+  - let destructure `let (a, b) = pair`
+  - 3-tuple destructure `let (a, b, c) = triple`
+  - tuple return type `fn split() -> (str, str)`
+  - 3-tuple return type `fn triple() -> (int, int, int)`
+  - tuple match scrutinee `match (x, y) { (0, 0) => ..., _ => ... }`
+  - trailing comma `(1, 2,)`
+  - parenthesized `(1 + 2)` does NOT parse as tuple
+
+`tree-sitter test` reports `Total parses: 150; successful parses:
+150; failed parses: 0`. The pre-R37B 131 baseline tests are
+byte-identical (no node-type changes, no field renames, no shape
+shifts in the R34E pattern subtree).
+
+### Query updates
+
+`queries/highlights.scm` gains:
+
+  - `closure_param name` and `type` highlight as `@variable.parameter`
+    and `@type`
+  - `closure_expr "|"` and `"||"` highlight as `@punctuation.special`
+    (visually distinct from the surrounding `@operator` `|` / `||`
+    binary-op tokens)
+  - `tuple_type` element identifiers highlight as `@type`
+
+`queries/folds.scm` adds `closure_expr body: (block)` as a foldable
+region. `queries/locals.scm` adds `closure_expr` as a `@local.scope`
+and `closure_param name` as `@local.definition.parameter`, plus
+`tuple_pattern (identifier) @local.definition.var` for destructure
+binders.
+
+### Concurrency note
+
+R37A (closure lowering migration to tuple-shaped captures) is
+concurrent on `src/compiler/parser.nova` / `codegen.nova` — its
+surface syntax is unchanged from R35C, so this grammar work covers
+both lowering strategies. R37D (VS Code extension packaging) is a
+new directory `tools/vscode-nova/` with no collision. R37E (stdlib
+list combinators) ships pure library code consuming the grammar.
+
 ## R37E — stdlib: list combinators consuming R35C closures + R36C tuples
 
 **Status: complete** — `src/stdlib/list.nova` becomes the first user-

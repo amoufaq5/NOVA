@@ -1,0 +1,191 @@
+================================================================================
+R36C: two-element tuple literal
+================================================================================
+
+let p = (1, 2)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (tuple_expr
+      (number)
+      (number))))
+
+================================================================================
+R36C: three-element tuple literal
+================================================================================
+
+let p = (1, 2, 3)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (tuple_expr
+      (number)
+      (number)
+      (number))))
+
+================================================================================
+R36C: nested tuple literal
+================================================================================
+
+let p = ((1, 2), (3, 4))
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (tuple_expr
+      (tuple_expr
+        (number)
+        (number))
+      (tuple_expr
+        (number)
+        (number)))))
+
+================================================================================
+R36C: tuple destructure at let head
+================================================================================
+
+let (a, b) = pair
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (tuple_pattern
+      (identifier)
+      (identifier))
+    value: (identifier)))
+
+================================================================================
+R36C: tuple return type on fn declaration
+================================================================================
+
+fn split() -> (str, str) {
+    return ("a", "b")
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    return_type: (type_expression
+      (tuple_type
+        (type_expression
+          (identifier))
+        (type_expression
+          (identifier))))
+    body: (block
+      (return_statement
+        value: (tuple_expr
+          (string_literal)
+          (string_literal))))))
+
+================================================================================
+R36C: tuple scrutinee in match expression
+================================================================================
+
+let r = match (x, y) {
+    (0, 0) => "origin"
+    _ => "other"
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (match_expression
+      scrutinee: (tuple_expr
+        (identifier)
+        (identifier))
+      (match_arm
+        pattern: (tuple_expr
+          (number)
+          (number))
+        value: (string_literal))
+      (match_arm
+        pattern: (wildcard_pattern)
+        value: (string_literal)))))
+
+================================================================================
+R36C: tuple literal with trailing comma
+================================================================================
+
+let p = (1, 2,)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (tuple_expr
+      (number)
+      (number))))
+
+================================================================================
+R36C: parenthesized expression is NOT a tuple (single element)
+================================================================================
+
+let x = (1 + 2)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    name: (identifier)
+    value: (parenthesized_expression
+      (binary_expression
+        left: (number)
+        right: (number)))))
+
+================================================================================
+R36C: three-element tuple type on fn return
+================================================================================
+
+fn triple() -> (int, int, int) {
+    return (1, 2, 3)
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (fn_decl
+    name: (identifier)
+    return_type: (type_expression
+      (tuple_type
+        (type_expression
+          (identifier))
+        (type_expression
+          (identifier))
+        (type_expression
+          (identifier))))
+    body: (block
+      (return_statement
+        value: (tuple_expr
+          (number)
+          (number)
+          (number))))))
+
+================================================================================
+R36C: three-element tuple destructure
+================================================================================
+
+let (a, b, c) = triple
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_decl
+    pattern: (tuple_pattern
+      (identifier)
+      (identifier)
+      (identifier))
+    value: (identifier)))
