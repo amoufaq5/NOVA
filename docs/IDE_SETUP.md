@@ -7,10 +7,24 @@ machine interface). After following this guide you will have hover
 docs, go-to-definition, rename, inlay hints, breakpoints, conditional
 breakpoints, reverse debug, disassembly view, and a profiler.
 
+> **R37D shortcut:** the recommended install today is the
+> [`tools/vscode-nova/`](../tools/vscode-nova/) VS Code extension,
+> which bundles the TextMate grammar, an LSP client connected to
+> `nova-lsp`, and a DAP client connected to `nova-dap` into a
+> single VSIX. Build it once with
+> `tools/vscode-nova/scripts/build-vsix.sh` and install via
+> `code --install-extension nova-language-0.1.0.vsix`. The
+> per-tool sections (2-4) below remain as the **advanced /
+> bypass** path for users who want to wire LSP and DAP directly
+> without the extension.
+
 **Honest up-front note:** the NOVA VS Code extension is **not in the
-Marketplace yet**. Installation today is manual (build the VSIX
-locally or symlink the extension directory into VS Code's extensions
-folder). A Marketplace listing is planned for a future round.
+Marketplace yet**. Installation today is via the VSIX produced by
+R37D's build script (`tools/vscode-nova/scripts/build-vsix.sh`) or
+manually (Sections 2-4 below). A Marketplace listing is planned for
+a future round and tracked in the
+[`tools/vscode-nova/README.md`](../tools/vscode-nova/README.md)
+roadmap.
 
 ## Section 1 -- Install VS Code
 
@@ -189,15 +203,60 @@ After step 4 is complete you get:
   - **Watch expressions** + **Locals** + **stack trace** in the
     sidebar.
 
-## Section 5 -- Bring it all together
+## Section 5 -- Install the VS Code extension (recommended)
+
+R37D ships `tools/vscode-nova/` as a single installable VSIX. It
+bundles the TextMate grammar, an LSP client wired to `nova-lsp`,
+and a DAP client wired to `nova-dap`. After Sections 1 + 3 + 4
+above have set up VS Code and the Python venv, the extension
+replaces the manual VS Code-side wiring of Sections 2 (extension
+directory symlink) and Section 5's old `.vscode/settings.json`
+boilerplate.
+
+### Build + install the VSIX
+
+```bash
+cd $NOVA_ROOT/tools/vscode-nova
+./scripts/build-vsix.sh
+# Build output: ./nova-language-0.1.0.vsix
+code --install-extension nova-language-0.1.0.vsix
+```
+
+If you don't have `npm` available, you can also load the extension
+in dev mode by symlinking:
+
+```bash
+ln -s "$NOVA_ROOT/tools/vscode-nova" \
+    "$HOME/.vscode/extensions/crossengin.nova-language-0.1.0"
+```
+
+### Point the extension at your venv
+
+In your workspace `.vscode/settings.json`:
+
+```jsonc
+{
+  // Path to the venv interpreter where `pip install -e tools/nova-lsp
+  // tools/nova-dap` was run. The extension spawns
+  // `python -m nova_lsp` and `python -m nova_dap` from this.
+  "nova.python.path":
+    "/home/<you>/.local/share/nova-tools-venv/bin/python",
+  "nova.compiler.path": "/path/to/NOVA/bin/nova"
+}
+```
+
+You do NOT need to set `nova.lsp.serverPath` -- the extension uses
+`python -m nova_lsp` rather than a standalone `nova-lsp` binary.
+
+### Bring it all together
 
 In your NOVA project workspace:
 
 ```
 my-project/
 ├── .vscode/
-│   ├── settings.json     # nova-lsp wiring
-│   └── launch.json       # nova-dap wiring
+│   ├── settings.json     # nova.python.path + nova.compiler.path
+│   └── launch.json       # nova-dap launch config
 ├── src/
 │   └── main.nova
 ├── tests/
@@ -216,6 +275,30 @@ Then F5 to launch under the debugger. Set a breakpoint by clicking
 the gutter; right-click the breakpoint for the conditional-breakpoint
 dialog. The R34F disassembly view is on the View menu -> Open View
 -> "Disassembly View".
+
+### Marketplace listing (TBD)
+
+R37D produces a local-install VSIX, not a Marketplace listing.
+Marketplace publish requires a registered publisher namespace and
+a Personal Access Token; that step is tracked in
+[`tools/vscode-nova/README.md`](../tools/vscode-nova/README.md)
+under "Roadmap" and is deferred to a future round. Until then,
+distribute the VSIX by hand (or attach it to a GitHub release).
+
+## Section 5b -- Advanced: bypass the extension
+
+If you want to wire `nova-lsp` and `nova-dap` directly without
+installing the VSIX (for example, you're using a different editor,
+or developing the servers themselves), Sections 2-4 above are
+self-contained: the tree-sitter grammar, `nova-lsp` venv install,
+and `nova-dap` venv install all work without the VS Code extension.
+
+For VS Code specifically, the legacy wiring uses
+`nova.lsp.serverPath` (pointing at the `nova-lsp` console script)
+plus a `launch.json` that omits the bundled extension's debugger
+type registration. The R37D extension supersedes that path; both
+approaches read the same Python venv and produce identical
+diagnostics + debug behavior.
 
 ## Section 6 -- Troubleshooting
 
@@ -278,7 +361,15 @@ dialog. The R34F disassembly view is on the View menu -> Open View
 
 ## Section 8 -- Honest limitations summary
 
-  - **No Marketplace listing.** Install is manual today.
+  - **No Marketplace listing yet.** R37D ships a local-install
+    VSIX (`tools/vscode-nova/scripts/build-vsix.sh`) but the
+    Marketplace publish step (registered publisher + PAT + verified
+    namespace) is deferred. Distribute the VSIX by hand or attach
+    it to a GitHub release until then.
+  - **Tree-sitter WASM not bundled in the VSIX.** The R37D extension
+    uses the TextMate grammar (`syntaxes/nova.tmLanguage.json`,
+    ~80% surface coverage) for highlighting. Bundling the
+    tree-sitter WASM parser is deferred to v0.2 (planned R38+).
   - **Tree-sitter lags closure grammar.** R35C closure literals
     show as syntax error in the IDE until the grammar update lands
     (planned R37+).

@@ -13,7 +13,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 > evolution), ADR 0004 (LSP/DAP/tree-sitter strategy), ADR 0005
 > (R35C static-slot closure lowering + R37+ migration plan).
 
-## Status (through R36C)
+## Status (through R37D)
 
 | Track | Latest round | What landed |
 |---|---|---|
@@ -24,6 +24,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | LSP (Python / pygls) | R3 .. R35F | hover / goto / rename (R32E) / inlay (R30E) / documentLink + codeLens (R33D) / code actions (R35F) / scope-aware extract-function (R36D). |
 | DAP (Python over gdb-mi) | R17F .. R35E | source / function / exception (R33F) / instruction (R17F+R35E) breakpoints; conditional + hit-count (R29E); reverse debug (R31E); profiler (R28F); disassembly (R34F). |
 | Tree-sitter grammar | R34E | match + nested patterns + let destructure + if-let + arm guards; **closure literals (R35C) deferred**. |
+| VS Code extension | R37D | single VSIX bundles TextMate grammar + LSP client (`python -m nova_lsp`) + DAP client (`python -m nova_dap`) + snippets. Build via `tools/vscode-nova/scripts/build-vsix.sh`; install via `code --install-extension nova-language-0.1.0.vsix`. Marketplace publish TBD. |
 | Codegen targets | v4.2 | Linux x86-64, Windows x86-64 PE32+, macOS x86-64, WASM (WASI), Linux ARM64, Windows ARM64. |
 
 See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.

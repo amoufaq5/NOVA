@@ -1,5 +1,159 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R37D — tools: VS Code extension skeleton bundling nova-lsp + nova-dap + syntax highlighting
+
+**Status: complete** — `tools/vscode-nova/` becomes a real installable
+VS Code extension. Today a new contributor has to install three things
+manually (the TextMate grammar shipped via symlink, nova-lsp via pip,
+nova-dap via pip + launch.json boilerplate). R37D produces a single
+`nova-language-0.1.0.vsix` that wires all three together; one
+`code --install-extension` call replaces three manual steps.
+
+R37D is a **skeleton, not a v1.0 polish**. It ships the install +
+activation + LSP/DAP plumbing; the v0.1 honest caveats below
+enumerate what's deferred to v0.2.
+
+### What R37D delivers
+
+- **`tools/vscode-nova/src/extension.ts`** — TypeScript glue that:
+  - Reads `nova.python.path` + module/args config from VS Code
+    settings.
+  - Spawns `python -m nova_lsp` over stdio and attaches a
+    `vscode-languageclient` `LanguageClient` for `[file,
+    untitled]:nova` documents.
+  - Registers a `DebugAdapterDescriptorFactory` for the `nova`
+    debugger type that spawns `python -m nova_dap` on each
+    session start.
+  - Probes the configured Python interpreter at activation to
+    surface install hints early in the output channel.
+  - Watches `nova.*` configuration for changes and restarts the
+    LSP automatically.
+  - Exposes commands `nova.restartLanguageServer` and
+    `nova.showOutput`.
+- **`tools/vscode-nova/package.json`** — manifest with
+  `contributes.languages`, `contributes.grammars` (TextMate),
+  `contributes.debuggers` (type `nova` + `launch` config schema +
+  initial config + snippet), `contributes.snippets`,
+  `contributes.commands`, `contributes.configuration` (the
+  `nova.*` namespace), `contributes.breakpoints`, plus
+  `activationEvents: [onLanguage:nova, onDebug, onDebugResolve:nova]`
+  and `engines.vscode: ^1.85.0`.
+- **`tools/vscode-nova/syntaxes/nova.tmLanguage.json`** — already
+  present from earlier rounds; covers keywords, types, builtins,
+  literals, comments, inline `asm` blocks, operators.
+- **`tools/vscode-nova/snippets/nova.snippets.json`** — new;
+  13 snippets (fn, main, let, if, ifelse, while, for, match,
+  import, println, print_int, return, struct).
+- **`tools/vscode-nova/language-configuration.json`** — already
+  present; bracket pairs + indentation rules.
+- **`tools/vscode-nova/tsconfig.json`** — ES2022 target, strict
+  mode, `outDir: out`.
+- **`tools/vscode-nova/.vscodeignore`** — excludes `src/`, `tests/`,
+  `scripts/`, `node_modules/`, `.ts`, etc. from the VSIX.
+- **`tools/vscode-nova/scripts/build-vsix.sh`** — runs
+  `npm install` → `npm run compile` → `npx @vscode/vsce package
+  --no-dependencies --allow-missing-repository` and prints the
+  absolute VSIX path on the last stdout line.
+- **`tools/vscode-nova/tests/`** — three Python `unittest` modules:
+  - `test_extension_manifest.py` validates required manifest
+    fields, contributes structure, configuration property
+    coverage, snippet path resolution, scripts wiring,
+    dependency presence.
+  - `test_textmate_grammar.py` validates grammar JSON parses,
+    scope name matches, all repository sections covered,
+    promised keywords + types appear.
+  - `test_build.py` runs `build-vsix.sh` when `npm` is on PATH
+    (skips otherwise + when `NOVA_VSCODE_OFFLINE=1`) and checks
+    the version-matching VSIX file appears.
+- **`tools/vscode-nova/CHANGELOG.md`** — v0.1.0 entry with
+  added-features + known-limitations.
+- **`tools/vscode-nova/README.md`** — full user-facing docs:
+  install via VSIX, server install (pip + venv), launch.json
+  example, settings reference, build from source, tests,
+  architecture diagram, roadmap.
+
+### Build / install path
+
+```bash
+cd $NOVA_ROOT/tools/vscode-nova
+./scripts/build-vsix.sh
+# Output: $NOVA_ROOT/tools/vscode-nova/nova-language-0.1.0.vsix
+code --install-extension nova-language-0.1.0.vsix
+```
+
+The build was actually executed in R37D's session: `npm install`
+succeeded, `tsc` compiled `src/extension.ts` to `out/extension.js`
+(11.5 KB), `vsce package --no-dependencies` produced
+`nova-language-0.1.0.vsix` (15 KB, 9 entries including the compiled
+extension, TextMate grammar, snippets, language-configuration,
+package.json, README, CHANGELOG, and the vsixmanifest +
+Content_Types).
+
+### IDE_SETUP.md update
+
+Section 5 of `docs/IDE_SETUP.md` is rewritten to present the
+extension as the recommended install path. The old "wire up
+`.vscode/settings.json` from scratch" content moves to a new
+**Section 5b — Advanced: bypass the extension** as the
+direct-wiring path for users who don't want the VSIX.
+Section 8 (honest limitations) replaces the categorical
+"No Marketplace listing" bullet with the more accurate
+"local VSIX install today, Marketplace publish TBD".
+
+### Honest caveats
+
+- **Tree-sitter WASM not bundled.** v0.1 syntax highlighting is
+  TextMate-only. Bundling the `tree-sitter-nova` compiled WASM
+  parser into the VSIX is deferred to v0.2 (planned R38+).
+- **Marketplace publish path is documented as TBD, not wired.**
+  R37D produces an unsigned VSIX with `publisher: "crossengin"`
+  as a placeholder. Real publish needs a registered publisher
+  namespace + a vsce PAT + a `vsce publish` step in the build
+  script.
+- **Python servers are NOT bundled.** The user still runs
+  `pip install -e tools/nova-lsp tools/nova-dap` inside a venv.
+  Auto-install is deferred (would need a VS Code postinstall
+  hook + permission to invoke pip).
+- **Build environment is non-hermetic.** `scripts/build-vsix.sh`
+  uses `npm install` (not `npm ci`) and `npx --yes
+  @vscode/vsce@latest` (not a pinned version). Tightening to a
+  lock-file + pinned vsce is a follow-up.
+- **No real VS Code instance test.** Manifest invariants + grammar
+  invariants + build pipeline are unit-tested. An actual
+  `vscode-test`-runner end-to-end test (launch a VS Code
+  instance, install the extension, open a `.nova` file, assert
+  the LSP attached) is deferred.
+
+### Deferred to future rounds
+
+- Tree-sitter WASM bundling (R38+).
+- Marketplace publish flow (R38+).
+- Auto-install of Python servers (R38+).
+- `vscode-test`-runner end-to-end smoke (R38+).
+- Pinned `package-lock.json` + pinned vsce version (R38+).
+
+### Concurrency note
+
+R37D ships in parallel with:
+- **R37A** (closure lowering) — touches `src/parser.nova` +
+  `src/codegen.nova`; no API surface change to nova-lsp or
+  nova-dap, so no collision.
+- **R37B** (tree-sitter grammar update for R35C closures) —
+  touches `tools/tree-sitter-nova/grammar.js`; R37D is a
+  consumer of the TextMate grammar (not tree-sitter) so no
+  collision.
+
+R37D stash discipline: the working tree contained a sibling
+agent's edit to `tools/tree-sitter-nova/grammar.js` (R37B) at
+session start. That edit was stashed via
+`git stash push -m "R37D-preflight-sibling" --
+tools/tree-sitter-nova/grammar.js` before R37D writes began, and
+R37D never modifies any path outside its owned set
+(`tools/vscode-nova/`, `docs/IDE_SETUP.md`, root `README.md`,
+`NEXT_SESSION.md`).
+
+---
+
 ## R36C — parser+codegen: NOVA tuple literals + tuple types + tuple destructure
 
 **Status: complete** — NOVA gains its first first-class tuple surface
