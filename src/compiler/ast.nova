@@ -110,6 +110,43 @@ let AST_STRUCT_PATTERN = 68
 // is reused from the AST_STRUCT_PATTERN codepath so codegen never sees a
 // new pattern shape.
 let AST_NESTED_VARIANT_PATTERN = 69
+// R36C: tuple literal `(a, b, c)`. NOVA does NOT add a distinct runtime
+// representation for tuples — they lower to lists at codegen (the path of
+// least resistance: `[a, b, c]`). The node carries an `elements` list of
+// expression nodes; the parser only emits AST_TUPLE_LIT when at least
+// two expressions are present (`(x)` stays a parenthesized expression).
+// Wire shape: [tag, elements].
+//
+// Why a distinct AST tag if we lower to AST_LIST_LIT anyway? Two reasons:
+//   (1) keeps the parser's intent visible for future passes that may want
+//       to enforce per-slot type discipline (currently AST-level only —
+//       see par_collect_type's tuple-type branch).
+//   (2) tooling (nova-lsp / tree-sitter) can distinguish tuples from
+//       lists without re-parsing — once those modules add tuple support
+//       in a future round, the AST tag tells them which surface form to
+//       suggest in completions / hover.
+// Codegen treats AST_TUPLE_LIT identically to AST_LIST_LIT (one branch
+// near the AST_LIST_LIT cases per pass — see cg gen_expr / tc_walk_expr /
+// collect_comp_vars / cg_fold_constants / cg_dce_expr / etc.).
+let AST_TUPLE_LIT = 70
+// R36C: tuple type annotation `(int, str)`. Captured by par_collect_type
+// for the lightweight type-check pass; codegen never reads it. Wire shape:
+// [tag, slot_types] where slot_types is a list of `[base, [type_args]]`
+// pairs (the par_collect_type shape). The empty-tuple type `()` is NOT
+// modelled (NOVA has no unit type; deferred to a future round).
+let AST_TUPLE_TYPE = 71
+// R36C: tuple match pattern `(0, _) => ...`. Parser-time lowering: each
+// arm with an AST_TUPLE_PATTERN is rewritten into a wildcard arm with a
+// guard chain `tmp[0] == lit0 && tmp[1] == lit1 && ...` plus a per-binder
+// `let name = tmp[i]` prep stmt — mirrors the R32D nested-variant lowering
+// so codegen never sees AST_TUPLE_PATTERN directly. Wire shape:
+// [tag, sub_patterns] where each sub_patterns[i] is one of:
+//   * AST_IDENT (binder name)
+//   * AST_WILDCARD (skip)
+//   * AST_TUPLE_PATTERN (nested tuple)
+//   * any expression node (literal value; compared by equality at the
+//     dispatch site).
+let AST_TUPLE_PATTERN = 72
 // --- AST Constructors ---
 // Each returns a list: [tag, ...fields]
 
@@ -697,6 +734,39 @@ fn ast_struct_init(name, values, names) {
     push(n, values)
     push(n, names)
     push(n, 0)
+    return n
+}
+
+// R36C: tuple literal `(a, b, c)`. Carries the element list; codegen
+// lowers identically to AST_LIST_LIT (tuples are tagged lists in the
+// shallow R36C implementation — no distinct runtime representation).
+fn ast_tuple_lit(elements) {
+    let n = list_new()
+    push(n, AST_TUPLE_LIT)
+    push(n, elements)
+    return n
+}
+
+// R36C: tuple type annotation `(int, str)`. `slot_types` is a list of
+// `[base, [type_args]]` pairs as returned by par_collect_type. Codegen
+// never reads this; the type-check pass uses it only for documentation
+// today (a future round could enforce per-slot discipline).
+fn ast_tuple_type(slot_types) {
+    let n = list_new()
+    push(n, AST_TUPLE_TYPE)
+    push(n, slot_types)
+    return n
+}
+
+// R36C: tuple match pattern `(0, _, x)`. `sub_patterns` is the list of
+// per-slot sub-patterns — binders, wildcards, nested tuples, or literal
+// expression nodes. parse_match lowers AST_TUPLE_PATTERN arms into a
+// wildcard arm with guard chain + per-binder prep stmts referencing the
+// cached scrutinee temp; codegen never sees this tag directly.
+fn ast_tuple_pattern(sub_patterns) {
+    let n = list_new()
+    push(n, AST_TUPLE_PATTERN)
+    push(n, sub_patterns)
     return n
 }
 

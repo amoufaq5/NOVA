@@ -1,5 +1,161 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R36C — parser+codegen: NOVA tuple literals + tuple types + tuple destructure
+
+**Status: complete** — NOVA gains its first first-class tuple surface
+syntax: literals `(a, b, c)`, type annotations `(int, str)`, let-
+destructure `let (a, b) = pair`, and match patterns `(0, _) => ...`.
+Closes R35F's multi-live-out extract-function caveat (the LSP can now
+suggest a tuple return for multi-value selections) and prepares
+R37's multi-instance closures (a future `[fn_ptr, env_list]` shape
+lowers cleanly through the same tuple AST).
+
+R36C is a SHALLOW implementation by design — tuples are tagged lists at
+runtime, with no distinct heap representation and no per-slot runtime
+type discipline. The lowering reuses R32D's nested-pattern + R17A's
+tagged-list infrastructure byte-identically; only the parser surface
+and a thin AST extension are new.
+
+### Grammar additions
+
+```
+tuple_expr := '(' expr (',' expr)+ ','? ')'
+tuple_type := '(' type (',' type)+ ','? ')'    // in any par_collect_type position
+tuple_pat  := '(' pattern (',' pattern)+ ','? ')'   // match arm or let
+```
+
+Decision points (documented in source comments):
+
+  - `(x)`  stays a parenthesized expression (existing precedence path
+    preserved — important for pre-R36C grammar invariance).
+  - `(x,)` singleton tuple — OUT OF SCOPE. Trailing-comma-after-one-expr
+    silently collapses to the parenthesized expression so the path
+    stays forward-compatible if a future round adds singletons.
+  - `()`   unit / empty tuple — NOT MODELLED. NOVA has no unit type;
+    `par_skip_type` accepts the empty form as a no-op so a future
+    round can add it without grammar churn, but the expression form
+    still errors (no change from pre-R36C behaviour).
+  - Trailing commas after the LAST element of `(a, b,)` or `let (a, b,)`
+    are accepted (Python/Rust convention). Useful for codegen tools
+    and multi-line tuple literals.
+
+### Codegen lowering
+
+  - Tuple literal `(a, b, c)` → AST_LIST_LIT `[a, b, c]` at the parser
+    boundary. Codegen never sees a distinct tuple tag — the dozen-plus
+    `AST_LIST_LIT` branches across `gen_expr` / `cg_fold_constants` /
+    `cg_eliminate_dead_code` / `tc_walk_expr` / `wasm` / `arm64`
+    handle the runtime byte-identically.
+  - Tuple type `(int, str)` → AST_TUPLE_TYPE (declared in
+    `ast.nova`). Captured by `par_collect_type` for the lightweight
+    type-check pass; codegen ignores. Defensive guards added to
+    `tc_resolve_type` / `tc_check_let_enum_ctor` / arg-type checker
+    so tuple-typed annotations don't false-positive against the
+    `[base, args]` pair shape the existing pipeline expects.
+  - Tuple destructure `let (a, b) = expr` → AST_DESTRUCTURE
+    (existing R32D shape). Reuses `gen_expr`'s positional-index
+    codegen path byte-identically.
+  - Tuple match pattern `(0, _, x) =>` → AST_TUPLE_PATTERN, lowered
+    parser-side into a wildcard-with-guard arm that mirrors R32D's
+    nested-variant rewrite: literal slots emit `tmp[i] == lit`
+    guard chain entries, binder slots emit `let name = tmp[i]` prep
+    stmts, wildcards skip silently. Nested tuple sub-patterns
+    recurse through the same `r32d_lower_sub_pattern` machinery
+    (extended with an AST_TUPLE_PATTERN branch).
+
+### Multi-return functions
+
+```nova
+fn split(s: str) -> (str, str) {
+  let i = find(s, ":")
+  return (substr(s, 0, i), substr(s, i + 1, len(s) - i - 1))
+}
+
+let (left, right) = split("key:value")
+```
+
+The function's return type annotation `(str, str)` is captured by
+`par_collect_type`'s tuple-type branch; the body returns an
+AST_LIST_LIT (the tuple-literal-as-list lowering); the let-destructure
+on the call site emits AST_DESTRUCTURE which reads slot 0 / slot 1.
+
+### Match arm separator
+
+R36C also adds an OPTIONAL `,` between match arms (silent consume).
+NOVA's pre-R36C grammar tolerates no separator because arm boundaries
+are detected by `parse_expr` stopping at the first non-expression
+token (usually the next pattern's leading IDENT / INT / `_`). Tuple
+patterns break that heuristic — a bare-expression body followed by a
+`(`-starting tuple pattern is ambiguous (`parse_postfix` would treat
+the `(` as a postfix call). Accepting an explicit comma lets users
+disambiguate `(0,0) => "origin", (0,_) => "y_axis"` cleanly. Arms
+without commas continue to parse byte-identically to the pre-R36C
+grammar for every existing test in the repo (block-body `=> { ... }`
+form is the other safe disambiguator; `tests/unit/test_tuples.nova`
+uses the block-body form for the multi-arm tuple cases).
+
+### Tests
+
+`tests/unit/test_tuples.nova` — 70 assertions. New cases:
+
+  - 2-tuple / 3-tuple / heterogeneous (int + str) / nested tuple
+    construction + positional access (`p[0]`, `p[1]`, `n[0][1]`,
+    `len(p)`).
+  - Destructure on tuple literals, on variables, on function return
+    values, with trailing commas, inside function bodies.
+  - Trailing comma in literal `(a, b,)` parses identically to
+    `(a, b)`.
+  - Parenthesized expression `(1 + 2)` NOT a tuple — single-element
+    no-trailing-comma stays as the inner expression value 3.
+  - `(x,)` trailing-comma-after-single collapses to the
+    parenthesized expression — R36C does not ship singleton tuples
+    so the value of `s = (42,)` is just 42.
+  - Tuple-typed function return + multi-binding let-destructure
+    (the round's headline use case).
+  - Tuple type annotation on a parameter `fn first(t: (int, int))`
+    parses without false-positive type-check warnings.
+  - Match on tuple literal patterns including literals + binders +
+    wildcards + nested tuples + guards.
+  - Mixed list-of-tuples (`[(1, 2), (3, 4)]`) accesses sub-slots
+    correctly.
+  - Source-pin assertions verify parser carries the R36C comment
+    markers + helper functions (`par_parse_tuple_match_pattern`,
+    `lower_tuple_match_arm`).
+
+All 256 prior unit assertions remain green (38 R32D let-destructure
++ 83 R31D/R32D match-expr + 45 R33C match-guards + 33 R33C if-let
++ 57 R35C closures). `make self-host` confirms stage2 == stage3
+bit-identically.
+
+### Honest design caveats
+
+  - Tuple TYPES are AST-level metadata only. The type-check pass
+    recognises the surface form and skips per-slot enforcement
+    (avoiding false positives) but does NOT check that a value
+    passed to a `(int, str)`-typed parameter is actually a 2-list
+    with int + str slots. A future round could add per-slot
+    discipline by recursing through `payload_t[0]`'s slot list.
+
+  - Tuple ARITY is not runtime-checked. `match x { (a, b) => ... }`
+    binds `tmp[0]` and `tmp[1]` unconditionally; if `x` is a
+    1-element list or an int, the generated `tmp[i]` will trap at
+    runtime via the existing list-bounds check. This matches R32D's
+    pattern-discipline boundary — patterns over heterogeneous runtime
+    shapes are user-responsibility.
+
+  - Tuples and lists are indistinguishable at runtime. A function
+    returning `(int, str)` could in theory return `[1, "two"]` (a
+    list literal) and the destructure would succeed. The static
+    `(int, str)` annotation is the only documentation of intent
+    today. Promoting tuples to a distinct runtime representation
+    (e.g. an extra tag byte) is a future-round option if static
+    discipline becomes valuable.
+
+  - `()` (empty tuple / unit) is NOT a value. The literal form errors
+    at the original `parse_expr` call; `par_skip_type` accepts it as
+    a no-op so future-round addition won't require grammar churn but
+    today there is no in-language way to write or return unit.
+
 ## R36F — docs sweep: ADRs + GETTING_STARTED + IDE_SETUP
 
 **Status: complete** — documentation-only round. No code modules

@@ -212,6 +212,35 @@ fn par_match(typ) {
 }
 
 fn par_skip_type() {
+    // R36C: tuple type `(int, str)` may appear anywhere par_skip_type is
+    // called (param/return annotations, generic args, etc.). Recursively
+    // consume nested types delimited by `,`, terminated by `)`. The empty
+    // tuple type `()` is accepted as a no-op (NOVA has no unit type
+    // today; this keeps the parser forward-compatible without committing
+    // to a runtime void value).
+    if par_peek_type() == TOK_LPAREN {
+        par_advance()
+        if par_peek_type() == TOK_RPAREN {
+            par_advance()
+        } else {
+            par_skip_type()
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN { break }
+                par_skip_type()
+            }
+            par_expect(TOK_RPAREN)
+        }
+        // After tuple type, also accept `-> U` for tuple-returning fn types.
+        if par_peek_type() == TOK_MINUS {
+            if par_peek_at_type(1) == TOK_GT {
+                par_advance()
+                par_advance()
+                par_skip_type()
+            }
+        }
+        return 0
+    }
     par_expect(TOK_IDENT)
     if par_peek_type() == TOK_LT {
         par_advance()
@@ -566,7 +595,46 @@ fn parse_primary() {
     }
     if t == TOK_LPAREN {
         par_advance()
+        // R36C: tuple literal — distinguish parenthesized expression from tuple literal.
+        // `(x)`       -> parenthesized expr (existing behaviour preserved)
+        // `(a, b)`    -> tuple literal `[a, b]`
+        // `(a, b,)`   -> tuple literal (trailing comma accepted)
+        // `(x,)`      -> singleton tuple — OUT OF SCOPE (R36C). To stay
+        //                forward-compatible with a future singleton-tuple
+        //                extension AND not regress R32D's `(x)` behaviour,
+        //                a trailing-comma-after-one-expr collapses to the
+        //                parenthesized expression (the trailing comma is
+        //                silently dropped). Document below; tests cover.
+        // `()`        -> unit / empty tuple — NOT MODELLED (NOVA has no
+        //                unit type today). The original `parse_expr` call
+        //                would error on `)` anyway; no behaviour change.
         let expr = parse_expr()
+        if par_peek_type() == TOK_COMMA {
+            // Either a tuple or a parenthesized-with-trailing-comma.
+            let r36c_elems = list_new()
+            push(r36c_elems, expr)
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_RPAREN { break }
+                push(r36c_elems, parse_expr())
+            }
+            par_expect(TOK_RPAREN)
+            if len(r36c_elems) == 1 {
+                // `(x,)` — trailing comma after a single element. R36C
+                // does not ship singleton tuples; treat as parenthesized.
+                return r36c_elems[0]
+            }
+            // R36C: tuples lower to lists at the AST level. We emit
+            // AST_LIST_LIT directly so codegen never sees a tuple tag —
+            // the dozen-plus AST_LIST_LIT branches across codegen
+            // (gen_expr, fold_constants, dce, tc_walk, wasm, arm64, etc.)
+            // handle the runtime representation byte-identically. The
+            // AST_TUPLE_LIT tag in ast.nova is retained for tooling
+            // (nova-lsp / tree-sitter consumers can inspect the
+            // surface form via a future round) but the self-host
+            // compiler erases it at the parser boundary.
+            return ast_list(r36c_elems)
+        }
         par_expect(TOK_RPAREN)
         return expr
     }
@@ -1655,6 +1723,47 @@ fn parse_let() {
     } else {
         par_expect(TOK_LET)
     }
+    // R36C: tuple destructure `let (a, b) = expr`. Lowers to the same
+    // AST_DESTRUCTURE node the `let [a, b]` (list-destructure) path emits
+    // — tuples are tagged lists at runtime so positional access via
+    // `tmp[i]` is identical. The leading `(` is unambiguous in let-stmt
+    // position (no other let form starts with `(`). Trailing comma after
+    // the last name is accepted; singleton `let (x,) = expr` falls back
+    // to a regular `let x = expr` (singleton tuples are out of scope).
+    // No rest-pattern (`...rest`) for tuples — that's a list-destructure
+    // feature and is excluded here on purpose.
+    if par_peek_type() == TOK_LPAREN {
+        par_advance()
+        let tdnames = list_new()
+        if par_peek_type() == TOK_RPAREN {
+            par_error("empty tuple destructure `let ()` — not supported (NOVA has no unit type)")
+        }
+        let tdfirst = par_expect(TOK_IDENT)
+        push(tdnames, tdfirst[1])
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            if par_peek_type() == TOK_RPAREN { break }
+            let tdnxt = par_expect(TOK_IDENT)
+            push(tdnames, tdnxt[1])
+        }
+        par_expect(TOK_RPAREN)
+        // R36C: tuple destructure also accepts an optional type annotation
+        // `: (T, U)` for symmetry with non-destructure lets. We collect
+        // it for the type-check pass to read but codegen ignores it.
+        if par_peek_type() == TOK_COLON {
+            par_advance()
+            let _tdannot = par_collect_type()
+        }
+        par_expect(TOK_EQ)
+        let tdvalue = parse_expr()
+        if len(tdnames) == 1 {
+            // `let (x) = expr` -> just `let x = expr` (parenthesized name
+            // is not a tuple). Maintains forward-compat with future
+            // singleton-tuple addition.
+            return ast_let(tdnames[0], tdvalue)
+        }
+        return ast_destructure(tdnames, tdvalue)
+    }
     if par_peek_type() == TOK_LBRACKET {
         par_advance()
         let dnames = list_new()
@@ -2006,6 +2115,39 @@ fn par_collect_generic_params() {
 // (caller treats as "no annotation"). NOTE: this duplicates par_skip_type
 // to avoid altering existing call-sites; the two MUST stay in sync.
 fn par_collect_type() {
+    // R36C: tuple type annotation `(int, str)`. Captured as an
+    // AST_TUPLE_TYPE node — the lightweight type-check pass currently
+    // ignores it (no per-slot enforcement), codegen never reads it.
+    // Empty tuple type `()` is not modelled — treated as a no-annotation
+    // sentinel (returns 0) since NOVA has no unit type today.
+    if par_peek_type() == TOK_LPAREN {
+        par_advance()
+        let tt_slots = list_new()
+        if par_peek_type() == TOK_RPAREN {
+            par_advance()
+            return 0
+        }
+        let tt_first = par_collect_type()
+        if tt_first != 0 { push(tt_slots, tt_first) }
+        while par_peek_type() == TOK_COMMA {
+            par_advance()
+            if par_peek_type() == TOK_RPAREN { break }
+            let tt_nx = par_collect_type()
+            if tt_nx != 0 { push(tt_slots, tt_nx) }
+        }
+        par_expect(TOK_RPAREN)
+        // After the closing `)`, check for `-> T` (function returning a
+        // tuple-typed value used positionally). Matches par_collect_type's
+        // existing `T -> U` handling at the bottom of the IDENT branch.
+        if par_peek_type() == TOK_MINUS {
+            if par_peek_at_type(1) == TOK_GT {
+                par_advance()
+                par_advance()
+                let _tt_r = par_collect_type()
+            }
+        }
+        return ast_tuple_type(tt_slots)
+    }
     if par_peek_type() != TOK_IDENT {
         return 0
     }
@@ -2534,6 +2676,33 @@ fn parse_match() {
                 }
             }
         }
+        // R36C: tuple pattern detection MUST run before the general
+        // parse_expr fallthrough — `(0, _)` is a tuple pattern, not a
+        // parenthesized expression. The leading `(` paired with the
+        // presence of a comma inside the paren block disambiguates: if
+        // we see `(<sub-pat>,...)` with at least one comma at the same
+        // depth, it's a tuple pattern. The simpler check used here:
+        // `consumed_pat == 0 && TOK_LPAREN at the head` enters
+        // par_parse_tuple_match_pattern which itself rejects (returns 0)
+        // a single-element no-trailing-comma `(x)` so the existing
+        // expression-pattern fallthrough still handles parenthesized
+        // expressions like `(1 + 2)`. Tuple patterns flow through the
+        // same R32D-style match-rewrite below (saw_struct_pat is set so
+        // a `_struct_match_N` temp is allocated).
+        if consumed_pat == 0 {
+            if par_peek_type() == TOK_LPAREN {
+                let tp_node = par_parse_tuple_match_pattern()
+                if tp_node != 0 {
+                    if saw_struct_pat == 0 {
+                        match_tmp_name = "_struct_match_" + int_to_str(par_struct_tmp_count)
+                        par_struct_tmp_count = par_struct_tmp_count + 1
+                        saw_struct_pat = 1
+                    }
+                    pattern = tp_node
+                    consumed_pat = 1
+                }
+            }
+        }
         if consumed_pat == 0 {
         if par_peek_type() == TOK_UNDERSCORE {
             par_advance()
@@ -2656,6 +2825,20 @@ fn parse_match() {
             push(arm, mg)
         }
         push(arms, arm)
+        // R36C: optionally accept a `,` between arms. NOVA's pre-R36C
+        // match grammar tolerates no separator (arm boundaries are
+        // detected by parse_expr stopping at the first non-expression
+        // token — usually the next pattern's leading IDENT / INT / `_`).
+        // Tuple patterns break that heuristic because a bare-expression
+        // body followed by a `(`-starting tuple pattern is ambiguous
+        // (parse_postfix would treat the `(` as a call on the body).
+        // Accepting an explicit comma between arms lets users
+        // disambiguate `(0,0) => "origin", (0,_) => "y_axis"` cleanly
+        // without changing the rest of the grammar. The comma is
+        // consumed silently — arms without commas continue to parse
+        // byte-identically to the pre-R36C grammar for every existing
+        // test in the repo.
+        if par_peek_type() == TOK_COMMA { par_advance() }
     }
     par_expect(TOK_RBRACE)
     // R32D: parse-time typecheck for nested variant patterns. Walks every
@@ -2709,9 +2892,15 @@ fn parse_match() {
             } else { if ast_tag(pat0) == AST_NESTED_VARIANT_PATTERN {
                 let nested_pair = lower_nested_variant_match_arm(match_tmp_name, pat0, body0, old_guard)
                 push(new_arms, nested_pair)
+            } else { if ast_tag(pat0) == AST_TUPLE_PATTERN {
+                // R36C: tuple match pattern. Lower to wildcard-with-guard
+                // identically to AST_NESTED_VARIANT_PATTERN, dispatching
+                // on positional slot equality rather than tag compare.
+                let tuple_pair = lower_tuple_match_arm(match_tmp_name, pat0, body0, old_guard)
+                push(new_arms, tuple_pair)
             } else {
                 push(new_arms, arm0)
-            } }
+            } } }
             ai = ai + 1
         }
         let inner_match = ast_match(ast_ident(match_tmp_name), new_arms)
@@ -2902,6 +3091,16 @@ fn parse_match_sub_pattern() {
         par_advance()
         return ast_wildcard()
     }
+    // R36C: tuple sub-pattern `(0, _, x)` nested inside another pattern.
+    // Same disambiguation as top-level tuple patterns: require >=2
+    // comma-separated sub-patterns; a single-element `(x)` falls through
+    // to parse_expr so existing literal-equality semantics stay byte-
+    // identical. par_parse_tuple_match_pattern returns 0 in the non-tuple
+    // case so the caller can try the next branch.
+    if par_peek_type() == TOK_LPAREN {
+        let tp_sub = par_parse_tuple_match_pattern()
+        if tp_sub != 0 { return tp_sub }
+    }
     if par_peek_type() == TOK_IDENT {
         // Possible forms:
         //   IDENT                       -> binder
@@ -2976,6 +3175,96 @@ fn parse_match_sub_pattern() {
     // non-binder and triggers the nested-rewrite path, which emits a
     // literal-equality guard.
     return parse_expr()
+}
+
+// R36C: parse a tuple match pattern `(p0, p1, ...)`. Returns 0 when the
+// leading `(` does NOT start a tuple pattern (single-element with no
+// trailing comma — caller must defer to the expression-pattern lane).
+// Returns an AST_TUPLE_PATTERN node otherwise. Each slot is collected as
+// a sub-pattern (recursive — nested tuples / variants / structs / literals
+// all work via parse_match_sub_pattern).
+//
+// Backtracking model: the only par_pos rewind point is right after the
+// opening `(`. If the inner is one expression with no comma, we restore
+// par_pos to the saved position so the caller's parse_expr fallthrough
+// re-parses the same `(expr)` as a parenthesized expression and the
+// pattern dispatcher proceeds byte-identically to pre-R36C.
+fn par_parse_tuple_match_pattern() {
+    let saved_pos = par_pos
+    par_expect(TOK_LPAREN)
+    if par_peek_type() == TOK_RPAREN {
+        // Empty `()` — NOVA has no unit type; restore + caller errors.
+        par_pos = saved_pos
+        return 0
+    }
+    let tp_first = parse_match_sub_pattern()
+    if par_peek_type() != TOK_COMMA {
+        // Single-element no-trailing-comma — not a tuple pattern. Roll
+        // back so the caller's parse_expr re-parses the parenthesized
+        // expression. Must restore par_pos because parse_match_sub_pattern
+        // already consumed the inner tokens; the rewind discards them
+        // and forces a fresh parse against the (`expr`) shape the
+        // expression-pattern lane handles natively.
+        par_pos = saved_pos
+        return 0
+    }
+    let tp_subs = list_new()
+    push(tp_subs, tp_first)
+    while par_peek_type() == TOK_COMMA {
+        par_advance()
+        if par_peek_type() == TOK_RPAREN { break }
+        let tp_nx = parse_match_sub_pattern()
+        push(tp_subs, tp_nx)
+    }
+    par_expect(TOK_RPAREN)
+    if len(tp_subs) < 2 {
+        // `(x,)` trailing comma after a single binder — R36C does not
+        // ship singleton tuple patterns; emit the lone sub-pattern as
+        // the arm's pattern (preserves binder semantics for `(x,)` ==
+        // `x`). The pattern dispatcher consumes it like any other pat.
+        return tp_subs[0]
+    }
+    return ast_tuple_pattern(tp_subs)
+}
+
+// R36C: lower a match arm whose pattern is AST_TUPLE_PATTERN into the
+// same wildcard-with-guard shape R32D's nested-variant rewrite emits.
+// Each slot becomes either a per-binder `let name = tmp[i]` prep stmt
+// (binder) or a `tmp[i] == lit` guard chain entry (literal). Wildcards
+// are skipped. Nested tuple sub-patterns recurse via r32d_lower_sub_pattern
+// (extended below to accept AST_TUPLE_PATTERN).
+fn lower_tuple_match_arm(tmp_name, tuple_pat, body, user_guard) {
+    let prep_stmts = list_new()
+    let tag_chain = 0
+    let sub_patterns = tuple_pat[1]
+    let si = 0
+    while si < len(sub_patterns) {
+        let sub = sub_patterns[si]
+        let slot_idx = ast_index(ast_ident(tmp_name), ast_int(si))
+        tag_chain = r32d_lower_sub_pattern(sub, slot_idx, prep_stmts, tag_chain)
+        si = si + 1
+    }
+    let final_guard = 0
+    if user_guard == 0 {
+        final_guard = tag_chain
+        let new_body = r32d_attach_prep(body, prep_stmts)
+        let arm = ast_match_arm(ast_wildcard(), new_body)
+        if final_guard == 0 {
+        } else {
+            push(arm, final_guard)
+        }
+        return arm
+    }
+    let guarded_do = ast_do_expr(prep_stmts, user_guard)
+    if tag_chain == 0 {
+        final_guard = guarded_do
+    } else {
+        final_guard = ast_and(tag_chain, guarded_do)
+    }
+    let new_body2 = r32d_attach_prep(body, prep_stmts)
+    let arm2 = ast_match_arm(ast_wildcard(), new_body2)
+    push(arm2, final_guard)
+    return arm2
 }
 
 // R32D: classify a sub-pattern as a legacy single-binder name that the
@@ -3141,6 +3430,29 @@ fn r32d_lower_sub_pattern(sub, accessor, prep_stmts, guard_expr) {
             ni = ni + 1
         }
         return g3
+    }
+    if st == AST_TUPLE_PATTERN {
+        // R36C: tuple sub-pattern (e.g. `Some((a, b))` or nested
+        // `((0, x), _)`). Each slot of the inner tuple is accessed via
+        // `accessor[i]` and recursively lowered. No tag-compare is
+        // emitted here — tuples are tagged lists, not tagged unions,
+        // so a tuple position carries no discriminant. Wildcards skip
+        // silently; binders / literals / nested tuples thread through
+        // r32d_lower_sub_pattern. Caveat: tuple arity is NOT runtime-
+        // checked. If the scrutinee at this position has fewer slots
+        // than the pattern demands, the generated `accessor[i]` will
+        // panic at runtime via the list bounds check. This matches
+        // R36C's shallow lowering (no per-slot type discipline).
+        let tp_subs = sub[1]
+        let g5 = guard_expr
+        let tsi = 0
+        while tsi < len(tp_subs) {
+            let tsub = tp_subs[tsi]
+            let tslot_acc = ast_index(accessor, ast_int(tsi))
+            g5 = r32d_lower_sub_pattern(tsub, tslot_acc, prep_stmts, g5)
+            tsi = tsi + 1
+        }
+        return g5
     }
     if st == AST_STRUCT_PATTERN {
         // Struct destructure inside a variant payload (e.g. `Ok(Point { x, y })`).
@@ -4679,6 +4991,11 @@ fn tc_resolve_type(payload_t, param_names, bound_types) {
     if payload_t == 0 { return "" }
     if type_of(payload_t) != 3 { return "" }
     if len(payload_t) < 1 { return "" }
+    // R36C: tuple-type annotation has an integer-tag base (AST_TUPLE_TYPE).
+    // The lightweight type-check pass doesn't model per-slot tuple
+    // discipline yet — return "" to skip resolution rather than emit
+    // false positives. A future round can recurse into the slot list.
+    if type_of(payload_t[0]) == 1 { return "" }
     let base = payload_t[0]
     // Is `base` one of the enum's type-params? If so, substitute.
     let pi = 0
@@ -4703,6 +5020,11 @@ fn tc_check_let_enum_ctor(let_nd) {
     if annot == 0 { return 0 }
     if type_of(annot) != 3 { return 0 }
     if len(annot) < 2 { return 0 }
+    // R36C: tuple-type annotation `let p: (int, str) = ...` has shape
+    // [AST_TUPLE_TYPE, slots] — annot_base is an integer, not an enum/
+    // struct name. Skip the enum-ctor / struct-call check rather than
+    // chasing a non-existent enum named with an integer tag.
+    if type_of(annot[0]) == 1 { return 0 }
     let annot_base = annot[0]
     let annot_args = annot[1]
     let value = let_nd[2]
@@ -4824,6 +5146,15 @@ fn tc_check_call_fn(call_nd) {
                 // No annotation on this param — nothing to check.
             } else { if type_of(pt) != 3 {
             } else { if len(pt) < 1 {
+            } else { if type_of(pt[0]) == 1 {
+                // R36C: tuple-type annotation `(int, str)` has shape
+                // [AST_TUPLE_TYPE, slot_list] — pt[0] is an integer tag,
+                // not a base-name string. The type-check pass currently
+                // doesn't enforce per-slot tuple discipline, so skip the
+                // arg check rather than emit a false-positive warning.
+                // Future round: walk slot_list against args[ai] elements.
+                // (type_of returns 1 for integers, 2 for strings — a
+                // regular [base, args] annotation always has a string base.)
             } else {
                 let pt_base = pt[0]
                 let got = tc_literal_type(args[ai])
@@ -4860,7 +5191,7 @@ fn tc_check_call_fn(call_nd) {
                         }
                     }
                 }
-            } } }
+            } } } }
         }
         ai = ai + 1
     }

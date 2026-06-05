@@ -1,0 +1,379 @@
+// R36C: tuple literals + tuple types + tuple destructure.
+//
+// NOVA tuples are tagged lists at runtime — `(a, b, c)` lowers to the
+// same list representation `[a, b, c]` that R32D's nested-pattern path
+// and R17A's enum-payload list have always used. This is a shallow
+// implementation: tuples are not their own runtime type, and per-slot
+// type discipline is AST-level only (no codegen enforcement). What R36C
+// actually ships:
+//
+//   1. Tuple LITERAL syntax `(a, b, c)`        — surface form, parses
+//                                                 to AST_LIST_LIT.
+//   2. Tuple TYPE annotation `(int, str)`      — captured as AST_TUPLE_TYPE
+//                                                 by par_collect_type;
+//                                                 type-check pass currently
+//                                                 ignores per-slot
+//                                                 enforcement, codegen
+//                                                 never reads it.
+//   3. Tuple DESTRUCTURE `let (a, b) = t`      — parser-time emit of
+//                                                 AST_DESTRUCTURE; reuses
+//                                                 the R32D positional-
+//                                                 index codegen path.
+//   4. Tuple PATTERN in match `(0, _) => ...`  — parse_match emits
+//                                                 AST_TUPLE_PATTERN;
+//                                                 parser-time rewrite
+//                                                 lowers to a wildcard
+//                                                 arm with guard chain
+//                                                 + per-binder prep
+//                                                 stmts, identical to
+//                                                 R32D's variant lowering.
+//   5. Trailing-comma accepted everywhere      — `(a, b,)` parses
+//                                                 identically to `(a, b)`.
+//
+// Out-of-scope (documented):
+//   * `()` unit / empty-tuple value             — NOVA has no unit type
+//                                                 today. par_skip_type
+//                                                 accepts `()` as a
+//                                                 no-op so a future
+//                                                 round can add it
+//                                                 without grammar
+//                                                 churn; parse_primary
+//                                                 still errors on `()`
+//                                                 in expression position.
+//   * `(x,)` singleton tuple value              — trailing comma after
+//                                                 a single expr falls
+//                                                 back to the
+//                                                 parenthesized
+//                                                 expression (the
+//                                                 trailing comma is
+//                                                 silently dropped).
+//                                                 Keeps `(x)` semantics
+//                                                 byte-identical to
+//                                                 pre-R36C.
+//   * `(x)` parenthesized expression preserved  — single expr inside
+//                                                 parens with no
+//                                                 comma stays as the
+//                                                 inner expression
+//                                                 (existing precedence
+//                                                 path).
+//
+// Lives under tests/unit/ so the tests/run_tests.sh glob doesn't pick
+// it up — invoke directly via `bin/nova tests/unit/test_tuples.nova`.
+
+let ok_count = 0
+let fail_count = 0
+
+fn check(cond, label) {
+    if cond == 1 {
+        ok_count = ok_count + 1
+        print("OK ")
+        println(label)
+    } else {
+        fail_count = fail_count + 1
+        print("FAIL ")
+        println(label)
+    }
+    return 0
+}
+
+// --- 1. 2-tuple construction + positional access ---
+
+let p = (1, 2)
+check(p[0] == 1, "2-tuple (1, 2): p[0] == 1")
+check(p[1] == 2, "2-tuple (1, 2): p[1] == 2")
+check(len(p) == 2, "2-tuple (1, 2): len == 2")
+
+// --- 2. 3-tuple ---
+
+let t3 = (10, 20, 30)
+check(t3[0] == 10, "3-tuple (10, 20, 30): t3[0] == 10")
+check(t3[1] == 20, "3-tuple: t3[1] == 20")
+check(t3[2] == 30, "3-tuple: t3[2] == 30")
+check(len(t3) == 3, "3-tuple: len == 3")
+
+// --- 3. Heterogeneous tuple (mixed int / str) ---
+
+let m = (42, "hello")
+check(m[0] == 42, "mixed tuple: int slot")
+check(m[1] == "hello", "mixed tuple: str slot")
+
+// --- 4. Nested tuple ---
+
+let n = ((1, 2), (3, 4))
+check(n[0][1] == 2, "nested ((1,2),(3,4))[0][1] == 2")
+check(n[1][0] == 3, "nested [1][0] == 3")
+check(len(n) == 2, "outer nested len == 2")
+check(len(n[0]) == 2, "inner nested len == 2")
+
+// --- 5. Tuple destructure on a literal ---
+
+let (a, b) = (10, 20)
+check(a == 10, "let (a, b) = (10, 20): a == 10")
+check(b == 20, "let (a, b) = (10, 20): b == 20")
+
+// --- 6. Destructure 3-tuple ---
+
+let (x1, x2, x3) = (100, 200, 300)
+check(x1 == 100, "let (x1,x2,x3): x1 == 100")
+check(x2 == 200, "let (x1,x2,x3): x2 == 200")
+check(x3 == 300, "let (x1,x2,x3): x3 == 300")
+
+// --- 7. Trailing comma in tuple literal ---
+
+let tc = (5, 6,)
+check(tc[0] == 5, "trailing comma (5, 6,): tc[0] == 5")
+check(tc[1] == 6, "trailing comma: tc[1] == 6")
+check(len(tc) == 2, "trailing comma: len == 2")
+
+// --- 8. Trailing comma in destructure ---
+
+let (q, r,) = (7, 8)
+check(q == 7, "trailing comma destructure: q == 7")
+check(r == 8, "trailing comma destructure: r == 8")
+
+// --- 9. Parenthesized expression is NOT a tuple ---
+
+let pe = (1 + 2)
+check(pe == 3, "(1 + 2) stays parenthesized expr: pe == 3")
+
+let pe2 = (5 * 6)
+check(pe2 == 30, "(5 * 6) parenthesized: pe2 == 30")
+
+// `(x)` (single bare ident) is still just the value of x.
+let pex = 42
+let pe3 = (pex)
+check(pe3 == 42, "(pex) single-ident parens: pe3 == 42")
+
+// --- 10. Tuple as function return + multi-binding destructure ---
+
+fn pair() {
+    return (3, 4)
+}
+
+let (pa, pb) = pair()
+check(pa == 3, "fn pair() return + destructure: pa == 3")
+check(pb == 4, "fn pair() return + destructure: pb == 4")
+
+// --- 11. Tuple type annotation parses ---
+
+fn typed_pair() -> (int, int) {
+    return (50, 60)
+}
+
+let (tp_a, tp_b) = typed_pair()
+check(tp_a == 50, "fn typed_pair() -> (int, int): tp_a == 50")
+check(tp_b == 60, "typed_pair: tp_b == 60")
+
+// --- 12. Tuple with mixed type annotation ---
+
+fn mixed_pair() -> (int, str) {
+    return (99, "abc")
+}
+
+let (mp_n, mp_s) = mixed_pair()
+check(mp_n == 99, "mixed (int, str) return: mp_n == 99")
+check(mp_s == "abc", "mixed (int, str) return: mp_s == abc")
+
+// --- 13. Param type annotation accepts tuple type ---
+
+fn first(t: (int, int)) {
+    return t[0]
+}
+
+check(first((11, 22)) == 11, "param: t: (int, int) -> t[0] == 11")
+
+// --- 14. Function returning tuple, called nested ---
+
+fn split_str(s) {
+    let i = 0
+    let sl = len(s)
+    let found = 0 - 1
+    while i < sl {
+        if char_at(s, i) == 58 {
+            found = i
+            i = sl
+        } else {
+            i = i + 1
+        }
+    }
+    if found == 0 - 1 {
+        return (s, "")
+    }
+    return (substr(s, 0, found), substr(s, found + 1, sl - found - 1))
+}
+
+let (left, right) = split_str("key:value")
+check(left == "key", "split_str key:value -> left == key")
+check(right == "value", "split_str -> right == value")
+
+let (left2, right2) = split_str("no_colon")
+check(left2 == "no_colon", "split_str no_colon -> left2 == no_colon")
+check(right2 == "", "split_str no_colon -> right2 == empty")
+
+// --- 15. Match on tuple literal pattern ---
+// NOTE: bodies use block-form `{ ... }` because NOVA's parse_postfix
+// is greedy on TOK_LPAREN — a bare-expression arm body followed by
+// a `(`-starting tuple pattern on the next line would be misparsed as
+// a call. The comma-between-arms separator R36C added (silent consume
+// in parse_match) is the supported alternative if you prefer single-
+// expression bodies; both forms work, but block-bodies make the
+// boundary maximally explicit.
+
+fn classify(t) {
+    return match t {
+        (0, 0) => { "origin" }
+        (0, _) => { "y_axis" }
+        (_, 0) => { "x_axis" }
+        _ => { "elsewhere" }
+    }
+}
+
+check(classify((0, 0)) == "origin", "match tuple (0, 0) -> origin")
+check(classify((0, 5)) == "y_axis", "match (0, 5) -> y_axis")
+check(classify((7, 0)) == "x_axis", "match (7, 0) -> x_axis")
+check(classify((3, 4)) == "elsewhere", "match (3, 4) -> elsewhere")
+
+// --- 16. Match tuple pattern with binders ---
+
+fn sum_tuple(t) {
+    return match t {
+        (x, y) => { x + y }
+    }
+}
+
+check(sum_tuple((10, 20)) == 30, "match tuple binder (x, y) -> x + y")
+check(sum_tuple((0 - 5, 5)) == 0, "match binder negative: -5 + 5 == 0")
+
+// --- 17. Match nested tuple pattern ---
+
+fn nested_match(t) {
+    return match t {
+        ((0, 0), _) => { "lhs_origin" }
+        (_, (0, 0)) => { "rhs_origin" }
+        _ => { "other" }
+    }
+}
+
+check(nested_match(((0, 0), (1, 2))) == "lhs_origin", "nested match ((0,0),_) -> lhs_origin")
+check(nested_match(((1, 2), (0, 0))) == "rhs_origin", "nested match (_,(0,0)) -> rhs_origin")
+check(nested_match(((1, 1), (2, 2))) == "other", "nested match other -> other")
+
+// --- 18. Tuple inside list ---
+
+let lt = [(1, 2), (3, 4), (5, 6)]
+check(lt[0][0] == 1, "list of tuples: lt[0][0] == 1")
+check(lt[1][1] == 4, "list of tuples: lt[1][1] == 4")
+check(lt[2][0] == 5, "list of tuples: lt[2][0] == 5")
+check(len(lt) == 3, "list of tuples: len == 3")
+
+// --- 19. Destructure inside function body ---
+
+fn use_destructure() {
+    let (xa, xb) = (15, 25)
+    return xa * xb
+}
+
+check(use_destructure() == 375, "destructure inside fn: 15*25 == 375")
+
+// --- 20. Tuple created from variables ---
+
+let v1 = 100
+let v2 = 200
+let vt = (v1, v2)
+check(vt[0] == 100, "tuple from vars: vt[0] == 100")
+check(vt[1] == 200, "tuple from vars: vt[1] == 200")
+
+// --- 21. Tuple destructure from a variable ---
+
+let src = (7, 9)
+let (sa, sb) = src
+check(sa == 7, "destructure from var: sa == 7")
+check(sb == 9, "destructure from var: sb == 9")
+
+// --- 22. Reassignment of destructured locals works ---
+
+fn reassign_test() {
+    let (ra, rb) = (1, 2)
+    ra = ra + 10
+    rb = rb + 20
+    return ra + rb
+}
+
+check(reassign_test() == 33, "destructured locals reassign: (1+10) + (2+20) == 33")
+
+// --- 23. Match guard combined with tuple pattern ---
+
+fn guarded(t) {
+    return match t {
+        (x, y) if x == y => { "equal" }
+        (x, _) if x == 0 => { "zero_x" }
+        _ => { "other" }
+    }
+}
+
+check(guarded((5, 5)) == "equal", "guarded (x,y) if x==y -> equal")
+check(guarded((0, 7)) == "zero_x", "guarded (x,_) if x==0 -> zero_x")
+check(guarded((3, 4)) == "other", "guarded other -> other")
+
+// --- 24. Empty trailing-comma policy: (x,) is NOT a singleton tuple ---
+
+let s = (42,)
+check(s == 42, "(42,) trailing-comma single: collapses to parenthesized 42")
+
+// --- Source pin: parser carries the R36C tuple plumbing ---
+
+fn assert_contains(haystack, needle, label) {
+    let i = 0
+    let hl = len(haystack)
+    let nl = len(needle)
+    let found = 0
+    while i + nl <= hl {
+        let j = 0
+        let ok = 1
+        while j < nl {
+            if char_at(haystack, i + j) != char_at(needle, j) { ok = 0  j = nl } else { j = j + 1 }
+        }
+        if ok == 1 { found = 1  i = hl } else { i = i + 1 }
+    }
+    check(found, label)
+    return 0
+}
+
+let ast_src = read_file("src/compiler/ast.nova")
+assert_contains(ast_src, "AST_TUPLE_LIT",
+    "ast.nova declares AST_TUPLE_LIT tag")
+assert_contains(ast_src, "AST_TUPLE_TYPE",
+    "ast.nova declares AST_TUPLE_TYPE tag")
+assert_contains(ast_src, "AST_TUPLE_PATTERN",
+    "ast.nova declares AST_TUPLE_PATTERN tag")
+assert_contains(ast_src, "fn ast_tuple_pattern",
+    "ast.nova exposes ast_tuple_pattern constructor")
+
+let par_src = read_file("src/compiler/parser.nova")
+assert_contains(par_src, "par_parse_tuple_match_pattern",
+    "parser.nova exposes par_parse_tuple_match_pattern")
+assert_contains(par_src, "lower_tuple_match_arm",
+    "parser.nova exposes lower_tuple_match_arm")
+assert_contains(par_src, "R36C: tuple literal",
+    "parser.nova carries R36C tuple-literal comment marker")
+assert_contains(par_src, "R36C: tuple type annotation",
+    "parser.nova carries R36C tuple-type comment marker")
+assert_contains(par_src, "R36C: tuple destructure",
+    "parser.nova carries R36C tuple-destructure comment marker")
+assert_contains(par_src, "R36C: tuple match pattern",
+    "parser.nova carries R36C tuple-match comment marker")
+
+// --- Summary ---
+
+print("ok=")
+print_int(ok_count)
+print(" fail=")
+print_int(fail_count)
+println("")
+
+if fail_count == 0 {
+    println("R36C tuple unit suite PASS")
+} else {
+    println("R36C tuple unit suite FAIL")
+    exit(1)
+}
