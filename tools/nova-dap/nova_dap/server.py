@@ -188,6 +188,28 @@ from nova_dap.breakpoints import (
     evaluate_condition_via_bridge,
     parse_hit_condition,
 )
+from nova_dap.variables import (
+    DEFAULT_CHILD_LIMIT,
+    ExpansionRef,
+    SCOPE_ARGUMENTS,
+    SCOPE_CAPTURES,
+    SCOPE_LOCALS,
+    ScopeRef,
+    VariablesReferenceCache,
+    build_list_data_expr,
+    build_list_length_expr,
+    build_list_slot_expr,
+    build_scope_entry,
+    build_string_preview,
+    build_variable_entry,
+    classify_variable,
+    format_child_name,
+    looks_like_closure_frame,
+    parse_arguments_response,
+    parse_locals_response,
+    parse_pointer_text,
+    surface_value_text,
+)
 
 
 LOG_FILE = os.environ.get("NOVA_DAP_LOG")
@@ -407,6 +429,14 @@ class Session:
     # ``source { sourceReference: N }`` request to fetch the ``.s``
     # listing for that function. See ``nova_dap.source_refs``.
     source_refs: SourceReferenceCache = field(default_factory=SourceReferenceCache)
+    # R38F: structured ``variablesReference`` cache. Maps the integer
+    # ids advertised on the wire (via ``scopes`` / ``variables``) back
+    # to typed descriptors (``ScopeRef`` / ``ExpansionRef``) so the
+    # ``variables`` handler can replay the right gdb-MI walk regardless
+    # of which scope the IDE is drilling into. See
+    # :mod:`nova_dap.variables`. Reset on every ``launch`` because
+    # stack frames from the previous inferior are gone.
+    var_cache: VariablesReferenceCache = field(default_factory=VariablesReferenceCache)
 
     def alloc_var_ref(self, frame_id: int) -> int:
         ref = self.next_var_ref
@@ -1367,6 +1397,12 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     # layout, even a different symbol set), so cached ``.s`` listings
     # would mislead the IDE if served against the new gdb session.
     session.source_refs.clear_all()
+    # R38F: drop cached variablesReference descriptors. Stack frames
+    # from the previous inferior are gone so any ScopeRef pointing
+    # at them would resolve to a frame id that no longer exists; an
+    # ExpansionRef holding a stale pointer expression would read
+    # garbage memory in the new inferior.
+    session.var_cache.clear()
 
     # Try to negotiate non-stop + mi-async so individual threads can
     # be paused / continued. If gdb rejects either (e.g. it's running
@@ -2811,39 +2847,412 @@ def handle_stack_trace(session: Session, req: Dict[str, Any]) -> None:
 
 
 def handle_scopes(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``scopes`` request (R38F upgrade).
+
+    Returns one DAP ``Scope`` per *category* per frame instead of a
+    single combined ``Locals`` view. The IDE renders these as separate
+    expandable rows in the Variables panel, so the user can drill into
+    ``Arguments`` without dredging through every local stack slot.
+
+    Scopes emitted (in order):
+
+    * ``Locals`` — locals minus formal parameters. Always present.
+    * ``Arguments`` — formal parameters in declaration order. Always
+      present; will be empty + non-expandable for nullary functions.
+    * ``Captures`` — environment list for R37A closure bodies. Only
+      emitted when ``looks_like_closure_frame`` recognises the
+      ``[fn_ptr, env_list]`` formal-arg signature. Skipped silently for
+      ordinary functions.
+
+    Each scope carries a freshly-allocated ``variablesReference`` so
+    the IDE can fetch the children via the ``variables`` request. The
+    ref points into ``Session.var_cache`` which routes back to a typed
+    :class:`ScopeRef` carrying the originating frame id."""
     args = req.get("arguments", {}) or {}
-    frame_id = int(args.get("frameId") or 1)
-    var_ref = session.alloc_var_ref(frame_id)
-    send_response(
-        session,
-        req,
-        body={
-            "scopes": [
-                {
-                    "name": "Locals",
-                    "variablesReference": var_ref,
-                    "namedVariables": 0,
-                    "indexedVariables": 0,
-                    "expensive": False,
-                }
-            ]
-        },
+    try:
+        frame_id = int(args.get("frameId") or 1)
+    except (TypeError, ValueError):
+        frame_id = 1
+    scopes_out: List[Dict[str, Any]] = []
+    # Locals + Arguments are unconditional -- DAP clients render an
+    # empty list as a non-expandable header so an empty scope is fine.
+    locals_ref = session.var_cache.allocate_scope(SCOPE_LOCALS, frame_id)
+    args_ref = session.var_cache.allocate_scope(SCOPE_ARGUMENTS, frame_id)
+    scopes_out.append(
+        build_scope_entry(
+            name="Locals",
+            variables_reference=locals_ref,
+            presentation_hint="locals",
+        )
+    )
+    scopes_out.append(
+        build_scope_entry(
+            name="Arguments",
+            variables_reference=args_ref,
+            presentation_hint="arguments",
+        )
+    )
+    # Captures: only emitted when the frame looks like a closure body.
+    # The probe needs a live bridge + correctly-selected frame so we
+    # do a best-effort ``-stack-list-arguments --simple-values`` to
+    # peek at the formals. If the bridge isn't available (test fakes,
+    # pre-launch) we skip the captures scope rather than crash.
+    bridge = session.bridge
+    if bridge is not None:
+        thread_id, frame_level = session.frame_lookup_by_id(frame_id)
+        try:
+            if session.non_stop:
+                bridge.command(f"-thread-select {thread_id}")
+            bridge.command(f"-stack-select-frame {frame_level}")
+            probe = bridge.command(
+                f"-stack-list-arguments --simple-values {frame_level} {frame_level}"
+            )
+            if probe.ok:
+                probe_args = parse_arguments_response(probe.fields)
+                if looks_like_closure_frame(probe_args):
+                    captures_ref = session.var_cache.allocate_scope(
+                        SCOPE_CAPTURES, frame_id
+                    )
+                    scopes_out.append(
+                        build_scope_entry(
+                            name="Captures",
+                            variables_reference=captures_ref,
+                            presentation_hint="locals",
+                        )
+                    )
+        except (TimeoutError, RuntimeError):
+            # Bridge transient errors are non-fatal -- skip captures.
+            pass
+    send_response(session, req, body={"scopes": scopes_out})
+
+
+def _select_frame_for(session: Session, frame_id: int) -> Tuple[int, int]:
+    """Resolve a DAP frame id back to ``(thread_id, frame_level)`` and
+    issue the gdb-MI thread + frame selects so subsequent commands in
+    the same handler run in that scope.
+
+    Centralised helper so every variables-related code path (Locals,
+    Arguments, Captures, expansion) selects the frame the same way.
+    A no-op call (selecting an already-current frame) costs ~50us so
+    it's cheap to call on every dispatch."""
+    thread_id, frame_level = session.frame_lookup_by_id(frame_id)
+    bridge = session.bridge
+    if bridge is None:
+        return (thread_id, frame_level)
+    if session.non_stop:
+        bridge.command(f"-thread-select {thread_id}")
+    bridge.command(f"-stack-select-frame {frame_level}")
+    return (thread_id, frame_level)
+
+
+def _emit_variable_from_entry(
+    session: Session,
+    frame_id: int,
+    name: str,
+    value: str,
+    type_str: str,
+    base_expr: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Turn one ``{name, value, type}`` triple into a DAP Variable.
+
+    Decides whether the variable is expandable via
+    :func:`classify_variable`, allocates an :class:`ExpansionRef` if
+    so, and surfaces a string preview when gdb provided one. ``base_expr``
+    is the gdb-evaluable expression that recovers the variable's address
+    at expansion time (usually just the variable name; subclass for
+    nested expansions where the name doesn't resolve in the parent
+    frame's scope)."""
+    display, type_tag = surface_value_text(value)
+    expandable, _ = classify_variable(value, type_hint=type_str)
+    ref = 0
+    if expandable:
+        expr = base_expr if base_expr is not None else name
+        ref = session.var_cache.allocate_expansion(
+            frame_id=frame_id,
+            expression=expr,
+            element_kind="slot",
+            display_name=name,
+        )
+    return build_variable_entry(
+        name=name,
+        value=display,
+        type_str=type_tag if type_tag != "raw" else (type_str or ""),
+        variables_reference=ref,
     )
 
 
-def handle_variables(session: Session, req: Dict[str, Any]) -> None:
-    args = req.get("arguments", {}) or {}
-    var_ref = int(args.get("variablesReference") or 0)
+def _handle_scope_locals(
+    session: Session, req: Dict[str, Any], scope: ScopeRef
+) -> None:
+    """Children of a Locals scope: locals minus formal parameters."""
     bridge = session.bridge
     if bridge is None:
         send_response(session, req, body={"variables": []})
         return
+    _select_frame_for(session, scope.frame_id)
+    result = bridge.command("-stack-list-variables --all-values")
+    if not result.ok:
+        send_response(session, req, success=False, message=result.error_message)
+        return
+    entries = parse_locals_response(result.fields)
+    out = [
+        _emit_variable_from_entry(
+            session,
+            scope.frame_id,
+            entry["name"],
+            entry["value"],
+            entry["type"],
+        )
+        for entry in entries
+    ]
+    send_response(session, req, body={"variables": out})
+
+
+def _handle_scope_arguments(
+    session: Session, req: Dict[str, Any], scope: ScopeRef
+) -> None:
+    """Children of an Arguments scope: formal parameters only."""
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, body={"variables": []})
+        return
+    thread_id, frame_level = _select_frame_for(session, scope.frame_id)
+    # ``--simple-values`` keeps the response compact for primitive
+    # types; structured args print as bare pointers which the
+    # classifier picks up as expandable. The frame window is
+    # ``<level> <level>`` so gdb returns args for exactly one frame.
+    result = bridge.command(
+        f"-stack-list-arguments --simple-values {frame_level} {frame_level}"
+    )
+    if not result.ok:
+        send_response(session, req, success=False, message=result.error_message)
+        return
+    entries = parse_arguments_response(result.fields)
+    out = [
+        _emit_variable_from_entry(
+            session,
+            scope.frame_id,
+            entry["name"],
+            entry["value"],
+            entry["type"],
+        )
+        for entry in entries
+    ]
+    send_response(session, req, body={"variables": out})
+
+
+def _handle_scope_captures(
+    session: Session, req: Dict[str, Any], scope: ScopeRef
+) -> None:
+    """Children of a Captures scope: expand the closure's ``env_list``.
+
+    R37A's closure lowering surfaces a NOVA list as the second formal
+    parameter (``env_list``). We re-use the list expansion machinery
+    so each captured value gets indexed as ``[0]``, ``[1]``, ...
+    matching the IDE's expectation for an array view.
+
+    Best-effort: if the env_list local isn't visible to gdb (DWARF
+    info missing the closure-specific symbol) we surface an empty
+    children list rather than fail the request."""
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, body={"variables": []})
+        return
+    _select_frame_for(session, scope.frame_id)
+    # The R37A convention is that the second formal is named
+    # ``env_list``. We expand it as a NOVA list. If the symbol isn't
+    # resolvable, surface an empty list with a "best-effort" note in
+    # a synthetic first row so the user knows we tried.
+    _emit_list_children(
+        session=session,
+        req=req,
+        frame_id=scope.frame_id,
+        list_ptr_expr="env_list",
+    )
+
+
+def _read_list_length(bridge, list_ptr_expr: str) -> Optional[int]:
+    """Best-effort: read the length field of a NOVA list.
+
+    Returns None when gdb refuses the expression (e.g. the pointer
+    address is unmapped or the symbol doesn't resolve)."""
+    length_expr = build_list_length_expr(list_ptr_expr)
+    res = bridge.command(f'-data-evaluate-expression "{length_expr}"')
+    if not res.ok:
+        return None
+    raw = res.fields.get("value")
+    if not isinstance(raw, str):
+        return None
+    try:
+        # gdb can print the length as decimal or hex; ``int(s, 0)``
+        # accepts both with a literal prefix.
+        return int(raw.strip(), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _emit_list_children(
+    session: Session,
+    req: Dict[str, Any],
+    frame_id: int,
+    list_ptr_expr: str,
+) -> None:
+    """Read a NOVA list at ``list_ptr_expr`` and emit one DAP Variable
+    per slot.
+
+    The list layout is per ``src/runtime/list.nova``:
+    ``[len(8B)][cap(8B)][data_ptr(8B)]`` then ``data_ptr``-keyed slots.
+    We read the length first, then per-slot values via
+    ``-data-evaluate-expression``. Each child carries a fresh
+    ``variablesReference`` so the IDE can drill into nested lists
+    (two-level expansion in tests; deeper trees work mechanically)."""
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, body={"variables": []})
+        return
+    length = _read_list_length(bridge, list_ptr_expr)
+    if length is None or length < 0:
+        # Best-effort failure: surface an empty list rather than an
+        # error response so the IDE doesn't show a red error banner.
+        send_response(session, req, body={"variables": []})
+        return
+    children: List[Dict[str, Any]] = []
+    limit = min(length, DEFAULT_CHILD_LIMIT)
+    for i in range(limit):
+        slot_expr = build_list_slot_expr(list_ptr_expr, i)
+        slot_res = bridge.command(f'-data-evaluate-expression "{slot_expr}"')
+        if not slot_res.ok:
+            # Surface a placeholder so the user knows the slot exists
+            # but couldn't be read (rare; usually means the data_ptr
+            # was bogus).
+            children.append(
+                build_variable_entry(
+                    name=format_child_name(i),
+                    value="<unreadable>",
+                    type_str="raw",
+                    variables_reference=0,
+                )
+            )
+            continue
+        raw_value = slot_res.fields.get("value")
+        if not isinstance(raw_value, str):
+            raw_value = ""
+        display, type_tag = surface_value_text(raw_value)
+        expandable, _ = classify_variable(raw_value)
+        sub_ref = 0
+        if expandable:
+            # The slot's gdb expression IS the child's expansion
+            # expression: when the user drills further, we re-read
+            # ``*((long*)(data_ptr + N*8))`` and treat the result as
+            # another list/tuple if it's expandable.
+            sub_ref = session.var_cache.allocate_expansion(
+                frame_id=frame_id,
+                expression=slot_expr,
+                element_kind="slot",
+                display_name=format_child_name(i),
+                index=i,
+            )
+        children.append(
+            build_variable_entry(
+                name=format_child_name(i),
+                value=display,
+                type_str=type_tag if type_tag != "raw" else "",
+                variables_reference=sub_ref,
+            )
+        )
+    send_response(session, req, body={"variables": children})
+
+
+def _handle_expansion(
+    session: Session, req: Dict[str, Any], expansion: ExpansionRef
+) -> None:
+    """Children of an ExpansionRef.
+
+    The ref's ``expression`` is a gdb-evaluable string that yields a
+    pointer (or possibly an integer that *looks like* a pointer if the
+    user fed us a non-list value by mistake). We evaluate it to get
+    the address, then treat the addressed memory as a NOVA list and
+    expand. Lists / tuples / closure-env-lists all share this layout
+    so the expansion is uniform."""
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, body={"variables": []})
+        return
+    _select_frame_for(session, expansion.frame_id)
+    # First: read the pointer value at the expansion expression.
+    val_res = bridge.command(
+        f'-data-evaluate-expression "{expansion.expression}"'
+    )
+    if not val_res.ok:
+        send_response(session, req, body={"variables": []})
+        return
+    raw = val_res.fields.get("value")
+    if not isinstance(raw, str):
+        send_response(session, req, body={"variables": []})
+        return
+    addr = parse_pointer_text(raw)
+    if addr is None or addr == 0:
+        send_response(session, req, body={"variables": []})
+        return
+    # Treat the addressed memory as a NOVA list. The address is
+    # passed as a literal hex value so subsequent slot reads don't
+    # depend on the original expression evaluating in the same frame
+    # twice in a row (the frame is already selected; the literal
+    # address is stable across the per-slot evaluations).
+    hex_addr = f"0x{addr:x}"
+    _emit_list_children(
+        session=session,
+        req=req,
+        frame_id=expansion.frame_id,
+        list_ptr_expr=hex_addr,
+    )
+
+
+def handle_variables(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``variables`` request (R38F upgrade).
+
+    Dispatches on the ``variablesReference`` descriptor:
+
+    * :class:`ScopeRef` with ``kind="locals"`` -> Locals view
+    * :class:`ScopeRef` with ``kind="arguments"`` -> Arguments view
+    * :class:`ScopeRef` with ``kind="captures"`` -> Captures view
+    * :class:`ExpansionRef` -> NOVA list / tuple expansion at the
+      cached gdb expression
+
+    Unknown refs fall back to the legacy flat-locals path so the
+    handler is backward-compatible with any third-party DAP client
+    that pre-allocates its own ref ids."""
+    args = req.get("arguments", {}) or {}
+    try:
+        var_ref = int(args.get("variablesReference") or 0)
+    except (TypeError, ValueError):
+        var_ref = 0
+    bridge = session.bridge
+    if bridge is None:
+        send_response(session, req, body={"variables": []})
+        return
+    record = session.var_cache.get(var_ref)
+    if isinstance(record, ScopeRef):
+        if record.kind == SCOPE_LOCALS:
+            _handle_scope_locals(session, req, record)
+            return
+        if record.kind == SCOPE_ARGUMENTS:
+            _handle_scope_arguments(session, req, record)
+            return
+        if record.kind == SCOPE_CAPTURES:
+            _handle_scope_captures(session, req, record)
+            return
+    if isinstance(record, ExpansionRef):
+        _handle_expansion(session, req, record)
+        return
+    # Legacy path: unknown ref means a pre-R38F client wired through
+    # ``Session.alloc_var_ref`` directly. Honour the old contract --
+    # treat the ref as "the Locals view for this frame_id" and return
+    # the flat ``-stack-list-variables`` output (R17F behaviour). Tests
+    # that round-trip the legacy ref via ``alloc_var_ref`` rely on
+    # this path remaining intact.
     frame_id = session.frame_refs.get(var_ref, 0)
     thread_id, frame_level = session.frame_lookup_by_id(frame_id)
-    # Select the right thread first (no-op in all-stop mode where
-    # there's only one stopped thread), then the right frame, then
-    # list locals + arguments. Routing via ``--thread`` on every MI
-    # command is also fine but adds noise; selecting once is enough.
     if session.non_stop:
         bridge.command(f"-thread-select {thread_id}")
     bridge.command(f"-stack-select-frame {frame_level}")

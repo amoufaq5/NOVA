@@ -28,8 +28,8 @@ repo root and `make smoke-dwarf`).
 | `configurationDone`       | `-exec-run` first time; `-exec-continue --all` thereafter. |
 | `threads`                 | Multi-thread: backstop reconcile with `-thread-info`; tracks `=thread-created` / `=thread-exited` for live updates. |
 | `stackTrace`              | `-stack-list-frames --thread <threadId>`; frame ids are stable per `(threadId, level)`. |
-| `scopes`                  | One `Locals` scope per frame.                     |
-| `variables`               | `-thread-select` + `-stack-select-frame` + `-stack-list-variables --all-values` (so per-thread frame chains are isolated). |
+| `scopes`                  | **Structured scopes per frame** (R38F): emits `Locals` + `Arguments` for every frame, plus `Captures` when the formal-arg signature matches R37A's `[fn_ptr, env_list]` closure lowering. Each scope carries a freshly-allocated `variablesReference` that routes through `Session.var_cache` to a typed descriptor (`ScopeRef`). |
+| `variables`               | **Expandable variable tree** (R38F): dispatches on the `variablesReference` descriptor. `Locals` returns `-stack-list-variables --all-values` minus formal parameters. `Arguments` returns `-stack-list-arguments --simple-values <level> <level>` for one frame. `Captures` walks the closure's `env_list` as a NOVA list. List / tuple / pointer values are advertised as expandable (`variablesReference != 0`); expansion reads the NOVA runtime layout `[len(8B), cap(8B), data_ptr(8B), ...slots]` from `src/runtime/list.nova` via per-slot `-data-evaluate-expression` calls. String pointer values surface a quoted preview (`"hello"`) instead of the raw hex. Nested lists expand recursively (two-level demo coverage in tests; deeper trees work mechanically). |
 | `evaluate`                | `-data-evaluate-expression --thread <id> --frame <level> "<expr>"`; result string decoded into `{result, type}` where type is `int` / `str` / `char` / `bool` / `ptr` / `raw`. Used for watch panel, REPL, and hover tooltips. |
 | `dataBreakpointInfo`      | Returns `{dataId, description, accessTypes: ["write", "readWrite"], canPersist: false}` for a named variable. `dataId` is a base64-encoded JSON envelope `{n, f?, v?}` carrying the variable name + frame id so `setDataBreakpoints` can round-trip it without server-side state. |
 | `setDataBreakpoints`      | Tears down prior watchpoints via `-break-delete <id>` (per id, so source breakpoints are preserved) and installs gdb hardware watchpoints via `-break-watch <expr>` (write), `-break-watch -r <expr>` (read), or `-break-watch -a <expr>` (rw). Watchpoint hits surface as `stopped` events with `reason: "data breakpoint"` and a description like `Variable 'counter' changed (write): 5 -> 6`. |
@@ -279,10 +279,13 @@ is out of scope for this milestone.
 * **`stopOnEntry`.** The adapter runs straight to the first
   breakpoint.
 * **Structured `evaluate` results.** Today `evaluate` returns a flat
-  `{result, type}` pair with `variablesReference: 0`. NOVA list /
-  struct / map values come back as bare pointer strings; expanding
-  them inline in the watch panel needs a debugger-side reader of
-  the smart-op runtime headers — deferred.
+  `{result, type}` pair with `variablesReference: 0` for watch /
+  hover expressions. The structured Variables panel itself (Locals /
+  Arguments / Captures with expandable list / tuple / closure trees)
+  works as of R38F; only the watch-window expression evaluator
+  remains flat. Reusing the R38F expansion machinery for `evaluate`
+  results is mechanically straightforward but deferred to keep the
+  R38F diff focused on the Variables panel.
 * **Reverse-debug performance with `record full`.** The default
   `recordMode: "full"` slows the recorded segment 50-1000x because
   gdb instruments every basic block. Long debug sessions can chew
@@ -355,6 +358,30 @@ tools/nova-dap/
                                           fallback for the
                                           worker-thread / install-time
                                           path).
+    variables.py                         Structured scopes + variables
+                                          (R38F): value classifier
+                                          (int / str / char / bool /
+                                          ptr / list / raw + leaf vs
+                                          expandable), NOVA list-layout
+                                          helpers (length / data_ptr /
+                                          slot expression builders
+                                          mirroring `src/runtime/list.nova`),
+                                          string-preview extractor for
+                                          pointer-with-string values,
+                                          `VariablesReferenceCache`
+                                          (the Session holds one;
+                                          allocates `ScopeRef` /
+                                          `ExpansionRef` ids on the
+                                          wire), gdb-MI response parsers
+                                          for `-stack-list-variables`
+                                          and `-stack-list-arguments`,
+                                          closure-frame detector
+                                          (`looks_like_closure_frame`
+                                          spots the R37A
+                                          `[fn_ptr, env_list]`
+                                          signature so `Captures` is
+                                          only emitted for closure
+                                          bodies).
   tests/
     dap_smoke.py                         end-to-end single-thread smoke test
     dap_multi_thread.py                  end-to-end multi-thread coordination test
@@ -367,6 +394,10 @@ tools/nova-dap/
     test_profiler.py                     sample-based profiler (nova/profile/{start,stop,report})
     test_reverse_debug.py                reverse-debug (reverseContinue / stepBack / goto / record lifecycle)
     test_exception_breakpoints.py        exception breakpoints (setExceptionBreakpoints + exceptionInfo, R33F)
+    test_source_reference.py             disassemble + sourceReference cache (R34F)
+    test_variables.py                    structured scopes + variables tree
+                                          (Locals + Arguments + Captures,
+                                          list / tuple / string expansion, R38F)
     fixtures/multi_thread.c              pthread fixture (built on demand by the test)
 ```
 

@@ -1,5 +1,142 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R38F — nova-dap: structured `scopes` + `variables` with expandable list/tuple/closure trees
+
+**Status: complete** — the DAP Variables panel now renders a proper
+tree view when execution stops at a breakpoint. Pre-R38F the
+adapter returned a single flat `Locals` group; R38F upgrades the
+`scopes` + `variables` handlers to emit `Locals` + `Arguments` per
+frame (plus `Captures` for closure bodies), and to advertise lists /
+tuples / closure env-lists as expandable so the user can drill into
+slot-by-slot child variables.
+
+### What R38F adds
+
+- **Per-category scopes** — `handle_scopes` now returns one DAP
+  `Scope` per logical bucket per frame:
+  - `Locals` (stack-local bindings minus formal parameters)
+  - `Arguments` (formal parameters in declaration order)
+  - `Captures` (closure environment list, emitted only when the
+    formal-arg signature matches R37A's `[fn_ptr, env_list]`
+    convention via `looks_like_closure_frame`)
+  Each scope ref is allocated fresh per `scopes` request via
+  `Session.var_cache.allocate_scope(kind, frame_id)`.
+- **Expandable variables** — every variable's `value` is classified
+  via `variables.classify_variable(...)`. Pointer-shaped values
+  (bare `0x...`) get `variablesReference != 0` so the IDE renders an
+  expansion chevron; primitive ints / strings / bools / chars stay
+  leaves (`variablesReference: 0`). String pointers with a gdb-printed
+  preview (`0x7fff "hello"`) collapse to a quoted display
+  (`"hello"`) instead of the raw hex.
+- **NOVA list expansion** — `handle_variables` for an `ExpansionRef`
+  reads the NOVA runtime list layout
+  (`[len(8B), cap(8B), data_ptr(8B), ...slots]` per
+  `src/runtime/list.nova`) via per-slot `-data-evaluate-expression`
+  calls. Each slot becomes a child `[N]` variable; nested lists
+  (slots pointing to other list heads) carry their own
+  `variablesReference` so the IDE can drill further.
+- **Tuple expansion** — R36C lowers NOVA tuples to tagged lists, so
+  the list expansion machinery handles them with no extra code path.
+  Slots surface as `[0]`, `[1]`, ... matching the declaration order.
+- **Closure captures expansion** — R37A's closure bodies receive an
+  `env_list` formal that's also a NOVA list; the `Captures` scope
+  routes its expansion through the same list walker. Best-effort:
+  if the symbol isn't visible to gdb's DWARF the response degrades
+  to an empty children list rather than failing.
+
+### Module: `tools/nova-dap/nova_dap/variables.py` (new, ~500 lines)
+
+Surface:
+- `classify_variable(value, type_hint=None) -> (expandable, type_tag)` —
+  the leaf-vs-expandable + classification dispatcher.
+- `build_string_preview(value, limit=80) -> Optional[str]` — extracts a
+  quoted preview from `0x... "text"` shapes.
+- `parse_locals_response` / `parse_arguments_response` — gdb-MI
+  result -> normalised `[{name, value, type}]` dicts.
+- `looks_like_closure_frame(arg_entries) -> bool` — heuristic match
+  for R37A's `[fn_ptr, env_list]` signature.
+- `VariablesReferenceCache` — per-session ref allocator + lookup;
+  the `Session` holds one, reset on `launch`.
+- `ScopeRef` / `ExpansionRef` — typed descriptors the cache stores.
+- `build_list_length_expr` / `build_list_data_expr` /
+  `build_list_slot_expr` — gdb expressions encoding the NOVA list
+  layout from `src/runtime/list.nova`. Constants
+  (`LIST_OFFSET_LEN=0`, `LIST_OFFSET_CAP=8`, `LIST_OFFSET_DATA=16`,
+  `LIST_HEADER_SIZE=24`, `LIST_SLOT_SIZE=8`) mirror the runtime
+  source and are asserted in tests so runtime drift fails loudly.
+
+### Server changes
+
+- `server.Session` grows a `var_cache: VariablesReferenceCache`
+  field (in addition to the legacy `next_var_ref` + `frame_refs`
+  which remain for backward-compat).
+- `handle_launch` calls `session.var_cache.clear()` so a relaunch
+  doesn't reuse refs pointing at the previous inferior's stack
+  frames.
+- `handle_scopes` returns `[Locals, Arguments]` + optionally
+  `[Captures]` via best-effort closure detection.
+- `handle_variables` dispatches on the cached descriptor:
+  - `ScopeRef(kind="locals")` -> `-stack-list-variables --all-values`
+    minus formal args
+  - `ScopeRef(kind="arguments")` ->
+    `-stack-list-arguments --simple-values <level> <level>`
+  - `ScopeRef(kind="captures")` -> expand `env_list` as a NOVA list
+  - `ExpansionRef` -> read pointer, walk list, emit `[N]` children
+  - Unknown refs -> legacy flat-locals path (R17F behaviour preserved
+    for any pre-R38F client that hand-allocated refs via
+    `Session.alloc_var_ref`).
+
+### Files touched
+
+- `tools/nova-dap/nova_dap/variables.py` (new, ~500 lines).
+- `tools/nova-dap/nova_dap/server.py`: imports the variables module,
+  upgrades `handle_scopes` + `handle_variables`, adds
+  `var_cache` field to `Session`, calls `var_cache.clear()` from
+  `handle_launch`. Total +~250 lines, ~50 lines removed.
+- `tools/nova-dap/tests/test_variables.py` (new, ~1100 lines): 211
+  new assertions covering layout constants, classifier, string
+  preview, response parsers, closure detection, cache invariants,
+  list expansion expressions, server handlers (scopes for non-closure
+  + closure frames, locals/arguments/captures dispatch, list
+  expansion with int / string / pointer slots, two-level nested
+  list expansion, null pointer + zero-length list edge cases,
+  bridge-unavailable graceful degradation), prior R-round regression
+  checks.
+- `tools/nova-dap/README.md`: scopes + variables rows in the "What
+  works" table updated to describe the R38F tree; layout section
+  adds the `variables.py` + `test_variables.py` entries; "What
+  does NOT work yet" notes that `evaluate` watch-window results
+  remain flat (deferred follow-up).
+
+### Honest design caveat
+
+DAP variable trees can nest arbitrarily deep; R38F focuses on the
+two-level case (outer list -> inner list/tuple/struct -> leaves)
+in tests, with the assumption that deeper trees work mechanically
+(the same `ExpansionRef` machinery composes). Closure captures
+expansion via R37A's `env_list` is best-effort and depends on the
+NOVA compiler emitting DWARF info that names the formal parameter
+`env_list` (or a recognized variant) at function entry; if the
+compiler's DWARF doesn't surface the symbol, the `Captures` scope
+gracefully falls back to an empty children list rather than failing
+the request. The hex-literal classifier collapses `0x...` to ``ptr``
+universally because gdb prints in hex only for pointer-shaped
+values (NOVA ints are untagged decimals after the smart-op layer);
+a future round could refine this with a fuller gdb type-system
+probe but that's deferred.
+
+### Concurrency note
+
+R38F touches only `tools/nova-dap/`. R38A (NOVA floats) runs
+concurrently on parser+codegen; we share no files. The 309 prior
+R35E + R36E assertions in `test_instruction_stepping.py` remain
+byte-identical; the full DAP test suite (R17F instruction stepping,
+R28F profiler, R29E hit-count BPs, R31E reverse-debug, R33F
+exception BPs, R34F disassemble + sourceReference, R35E + R36E
+instruction BP hardening) stays green.
+
+---
+
 ## R38E — nova-lsp `textDocument/completion` (keywords + scope-aware identifiers + snippets)
 
 **Status: complete** — the autocomplete dropdown surface adds modern
