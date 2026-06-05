@@ -1,5 +1,159 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R35C — parser+codegen: closure literals `|x| x + 1` + capture analysis
+
+**Status: complete** — NOVA gains the `|...|` closure literal syntax
+on top of the existing `fn(params) { body }` lambda machinery.  This is
+a pure parser-level extension: no AST node tags added (reuses
+`AST_LAMBDA` / `par_lambdas`), no codegen changes (the existing capture
+analysis in `compute_captures` and the `_cap_<lambda>_<var>` static
+slot emission flow byte-identically), no runtime ABI changes.
+
+### Grammar
+
+```
+closure_expr := '|' param_list? '|' (block | expression)
+              | '||' (block | expression)
+param_list   := param (',' param)*
+param        := identifier (':' type)?
+```
+
+Three body forms:
+
+  - `|x| x + 1` — single-expression body, wrapped as
+    `{ AST_EXPR_STMT(x + 1) }` so gen_function's implicit-return path
+    (last `AST_EXPR_STMT`'s `rax` IS the return value) emits the right
+    code with zero codegen changes.
+  - `|x, y| { let t = x; x + y * t }` — block body, parsed directly via
+    `parse_block`, flows through gen_function's standard prologue/body/
+    epilogue path.
+  - `|| 42` — zero-parameter form using the `TOK_OR` lexeme.  Logical
+    OR is parsed exclusively as infix in `parse_or`; a leading `||` in
+    primary position is unambiguously a zero-parameter closure literal.
+
+### Disambiguation vs `|` / `||`
+
+Both bitwise OR (`a | b`) and logical OR (`a || b`) are INFIX-only
+operators that only fire inside `parse_bitwise` / `parse_or` AFTER a
+left operand has been consumed.  `parse_primary` is only entered at
+the START of an expression — a leading `|` or `||` there cannot be
+infix and is unambiguously a closure literal.  No lookahead heuristic
+needed; the existing precedence-climbing structure already disjoins
+the two cases by position.
+
+### Lowering
+
+Each closure literal becomes a synthetic top-level function named
+`_lambda_N` whose `AST_FN_DECL` is appended to `par_lambdas`.  The
+`compile_program` driver in codegen.nova already iterates
+`par_lambdas` for:
+
+  1. **Pre-pass**: `compute_captures` walks the body, collecting all
+     identifiers and subtracting closure params + body-bound `let`
+     names + builtins + globals.  The residue is the capture set, and
+     each captured variable is registered as a `_cap_<lname>_<var>`
+     slot in `cg_capture_slots`.
+
+  2. **Function emit**: `gen_function` is called for each lambda fn
+     decl.  Inside, `cg_current_caps` is bound to the capture set and
+     each `AST_IDENT` read for a captured variable lowers to
+     `mov rax, [rip + _cap_<lname>_<var>]`.
+
+  3. **Capture slot emit**: each registered slot becomes a `.quad 0`
+     in the `.bss` section alongside global storage.
+
+The closure expression itself (where the `|x| ...` appears in source)
+lowers via gen_expr's AST_LAMBDA path: for each captured variable,
+emit a load (from a local stack slot, a global, or a containing
+closure's capture slot) + a store into the lambda's static capture
+slot; finally `lea rax, [rip + _lambda_N]` yields the function
+pointer that the caller stores into a local / passes as an argument.
+
+### Indirect-call ABI
+
+NOVA's existing `AST_CALL` lowering already handles indirect calls:
+when the callee identifier is not a known function (e.g. it's a
+local variable holding a function pointer), gen_expr emits
+
+```
+mov r11, [rbp - <off>]    ; load fn ptr from local
+call r11                  ; indirect call
+```
+
+after laying out args in `rdi/rsi/rdx/rcx/r8/r9` per the SysV ABI.
+Closures use the SAME ABI — the function pointer is naked (no env
+prefix) because captures are read through static `.bss` slots, not
+threaded through the call.  This is why `(closure_value)(arg1, arg2)`
+"just works" with zero call-site changes: closure values ARE function
+pointers, and the closure body indirectly reads its captures via
+RIP-relative loads.
+
+### Capture semantics
+
+  - **Globals** (top-level `let`): live-binding.  The closure reads
+    `[rip + _g_<var>]` directly inside the body; mutations to the
+    global visible everywhere INCLUDING inside the closure.
+  - **Locals** (function-scope `let`): by-value at closure-creation
+    time.  The capturing `mov [rip + _cap_...]` snapshots the local's
+    current value into the static slot; mutating the source local
+    afterwards does NOT update the closure's view.
+
+### Standard library
+
+A single helper `list_map(xs, f) -> new_list` is defined inline in
+the unit-test file as a thin wrapper around the existing `map_list`
+builtin.  Other higher-order helpers (`list_filter`, `list_fold`,
+`list_foreach`) follow the same trivial-wrapper pattern and ship as
+needed in future rounds; they are intentionally NOT added here to
+keep R35C scoped to the language change.
+
+### Tests
+
+`tests/unit/test_closures.nova` — 57 assertions covering: zero
+captures, single capture, multi-capture, multi-parameter, zero-
+parameter `|| 42`, block-body with internal `let`, closure-as-
+argument with `map_list` + the new `list_map` wrapper, global
+capture live-binding, local capture by-value, single-instance
+closure-returning-closure, closure inside an if-arm, closure
+capturing a list local, closure body calling builtins, ternary
+inside closure body, multiple zero-parameter closures.  Also
+includes an EXPLICITLY VALIDATED test for the static-slot
+limitation (`make_adder(5)` + `make_adder(7)` clobber each other's
+captures — last write wins).
+
+### Limitations (deferred to a future round)
+
+  1. **STATIC capture slot per source-position lambda.**  Multiple
+     instances of the same closure literal share a single set of
+     `_cap_<lname>_<var>` slots, so `let add5 = make_adder(5); let
+     add7 = make_adder(7); add5(3)` returns `10` (not `8`) because
+     the second `make_adder` call rewrote the captured `k`.  Fixing
+     this requires lowering closures to `[fn_ptr, env_list]` tuples
+     and a new indirect-call ABI that prepends `env_list` to the arg
+     vector — significant codegen and runtime work, out of scope for
+     R35C.
+
+  2. **No by-reference capture.**  Mutable shared state between
+     closures and the enclosing scope is not supported.  Workaround:
+     box the mutable state in a single-element list and have both
+     parties read/write through `[0]` (NOVA's list elements are
+     references, so this provides shared mutation).
+
+  3. **No closure literals in tree-sitter grammar.**  The R34E
+     tree-sitter-nova update shipped match-expression syntax; closure
+     literals need a follow-on grammar extension.  IDE syntax
+     highlighting will treat `|x| x + 1` as a syntax error until the
+     tree-sitter pass lands.  Out of scope for R35C per the brief.
+
+### Self-host + tests
+
+  - `make self-host`: stage2.s == stage3.s (bit-identical).
+  - `bash tests/run_tests.sh`: 177 passed / 0 failed / 6 skipped
+    (unchanged from R34F baseline; closures are additive).
+  - `tests/unit/test_closures.nova`: 57 OK / 0 FAIL.
+  - All 4 prior unit-test files re-run: 33 + 38 + 83 + 45 = 199 OK,
+    0 FAIL (unchanged).
+
 ## R34F — nova-dap: `disassemble` + `sourceReference` + per-frame PC
 
 **Status: complete** — DAP `disassemble` now stamps each

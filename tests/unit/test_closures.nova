@@ -1,0 +1,300 @@
+// R35C: closure literals (`|x| x + 1`, `|x, y| { ... }`, `|| 42`) with
+// variable capture from the enclosing scope.
+//
+// R35C adds the `|...|` syntax as a parser-only extension on top of the
+// existing AST_LAMBDA infrastructure that NOVA inherited from the
+// `fn(params) { body }` form.  Lowering:
+//
+//   * The closure body is parsed into an AST_BLOCK either directly
+//     (block-body form `|x| { stmt; ... }`) or by wrapping the single
+//     expression as `{ AST_EXPR_STMT(expr) }` (single-expression form
+//     `|x| x + 1`).  In both cases gen_function's implicit-return path
+//     (last AST_EXPR_STMT's rax IS the return value) emits the right
+//     code without any codegen change.
+//
+//   * Each closure becomes a synthetic top-level function named
+//     `_lambda_N` whose AST_FN_DECL is appended to par_lambdas and
+//     therefore re-enters gen_function alongside the user-declared
+//     functions in compile_program.  An `ast_lambda` node is returned at
+//     the closure's source position; gen_expr lowers it to a function-
+//     pointer (`lea rax, [rip + _lambda_N]`) prefixed by a per-capture
+//     `mov [rip + _cap__lambda_N_<var>], rax` sequence.
+//
+//   * Capture analysis is delegated to compute_captures (codegen.nova),
+//     which walks all identifiers in the body and subtracts the closure
+//     params + body-bound `let` names + known functions + globals — the
+//     residue is the capture set.  Captured values are stored in static
+//     `.bss` slots `_cap_<lname>_<var>` written at the closure-creation
+//     site and read at each AST_IDENT inside the body.
+//
+// Capture semantics: capture-by-VALUE.  At closure creation each
+// captured local's CURRENT value is copied into the lambda's static
+// capture slot.  Mutating the captured variable later in the enclosing
+// scope does NOT affect the closure's view (the closure has its own
+// copy in .bss).  This matches the existing `fn(...)` lambda behaviour
+// — R35C is a pure syntactic extension.
+//
+// Disambiguation vs `|` (bitwise OR): the bitwise-OR operator is parsed
+// in parse_bitwise() as INFIX, so it only fires AFTER a left operand
+// has been consumed.  parse_primary() is only entered at the start of
+// an expression; a leading `|` token there cannot be infix and is
+// unambiguously a closure literal.  The same logic applies to `||`
+// (TOK_OR): logical OR is infix-only via parse_or(), so a leading `||`
+// in primary position is a zero-parameter closure literal.
+//
+// Known limitations (R35C ships flat closures; nested fixes are future
+// work — see par_parse_closure_body / compute_captures comments):
+//
+//   1. STATIC capture slot.  All instances of the same `_lambda_N`
+//      share a single `_cap_<lname>_<var>` slot in .bss, so creating
+//      multiple closure instances from the same source-position lambda
+//      (e.g. `make_adder(5)` and `make_adder(7)`) clobbers each other's
+//      captures.  The LAST creation wins.  The make_adder test below
+//      exercises this pattern and validates the "last write wins"
+//      behaviour explicitly.  A real per-instance capture environment
+//      requires lowering the closure to `[fn_ptr, env_list]` and
+//      threading the env through the call site — out of scope for R35C.
+//
+//   2. CAPTURE BY VALUE only.  Mutating a captured variable inside the
+//      closure does not update the enclosing scope's binding; the
+//      closure writes its own static slot which the enclosing scope
+//      doesn't read.  Mutable shared state requires by-reference
+//      capture (typically via a boxed list cell) which NOVA's AST does
+//      not yet model.
+
+let ok_count = 0
+let fail_count = 0
+
+fn check(cond, label) {
+    if cond == 1 {
+        ok_count = ok_count + 1
+        print("OK ")
+        println(label)
+    } else {
+        fail_count = fail_count + 1
+        print("FAIL ")
+        println(label)
+    }
+    return 0
+}
+
+// --- 1. Zero captures: simplest single-expression closure ---
+
+let f1 = |x| x + 1
+check(f1(5) == 6, "|x| x + 1 with arg 5 -> 6")
+check(f1(0) == 1, "|x| x + 1 with arg 0 -> 1")
+check(f1(-3) == -2, "|x| x + 1 with negative arg -> -2")
+
+let f1b = |x| x * x
+check(f1b(4) == 16, "|x| x * x with arg 4 -> 16")
+check(f1b(0) == 0, "|x| x * x with arg 0 -> 0")
+
+// --- 2. Single capture from enclosing global scope ---
+
+let k1 = 10
+let f2 = |x| x + k1
+check(f2(5) == 15, "single capture k=10: |x| x + k with 5 -> 15")
+check(f2(0) == 10, "single capture k=10: |x| x + k with 0 -> 10")
+
+// --- 3. Multi-capture ---
+
+let a3 = 3
+let b3 = 4
+let f3 = |x| x * a3 + b3
+check(f3(5) == 19, "multi-capture: |x| x*3 + 4 with 5 -> 19")
+check(f3(0) == 4, "multi-capture: |x| x*3 + 4 with 0 -> 4")
+check(f3(1) == 7, "multi-capture: |x| x*3 + 4 with 1 -> 7")
+
+// --- 4. Multi-parameter closures ---
+
+let sub = |x, y| x - y
+check(sub(10, 3) == 7, "|x, y| x - y with (10,3) -> 7")
+check(sub(0, 5) == -5, "|x, y| x - y with (0,5) -> -5")
+check(sub(100, 100) == 0, "|x, y| x - y with (100,100) -> 0")
+
+let triple_add = |a, b, c| a + b + c
+check(triple_add(1, 2, 3) == 6, "|a,b,c| a+b+c with (1,2,3) -> 6")
+check(triple_add(10, 20, 30) == 60, "|a,b,c| a+b+c with (10,20,30) -> 60")
+
+// --- 5. Zero-parameter closure `|| 42` ---
+
+let const_42 = || 42
+check(const_42() == 42, "|| 42 -> 42")
+check(const_42() == 42, "|| 42 called twice still -> 42")
+
+let const_sum = || (1 + 2 + 3)
+check(const_sum() == 6, "|| (1+2+3) -> 6")
+
+// --- 6. Block-body closure with let inside ---
+
+let blk1 = |x| { let t = x * 2; t + 1 }
+check(blk1(5) == 11, "block-body |x| { let t = x*2; t+1 } with 5 -> 11")
+check(blk1(0) == 1, "block-body |x| { let t = x*2; t+1 } with 0 -> 1")
+check(blk1(-4) == -7, "block-body |x| { let t = x*2; t+1 } with -4 -> -7")
+
+// Multi-statement block body.
+let blk2 = |x, y| { let t1 = x * 2; let t2 = y * 3; t1 + t2 }
+check(blk2(5, 4) == 22, "block-body |x,y| { 2x + 3y } with (5,4) -> 22")
+check(blk2(0, 0) == 0, "block-body |x,y| { 2x + 3y } with (0,0) -> 0")
+check(blk2(10, 1) == 23, "block-body |x,y| { 2x + 3y } with (10,1) -> 23")
+
+// --- 7. Closure passed as argument (map_list) — the canonical
+//        higher-order pattern that closures unlock. ---
+
+let nums = [1, 2, 3, 4, 5]
+let doubled = map_list(nums, |x| x * 2)
+check(doubled[0] == 2, "map_list with closure: doubled[0] == 2")
+check(doubled[1] == 4, "map_list with closure: doubled[1] == 4")
+check(doubled[2] == 6, "map_list with closure: doubled[2] == 6")
+check(doubled[3] == 8, "map_list with closure: doubled[3] == 8")
+check(doubled[4] == 10, "map_list with closure: doubled[4] == 10")
+check(len(doubled) == 5, "map_list with closure: length preserved")
+
+// R35C stdlib helper: `list_map` (Nova-level wrapper around map_list).
+let squared = list_map(nums, |x| x * x)
+check(squared[0] == 1, "list_map with closure: squared[0] == 1")
+check(squared[1] == 4, "list_map with closure: squared[1] == 4")
+check(squared[2] == 9, "list_map with closure: squared[2] == 9")
+check(squared[3] == 16, "list_map with closure: squared[3] == 16")
+check(squared[4] == 25, "list_map with closure: squared[4] == 25")
+
+// Closure with multi-capture used in map_list.
+let bias = 7
+let factor = 3
+let scaled = map_list(nums, |x| x * factor + bias)
+check(scaled[0] == 10, "map_list with multi-capture closure: scaled[0] == 10")
+check(scaled[1] == 13, "map_list with multi-capture closure: scaled[1] == 13")
+check(scaled[2] == 16, "map_list with multi-capture closure: scaled[2] == 16")
+check(scaled[4] == 22, "map_list with multi-capture closure: scaled[4] == 22")
+
+// --- 8. Capture semantics: globals are live-bindings (capture-by-
+//        REFERENCE), locals are captured by VALUE into a static slot. ---
+//
+// Globals: compute_captures treats top-level `let` names as globals and
+// EXCLUDES them from the capture set, so the closure body reads them
+// directly from `[rip + _g_<name>]` on every call.  Mutating a global
+// after the closure was created IS visible inside the closure.
+
+let v_glob = 100
+let capt_glob = |x| x + v_glob
+v_glob = 200
+check(capt_glob(5) == 205, "global capture is live: v_glob mutated 100->200, capt(5) reads new value")
+v_glob = 100
+check(capt_glob(5) == 105, "global capture is live: v_glob set back to 100, capt(5) sees it")
+
+// Locals: captured into a static `.bss` slot at the closure-VALUE site
+// (the `mov [rip + _cap_...]` sequence emitted at the lambda literal).
+// Mutating the source local AFTER creation does NOT update the slot
+// because the slot is only written when the lambda literal is
+// evaluated — but the closure's source local IS the same identifier as
+// the captured one, so a re-assignment of the local in the SAME scope
+// writes back through the local's stack slot, not the capture slot.
+// This is the canonical "capture by value at creation" semantics.
+
+fn local_capture_test() {
+    let p = 50
+    let q = |n| n + p
+    let first = q(10)
+    p = 999
+    let second = q(10)
+    let pair = list_new()
+    push(pair, first)
+    push(pair, second)
+    return pair
+}
+
+let lc_result = local_capture_test()
+check(lc_result[0] == 60, "local capture: q(10) at creation with p=50 -> 60")
+check(lc_result[1] == 60, "local capture-by-value: p mutated to 999 but q still uses captured 50 -> 60")
+
+// --- 9. Closure-returning-closure (single-instance) ---
+
+fn make_adder(k) {
+    return |x| x + k
+}
+
+let add5 = make_adder(5)
+check(add5(3) == 8, "make_adder(5)(3) -> 8 (single instance)")
+check(add5(0) == 5, "make_adder(5)(0) -> 5 (single instance)")
+check(add5(-2) == 3, "make_adder(5)(-2) -> 3 (single instance)")
+
+// Documented limitation: STATIC capture slot is shared across
+// all instances of the same source-position lambda.  Creating
+// make_adder(5) then make_adder(7) clobbers the slot — the last
+// creation wins.  This is the same semantics the existing
+// `fn(params) { body }` lambda has had since R0; R35C does NOT
+// extend the runtime.  Per-instance environments would require
+// lowering to `[fn_ptr, env_list]` (closure-as-tuple) and a new
+// indirect-call ABI that prepends env_list to the arg vector —
+// deferred to a future round.
+let add7 = make_adder(7)
+check(add5(3) == 10, "documented limitation: static slot clobbered, add5 now reads k=7 (3+7=10)")
+check(add7(3) == 10, "static slot shared: add7(3) -> 10")
+
+// Closure literal directly returning a closure literal (sequential
+// lambda creation does NOT trigger the multi-instance hazard above
+// because each call to the outer lambda re-evaluates the inner lambda
+// — the inner re-writes the same static slot, but there is only one
+// "live" instance at a time as long as we use it immediately).
+let make_mul = |k| |x| x * k
+let mul3_now = make_mul(3)
+check(mul3_now(4) == 12, "closure-returning-closure direct: |k| |x| x*k applied (3)(4) -> 12")
+
+// --- 10. Closure inside an if-branch ---
+
+let pick = 1
+let chosen = if pick == 1 { |x| x + 100 } else { |x| x + 200 }
+check(chosen(5) == 105, "closure literal inside if-then arm: 5+100 == 105")
+
+// --- 11. Closure captures a struct field via the enclosing local ---
+
+let pair = [10, 20]
+let pair_sum = |x| x + pair[0] + pair[1]
+check(pair_sum(5) == 35, "closure captures list local: 5 + 10 + 20 == 35")
+
+// --- 12. Builtin call inside closure body ---
+
+let to_str_n = |x| int_to_str(x + 1)
+let s_result = to_str_n(41)
+check(str_eq(s_result, "42") == 1, "closure body calls builtin: int_to_str(41+1) == \"42\"")
+
+// --- 13. Single-expression closure with chained ops ---
+
+let chained = |x, y, z| x + y * z - 1
+check(chained(2, 3, 4) == 13, "|x,y,z| x + y*z - 1 with (2,3,4) -> 13")
+check(chained(0, 1, 1) == 0, "|x,y,z| x + y*z - 1 with (0,1,1) -> 0")
+
+// --- 14. Closures with no parameters and zero captures: pure constant
+//         closures distinct from each other. ---
+
+let lazy_pi = || 314
+let lazy_e = || 271
+check(lazy_pi() == 314, "lazy_pi() == 314")
+check(lazy_e() == 271, "lazy_e() == 271")
+check(lazy_pi() + lazy_e() == 585, "lazy_pi() + lazy_e() == 585")
+
+// --- Final summary ---
+
+print("Total assertions: ")
+println(int_to_str(ok_count + fail_count))
+print("Passed: ")
+println(int_to_str(ok_count))
+print("Failed: ")
+println(int_to_str(fail_count))
+
+if fail_count == 0 {
+    println("ALL CLOSURE TESTS PASSED")
+} else {
+    println("CLOSURE TESTS FAILED")
+}
+
+// R35C: stdlib helper `list_map(list, closure) -> new_list`.  Thin
+// wrapper around the existing built-in `map_list` so that user code
+// can refer to it via a name that matches the rest of the closure-
+// friendly stdlib (`list_map`, `list_filter`, `list_fold` in future
+// rounds).  Defined at the bottom of the test file so the test body
+// above can use it; in a self-host build this same body lives in
+// src/core/system.nova (see R35C stdlib hook).
+fn list_map(xs, f) {
+    return map_list(xs, f)
+}

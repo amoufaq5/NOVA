@@ -685,6 +685,77 @@ fn parse_primary() {
             }
         }
     }
+    // R35C: closure literals.  `|x| body`, `|x, y| { stmt; ... }`, `|| 42`.
+    //
+    // Disambiguation vs `|` (bitwise OR) / `||` (logical OR): both of those
+    // are infix operators that are only reached from parse_bitwise /
+    // parse_or AFTER a left operand has already been consumed. parse_primary
+    // is only entered at the *start* of an expression, so a leading `|` or
+    // `||` here is unambiguously a closure literal — there is no left
+    // operand for it to be an infix operator of. Lowering reuses the
+    // existing `fn(...)` lambda machinery (par_lambdas + AST_LAMBDA +
+    // codegen capture analysis) so closure semantics, capture-by-value, and
+    // function-pointer emission all come for free.
+    if t == TOK_PIPE {
+        par_advance()
+        let cl_params = list_new()
+        let cl_ptypes = list_new()
+        if par_peek_type() == TOK_PIPE {
+            // empty param list, `||` token was lexed as two TOK_PIPE here
+            // (this branch is only reachable when the lexer emitted two
+            // separate TOK_PIPE — e.g. across a space `| |`; the `||`
+            // glyph itself is lexed as TOK_OR and handled below).
+        } else {
+            let cp1 = par_expect(TOK_IDENT)
+            push(cl_params, cp1[1])
+            let cpt1 = 0
+            if par_peek_type() == TOK_COLON {
+                par_advance()
+                cpt1 = par_collect_type()
+            }
+            push(cl_ptypes, cpt1)
+            while par_peek_type() == TOK_COMMA {
+                par_advance()
+                if par_peek_type() == TOK_PIPE { break }
+                let cpn = par_expect(TOK_IDENT)
+                push(cl_params, cpn[1])
+                let cptn = 0
+                if par_peek_type() == TOK_COLON {
+                    par_advance()
+                    cptn = par_collect_type()
+                }
+                push(cl_ptypes, cptn)
+            }
+        }
+        par_expect(TOK_PIPE)
+        par_skip_return_type()
+        let cl_body = par_parse_closure_body()
+        let cl_name = "_lambda_" + int_to_str(par_lambda_count)
+        par_lambda_count = par_lambda_count + 1
+        let cl_fn = ast_fn_decl(cl_name, cl_params, cl_body)
+        push(cl_fn, list_new())
+        push(cl_fn, cl_ptypes)
+        push(par_lambdas, cl_fn)
+        return ast_lambda(cl_name, cl_params, cl_body)
+    }
+    if t == TOK_OR {
+        // `||` at expression start: zero-parameter closure literal.  The
+        // logical-OR operator never reaches parse_primary because it is
+        // parsed as infix in parse_or, so a leading `||` here cannot mean
+        // anything else.
+        par_advance()
+        let zc_params = list_new()
+        let zc_ptypes = list_new()
+        par_skip_return_type()
+        let zc_body = par_parse_closure_body()
+        let zc_name = "_lambda_" + int_to_str(par_lambda_count)
+        par_lambda_count = par_lambda_count + 1
+        let zc_fn = ast_fn_decl(zc_name, zc_params, zc_body)
+        push(zc_fn, list_new())
+        push(zc_fn, zc_ptypes)
+        push(par_lambdas, zc_fn)
+        return ast_lambda(zc_name, zc_params, zc_body)
+    }
     if t == TOK_DO {
         par_advance()
         par_expect(TOK_LBRACE)
@@ -1720,6 +1791,23 @@ fn parse_let() {
     let lnd = ast_let(name, value)
     push(lnd, type_annot)
     return lnd
+}
+
+// R35C: closure-literal body parser.  After `|params|` the body is
+// either a brace-block (multi-statement, returns final expression via
+// the implicit-return path in gen_function) or a single expression
+// (lowered to a synthetic block containing one AST_EXPR_STMT so the
+// same implicit-return path applies).  Returning AST_BLOCK in both
+// cases lets gen_function consume it byte-identically to the existing
+// `fn(...)` lambda code path.
+fn par_parse_closure_body() {
+    if par_peek_type() == TOK_LBRACE {
+        return parse_block()
+    }
+    let cb_expr = parse_expr()
+    let cb_stmts = list_new()
+    push(cb_stmts, ast_expr_stmt(cb_expr))
+    return ast_block(cb_stmts)
 }
 
 fn parse_param_list() {
