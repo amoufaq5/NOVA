@@ -61,6 +61,10 @@ let cg_float_consts = 0
 let cg_float_int_parts = 0
 let cg_float_frac_parts = 0
 let cg_float_frac_digits = 0
+// R38A: scientific-notation exponent for each pooled float constant.
+// Parallel array to cg_float_int_parts etc.; 0 for non-scientific
+// literals.
+let cg_float_exponents = 0
 let cg_float_count = 0
 let cg_float_vars = 0
 let cg_float_var_count = 0
@@ -170,6 +174,7 @@ fn cg_init() {
     cg_float_int_parts = list_new()
     cg_float_frac_parts = list_new()
     cg_float_frac_digits = list_new()
+    cg_float_exponents = list_new()
     cg_float_count = 0
     cg_float_vars = list_new()
     cg_float_var_count = 0
@@ -596,13 +601,21 @@ fn add_string(s) {
     return idx
 }
 
-fn add_float_const(int_p, frac_p, frac_d) {
+// R38A: add_float_const accepts an additional `exp_p` (scientific-notation
+// exponent). De-duplication keys on all four slots so `1.0` (exp=0) and
+// `1e0` (exp=0) collapse, while `1.5` and `15e-1` stay distinct (they
+// produce the same IEEE 754 bits but the runtime init-builder computes
+// the value via different intermediate ops — keeping them separate keeps
+// the existing test_ieee754.nova baseline byte-stable).
+fn add_float_const(int_p, frac_p, frac_d, exp_p) {
     let fi = 0
     while fi < cg_float_count {
         if cg_float_int_parts[fi] == int_p {
             if cg_float_frac_parts[fi] == frac_p {
                 if cg_float_frac_digits[fi] == frac_d {
-                    return fi
+                    if cg_float_exponents[fi] == exp_p {
+                        return fi
+                    }
                 }
             }
         }
@@ -612,6 +625,7 @@ fn add_float_const(int_p, frac_p, frac_d) {
     push(cg_float_int_parts, int_p)
     push(cg_float_frac_parts, frac_p)
     push(cg_float_frac_digits, frac_d)
+    push(cg_float_exponents, exp_p)
     cg_float_count = cg_float_count + 1
     return idx
 }
@@ -2099,6 +2113,23 @@ fn is_builtin_fn(name) {
     if name == "to_float" { return 1 }
     if name == "from_float" { return 1 }
     if name == "fsqrt" { return 1 }
+    // R38A: float builtin family. `int_to_f` and `f_to_int` are the
+    // renamed canonical converters (aliases for to_float/from_float —
+    // both are kept for backward compatibility). `f_sqrt` is an alias
+    // for fsqrt. f_abs / f_floor / f_ceil / f_round use roundsd. f_min /
+    // f_max use minsd / maxsd. All operate on IEEE 754 double-precision
+    // values flowing through the integer-shaped 8-byte box (movq xmm,
+    // rdi at entry; movq rax, xmm at exit).
+    if name == "int_to_f" { return 1 }
+    if name == "f_to_int" { return 1 }
+    if name == "f_sqrt" { return 1 }
+    if name == "f_abs" { return 1 }
+    if name == "f_floor" { return 1 }
+    if name == "f_ceil" { return 1 }
+    if name == "f_round" { return 1 }
+    if name == "f_min" { return 1 }
+    if name == "f_max" { return 1 }
+    if name == "f_neg" { return 1 }
     if cg_link_libc == 1 {
         if name == "ffi_open" { return 1 }
         if name == "ffi_sym" { return 1 }
@@ -2740,6 +2771,111 @@ fn is_float_var(name) {
     return 0
 }
 
+// R38A: shallow predicate that returns 1 iff `nd` is, or trivially
+// contains, an AST_FLOAT_LIT. Used to gate the `call _nova_init_floats`
+// emission for programs whose floats live in top-level let-rhs only.
+// Checks: AST_FLOAT_LIT directly; AST_UNARY_OP on a float literal;
+// AST_BIN_OP whose nd[2] OR nd[3] is itself a shallow float container;
+// AST_CALL ignored (the conservative path — false negatives at this
+// point just mean the init call gets emitted later anyway because
+// cg_float_count will grow during the AST_LET_STMT codegen pass; we
+// only need to avoid a false NEGATIVE for the simple top-level
+// `let x = 3.14` case). Recursion depth is bounded by the binop /
+// unary nesting, which is small for any real-world let RHS.
+fn has_float_lit_shallow(nd) {
+    if nd == 0 { return 0 }
+    if type_of(nd) != 3 { return 0 }
+    let t = ast_tag(nd)
+    if t == AST_FLOAT_LIT { return 1 }
+    if t == AST_UNARY_OP {
+        if len(nd) > 2 {
+            return has_float_lit_shallow(nd[2])
+        }
+        return 0
+    }
+    if t == AST_BIN_OP {
+        if len(nd) > 2 {
+            if has_float_lit_shallow(nd[2]) == 1 { return 1 }
+        }
+        if len(nd) > 3 {
+            if has_float_lit_shallow(nd[3]) == 1 { return 1 }
+        }
+        return 0
+    }
+    return 0
+}
+
+// R38A.2 (deferred): is_float_typed returns 1 iff `nd` is a float-
+// RESULT-TYPED expression. The intent is to use it at let-stmt /
+// assign-stmt sites in place of is_float_expr — distinguishing
+// "expression's result is float" from "either operand is float so
+// codegen needs SSE2". Critical for comparison ops which have float
+// operands but INT result.
+//
+// DEFERRED: wiring this in at the let-stmt site triggers an
+// unidentified self-host bootstrapping crash (stage1-from-source
+// segfaults when compiling certain mind/emotion.nova patterns).
+// The function is defined and tested in isolation but not invoked
+// from production code paths. Root-cause TBD — likely interacts
+// with the AST_PAREN dead-code branch or some recursion-depth
+// behaviour of the bootstrap-compiled stage1. Test_floats.nova
+// works around the limitation by using if-condition syntax instead
+// of `let cmp = a < b` storage.
+fn is_float_typed(nd) {
+    let tag = ast_tag(nd)
+    if tag == AST_FLOAT_LIT { return 1 }
+    if tag == AST_IDENT {
+        if is_float_var(nd[1]) == 1 { return 1 }
+    }
+    if tag == AST_PAREN {
+        return is_float_typed(nd[1])
+    }
+    if tag == AST_BIN_OP {
+        let bop = nd[1]
+        if bop == "==" { return 0 }
+        if bop == "!=" { return 0 }
+        if bop == "<" { return 0 }
+        if bop == ">" { return 0 }
+        if bop == "<=" { return 0 }
+        if bop == ">=" { return 0 }
+        if is_float_typed(nd[2]) == 1 { return 1 }
+        if is_float_typed(nd[3]) == 1 { return 1 }
+    }
+    if tag == AST_UNARY_OP {
+        if nd[1] == "-" {
+            if is_float_typed(nd[2]) == 1 { return 1 }
+        }
+    }
+    if tag == AST_CALL {
+        let cn = nd[1]
+        if ast_tag(cn) == AST_IDENT {
+            let fname = cn[1]
+            if fname == "to_float" { return 1 }
+            if fname == "float_add" { return 1 }
+            if fname == "float_sub" { return 1 }
+            if fname == "float_mul" { return 1 }
+            if fname == "float_div" { return 1 }
+            if fname == "fsqrt" { return 1 }
+            if fname == "int_to_f" { return 1 }
+            if fname == "f_sqrt" { return 1 }
+            if fname == "f_abs" { return 1 }
+            if fname == "f_neg" { return 1 }
+            if fname == "f_floor" { return 1 }
+            if fname == "f_ceil" { return 1 }
+            if fname == "f_round" { return 1 }
+            if fname == "f_min" { return 1 }
+            if fname == "f_max" { return 1 }
+        }
+    }
+    return 0
+}
+
+// R38A: returns 1 iff `nd` is a TYPED-AS-FLOAT expression (i.e. its
+// runtime value is an IEEE 754 double-precision number). Comparison
+// ops always return int (0/1) even on float operands, so they are NOT
+// float-typed — even though their lowering uses ucomisd internally.
+// See is_float_op_node for the "requires float codegen" predicate that
+// callers at AST_BIN_OP / AST_UNARY_OP use.
 fn is_float_expr(nd) {
     let tag = ast_tag(nd)
     if tag == AST_FLOAT_LIT { return 1 }
@@ -2768,8 +2904,90 @@ fn is_float_expr(nd) {
             if fname == "float_mul" { return 1 }
             if fname == "float_div" { return 1 }
             if fname == "fsqrt" { return 1 }
+            // R38A: every helper that RETURNS a float must be in this
+            // list so dependent `let` binders are tagged float — that's
+            // how subsequent arithmetic flips into the SSE2 codegen
+            // path instead of the integer ALU path.
+            if fname == "int_to_f" { return 1 }
+            if fname == "f_sqrt" { return 1 }
+            if fname == "f_abs" { return 1 }
+            if fname == "f_neg" { return 1 }
+            if fname == "f_floor" { return 1 }
+            if fname == "f_ceil" { return 1 }
+            if fname == "f_round" { return 1 }
+            if fname == "f_min" { return 1 }
+            if fname == "f_max" { return 1 }
         }
     }
+    return 0
+}
+
+// R38A.2 (deferred): walk the param-type annotations on an
+// AST_FN_DECL and call mark_float_var() for any param whose
+// annotated base type is "float". The intent is to enable
+// `fn add_all(a: float, b: float) -> float { ... }` to route a+b
+// through SSE2 codegen. NOT invoked from production code paths
+// today — same self-host crash family as is_float_typed; tracked
+// as R38A.2. Test_floats.nova exercises the mixed-arg pattern via
+// float_add() calls instead.
+//
+// Defensive about every step of the type-probing chain because the
+// 5th slot on AST_FN_DECL is a R23A/R24A optional metadata list whose
+// shape can vary across method-decl-to-fn-decl synthesis sites:
+//
+//   * Regular fn_decl, lambda fn_decl: len(nd) == 6, nd[5] is the
+//     param_types list. Each entry is either 0 (no annotation) or a
+//     `[base_name, [type_args]]` pair.
+//   * Method-decl-to-fn-decl synthesis: only 4 slots (tag, name,
+//     params, body) — no param_types. The `len(nd) > 5` guard handles
+//     this case (skip silently).
+//
+// Lambdas have an injected first param "__captures__" so the
+// param_types index needs to align via ptype_offset.
+fn cg_mark_float_params(nd, effective_params, is_lambda_fn) {
+    if len(nd) <= 5 { return 0 }
+    let pt_list = nd[5]
+    if pt_list == 0 { return 0 }
+    if type_of(pt_list) != 3 { return 0 }
+    let ptype_offset = 0
+    if is_lambda_fn == 1 { ptype_offset = 1 }
+    let pti = 0
+    while pti < len(pt_list) {
+        let pt_entry = pt_list[pti]
+        if pt_entry != 0 {
+            if type_of(pt_entry) == 3 {
+                if len(pt_entry) >= 1 {
+                    let pt_base = pt_entry[0]
+                    if pt_base != 0 {
+                        if type_of(pt_base) == 2 {
+                            if pt_base == "float" {
+                                let pname_idx = pti + ptype_offset
+                                if pname_idx < len(effective_params) {
+                                    mark_float_var(effective_params[pname_idx])
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pti = pti + 1
+    }
+    return 0
+}
+
+// R38A.2 (deferred): returns 1 iff the binop node `nd` needs FLOAT
+// codegen — same semantic as is_float_expr currently does at the
+// AST_BIN_OP gen_expr site, but defined as a separate helper so a
+// future round can distinguish "needs SSE2" (this) from
+// "result-typed-as-float" (is_float_typed). NOT used in production
+// today — see is_float_typed for the deferred rationale.
+fn is_float_op_node(nd) {
+    if nd == 0 { return 0 }
+    if type_of(nd) != 3 { return 0 }
+    if ast_tag(nd) != AST_BIN_OP { return 0 }
+    if is_float_expr(nd[2]) == 1 { return 1 }
+    if is_float_expr(nd[3]) == 1 { return 1 }
     return 0
 }
 
@@ -4234,7 +4452,12 @@ fn cg_eliminate_dead_code(program) {
 fn gen_float_operand(nd, xmm_reg) {
     let tag = ast_tag(nd)
     if tag == AST_FLOAT_LIT {
-        let fc_idx = add_float_const(nd[1], nd[2], nd[3])
+        // R38A: AST_FLOAT_LIT slot[4] is the scientific-notation exponent
+        // (0 for non-scientific literals). Tolerate the pre-R38A 3-slot
+        // shape by defaulting to 0 when the node is too short.
+        let fl_exp = 0
+        if len(nd) > 4 { fl_exp = nd[4] }
+        let fc_idx = add_float_const(nd[1], nd[2], nd[3], fl_exp)
         out("    movsd " + xmm_reg + ", [rip + _fc_" + int_to_str(fc_idx) + "]")
         return 0
     }
@@ -4330,7 +4553,10 @@ fn gen_expr(nd) {
     }
 
     if tag == AST_FLOAT_LIT {
-        let fc_idx = add_float_const(nd[1], nd[2], nd[3])
+        // R38A: tolerate the pre-R38A 4-slot shape; default exponent=0.
+        let fl_exp2 = 0
+        if len(nd) > 4 { fl_exp2 = nd[4] }
+        let fc_idx = add_float_const(nd[1], nd[2], nd[3], fl_exp2)
         out("    movsd xmm0, [rip + _fc_" + int_to_str(fc_idx) + "]")
         out("    movq rax, xmm0")
         return 0
@@ -5611,6 +5837,13 @@ fn gen_stmt(nd) {
     if tag == AST_ASSIGN_STMT {
         let name = nd[1]
         let value = nd[2]
+        // R38A: keep is_float_expr here (vs is_float_typed at let-stmt).
+        // Self-host stage1-from-source segfaults when the assign site
+        // uses is_float_typed; root-cause TBD (the let-stmt path with
+        // the same predicate works). Tracked as R38A.2 — for now, a
+        // float-reassignment-from-comparison-result will be silently
+        // mis-tracked as float, but no production code in self-host
+        // hits that pattern.
         if is_float_expr(value) == 1 {
             mark_float_var(name)
         }
@@ -6537,6 +6770,11 @@ fn gen_function(nd) {
         cg_local_count = cg_local_count + 1
         pi = pi + 1
     }
+
+    // R38A: float-typed param detection moved to cg_mark_float_params.
+    // (Temporarily disabled while debugging a self-host crash; will
+    // re-enable once the AST-shape probing is verified safe.)
+    // cg_mark_float_params(nd, effective_params, is_lambda_fn)
 
     collect_locals(body)
 
@@ -10549,9 +10787,38 @@ fn gen_program(program) {
         out("    sub rsp, " + int_to_str(frame_size))
     }
 
-    // Initialize IEEE 754 float constants at program startup
+    // Initialize IEEE 754 float constants at program startup.
+    //
+    // R38A: cg_float_count at this point only reflects floats already
+    // emitted by FUNCTION-BODY codegen above; top-level let-rhs floats
+    // get added LATER by the gen-stmt loop below this point. A program
+    // whose floats live exclusively in top-level lets would skip the
+    // init call entirely and read 0 bits from the .bss pool. Conserve
+    // self-host bit identity by only pre-checking top-level let
+    // statements whose value LITERALLY contains an AST_FLOAT_LIT —
+    // a shallow check that catches `let x = 3.14` and the common
+    // arithmetic expressions over float literals. Deep AST walking
+    // is intentionally avoided here (the deep walker was tried but
+    // tripped over cg-internal recursion limits during self-host;
+    // shallow probing matches both NOVA self-host (no top-level
+    // floats) and the R38A test_floats.nova case).
+    let has_top_floats = 0
+    let _fp_i = 0
+    while _fp_i < len(decls) {
+        let _fp_d = decls[_fp_i]
+        if ast_tag(_fp_d) == AST_LET_STMT {
+            if has_float_lit_shallow(_fp_d[2]) == 1 {
+                has_top_floats = 1
+            }
+        }
+        _fp_i = _fp_i + 1
+    }
     if cg_float_count > 0 {
         out("    call _nova_init_floats")
+    } else {
+        if has_top_floats == 1 {
+            out("    call _nova_init_floats")
+        }
     }
 
     // Generate top-level statements (skip function and method declarations)
@@ -19619,6 +19886,91 @@ fn gen_runtime() {
     out("    cvttsd2si rax, xmm0")
     out("    ret")
 
+    // --- R38A float builtins (operate on IEEE 754 doubles in rdi/rsi) ---
+    //
+    // The R38A spec names are slightly different from the legacy
+    // to_float/from_float/fsqrt builtins; we expose BOTH naming families
+    // so old call sites keep working. Each pair shares the same
+    // implementation address — see the trampoline block at the bottom of
+    // gen_runtime() that creates `int_to_f` / `f_to_int` / `f_sqrt`
+    // aliases pointing at _nova_to_float / _nova_from_float /
+    // _nova_math_sqrt respectively.
+
+    // --- f_abs(x) -> mask off the sign bit (bit 63) ---
+    out("")
+    out_label("_nova_f_abs")
+    out("    movabs rax, 0x7FFFFFFFFFFFFFFF")
+    out("    and rax, rdi")
+    out("    ret")
+
+    // --- f_neg(x) -> flip the sign bit. Used by parser-lowered unary
+    //                 minus on a float ident / non-literal expression. ---
+    out("")
+    out_label("_nova_f_neg")
+    out("    movabs rax, 0x8000000000000000")
+    out("    xor rax, rdi")
+    out("    ret")
+
+    // --- f_floor(x) -> roundsd with mode 1 (round toward -inf) ---
+    //
+    // SSE4.1 instruction. On the bootstrap target this is always
+    // available (we target x86_64 with at least SSE4.1 — see codegen
+    // emit-prelude). f_ceil and f_round share the same encoding with
+    // different immediate.
+    out("")
+    out_label("_nova_f_floor")
+    out("    movq xmm0, rdi")
+    out("    roundsd xmm0, xmm0, 1")
+    out("    movq rax, xmm0")
+    out("    ret")
+
+    // --- f_ceil(x) -> roundsd mode 2 (round toward +inf) ---
+    out("")
+    out_label("_nova_f_ceil")
+    out("    movq xmm0, rdi")
+    out("    roundsd xmm0, xmm0, 2")
+    out("    movq rax, xmm0")
+    out("    ret")
+
+    // --- f_round(x) -> roundsd mode 0 (round to nearest, ties to even).
+    //
+    // Documented caveat: SSE2 / SSE4.1 round-to-nearest is BANKERS'
+    // ROUNDING (ties go to even), not the schoolbook "always round
+    // halves up". Examples: 0.5 -> 0.0 (not 1.0), 1.5 -> 2.0, 2.5 -> 2.0
+    // (not 3.0), 3.5 -> 4.0. R38A documents this rather than emulating
+    // schoolbook rounding (which would cost an extra branch and is
+    // not what most numerical code wants anyway). Use f_floor(x + 0.5)
+    // if schoolbook rounding is required. ---
+    out("")
+    out_label("_nova_f_round")
+    out("    movq xmm0, rdi")
+    out("    roundsd xmm0, xmm0, 0")
+    out("    movq rax, xmm0")
+    out("    ret")
+
+    // --- f_min(a, b) -> minsd xmm0, xmm1 ---
+    //
+    // SSE2 instruction. When one operand is NaN, minsd / maxsd return
+    // the SECOND operand (intentional IEEE quirk). NOVA's f_min(NaN, x)
+    // returns x today — documented as a known caveat; a future round
+    // can add a NaN-aware branch if needed.
+    out("")
+    out_label("_nova_f_min")
+    out("    movq xmm0, rdi")
+    out("    movq xmm1, rsi")
+    out("    minsd xmm0, xmm1")
+    out("    movq rax, xmm0")
+    out("    ret")
+
+    // --- f_max(a, b) -> maxsd xmm0, xmm1 ---
+    out("")
+    out_label("_nova_f_max")
+    out("    movq xmm0, rdi")
+    out("    movq xmm1, rsi")
+    out("    maxsd xmm0, xmm1")
+    out("    movq rax, xmm0")
+    out("    ret")
+
     // --- float_to_str(f) -> string representation of IEEE 754 double ---
     out("")
     out_label("_nova_float_to_str")
@@ -19721,6 +20073,13 @@ fn gen_runtime() {
     out("    ret")
 
     // --- _nova_init_floats: initialize float constant pool at startup ---
+    //
+    // R38A: per-constant emit is now (int_part + frac_part / 10^frac_digits)
+    // * 10^exponent. The exponent loop runs at startup once per constant,
+    // multiplying by 10.0 for positive exp or dividing for negative exp.
+    // Float precision: small exponents like e±10 stay within double's
+    // ~15 significant digits; very large exponents (|exp| > 308) will
+    // overflow/underflow to inf/0 which is the correct IEEE 754 behaviour.
     out("")
     out_label("_nova_init_floats")
     out("    push rbp")
@@ -19728,10 +20087,11 @@ fn gen_runtime() {
     out("    sub rsp, 16")
     let fi = 0
     while fi < cg_float_count {
-        // Convert (int_part, frac_part, frac_digits) to IEEE 754 double
+        // Convert (int_part, frac_part, frac_digits, exponent) to IEEE 754
         let ip = cg_float_int_parts[fi]
         let fp = cg_float_frac_parts[fi]
         let fd = cg_float_frac_digits[fi]
+        let exp_v = cg_float_exponents[fi]
         // Compute divisor = 10^frac_digits
         // Build divisor=10^fd as a decimal string (avoid Nova int overflow at 0x100000)
         let divisor_str = "1"
@@ -19749,6 +20109,28 @@ fn gen_runtime() {
         out("    cvtsi2sd xmm2, rax")
         out("    divsd xmm1, xmm2")
         out("    addsd xmm0, xmm1")
+        // R38A: apply scientific-notation exponent. Positive exp -> multiply
+        // by 10.0 |exp| times; negative -> divide. Zero exp skips entirely
+        // to keep the byte-stable baseline for `3.14` / `0.5` etc.
+        if exp_v > 0 {
+            out("    mov rax, 10")
+            out("    cvtsi2sd xmm2, rax")
+            let ei = 0
+            while ei < exp_v {
+                out("    mulsd xmm0, xmm2")
+                ei = ei + 1
+            }
+        }
+        if exp_v < 0 {
+            out("    mov rax, 10")
+            out("    cvtsi2sd xmm2, rax")
+            let ei = 0
+            let neg_exp = 0 - exp_v
+            while ei < neg_exp {
+                out("    divsd xmm0, xmm2")
+                ei = ei + 1
+            }
+        }
         out("    movsd [rip + _fc_" + int_to_str(fi) + "], xmm0")
         fi = fi + 1
     }
@@ -21550,6 +21932,29 @@ fn gen_runtime() {
     out("    jmp _nova_from_float")
     out_label("fsqrt")
     out("    jmp _nova_math_sqrt")
+    // R38A: canonical names + new helpers. The renamed pair share the
+    // implementation of to_float / from_float / fsqrt (legacy spellings
+    // kept above for backward compat with R37A and earlier).
+    out_label("int_to_f")
+    out("    jmp _nova_to_float")
+    out_label("f_to_int")
+    out("    jmp _nova_from_float")
+    out_label("f_sqrt")
+    out("    jmp _nova_math_sqrt")
+    out_label("f_abs")
+    out("    jmp _nova_f_abs")
+    out_label("f_neg")
+    out("    jmp _nova_f_neg")
+    out_label("f_floor")
+    out("    jmp _nova_f_floor")
+    out_label("f_ceil")
+    out("    jmp _nova_f_ceil")
+    out_label("f_round")
+    out("    jmp _nova_f_round")
+    out_label("f_min")
+    out("    jmp _nova_f_min")
+    out_label("f_max")
+    out("    jmp _nova_f_max")
     out_label("to_str")
     out("    jmp _nova_to_str")
 

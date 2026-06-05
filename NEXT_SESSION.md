@@ -1,5 +1,152 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R38A — lexer+parser+codegen+stdlib: IEEE 754 float64 arithmetic
+
+**Status: complete** — NOVA now has working IEEE 754 double-precision
+float64 arithmetic end-to-end. Lexer, parser, codegen, and stdlib all
+wired; self-host bit-identical; all 304 prior unit assertions remain
+green; 76 new float assertions added in `tests/unit/test_floats.nova`.
+
+### What R38A adds
+
+- **Lexer** (`src/compiler/lexer.nova`)
+  - Existing `TOK_FLOAT` token retained.
+  - Scientific notation added: `1.0e-3`, `5E10`, `1.5e+2`, `1e6`
+    (no dot, with exponent), `2.5E2` (capital E).
+  - Float-info token payload extended to a 4-tuple `[int_v, frac_v,
+    frac_len, exponent]` — exponent slot defaults to 0 for non-
+    scientific literals so all existing parser / codegen call sites
+    keep working.
+  - `.5` (leading dot, no integer part) is intentionally NOT
+    accepted — require explicit `0.5`. Documented design choice.
+
+- **AST** (`src/compiler/ast.nova`)
+  - `ast_float_exp(int_part, frac_part, frac_digits, exponent)`
+    constructor added alongside the legacy 3-arg `ast_float`.
+  - `AST_FLOAT_LIT` node shape is now 5-element `[tag, ip, fp, fd,
+    exp]`; the legacy 4-element shape is tolerated via `len(nd) > 4`
+    guards in codegen.
+
+- **Parser** (`src/compiler/parser.nova`)
+  - `parse_primary`'s `TOK_FLOAT` branch reads the optional 4th
+    token slot (exponent) and emits an extended `AST_FLOAT_LIT`.
+  - `let x: float = ...` parses today (the lightweight type-check
+    pass accepts "float" via `par_collect_type`).
+
+- **Codegen** (`src/compiler/codegen.nova`)
+  - Float-const pool extended to track exponent per slot
+    (`cg_float_exponents` parallel array).
+  - `add_float_const(int_p, frac_p, frac_d, exp_p)` signature
+    extended; de-dup keys on all four parts.
+  - `_nova_init_floats` applies the scientific-notation exponent at
+    startup by multiplying by 10.0 the right number of times (or
+    dividing for negative exponent).
+  - New SSE2 / SSE4.1 runtime functions emitted:
+    `_nova_f_abs` (mask sign bit), `_nova_f_neg` (xor sign bit),
+    `_nova_f_floor` (roundsd mode 1), `_nova_f_ceil` (mode 2),
+    `_nova_f_round` (mode 0 — banker's rounding),
+    `_nova_f_min` (minsd), `_nova_f_max` (maxsd).
+  - Trampoline aliases added at the bottom of `gen_runtime`:
+    `int_to_f` / `f_to_int` / `f_sqrt` route to the legacy
+    `to_float` / `from_float` / `fsqrt` bodies; `f_abs` / `f_neg`
+    / `f_floor` / `f_ceil` / `f_round` / `f_min` / `f_max` are
+    fresh.
+  - `is_float_expr` extended to recognise the new builtin call
+    names so float-ness propagates through dependent let bindings.
+  - `has_float_lit_shallow` walker added: gates `call
+    _nova_init_floats` emission at `_start` prologue for programs
+    whose floats live in top-level `let` statements (previously,
+    such programs read uninitialised 0 bits from the `.bss` float
+    pool because `cg_float_count == 0` at the gate-check time).
+
+- **Stdlib** (`src/stdlib/float.nova` — NEW)
+  - Documents the float builtin family (`int_to_f`, `f_to_int`,
+    `f_abs`, `f_neg`, `f_sqrt`, `f_floor`, `f_ceil`, `f_round`,
+    `f_min`, `f_max`) — emitted as global trampolines by codegen
+    and callable from any user code without explicit import.
+  - Adds derived helpers: `f_clamp` / `f_saturate` / `f_sign` /
+    `f_square` / `f_cube` / `f_reciprocal` / `f_approx_eq` /
+    `f_lerp` / `f_step` / `f_smoothstep` / `f_distance` plus
+    constants `f_zero` / `f_one` / `f_two` / `f_half` etc.
+
+- **Tests** (`tests/unit/test_floats.nova` — NEW)
+  - 76 assertions covering: literal forms (decimal + scientific),
+    negative literals, arithmetic (+ - * /), comparison (== != < > <= >=),
+    conversions (int_to_f / f_to_int + legacy aliases), f_abs,
+    f_neg, f_sqrt (incl. tolerance check for `f_sqrt(2)`), rounding
+    (f_floor / f_ceil / f_round with banker's caveat), f_min / f_max,
+    typed let bindings, tuple-of-float Pythagorean check, int closure
+    captures (sanity), reassignment of float locals, edge cases.
+
+### How the SysV ABI is bent
+
+NOVA's calling convention is integer-shaped: every value passes
+through `rdi/rsi/rdx/rcx/r8/r9` (then the stack). Float values flow
+through the integer-shaped 8-byte box as raw IEEE 754 bits — `movq
+xmm0, rdi` at function entry, `movq rax, xmm0` at return. This
+diverges from the SysV float-arg convention (which uses `xmm0..xmm7`
+for the first 8 float args) but lets all NOVA-to-NOVA calls share
+the same register-allocation machinery.
+
+Consequence: **mixed-arg SysV calling convention is NOT modelled.**
+A function `fn f(n: int, x: float)` does NOT route the float arg
+through xmm1 — it stays in `rsi` as IEEE 754 bits. NOVA-to-NOVA
+this is fine. FFI to C functions requires `ffi_callf*` shims.
+
+### Known caveats (documented)
+
+1. **Banker's rounding.** `f_round` uses SSE4.1 `roundsd` mode 0
+   (ties-to-even): `f_round(0.5) == 0.0`, `f_round(1.5) == 2.0`,
+   `f_round(2.5) == 2.0`. Use `f_floor(x + 0.5)` for schoolbook.
+
+2. **f_to_int truncates toward zero.** `f_to_int(3.7) == 3` and
+   `f_to_int(-3.7) == -3` (NOT -4).
+
+3. **No implicit int→float coercion.** Use `int_to_f(3) + 3.14`.
+
+4. **`f_min` / `f_max` follow SSE2 NaN convention** (second-operand
+   wins on NaN, not IEEE-strict minNum / maxNum).
+
+5. **`let cmp = 3.0 > 2.0` mis-marks `cmp` as float.** Workaround:
+   use comparison directly as if-condition. The `is_float_typed`
+   predicate (defined but unused) fixes this — wiring it in trips
+   an unidentified self-host bootstrap crash, deferred to R38A.2.
+
+6. **`fn f(a: float, ...)` param annotation is documentation only.**
+   `cg_mark_float_params` helper defined but unused (same R38A.2
+   self-host crash). Use `float_add` etc. explicitly in the body.
+
+7. **Float capture in a closure** loses float-ness in the body.
+   Workaround: explicit `float_add(x, k)` inside the closure.
+   Deferred to R38A.2.
+
+8. **No transcendentals** (`sin`, `cos`, `log`, `exp`, `pow`).
+   Need libc bindings or polynomial approximations. Deferred to R38A.3.
+
+### Quick start
+
+```nova
+let pi = 3.14159
+let two_pi = pi * 2.0
+let area = pi * (5.0 * 5.0)  // pi * r^2
+
+// Scientific
+let avogadro = 6.022e23
+
+// Mixed int + float — explicit conversion
+let n = 10
+let mean = float_div(int_to_f(n), 3.0)
+
+// Conditional on a float compare
+if area > 50.0 {
+    println("big circle")
+}
+```
+
+Pre-R38A code keeps working — `to_float` / `from_float` / `fsqrt` /
+`float_add` / `float_sub` / `float_mul` / `float_div` / `float_cmp` /
+`float_to_str` retained as legacy names.
+
 ## R38F — nova-dap: structured `scopes` + `variables` with expandable list/tuple/closure trees
 
 **Status: complete** — the DAP Variables panel now renders a proper

@@ -336,7 +336,16 @@ fn lex_number() {
         }
     }
 
-    // Normal decimal number
+    // Normal decimal number.
+    //
+    // R38A: scientific notation. After the (optional) fractional part, an
+    // exponent `[eE][+-]?\d+` produces an additional 4th tuple slot. To
+    // disambiguate from identifiers starting with `e`/`E`, we only consume
+    // the exponent when it is IMMEDIATELY followed by a sign (+/-) or
+    // digit. Examples accepted:
+    //   3.14, 0.5, 1.0e-3, 5E10, 1.5e+2, 1e6 (no dot, with exponent)
+    // Examples NOT accepted (intentional; deferred to a future round):
+    //   .5  (leading dot — require explicit `0.5`)
     let has_sep = 0
     while lex_pos < lex_len {
         let c2 = lex_peek()
@@ -364,10 +373,12 @@ fn lex_number() {
                                 let frac_str = substr(lex_src, frac_start, lex_pos - frac_start)
                                 let frac_len = lex_pos - frac_start
                                 let frac_v = str_to_int(frac_str)
+                                let exp_v = lex_optional_exponent()
                                 let float_info = list_new()
                                 push(float_info, int_v)
                                 push(float_info, frac_v)
                                 push(float_info, frac_len)
+                                push(float_info, exp_v)
                                 emit_tok(TOK_FLOAT, float_info)
                                 return 0
                             }
@@ -375,13 +386,54 @@ fn lex_number() {
                         let frac_str = substr(lex_src, frac_start, lex_pos - frac_start)
                         let frac_len = lex_pos - frac_start
                         let frac_v = str_to_int(frac_str)
+                        let exp_v = lex_optional_exponent()
                         let float_info = list_new()
                         push(float_info, int_v)
                         push(float_info, frac_v)
                         push(float_info, frac_len)
+                        push(float_info, exp_v)
                         emit_tok(TOK_FLOAT, float_info)
                         return 0
                     }
+                }
+            }
+            // R38A: integer with exponent (no fractional part) e.g. `5E10`.
+            // Only fires when next char is `e` or `E` AND the lookahead
+            // looks like the start of an exponent body (digit or sign +
+            // digit). Otherwise it's an identifier following an integer
+            // literal and we leave the integer as-is.
+            if c2 == 101 {
+                if lex_exp_body_follows(1) == 1 {
+                    let i_str = substr(lex_src, start, lex_pos - start)
+                    if has_sep == 1 {
+                        i_str = str_replace(i_str, "_", "")
+                    }
+                    let i_v = str_to_int(i_str)
+                    let exp_v2 = lex_optional_exponent()
+                    let f_info2 = list_new()
+                    push(f_info2, i_v)
+                    push(f_info2, 0)
+                    push(f_info2, 0)
+                    push(f_info2, exp_v2)
+                    emit_tok(TOK_FLOAT, f_info2)
+                    return 0
+                }
+            }
+            if c2 == 69 {
+                if lex_exp_body_follows(1) == 1 {
+                    let i_str = substr(lex_src, start, lex_pos - start)
+                    if has_sep == 1 {
+                        i_str = str_replace(i_str, "_", "")
+                    }
+                    let i_v = str_to_int(i_str)
+                    let exp_v2 = lex_optional_exponent()
+                    let f_info2 = list_new()
+                    push(f_info2, i_v)
+                    push(f_info2, 0)
+                    push(f_info2, 0)
+                    push(f_info2, exp_v2)
+                    emit_tok(TOK_FLOAT, f_info2)
+                    return 0
                 }
             }
             // Not a float, emit as integer
@@ -398,6 +450,74 @@ fn lex_number() {
         val = str_replace(val, "_", "")
     }
     emit_tok(TOK_INT, str_to_int(val))
+}
+
+// R38A: returns 1 if the character at lex_pos+offset starts an exponent
+// body. The exponent body is `[+-]?\d+`. Used to disambiguate `5E10` (float
+// literal with exponent) from `5 E10` (integer followed by an identifier).
+fn lex_exp_body_follows(offset) {
+    let p2 = lex_pos + offset
+    if p2 >= lex_len { return 0 }
+    let c0 = char_at(lex_src, p2)
+    if c0 == 43 {
+        let p3 = p2 + 1
+        if p3 >= lex_len { return 0 }
+        if is_digit(char_at(lex_src, p3)) == 1 { return 1 }
+        return 0
+    }
+    if c0 == 45 {
+        let p3 = p2 + 1
+        if p3 >= lex_len { return 0 }
+        if is_digit(char_at(lex_src, p3)) == 1 { return 1 }
+        return 0
+    }
+    if is_digit(c0) == 1 { return 1 }
+    return 0
+}
+
+// R38A: consume an OPTIONAL exponent suffix `[eE][+-]?\d+` starting at the
+// current lex_pos and return the parsed signed integer exponent (0 if no
+// exponent present). Caller must have already verified via
+// lex_exp_body_follows that the body is well-formed when peeked at, OR
+// is willing to leave the lexer position unchanged when no exponent is
+// found. Returns 0 (no exponent), or the signed exponent integer.
+fn lex_optional_exponent() {
+    if lex_pos >= lex_len { return 0 }
+    let ec = lex_peek()
+    if ec == 101 {
+    } else { if ec == 69 {
+    } else {
+        return 0
+    } }
+    // Confirm body follows (sign or digit). If not, leave position
+    // unchanged so the caller can re-lex the `e`/`E` as part of an
+    // identifier (defensive — shouldn't happen when called from the
+    // float-emitting paths).
+    if lex_exp_body_follows(1) == 0 { return 0 }
+    lex_advance()
+    let neg = 0
+    let ec2 = lex_peek()
+    if ec2 == 43 {
+        lex_advance()
+    } else { if ec2 == 45 {
+        neg = 1
+        lex_advance()
+    } }
+    let exp_start = lex_pos
+    while lex_pos < lex_len {
+        if is_digit(lex_peek()) == 1 {
+            lex_advance()
+        } else {
+            let exp_str = substr(lex_src, exp_start, lex_pos - exp_start)
+            let v = str_to_int(exp_str)
+            if neg == 1 { return 0 - v }
+            return v
+        }
+    }
+    let exp_str = substr(lex_src, exp_start, lex_pos - exp_start)
+    let v = str_to_int(exp_str)
+    if neg == 1 { return 0 - v }
+    return v
 }
 
 fn lex_string() {

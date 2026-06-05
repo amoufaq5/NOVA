@@ -13,7 +13,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 > evolution), ADR 0004 (LSP/DAP/tree-sitter strategy), ADR 0005
 > (R35C static-slot closure lowering + R37+ migration plan).
 
-## Status (through R37E)
+## Status (through R38A)
 
 | Track | Latest round | What landed |
 |---|---|---|
@@ -22,6 +22,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | Tuples | R36C | first-class tuple literals `(a, b, c)`, tuple type annotations `(int, str)`, let-destructure `let (a, b) = pair`, match patterns `(0, _) => ...`. Lowers to tagged lists at runtime — AST-level type-discipline only; documented in NEXT_SESSION.md. |
 | Closures | R37A | per-instance `[fn_ptr, captures_list]` tuples + by-reference capture; multi-instance `make_adder(5)` + `make_adder(7)` independent; closure mutations propagate to source scope and vice-versa. Higher-order builtins (`map_list`, `filter`, `reduce`, `foreach`, `any`, `all`, `flat_map`) detect closure tuples at runtime, fall back to legacy raw-fn-ptr ABI for top-level fns passed as values. R35C `_cap_<lname>_<var>` `.bss` slots dropped (ADR 0005). |
 | Stdlib (list combinators) | R37E | `src/stdlib/list.nova` ships 13 idiomatic higher-order list functions consuming R35C closures + R36C tuples: `list_map`, `list_filter`, `list_fold`, `list_take`, `list_drop`, `list_concat`, `list_zip`, `list_enumerate`, `list_find`, `list_any`, `list_all`, `list_reverse`, `list_sum`. Library code only — no parser/codegen change. Stable across R37A's closure-lowering migration. 144 new unit assertions in `tests/unit/test_stdlib_list.nova`. |
+| Floats (IEEE 754 float64) | R38A | full IEEE 754 double-precision: literals `3.14` / `0.5`, scientific notation `1.0e-3` / `5E10` / `1.5e+2` / `1e6`, arithmetic `+ - * /` via SSE2 `addsd/subsd/mulsd/divsd`, comparison `== != < > <= >=` via `ucomisd`, conversions `int_to_f` / `f_to_int`, helpers `f_abs` / `f_neg` / `f_sqrt` / `f_floor` / `f_ceil` / `f_round` (banker's) / `f_min` / `f_max`, stdlib `f_clamp` / `f_lerp` / `f_distance` / `f_smoothstep` in `src/stdlib/float.nova`. 76 new unit assertions in `tests/unit/test_floats.nova`. Self-host bit-identical. No transcendentals (deferred R38A.3); no implicit int→float coercion (use `int_to_f`); SysV mixed-arg calling convention NOT modelled (float args flow through `rdi/rsi/...` as raw IEEE 754 bits, not `xmm0..7` — NOVA-to-NOVA only). |
 | LSP (Python / pygls) | R3 .. R35F | hover / goto / rename (R32E) / inlay (R30E) / documentLink + codeLens (R33D) / code actions (R35F) / scope-aware extract-function (R36D). |
 | DAP (Python over gdb-mi) | R17F .. R35E | source / function / exception (R33F) / instruction (R17F+R35E) breakpoints; conditional + hit-count (R29E); reverse debug (R31E); profiler (R28F); disassembly (R34F). |
 | Tree-sitter grammar | R34E | match + nested patterns + let destructure + if-let + arm guards; **closure literals (R35C) deferred**. |

@@ -503,7 +503,13 @@ fn parse_primary() {
     if t == TOK_FLOAT {
         let tok = par_advance()
         let finfo = tok[1]
-        return ast_float(finfo[0], finfo[1], finfo[2])
+        // R38A: scientific notation. Lexer emits a 4-element tuple
+        // [int_v, frac_v, frac_len, exponent]; pre-R38A producers used a
+        // 3-element tuple. Detect by length and supply exponent=0 when
+        // the lexer didn't carry one.
+        let fexp = 0
+        if len(finfo) > 3 { fexp = finfo[3] }
+        return ast_float_exp(finfo[0], finfo[1], finfo[2], fexp)
     }
     if t == TOK_STRING {
         let tok = par_advance()

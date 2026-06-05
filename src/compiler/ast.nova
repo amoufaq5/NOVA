@@ -259,12 +259,31 @@ fn ast_int(value) {
     return n
 }
 
+// R38A: AST_FLOAT_LIT shape is [tag, int_part, frac_part, frac_digits,
+// exponent]. The 4th slot (exponent) is the signed integer exponent from
+// scientific notation (`1.0e-3` -> exponent=-3, `5E10` -> exponent=10,
+// `3.14` -> exponent=0). The pre-R38A 4-slot shape [tag, ip, fp, fd] is
+// still accepted by codegen via a length check (any node missing the
+// exponent slot is treated as exponent=0) so any external producers (none
+// in-tree today) continue to work.
 fn ast_float(int_part, frac_part, frac_digits) {
     let n = list_new()
     push(n, AST_FLOAT_LIT)
     push(n, int_part)
     push(n, frac_part)
     push(n, frac_digits)
+    push(n, 0)
+    return n
+}
+
+// R38A: variant that also carries the scientific-notation exponent.
+fn ast_float_exp(int_part, frac_part, frac_digits, exponent) {
+    let n = list_new()
+    push(n, AST_FLOAT_LIT)
+    push(n, int_part)
+    push(n, frac_part)
+    push(n, frac_digits)
+    push(n, exponent)
     return n
 }
 

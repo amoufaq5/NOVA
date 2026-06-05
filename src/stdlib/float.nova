@@ -1,0 +1,180 @@
+// R38A: NOVA stdlib float helpers — IEEE 754 double-precision support.
+//
+// This module documents the float helper layer shipped in R38A and adds
+// a curated set of DERIVED helpers (clamp / lerp / saturate / sign /
+// approx_eq / square / cube / reciprocal / lerp-step / smoothstep) on
+// top of the builtin family. The builtins themselves (int_to_f /
+// f_to_int / f_abs / f_neg / f_sqrt / f_floor / f_ceil / f_round /
+// f_min / f_max) are emitted by codegen as global trampolines and
+// callable from any user code without any explicit import — see the
+// `Builtins` section below for the full inventory.
+//
+// Why a stdlib module if the names are builtins? Two reasons:
+//
+//   1. The DERIVED helpers below (clamp, lerp, etc.) are common enough
+//      to want at hand without forcing every caller to recreate them.
+//   2. The module is the canonical reference doc for the IEEE 754 layer
+//      — caveats (banker's rounding, NaN-handling, no implicit
+//      coercion) live here so consumers can read them once and move on.
+//
+// To use, concatenate before user code (the standard NOVA include idiom):
+//
+//   cat src/stdlib/float.nova user.nova > combined.nova
+//   bin/nova combined.nova -o user.s
+//
+// =============== Builtins (emitted by codegen, callable directly) ====
+//
+//   int_to_f(n: int) -> float         // cvtsi2sd
+//   f_to_int(x: float) -> int         // cvttsd2si (truncate toward zero)
+//   f_abs(x: float) -> float          // mask sign bit
+//   f_neg(x: float) -> float          // flip sign bit
+//   f_sqrt(x: float) -> float         // sqrtsd
+//   f_floor(x: float) -> float        // roundsd mode 1
+//   f_ceil(x: float) -> float         // roundsd mode 2
+//   f_round(x: float) -> float        // roundsd mode 0 (banker's; see caveat)
+//   f_min(a: float, b: float) -> float // minsd
+//   f_max(a: float, b: float) -> float // maxsd
+//
+// Legacy aliases (kept for backward compatibility with pre-R38A code):
+//   to_float / from_float / fsqrt (same as int_to_f / f_to_int / f_sqrt)
+//   float_add / float_sub / float_mul / float_div / float_cmp / float_to_str
+//
+// =============== Caveats ============================================
+//
+//   1. f_round uses SSE round-to-nearest, ties-to-even (BANKERS' rounding).
+//      Examples: 0.5 -> 0.0, 1.5 -> 2.0, 2.5 -> 2.0, 3.5 -> 4.0. This is
+//      the same semantics every IEEE 754 conforming float library uses.
+//      Schoolbook "always-up" rounding (0.5 -> 1, 1.5 -> 2, 2.5 -> 3) can
+//      be emulated with f_floor(x + 0.5) when really desired.
+//
+//   2. f_to_int truncates toward zero, NOT toward -inf. So
+//      f_to_int(3.7) == 3 and f_to_int(-3.7) == -3 (NOT -4). Use
+//      f_to_int(f_floor(x)) when floor-toward-minus-infinity semantics
+//      are needed.
+//
+//   3. NO IMPLICIT INT->FLOAT COERCION. NOVA's type system does not
+//      auto-promote ints to floats. `3 + 3.14` may compile but the
+//      integer is reinterpreted as IEEE 754 bits, not converted — use
+//      `int_to_f(3) + 3.14` for arithmetically expected behaviour.
+//
+//   4. f_min / f_max follow the SSE2 minsd/maxsd NaN convention: if
+//      either operand is NaN, the SECOND operand is returned. Differs
+//      from IEEE 754 minNum / maxNum which propagate quiet NaNs.
+//
+//   5. Transcendentals (sin, cos, log, exp, pow, atan2, ...) are NOT
+//      part of R38A. Deferred to R38A.3 (libc bindings or polynomial
+//      approximations).
+
+// --- Constants (computed at startup; recomputed on each call site since
+//      NOVA has no global initialisers for non-literal values). ---
+
+fn f_zero() {
+    return int_to_f(0)
+}
+
+fn f_one() {
+    return int_to_f(1)
+}
+
+fn f_neg_one() {
+    return int_to_f(0 - 1)
+}
+
+fn f_two() {
+    return int_to_f(2)
+}
+
+fn f_ten() {
+    return int_to_f(10)
+}
+
+fn f_half() {
+    return float_div(f_one(), f_two())
+}
+
+// --- Derived helpers ---
+
+// f_clamp(x, lo, hi) — clamp x to the closed interval [lo, hi]. NaN
+// inputs follow f_min / f_max semantics (the second arg wins on a NaN).
+fn f_clamp(x, lo, hi) {
+    return f_min(f_max(x, lo), hi)
+}
+
+// f_saturate(x) — clamp to [0.0, 1.0]. Common in graphics shaders.
+fn f_saturate(x) {
+    return f_clamp(x, f_zero(), f_one())
+}
+
+// f_sign(x) -> -1.0 / 0.0 / 1.0 as a float.
+// Note: returns 0.0 for both +0.0 and -0.0 (matches numpy.sign / C math sign).
+fn f_sign(x) {
+    let z = f_zero()
+    let cmp = float_cmp(x, z)
+    if cmp == 1 { return f_one() }
+    if cmp == 0 - 1 { return f_neg_one() }
+    return z
+}
+
+// f_square(x) -> x * x. Convenience for the common case (no special
+// instruction; just a mulsd).
+fn f_square(x) {
+    return float_mul(x, x)
+}
+
+// f_cube(x) -> x * x * x.
+fn f_cube(x) {
+    return float_mul(float_mul(x, x), x)
+}
+
+// f_reciprocal(x) -> 1.0 / x. Naive impl — for fast approximate
+// reciprocal use rcpss (not exposed yet; deferred).
+fn f_reciprocal(x) {
+    return float_div(f_one(), x)
+}
+
+// f_approx_eq(a, b, epsilon) -> 1 if |a - b| < epsilon, else 0. The
+// standard guard for testing float arithmetic: due to rounding,
+// `0.1 + 0.2 == 0.3` is FALSE — use f_approx_eq with epsilon ~ 1e-9.
+fn f_approx_eq(a, b, epsilon) {
+    let diff = f_abs(float_sub(a, b))
+    let cmp = float_cmp(diff, epsilon)
+    if cmp == 0 - 1 { return 1 }
+    return 0
+}
+
+// f_lerp(a, b, t) -> a + (b - a) * t. Linear interpolation. t in
+// [0, 1] gives values between a and b; outside that range extrapolates.
+fn f_lerp(a, b, t) {
+    let delta = float_sub(b, a)
+    return float_add(a, float_mul(delta, t))
+}
+
+// f_step(edge, x) -> 0.0 if x < edge else 1.0. Hard step (no smoothing);
+// see f_smoothstep below for the smooth version. Common in graphics.
+fn f_step(edge, x) {
+    let cmp = float_cmp(x, edge)
+    if cmp == 0 - 1 { return f_zero() }
+    return f_one()
+}
+
+// f_smoothstep(edge0, edge1, x) -> Hermite smooth step. Returns 0 for
+// x <= edge0, 1 for x >= edge1, and a smooth Hermite curve between.
+// Reference: GLSL smoothstep. Common in graphics.
+fn f_smoothstep(edge0, edge1, x) {
+    let t_raw = float_div(float_sub(x, edge0), float_sub(edge1, edge0))
+    let t = f_saturate(t_raw)
+    // 3 t^2 - 2 t^3 = t^2 * (3 - 2t)
+    let three = int_to_f(3)
+    let two = f_two()
+    let inner = float_sub(three, float_mul(two, t))
+    return float_mul(f_square(t), inner)
+}
+
+// f_distance(x1, y1, x2, y2) -> Euclidean distance between two points
+// in 2D. f_sqrt((x2-x1)^2 + (y2-y1)^2). Convenience wrapper.
+fn f_distance(x1, y1, x2, y2) {
+    let dx = float_sub(x2, x1)
+    let dy = float_sub(y2, y1)
+    let sq = float_add(f_square(dx), f_square(dy))
+    return f_sqrt(sq)
+}
