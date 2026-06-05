@@ -30,6 +30,17 @@ let cg_lambda_caps = 0
 let cg_capture_slots = 0
 let cg_current_caps = 0
 let cg_current_cap_name = ""
+// R37A: closures lower to `[fn_ptr, captures_list]` tuples; captures_list[i]
+// holds a 1-element BOX list whose [0] slot is the captured variable's
+// storage. The enclosing scope must allocate the box at the let-stmt that
+// declares a captured local so that source-scope reads/writes go through
+// the same box (by-ref capture). cg_boxed_fns / cg_boxed_locals_per_fn
+// is the pre-computed [fn_name, [boxed_local_names...]] table; the active
+// per-function set is loaded into cg_boxed_locals before gen_function().
+let cg_boxed_fns = 0
+let cg_boxed_locals_per_fn = 0
+let cg_boxed_locals = 0
+let cg_boxed_locals_count = 0
 let cg_lbl_names = 0
 let cg_lbl_breaks = 0
 let cg_lbl_continues = 0
@@ -139,6 +150,10 @@ fn cg_init() {
     cg_enum_count = 0
     cg_lambda_caps = list_new()
     cg_capture_slots = list_new()
+    cg_boxed_fns = list_new()
+    cg_boxed_locals_per_fn = list_new()
+    cg_boxed_locals = list_new()
+    cg_boxed_locals_count = 0
     cg_current_caps = 0
     cg_current_cap_name = ""
     cg_lbl_names = list_new()
@@ -1331,6 +1346,84 @@ fn is_capture_var(name) {
     return 0
 }
 
+// R37A: returns the capture index of `name` in cg_current_caps,
+// or -1 if not a capture. Used to read/write captures_list[idx]
+// inside the lambda body.
+fn capture_index(name) {
+    if cg_current_caps == 0 { return 0 - 1 }
+    let i = 0
+    while i < len(cg_current_caps) {
+        if cg_current_caps[i] == name { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// R37A: returns 1 iff `name` is a local of the current function that
+// must be boxed (because it's captured by a nested lambda). cg_boxed_locals
+// is set by gen_function before walking the body.
+fn is_boxed_local(name) {
+    if cg_boxed_locals == 0 { return 0 }
+    let i = 0
+    while i < cg_boxed_locals_count {
+        if cg_boxed_locals[i] == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// R37A: emit captures_list pointer into rax. captures_list is the synthetic
+// first parameter of every lambda compiled fn; it lives at [rbp - 8].
+fn cg_emit_captures_list() {
+    out("    mov rax, [rbp - 8]")
+    return 0
+}
+
+// R37A: emit `mov rax, box_ptr` where box_ptr is captures_list[idx]
+// (a 1-element list that stores the captured variable's value at [0]).
+fn cg_emit_capture_box(idx) {
+    cg_emit_captures_list()
+    out("    mov rax, [rax + 24]")
+    out("    mov rax, [rax + " + int_to_str(idx * 8) + "]")
+    return 0
+}
+
+// R37A: emit code to load the value held by captures_list[idx].
+// Result in rax. Pattern: rax = captures_list[idx][0].
+fn cg_emit_capture_load(idx) {
+    cg_emit_capture_box(idx)
+    out("    mov rax, [rax + 24]")
+    out("    mov rax, [rax]")
+    return 0
+}
+
+// R37A: emit code to store rax INTO captures_list[idx]'s slot. The
+// caller has already evaluated the source into rax; we push/pop to
+// preserve it across the box-lookup. Result is the stored value in rax.
+fn cg_emit_capture_store(idx) {
+    out("    push rax")
+    cg_emit_capture_box(idx)
+    out("    mov rcx, [rax + 24]")
+    out("    pop rax")
+    out("    mov [rcx], rax")
+    return 0
+}
+
+// R37A: emit a fresh 1-element list with rax as the initial value.
+// Result in rax: the new box pointer. Used at let-stmt for boxed locals
+// and at lambda-creation when binding a not-yet-boxed capture source.
+fn cg_emit_alloc_box() {
+    out("    push rax")
+    out("    call _nova_list_new")
+    out("    pop rcx")
+    out("    mov rsi, rcx")
+    out("    mov rdi, rax")
+    out("    push rax")
+    out("    call _nova_push")
+    out("    pop rax")
+    return 0
+}
+
 fn collect_idents_in(nd, names) {
     if nd == 0 { return 0 }
     let tag = nd[0]
@@ -1583,6 +1676,37 @@ fn compute_captures(lam) {
     let lam_body = lam[3]
     let all_names = list_new()
     collect_idents_in(lam_body, all_names)
+    // R37A: nested-closure transitivity. collect_idents_in does NOT descend
+    // into inner AST_LAMBDAs (line 1451), so a free var referenced ONLY from
+    // a nested lambda would be missed (e.g. `|k| |x| x + k` — the outer needs
+    // to see `k` so it can forward k's box through its own captures_list, but
+    // without recursing, `k` only appears in the inner's body). Recursively
+    // gather free vars of every nested lambda (their captures, recursively
+    // computed) and add them as candidate captures of the OUTER lambda;
+    // outer params/body-lets still shadow them in the filter below.
+    let inner_lams = list_new()
+    cg_collect_inner_lambdas(lam_body, inner_lams)
+    let inli = 0
+    while inli < len(inner_lams) {
+        let in_lam_name = inner_lams[inli]
+        let in_lam_node = cg_find_lambda_by_name(in_lam_name)
+        if in_lam_node != 0 {
+            let inner_caps = compute_captures(in_lam_node)
+            let ic = 0
+            while ic < len(inner_caps) {
+                let in_nm = inner_caps[ic]
+                let already = 0
+                let qi = 0
+                while qi < len(all_names) {
+                    if all_names[qi] == in_nm { already = 1 }
+                    qi = qi + 1
+                }
+                if already == 0 { push(all_names, in_nm) }
+                ic = ic + 1
+            }
+        }
+        inli = inli + 1
+    }
     let save_locals = cg_locals
     let save_lcount = cg_local_count
     cg_locals = list_new()
@@ -1623,6 +1747,276 @@ fn compute_captures(lam) {
         ni = ni + 1
     }
     return captures
+}
+
+// R37A: look up a lambda fn-decl by name in par_lambdas. Used by
+// compute_captures to recurse into nested lambdas.
+fn cg_find_lambda_by_name(name) {
+    let i = 0
+    while i < len(par_lambdas) {
+        let lam = par_lambdas[i]
+        if lam[1] == name { return lam }
+        i = i + 1
+    }
+    return 0
+}
+
+// R37A: walk a node collecting AST_LAMBDA references into `out_lams`.
+// Recurses through statement and expression forms; deep enough to catch
+// lambdas nested inside if/while/match/blocks/expressions.
+fn cg_collect_inner_lambdas(nd, out_lams) {
+    if nd == 0 { return 0 }
+    let tag = nd[0]
+    if tag == AST_LAMBDA {
+        push(out_lams, nd[1])
+        return 0
+    }
+    if tag == AST_INT_LIT { return 0 }
+    if tag == AST_FLOAT_LIT { return 0 }
+    if tag == AST_STR_LIT { return 0 }
+    if tag == AST_BOOL_LIT { return 0 }
+    if tag == AST_NONE_LIT { return 0 }
+    if tag == AST_IDENT { return 0 }
+    if tag == AST_WILDCARD { return 0 }
+    if tag == AST_BREAK_STMT { return 0 }
+    if tag == AST_CONTINUE_STMT { return 0 }
+    if tag == AST_STRUCT_DECL { return 0 }
+    if tag == AST_ENUM_DECL { return 0 }
+    if tag == AST_BLOCK {
+        let bs = nd[1]
+        let i = 0
+        while i < len(bs) {
+            cg_collect_inner_lambdas(bs[i], out_lams)
+            i = i + 1
+        }
+        return 0
+    }
+    if tag == AST_LET_STMT {
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_ASSIGN_STMT {
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_EXPR_STMT {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        return 0
+    }
+    if tag == AST_RETURN_STMT {
+        if nd[1] == 0 { return 0 }
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        return 0
+    }
+    if tag == AST_IF_STMT {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        if nd[2] != 0 { cg_collect_inner_lambdas(nd[2], out_lams) }
+        if nd[3] != 0 { cg_collect_inner_lambdas(nd[3], out_lams) }
+        return 0
+    }
+    if tag == AST_WHILE_STMT {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_FOR_STMT {
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        cg_collect_inner_lambdas(nd[3], out_lams)
+        return 0
+    }
+    if tag == AST_BIN_OP {
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        cg_collect_inner_lambdas(nd[3], out_lams)
+        return 0
+    }
+    if tag == AST_UNARY_OP {
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_AND_EXPR {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_OR_EXPR {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_NULLISH {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_CALL {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        let cas = nd[2]
+        let i = 0
+        while i < len(cas) {
+            cg_collect_inner_lambdas(cas[i], out_lams)
+            i = i + 1
+        }
+        return 0
+    }
+    if tag == AST_INDEX_EXPR {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_FIELD_ACCESS {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        return 0
+    }
+    if tag == AST_LIST_LIT {
+        let els = nd[1]
+        let i = 0
+        while i < len(els) {
+            cg_collect_inner_lambdas(els[i], out_lams)
+            i = i + 1
+        }
+        return 0
+    }
+    if tag == AST_TUPLE_LIT {
+        let tels = nd[1]
+        let i = 0
+        while i < len(tels) {
+            cg_collect_inner_lambdas(tels[i], out_lams)
+            i = i + 1
+        }
+        return 0
+    }
+    if tag == AST_TERNARY {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        cg_collect_inner_lambdas(nd[3], out_lams)
+        return 0
+    }
+    if tag == AST_MATCH_STMT {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        let arms = nd[2]
+        let i = 0
+        while i < len(arms) {
+            let arm = arms[i]
+            cg_collect_inner_lambdas(arm[2], out_lams)
+            if len(arm) > 3 {
+                if arm[3] != 0 { cg_collect_inner_lambdas(arm[3], out_lams) }
+            }
+            i = i + 1
+        }
+        return 0
+    }
+    if tag == AST_TRY_CATCH {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        if len(nd) > 5 {
+            if nd[4] != 0 { cg_collect_inner_lambdas(nd[4], out_lams) }
+        }
+        return 0
+    }
+    if tag == AST_DO_EXPR {
+        let dstmts = nd[1]
+        let i = 0
+        while i < len(dstmts) {
+            cg_collect_inner_lambdas(dstmts[i], out_lams)
+            i = i + 1
+        }
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    if tag == AST_DEFER_STMT {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        return 0
+    }
+    if tag == AST_THROW {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        return 0
+    }
+    if tag == AST_TRY_PROPAGATE {
+        cg_collect_inner_lambdas(nd[1], out_lams)
+        return 0
+    }
+    if tag == AST_DESTRUCTURE {
+        cg_collect_inner_lambdas(nd[2], out_lams)
+        return 0
+    }
+    return 0
+}
+
+// R37A: compute the per-function set of locals that need to be boxed.
+// Uses cg_collect_inner_lambdas to find all lambdas in fn_decl's body,
+// then for each inner lambda intersects its capture set (already in
+// cg_lambda_caps) with fn_decl's own locals (params + body lets).
+// The intersection becomes the boxed-set; stored in cg_boxed_locals_per_fn.
+fn cg_compute_boxed_locals_for_fn(fn_decl) {
+    let fname = fn_decl[1]
+    let fparams = fn_decl[2]
+    let fbody = fn_decl[3]
+    let inner_lams = list_new()
+    cg_collect_inner_lambdas(fbody, inner_lams)
+    if len(inner_lams) == 0 { return 0 }
+    // Build the fn's local-name set (params + body lets).
+    let save_locals = cg_locals
+    let save_lcount = cg_local_count
+    cg_locals = list_new()
+    cg_local_count = 0
+    let pi = 0
+    while pi < len(fparams) {
+        push(cg_locals, fparams[pi])
+        cg_local_count = cg_local_count + 1
+        pi = pi + 1
+    }
+    collect_locals(fbody)
+    let fn_locals = cg_locals
+    let fn_lcount = cg_local_count
+    cg_locals = save_locals
+    cg_local_count = save_lcount
+    // For each inner lambda's capture, if the capture name is a local of
+    // this fn, mark it as boxed for THIS fn.
+    let boxed = list_new()
+    let bx = 0
+    while bx < len(inner_lams) {
+        let lam_name = inner_lams[bx]
+        let lcaps = get_lambda_caps(lam_name)
+        let ci = 0
+        while ci < len(lcaps) {
+            let nm = lcaps[ci]
+            let is_my_local = 0
+            let li2 = 0
+            while li2 < fn_lcount {
+                if fn_locals[li2] == nm { is_my_local = 1 }
+                li2 = li2 + 1
+            }
+            if is_my_local == 1 {
+                let already = 0
+                let bi = 0
+                while bi < len(boxed) {
+                    if boxed[bi] == nm { already = 1 }
+                    bi = bi + 1
+                }
+                if already == 0 { push(boxed, nm) }
+            }
+            ci = ci + 1
+        }
+        bx = bx + 1
+    }
+    if len(boxed) > 0 {
+        let entry = list_new()
+        push(entry, fname)
+        push(entry, boxed)
+        push(cg_boxed_locals_per_fn, entry)
+    }
+    return 0
+}
+
+// R37A: look up the boxed-locals set for fn `name`.
+fn cg_get_boxed_locals_for_fn(name) {
+    let i = 0
+    while i < len(cg_boxed_locals_per_fn) {
+        let e = cg_boxed_locals_per_fn[i]
+        if e[0] == name { return e[1] }
+        i = i + 1
+    }
+    return list_new()
 }
 
 fn is_builtin_fn(name) {
@@ -3962,11 +4356,20 @@ fn gen_expr(nd) {
         let name = nd[1]
         if has_local(name) == 1 {
             let off = local_offset(name)
+            // R37A: boxed local — load box, then deref to get value.
+            if is_boxed_local(name) == 1 {
+                out("    mov rax, [rbp - " + int_to_str(off) + "]")
+                out("    mov rax, [rax + 24]")
+                out("    mov rax, [rax]")
+                return 0
+            }
             out("    mov rax, [rbp - " + int_to_str(off) + "]")
             return 0
         }
         if is_capture_var(name) == 1 {
-            out("    mov rax, [rip + _cap_" + cg_current_cap_name + "_" + name + "]")
+            // R37A: read from captures_list[idx][0] via the new box ABI.
+            let cidx = capture_index(name)
+            cg_emit_capture_load(cidx)
             return 0
         }
         if is_global(name) == 1 {
@@ -4423,49 +4826,87 @@ fn gen_expr(nd) {
                 out("    add rsp, " + int_to_str(extra_args * 8 + align_pad))
             }
         } else {
-            // Indirect call through a function pointer variable
-            let ind_extra = 0
+            // R37A: indirect call dispatch. The callee VALUE may be:
+            //   (a) a closure tuple `[fn_ptr, captures_list]` — the new
+            //       R37A shape produced by AST_LAMBDA. Recognized by
+            //       `[rax] == -1` (list magic word). Calling convention is
+            //       fn_ptr(captures_list, original_args...).
+            //   (b) a raw top-level fn pointer (legacy: `let f = double`
+            //       where `double` is a known top-level fn). The compiled
+            //       fn takes args in the original order without a hidden
+            //       captures_list.
+            //
+            // We pick the path at runtime via the magic-word check. Args are
+            // first pushed onto the stack so we don't need to know the path
+            // before evaluating them; then we load callee into rax, detect,
+            // and pop into the right registers.
+            let ind_total = argc + 1  // +1 for captures_list in worst case
             let ind_pad = 0
-            if argc > 6 {
-                ind_extra = argc - 6
+            if ind_total > 6 {
+                let ind_extra = ind_total - 6
                 if ind_extra % 2 == 1 { ind_pad = 8 }
+            } else {
+                // Even for closure path we may push 6 slots; align to 16.
+                if argc > 5 {
+                    if (argc - 5) % 2 == 1 { ind_pad = 8 }
+                }
             }
             if ind_pad > 0 { out("    sub rsp, 8") }
-            // Evaluate args first, push onto stack
+            // Evaluate args first, push onto stack (right-to-left).
             let i = argc - 1
             while i >= 0 {
                 gen_expr(args[i])
                 out("    push rax")
                 i = i - 1
             }
+            // Load callee value into rax.
+            if ast_tag(callee) == AST_IDENT {
+                if is_global(callee_name) == 1 {
+                    out("    mov rax, [rip + _g_" + callee_name + "]")
+                } else {
+                    let off = local_offset(callee_name)
+                    if is_boxed_local(callee_name) == 1 {
+                        out("    mov rax, [rbp - " + int_to_str(off) + "]")
+                        out("    mov rax, [rax + 24]")
+                        out("    mov rax, [rax]")
+                    } else {
+                        out("    mov rax, [rbp - " + int_to_str(off) + "]")
+                    }
+                }
+            } else {
+                gen_expr(callee)
+            }
+            // Runtime detection: closure tuple vs raw fn ptr.
+            let legacy_lbl = new_label()
+            let dispatch_lbl = new_label()
+            out("    cmp qword ptr [rax], -1")
+            out("    jne " + legacy_lbl)
+            // Closure path: rax is the tuple. Extract fn_ptr + captures_list.
+            out("    mov rcx, [rax + 24]")
+            out("    mov r11, [rcx]")           // fn_ptr at slot 0
+            out("    mov rax, [rcx + 8]")       // captures_list at slot 1
+            out("    mov rdi, rax")              // captures_list -> rdi (synthetic 1st arg)
+            if argc > 0 { out("    pop rsi") }
+            if argc > 1 { out("    pop rdx") }
+            if argc > 2 { out("    pop rcx") }
+            if argc > 3 { out("    pop r8") }
+            if argc > 4 { out("    pop r9") }
+            out("    jmp " + dispatch_lbl)
+            out_label(legacy_lbl)
+            // Legacy path: rax is a raw fn ptr. Original args -> rdi/rsi/...
+            out("    mov r11, rax")
             if argc > 0 { out("    pop rdi") }
             if argc > 1 { out("    pop rsi") }
             if argc > 2 { out("    pop rdx") }
             if argc > 3 { out("    pop rcx") }
             if argc > 4 { out("    pop r8") }
             if argc > 5 { out("    pop r9") }
-            // Load function pointer into r11 (caller-saved, not used for args)
-            // The callee could be an identifier (variable) or any expression
-            if ast_tag(callee) == AST_IDENT {
-                if is_global(callee_name) == 1 {
-                    out("    mov r11, [rip + _g_" + callee_name + "]")
-                } else {
-                    let off = local_offset(callee_name)
-                    out("    mov r11, [rbp - " + int_to_str(off) + "]")
-                }
-            } else {
-                // Complex expression callee - save arg registers, evaluate, restore
-                // For now, push all arg regs, evaluate callee, then restore
-                if argc > 0 { out("    push rdi") }
-                if argc > 1 { out("    push rsi") }
-                gen_expr(callee)
-                out("    mov r11, rax")
-                if argc > 1 { out("    pop rsi") }
-                if argc > 0 { out("    pop rdi") }
-            }
+            out_label(dispatch_lbl)
             out("    call r11")
-            if argc > 6 {
-                out("    add rsp, " + int_to_str(ind_extra * 8 + ind_pad))
+            if argc > 5 {
+                out("    add rsp, " + int_to_str((argc - 5) * 8 + ind_pad))
+            } else {
+                if ind_pad > 0 { out("    add rsp, " + int_to_str(ind_pad)) }
             }
         }
         return 0
@@ -4549,25 +4990,94 @@ fn gen_expr(nd) {
     }
 
     if tag == AST_LAMBDA {
+        // R37A: a closure value is a 2-element list `[fn_ptr, captures_list]`.
+        // captures_list is a fresh per-instance list whose i-th slot is a
+        // 1-element BOX holding the captured variable's value. Boxes are
+        // SHARED with the enclosing scope (when the captured local was
+        // declared as a boxed local — see is_boxed_local handling in
+        // gen_function/let-stmt), giving by-reference semantics: a write
+        // in either the source scope OR through the closure mutates the
+        // same storage and is observable from both sides.
         let lname = nd[1]
         let lcaps = get_lambda_caps(lname)
-        let lci = 0
-        while lci < len(lcaps) {
-            let cap_nm = lcaps[lci]
-            if is_global(cap_nm) == 1 {
-                out("    mov rax, [rip + _g_" + cap_nm + "]")
-            } else {
-                if is_capture_var(cap_nm) == 1 {
-                    out("    mov rax, [rip + _cap_" + cg_current_cap_name + "_" + cap_nm + "]")
+        let lcap_count = len(lcaps)
+        // Step 1: allocate captures_list (or 0 if no captures).
+        if lcap_count == 0 {
+            out("    xor eax, eax")
+            out("    push rax")
+        } else {
+            out("    call _nova_list_new")
+            out("    push rax")
+            let lci = 0
+            while lci < lcap_count {
+                let cap_nm = lcaps[lci]
+                // Fetch the box pointer for cap_nm. Sources, in priority:
+                //  (a) a boxed local in the CURRENT scope -> stack slot
+                //      holds the box pointer directly; load and reuse it.
+                //  (b) a capture of the CURRENT scope (nested closure) ->
+                //      forward the box pointer from this fn's captures_list
+                //      (captures_list[outer_idx]).
+                //  (c) a non-boxed local (shouldn't happen for captures, since
+                //      compute_captures + cg_compute_boxed_locals_for_fn co-ordinate;
+                //      but we fall back to wrapping the value in a fresh box).
+                //  (d) a global -> wrap the current global value into a fresh
+                //      box (globals don't share storage with the closure by
+                //      design; this preserves R35C's "globals are live via
+                //      _g_<name>" behaviour by reading the global at call time
+                //      via is_global in the body, NOT via the box. The box is
+                //      never read for globals since compute_captures excludes
+                //      globals from the capture set in the first place.)
+                if is_global(cap_nm) == 1 {
+                    out("    mov rax, [rip + _g_" + cap_nm + "]")
+                    cg_emit_alloc_box()
                 } else {
-                    let cap_off = local_offset(cap_nm)
-                    out("    mov rax, [rbp - " + int_to_str(cap_off) + "]")
+                    if is_capture_var(cap_nm) == 1 {
+                        // Outer closure forwarding: load the box from THIS
+                        // fn's captures_list at the outer capture index.
+                        let outer_idx = capture_index(cap_nm)
+                        cg_emit_capture_box(outer_idx)
+                    } else {
+                        if has_local(cap_nm) == 1 {
+                            if is_boxed_local(cap_nm) == 1 {
+                                let lo = local_offset(cap_nm)
+                                out("    mov rax, [rbp - " + int_to_str(lo) + "]")
+                            } else {
+                                let lo2 = local_offset(cap_nm)
+                                out("    mov rax, [rbp - " + int_to_str(lo2) + "]")
+                                cg_emit_alloc_box()
+                            }
+                        } else {
+                            // Fallback: best-effort wrap current value.
+                            let lo3 = local_offset(cap_nm)
+                            out("    mov rax, [rbp - " + int_to_str(lo3) + "]")
+                            cg_emit_alloc_box()
+                        }
+                    }
                 }
+                // Push the box (in rax) onto captures_list.
+                out("    mov rsi, rax")
+                out("    mov rdi, [rsp]")
+                out("    call _nova_push")
+                lci = lci + 1
             }
-            out("    mov [rip + _cap_" + lname + "_" + cap_nm + "], rax")
-            lci = lci + 1
+            // captures_list is on top of stack; leave it there for the
+            // closure-tuple construction below.
         }
+        // Step 2: build the closure tuple [fn_ptr, captures_list].
+        // captures_list (or 0) is currently on top of stack.
+        out("    call _nova_list_new")
+        out("    push rax")
         out("    lea rax, [rip + " + lname + "]")
+        out("    mov rsi, rax")
+        out("    mov rdi, [rsp]")
+        out("    call _nova_push")
+        out("    pop rax")        // tuple in rax
+        out("    pop rcx")        // captures_list in rcx
+        out("    push rax")        // tuple back on stack
+        out("    mov rsi, rcx")
+        out("    mov rdi, [rsp]")
+        out("    call _nova_push")
+        out("    pop rax")        // final tuple in rax
         return 0
     }
 
@@ -5086,6 +5596,12 @@ fn gen_stmt(nd) {
         if is_global(name) == 1 {
             out("    mov [rip + _g_" + name + "], rax")
         } else {
+            // R37A: if this local is captured by a nested lambda, allocate
+            // a 1-element box list and store [value] in it. The box pointer
+            // is the slot's value; reads/writes go through box[0].
+            if is_boxed_local(name) == 1 {
+                cg_emit_alloc_box()
+            }
             let off = local_offset(name)
             out("    mov [rbp - " + int_to_str(off) + "], rax")
         }
@@ -5100,11 +5616,21 @@ fn gen_stmt(nd) {
         }
         gen_expr(value)
         if has_local(name) == 1 {
-            let off = local_offset(name)
-            out("    mov [rbp - " + int_to_str(off) + "], rax")
+            // R37A: boxed locals write through the box.
+            if is_boxed_local(name) == 1 {
+                let off2 = local_offset(name)
+                out("    mov rcx, [rbp - " + int_to_str(off2) + "]")
+                out("    mov rdx, [rcx + 24]")
+                out("    mov [rdx], rax")
+            } else {
+                let off = local_offset(name)
+                out("    mov [rbp - " + int_to_str(off) + "], rax")
+            }
         } else {
             if is_capture_var(name) == 1 {
-                out("    mov [rip + _cap_" + cg_current_cap_name + "_" + name + "], rax")
+                // R37A: write through captures_list[idx] -> box[0].
+                let cidx = capture_index(name)
+                cg_emit_capture_store(cidx)
             } else {
                 if is_global(name) == 1 {
                     out("    mov [rip + _g_" + name + "], rax")
@@ -5963,6 +6489,25 @@ fn gen_function(nd) {
     let params = nd[2]
     let body = nd[3]
 
+    // R37A: every lambda fn (synthesized via `_lambda_N`) gets a synthetic
+    // captures_list as its FIRST parameter. The caller passes captures_list
+    // as rdi; the lambda body reads captures via captures_list[i][0]. The
+    // synthetic param is named `__captures__` and stored at [rbp - 8].
+    let is_lambda_fn = 0
+    if starts_with(name, "_lambda_") == 1 {
+        is_lambda_fn = 1
+    }
+    let effective_params = params
+    if is_lambda_fn == 1 {
+        effective_params = list_new()
+        push(effective_params, "__captures__")
+        let pcp = 0
+        while pcp < len(params) {
+            push(effective_params, params[pcp])
+            pcp = pcp + 1
+        }
+    }
+
     let fn_caps = get_lambda_caps(name)
     if len(fn_caps) > 0 {
         cg_current_caps = fn_caps
@@ -5974,16 +6519,21 @@ fn gen_function(nd) {
 
     cg_locals = list_new()
     cg_local_count = 0
-    cg_params = params
-    cg_param_count = len(params)
+    cg_params = effective_params
+    cg_param_count = len(effective_params)
     cg_defers = list_new()
     cg_defer_count = 0
     cg_float_vars = list_new()
     cg_float_var_count = 0
 
+    // R37A: load the boxed-locals set for THIS function so let-stmt /
+    // ident / assign codegen knows to indirect through the box.
+    cg_boxed_locals = cg_get_boxed_locals_for_fn(name)
+    cg_boxed_locals_count = len(cg_boxed_locals)
+
     let pi = 0
     while pi < cg_param_count {
-        push(cg_locals, params[pi])
+        push(cg_locals, effective_params[pi])
         cg_local_count = cg_local_count + 1
         pi = pi + 1
     }
@@ -6037,6 +6587,32 @@ fn gen_function(nd) {
             out("    mov rax, [rbp + " + int_to_str(stk_off) + "]")
             out("    mov [rbp - " + int_to_str(lcl_off) + "], rax")
             sp_i = sp_i + 1
+        }
+    }
+
+    // R37A: for each PARAM that's also in the boxed-locals set, replace
+    // its stack-slot value with a freshly-allocated 1-element box list
+    // [param_value]. Subsequent reads/writes to the param name go through
+    // the box (see is_boxed_local handling in gen_expr/gen_stmt). Note:
+    // skip the synthetic `__captures__` param itself (it's already a list,
+    // never boxed). We don't box the captures_list slot.
+    if cg_boxed_locals_count > 0 {
+        let bp_i = 0
+        while bp_i < cg_param_count {
+            let pname = effective_params[bp_i]
+            let do_box = 0
+            let bb = 0
+            while bb < cg_boxed_locals_count {
+                if cg_boxed_locals[bb] == pname { do_box = 1 }
+                bb = bb + 1
+            }
+            if do_box == 1 {
+                let p_off = (bp_i + 1) * 8
+                out("    mov rax, [rbp - " + int_to_str(p_off) + "]")
+                cg_emit_alloc_box()
+                out("    mov [rbp - " + int_to_str(p_off) + "], rax")
+            }
+            bp_i = bp_i + 1
         }
     }
 
@@ -9797,6 +10373,27 @@ fn gen_program(program) {
         li = li + 1
     }
 
+    // R37A pre-pass: for each user fn / lambda, compute the set of its locals
+    // that are captured by lambdas nested inside its body. Those locals must
+    // be BOXED at let-stmt time so the source-scope reads/writes and the
+    // closure's view share storage (by-reference capture). We walk each fn's
+    // body collecting (1) the lambdas declared inside it and (2) the fn's own
+    // local names, then intersect the union of inner-lambda captures with the
+    // local names.
+    li = 0
+    while li < len(decls) {
+        let dd = decls[li]
+        if ast_tag(dd) == AST_FN_DECL {
+            cg_compute_boxed_locals_for_fn(dd)
+        }
+        li = li + 1
+    }
+    li = 0
+    while li < len(par_lambdas) {
+        cg_compute_boxed_locals_for_fn(par_lambdas[li])
+        li = li + 1
+    }
+
     out(".intel_syntax noprefix")
     if cg_debug == 1 {
         if len(cg_source_file) > 0 {
@@ -10037,15 +10634,10 @@ fn gen_program(program) {
         i = i + 1
     }
 
-    // Emit closure capture slots
-    i = 0
-    while i < len(cg_capture_slots) {
-        let slot = cg_capture_slots[i]
-        out("    .align 8")
-        out_label("_cap_" + slot[0] + "_" + slot[1])
-        out("    .quad 0")
-        i = i + 1
-    }
+    // R37A: closure capture slots `_cap_<lname>_<var>` are no longer emitted
+    // — closures now lower to `[fn_ptr, captures_list]` tuples and captures
+    // live in per-instance heap-allocated boxes (see AST_LAMBDA + AST_IDENT
+    // handling in gen_expr). The .bss path that R35C used is dead code.
 
     // Emit Win32 API import declarations for PE/COFF linking
     if cg_target == 3 {
@@ -19183,6 +19775,11 @@ fn gen_runtime() {
     out("    ret")
 
     // --- map_list(list, fn): create new list by applying fn to each element ---
+    // R37A: fn may be a closure tuple `[fn_ptr, captures_list]` (the new
+    // shape) or a legacy raw fn pointer. We detect by inspecting [rsi]: if
+    // it equals -1 (list magic word) it's a closure tuple. The closure
+    // calls expect `(captures_list, elem)`; legacy raw calls expect
+    // `(elem)`. cg_closure_dispatch handles both branches.
     out("")
     out_label("_nova_map_list")
     out("    push rbp")
@@ -19191,8 +19788,19 @@ fn gen_runtime() {
     out("    push r13")
     out("    push r14")
     out("    push r15")
+    out("    push rbx")          // closure captures_list (or 0 for legacy)
+    out("    sub rsp, 8")        // 16-byte align, also reserves is_closure slot
     out("    mov r12, rdi")  // source list
-    out("    mov r13, rsi")  // function pointer
+    out("    mov r13, rsi")  // raw fn ptr (closure code address)
+    out("    xor ebx, ebx")  // captures_list = 0
+    out("    mov dword ptr [rbp - 48], 0")   // is_closure flag (pad slot)
+    out("    cmp qword ptr [rsi], -1")
+    out("    jne .ml_have_fn")
+    out("    mov rax, [rsi + 24]")
+    out("    mov r13, [rax]")        // fn_ptr from tuple[0]
+    out("    mov rbx, [rax + 8]")    // captures_list from tuple[1]
+    out("    mov dword ptr [rbp - 48], 1")   // mark as closure call
+    out(".ml_have_fn:")
     out("    call _nova_list_new")
     out("    mov r14, rax")  // result list
     out("    xor r15d, r15d")  // index
@@ -19200,7 +19808,14 @@ fn gen_runtime() {
     out("    cmp r15, [r12 + 8]")
     out("    jge .ml_done")
     out("    mov rax, [r12 + 24]")
+    out("    cmp dword ptr [rbp - 48], 0")
+    out("    je .ml_legacy")
+    out("    mov rsi, [rax + r15*8]")
+    out("    mov rdi, rbx")
+    out("    jmp .ml_dispatch")
+    out(".ml_legacy:")
     out("    mov rdi, [rax + r15*8]")
+    out(".ml_dispatch:")
     out("    mov r11, r13")
     out("    call r11")
     out("    mov rsi, rax")
@@ -19210,6 +19825,8 @@ fn gen_runtime() {
     out("    jmp .ml_loop")
     out(".ml_done:")
     out("    mov rax, r14")
+    out("    add rsp, 8")
+    out("    pop rbx")
     out("    pop r15")
     out("    pop r14")
     out("    pop r13")
@@ -19218,6 +19835,7 @@ fn gen_runtime() {
     out("    ret")
 
     // --- filter(list, fn): new list with elements where fn returns non-zero ---
+    // R37A: closure-tuple aware (see _nova_map_list for protocol).
     out("")
     out_label("_nova_filter")
     out("    push rbp")
@@ -19226,8 +19844,19 @@ fn gen_runtime() {
     out("    push r13")
     out("    push r14")
     out("    push r15")
+    out("    push rbx")
+    out("    sub rsp, 8")
     out("    mov r12, rdi")
     out("    mov r13, rsi")
+    out("    xor ebx, ebx")
+    out("    mov dword ptr [rbp - 48], 0")
+    out("    cmp qword ptr [rsi], -1")
+    out("    jne .fl_have_fn")
+    out("    mov rax, [rsi + 24]")
+    out("    mov r13, [rax]")
+    out("    mov rbx, [rax + 8]")
+    out("    mov dword ptr [rbp - 48], 1")
+    out(".fl_have_fn:")
     out("    call _nova_list_new")
     out("    mov r14, rax")
     out("    xor r15d, r15d")
@@ -19235,14 +19864,24 @@ fn gen_runtime() {
     out("    cmp r15, [r12 + 8]")
     out("    jge .fl_done")
     out("    mov rax, [r12 + 24]")
-    out("    mov rdi, [rax + r15*8]")
-    out("    push rdi")
+    out("    mov rdx, [rax + r15*8]")    // elem
+    out("    push rdx")
+    out("    sub rsp, 8")  // align
+    out("    cmp dword ptr [rbp - 48], 0")
+    out("    je .fl_legacy")
+    out("    mov rsi, rdx")
+    out("    mov rdi, rbx")
+    out("    jmp .fl_dispatch")
+    out(".fl_legacy:")
+    out("    mov rdi, rdx")
+    out(".fl_dispatch:")
     out("    mov r11, r13")
     out("    call r11")
-    out("    pop rdi")
+    out("    add rsp, 8")
+    out("    pop rdx")
     out("    test rax, rax")
     out("    jz .fl_skip")
-    out("    mov rsi, rdi")
+    out("    mov rsi, rdx")
     out("    mov rdi, r14")
     out("    call _nova_push")
     out(".fl_skip:")
@@ -19250,6 +19889,8 @@ fn gen_runtime() {
     out("    jmp .fl_loop")
     out(".fl_done:")
     out("    mov rax, r14")
+    out("    add rsp, 8")
+    out("    pop rbx")
     out("    pop r15")
     out("    pop r14")
     out("    pop r13")
@@ -19258,6 +19899,8 @@ fn gen_runtime() {
     out("    ret")
 
     // --- reduce(list, fn, init): accumulate with fn(acc, elem) ---
+    // R37A: closure-tuple aware. For closure path, the call shape is
+    // fn(captures_list, acc, elem). For legacy raw fn ptr it's fn(acc, elem).
     out("")
     out_label("_nova_reduce")
     out("    push rbp")
@@ -19266,16 +19909,35 @@ fn gen_runtime() {
     out("    push r13")
     out("    push r14")
     out("    push r15")
+    out("    push rbx")
+    out("    sub rsp, 8")
     out("    mov r12, rdi")  // list
-    out("    mov r13, rsi")  // function
+    out("    mov r13, rsi")  // raw fn ptr
     out("    mov r14, rdx")  // accumulator
+    out("    xor ebx, ebx")
+    out("    mov dword ptr [rbp - 48], 0")
+    out("    cmp qword ptr [rsi], -1")
+    out("    jne .rd_have_fn")
+    out("    mov rax, [rsi + 24]")
+    out("    mov r13, [rax]")
+    out("    mov rbx, [rax + 8]")
+    out("    mov dword ptr [rbp - 48], 1")
+    out(".rd_have_fn:")
     out("    xor r15d, r15d")
     out(".rd_loop:")
     out("    cmp r15, [r12 + 8]")
     out("    jge .rd_done")
     out("    mov rax, [r12 + 24]")
+    out("    cmp dword ptr [rbp - 48], 0")
+    out("    je .rd_legacy")
+    out("    mov rdx, [rax + r15*8]")    // elem
+    out("    mov rsi, r14")                // acc
+    out("    mov rdi, rbx")                // captures_list
+    out("    jmp .rd_dispatch")
+    out(".rd_legacy:")
     out("    mov rsi, [rax + r15*8]")
     out("    mov rdi, r14")
+    out(".rd_dispatch:")
     out("    mov r11, r13")
     out("    call r11")
     out("    mov r14, rax")
@@ -19283,6 +19945,8 @@ fn gen_runtime() {
     out("    jmp .rd_loop")
     out(".rd_done:")
     out("    mov rax, r14")
+    out("    add rsp, 8")
+    out("    pop rbx")
     out("    pop r15")
     out("    pop r14")
     out("    pop r13")
@@ -19291,6 +19955,7 @@ fn gen_runtime() {
     out("    ret")
 
     // --- foreach(list, fn): call fn(elem) for each, return 0 ---
+    // R37A: closure-tuple aware (see _nova_map_list for protocol).
     out("")
     out_label("_nova_foreach")
     out("    push rbp")
@@ -19298,20 +19963,42 @@ fn gen_runtime() {
     out("    push r12")
     out("    push r13")
     out("    push r14")
+    out("    push r15")
+    out("    push rbx")
+    out("    sub rsp, 8")
     out("    mov r12, rdi")
     out("    mov r13, rsi")
+    out("    xor ebx, ebx")
+    out("    mov dword ptr [rbp - 48], 0")
+    out("    cmp qword ptr [rsi], -1")
+    out("    jne .fe_have_fn")
+    out("    mov rax, [rsi + 24]")
+    out("    mov r13, [rax]")
+    out("    mov rbx, [rax + 8]")
+    out("    mov dword ptr [rbp - 48], 1")
+    out(".fe_have_fn:")
     out("    xor r14d, r14d")
     out(".fe_loop:")
     out("    cmp r14, [r12 + 8]")
     out("    jge .fe_done")
     out("    mov rax, [r12 + 24]")
+    out("    cmp dword ptr [rbp - 48], 0")
+    out("    je .fe_legacy")
+    out("    mov rsi, [rax + r14*8]")
+    out("    mov rdi, rbx")
+    out("    jmp .fe_dispatch")
+    out(".fe_legacy:")
     out("    mov rdi, [rax + r14*8]")
+    out(".fe_dispatch:")
     out("    mov r11, r13")
     out("    call r11")
     out("    inc r14")
     out("    jmp .fe_loop")
     out(".fe_done:")
     out("    xor eax, eax")
+    out("    add rsp, 8")
+    out("    pop rbx")
+    out("    pop r15")
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")
@@ -20211,6 +20898,7 @@ fn gen_runtime() {
     out("    ret")
 
     // --- flat_map(list, fn): map then flatten one level ---
+    // R37A: closure-tuple aware (see _nova_map_list for protocol).
     out("")
     out_label("_nova_flat_map")
     out("    push rbp")
@@ -20219,8 +20907,19 @@ fn gen_runtime() {
     out("    push r13")
     out("    push r14")
     out("    push r15")
+    out("    push rbx")
+    out("    sub rsp, 8")
     out("    mov r12, rdi")
     out("    mov r13, rsi")
+    out("    xor ebx, ebx")
+    out("    mov dword ptr [rbp - 48], 0")
+    out("    cmp qword ptr [rsi], -1")
+    out("    jne .fm_have_fn")
+    out("    mov rax, [rsi + 24]")
+    out("    mov r13, [rax]")
+    out("    mov rbx, [rax + 8]")
+    out("    mov dword ptr [rbp - 48], 1")
+    out(".fm_have_fn:")
     out("    call _nova_list_new")
     out("    mov r14, rax")
     out("    xor r15d, r15d")
@@ -20228,7 +20927,14 @@ fn gen_runtime() {
     out("    cmp r15, [r12 + 8]")
     out("    jge .fm_done")
     out("    mov rax, [r12 + 24]")
+    out("    cmp dword ptr [rbp - 48], 0")
+    out("    je .fm_legacy")
+    out("    mov rsi, [rax + r15*8]")
+    out("    mov rdi, rbx")
+    out("    jmp .fm_dispatch")
+    out(".fm_legacy:")
     out("    mov rdi, [rax + r15*8]")
+    out(".fm_dispatch:")
     out("    mov r11, r13")
     out("    call r11")
     // result should be a list, append its elements
@@ -20247,6 +20953,8 @@ fn gen_runtime() {
     out("    jmp .fm_loop")
     out(".fm_done:")
     out("    mov rax, r14")
+    out("    add rsp, 8")
+    out("    pop rbx")
     out("    pop r15")
     out("    pop r14")
     out("    pop r13")
@@ -20255,6 +20963,7 @@ fn gen_runtime() {
     out("    ret")
 
     // --- any(list, fn): returns 1 if fn returns true for any element ---
+    // R37A: closure-tuple aware (see _nova_map_list for protocol).
     out("")
     out_label("_nova_any")
     out("    push rbp")
@@ -20262,14 +20971,33 @@ fn gen_runtime() {
     out("    push r12")
     out("    push r13")
     out("    push r14")
+    out("    push r15")
+    out("    push rbx")
+    out("    sub rsp, 8")
     out("    mov r12, rdi")
     out("    mov r13, rsi")
+    out("    xor ebx, ebx")
+    out("    mov dword ptr [rbp - 48], 0")
+    out("    cmp qword ptr [rsi], -1")
+    out("    jne .any_have_fn")
+    out("    mov rax, [rsi + 24]")
+    out("    mov r13, [rax]")
+    out("    mov rbx, [rax + 8]")
+    out("    mov dword ptr [rbp - 48], 1")
+    out(".any_have_fn:")
     out("    xor r14d, r14d")
     out(".any_loop:")
     out("    cmp r14, [r12 + 8]")
     out("    jge .any_false")
     out("    mov rax, [r12 + 24]")
+    out("    cmp dword ptr [rbp - 48], 0")
+    out("    je .any_legacy")
+    out("    mov rsi, [rax + r14*8]")
+    out("    mov rdi, rbx")
+    out("    jmp .any_dispatch")
+    out(".any_legacy:")
     out("    mov rdi, [rax + r14*8]")
+    out(".any_dispatch:")
     out("    mov r11, r13")
     out("    call r11")
     out("    test rax, rax")
@@ -20278,6 +21006,9 @@ fn gen_runtime() {
     out("    jmp .any_loop")
     out(".any_true:")
     out("    mov eax, 1")
+    out("    add rsp, 8")
+    out("    pop rbx")
+    out("    pop r15")
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")
@@ -20285,6 +21016,9 @@ fn gen_runtime() {
     out("    ret")
     out(".any_false:")
     out("    xor eax, eax")
+    out("    add rsp, 8")
+    out("    pop rbx")
+    out("    pop r15")
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")
@@ -20292,6 +21026,7 @@ fn gen_runtime() {
     out("    ret")
 
     // --- all(list, fn): returns 1 if fn returns true for all elements ---
+    // R37A: closure-tuple aware (see _nova_map_list for protocol).
     out("")
     out_label("_nova_all")
     out("    push rbp")
@@ -20299,14 +21034,33 @@ fn gen_runtime() {
     out("    push r12")
     out("    push r13")
     out("    push r14")
+    out("    push r15")
+    out("    push rbx")
+    out("    sub rsp, 8")
     out("    mov r12, rdi")
     out("    mov r13, rsi")
+    out("    xor ebx, ebx")
+    out("    mov dword ptr [rbp - 48], 0")
+    out("    cmp qword ptr [rsi], -1")
+    out("    jne .all_have_fn")
+    out("    mov rax, [rsi + 24]")
+    out("    mov r13, [rax]")
+    out("    mov rbx, [rax + 8]")
+    out("    mov dword ptr [rbp - 48], 1")
+    out(".all_have_fn:")
     out("    xor r14d, r14d")
     out(".all_loop:")
     out("    cmp r14, [r12 + 8]")
     out("    jge .all_true")
     out("    mov rax, [r12 + 24]")
+    out("    cmp dword ptr [rbp - 48], 0")
+    out("    je .all_legacy")
+    out("    mov rsi, [rax + r14*8]")
+    out("    mov rdi, rbx")
+    out("    jmp .all_dispatch")
+    out(".all_legacy:")
     out("    mov rdi, [rax + r14*8]")
+    out(".all_dispatch:")
     out("    mov r11, r13")
     out("    call r11")
     out("    test rax, rax")
@@ -20315,6 +21069,9 @@ fn gen_runtime() {
     out("    jmp .all_loop")
     out(".all_true:")
     out("    mov eax, 1")
+    out("    add rsp, 8")
+    out("    pop rbx")
+    out("    pop r15")
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")
@@ -20322,6 +21079,9 @@ fn gen_runtime() {
     out("    ret")
     out(".all_false:")
     out("    xor eax, eax")
+    out("    add rsp, 8")
+    out("    pop rbx")
+    out("    pop r15")
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")

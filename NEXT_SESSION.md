@@ -1,5 +1,151 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R37A — closures lower to `[fn_ptr, captures_list]` tuples + by-reference capture
+
+**Status: complete** — closures shift from R35C's static-slot
+`.bss` lowering to per-instance heap-allocated tuples
+`[fn_ptr, captures_list]`. R35C's two documented limitations
+("last write wins" on multi-instance + by-value snapshot) are both
+fixed in the same migration.
+
+### Closure value representation
+
+```
+closure_value : List{magic=-1, count=2, cap, items}
+items[0] = fn_ptr          ; raw code address of `_lambda_N`
+items[1] = captures_list   ; List{magic=-1, count=N, cap, items}
+                           ; OR integer 0 if no captures
+captures_list[i] = box     ; List{magic=-1, count=1, cap, items}
+box[0]           = value   ; the captured variable's storage
+```
+
+The captures_list element is a 1-element BOX so the source scope's
+local and the closure's view of that capture share storage. A write
+on either side is visible from the other (by-reference semantics).
+
+### Synthetic compiled-fn signature
+
+Every `_lambda_N` compiled fn gets a synthetic first parameter
+`__captures__` prepended in `gen_function`. So a closure
+`|x, y| body` compiles to `fn _lambda_N(__captures__, x, y) {body'}`
+where body' reads capture `cap` via `captures_list[i][0]` and writes
+via the same box. Caller pushes captures_list as rdi, then the
+original args shift one slot right.
+
+### Indirect-call dispatch
+
+`c(arg1, arg2)` where `c` is a value (not a known fn name) emits a
+runtime detection:
+
+```
+mov rax, c              ; callee value
+cmp [rax], -1           ; is it a list (closure tuple)?
+jne .legacy             ; no -> raw fn ptr ABI
+mov rcx, [rax + 24]
+mov r11, [rcx]          ; fn_ptr from tuple[0]
+mov rax, [rcx + 8]      ; captures_list from tuple[1]
+mov rdi, rax            ; captures_list -> rdi
+; original args in pushed order pop into rsi/rdx/rcx/r8/r9/stack
+jmp .dispatch
+.legacy:
+mov r11, rax            ; raw fn ptr, original ABI
+; original args pop into rdi/rsi/rdx/rcx/r8/r9/stack
+.dispatch:
+call r11
+```
+
+The legacy branch preserves R35C / pre-R35C behavior for top-level
+fns referenced as values (e.g. `let f = double; f(5)`) without
+making them participate in the closure ABI.
+
+### Boxed locals
+
+`cg_compute_boxed_locals_for_fn` runs as a pre-pass per fn-decl
+and per lambda. For each, it walks the body collecting inner
+AST_LAMBDA nodes and intersects their captures with this fn's own
+locals (params + body lets). The intersection is the "boxed-set"
+for this fn. The codegen path:
+
+  - **let-stmt**: if the local is in the boxed-set, allocate a fresh
+    1-element list and store [value] in it; the stack slot now holds
+    the box pointer.
+  - **param prologue**: same dance, applied to each param that lands
+    in the boxed-set (so `make_adder(k)` correctly boxes `k`).
+  - **AST_IDENT (read)**: if boxed local, load box pointer then
+    deref to box[0]. Otherwise normal stack-slot load.
+  - **AST_ASSIGN (write)**: if boxed local, write to box[0]
+    (preserving the box pointer in the stack slot).
+
+### Capture analysis for nested closures
+
+`compute_captures` now recurses transitively through nested
+AST_LAMBDAs (via `cg_collect_inner_lambdas` + `cg_find_lambda_by_name`),
+collecting free vars from sub-closures so an outer can forward boxes
+through its own captures_list. Without this, `|k| |x| x + k` would
+not know `k` needs forwarding because `collect_idents_in` does not
+descend into AST_LAMBDA.
+
+### Higher-order runtime builtins
+
+`_nova_map_list`, `_nova_filter`, `_nova_reduce`, `_nova_foreach`,
+`_nova_any`, `_nova_all`, `_nova_flat_map` detect closure tuples at
+entry by checking `cmp [rsi], -1`. On match, the fn-ptr + captures_list
+get unpacked into `r13` + `rbx`; per-iteration call shape becomes
+`fn_ptr(captures_list, ...)`. On mismatch (legacy raw fn ptr), the
+original ABI fn_ptr(elem) is preserved.
+
+### R35C `.bss` capture slots dropped
+
+The `_cap_<lname>_<var>` static-slot emission path is gone (commented
+out where the loop used to live). All capture storage is per-instance
+heap (the box lists allocated at closure-creation site or let-stmt).
+
+### Tests
+
+`tests/unit/test_closures.nova`:
+
+  - All 57 R35C assertions preserved structurally; 2 were FLIPPED to
+    assert the new R37A semantics:
+    - "by-value snapshot" -> "by-ref propagation" (p mutated to 999 ->
+      q(10) reads new value -> 1009 instead of 60).
+    - "static slot clobbered" -> "multi-instance independence"
+      (add5(3) -> 8 keeps its k=5 instead of -> 10 after add7 made).
+  - 28 NEW assertions covering:
+    - by-ref: source-local mutated after capture (2)
+    - by-ref: closure mutates source (4)
+    - multi-instance: 3 independent adders (5)
+    - multi-instance nested: mul3/mul7 (4)
+    - 3-level nested: `|k| |x| |y| x + y + k` + multi-instance (4)
+    - nested by-ref through 2 levels of closure (2)
+    - accumulator collector pattern (7)
+  - Total: 85 assertions, all passing.
+
+R37E's `tests/unit/test_stdlib_list.nova` (144 assertions consuming
+the stdlib higher-order combinators) continues to pass under the new
+closure ABI — `list_map`, `list_filter`, etc. flow through the
+runtime detection branch unchanged.
+
+### Self-hosting
+
+`make self-host` verifies `stage2.s == stage3.s` byte-identical
+under the new closure lowering. All 177 baseline tests pass.
+
+### Known caveats
+
+  - Recursion ON a closure value (closure body calls itself by
+    reference to its outer let-binding) requires the let-binding to
+    be in scope BEFORE the closure body is evaluated; NOVA's current
+    let-stmt semantics evaluate the RHS first and bind after, so a
+    closure literal cannot directly reference its own enclosing let
+    name. Workaround: wrap in a fn-decl that recurses, then capture
+    that fn name (which IS a known function at body time).
+
+  - Float-typed captures still flow through the integer-shaped box
+    (NOVA's runtime list slot is 8 bytes / qword). Float captures
+    work for integer-encoded operations but may require explicit
+    `mov rax, xmm0` / `movq xmm0, rax` shuffling at the use site if
+    the consumer expects SSE registers — same limitation as R35C.
+
 ## R37B — tree-sitter-nova: closure literals + tuple literals + tuple types + tuple patterns
 
 **Status: complete** — the editor-facing tree-sitter grammar at
