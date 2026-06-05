@@ -58,6 +58,10 @@ Module surface
 
 * :func:`parse_memory_reference` — normalise a DAP ``memoryReference``
   + ``instructionOffset`` into a hex string gdb can consume.
+* :func:`_normalize_hex_address` — canonicalise a hex address string
+  to the lowercase ``0x<digits>`` form. Used by the
+  ``setInstructionBreakpoints`` handler so diff keys are case-stable
+  across re-sends (R36E closing the R35E case-sensitivity caveat).
 * :func:`build_disassemble_command` — compose the MI command for a
   range request.
 * :func:`parse_disassemble_response` — turn gdb's ``asm_insns=[...]``
@@ -107,6 +111,74 @@ def _parse_hex_address(text: str) -> Optional[int]:
             return int(s, 16)
         except ValueError:
             return None
+
+
+def _normalize_hex_address(text: str) -> str:
+    """R36E: canonicalise an ``instructionReference`` string for
+    diff-key stability across DAP re-sends.
+
+    The DAP ``instructionReference`` field is documented as an opaque
+    hex address. In practice IDEs always round-trip whatever the
+    server emitted, so casing stays stable -- but a hand-crafted
+    client mixing casings (``"0X401000"`` vs ``"0x401000"``) would
+    have made R35E's diff treat each as a distinct BP, forcing an
+    unnecessary delete + reinstall on every re-send. R36E closes that
+    by routing every reference through this normaliser before it
+    becomes a diff key OR a response field.
+
+    Rules:
+
+    * Leading ``0x`` / ``0X`` / ``0`` prefix is OPTIONAL on input;
+      stripped if present. A bare ``"401000"`` is treated as HEX
+      (consistent with DAP spec semantics -- ``memoryReference`` /
+      ``instructionReference`` are defined as hex addresses -- and
+      with R34F's existing parser behaviour where ``int(s, 16)`` is
+      the documented fallback).
+    * Hex digits are lowercased.
+    * Output form: ``"0x<lowercase_hex>"`` (no zero padding, matches
+      gdb's emitted shape).
+    * Raises ``ValueError`` on bad input (non-hex digits, empty
+      string, non-string type). Failure surface is symmetric with how
+      ``int(s, 16)`` raises -- the caller handles the exception the
+      same way it would handle a malformed gdb reply.
+
+    Examples::
+
+        >>> _normalize_hex_address("0X401000")
+        '0x401000'
+        >>> _normalize_hex_address("0x401000")
+        '0x401000'
+        >>> _normalize_hex_address("401000")
+        '0x401000'
+        >>> _normalize_hex_address("0xDEADBEEF")
+        '0xdeadbeef'
+        >>> _normalize_hex_address("0xZZZZ")
+        Traceback (most recent call last):
+            ...
+        ValueError: invalid hex address: '0xZZZZ'
+    """
+    if not isinstance(text, str):
+        raise ValueError(f"invalid hex address: {text!r}")
+    s = text.strip()
+    if not s:
+        raise ValueError(f"invalid hex address: {text!r}")
+    # Strip an optional 0x / 0X prefix.
+    if len(s) >= 2 and s[0] == "0" and s[1] in ("x", "X"):
+        digits = s[2:]
+    else:
+        digits = s
+    if not digits:
+        # Was just ``"0x"`` / ``"0X"`` with no body.
+        raise ValueError(f"invalid hex address: {text!r}")
+    # ``int(digits, 16)`` is the canonical parse-and-validate step:
+    # it rejects every non-hex character and raises ValueError on
+    # failure -- we re-raise with a clearer message so the caller's
+    # diagnostic surface stays specific.
+    try:
+        value = int(digits, 16)
+    except ValueError:
+        raise ValueError(f"invalid hex address: {text!r}") from None
+    return f"0x{value:x}"
 
 
 def parse_memory_reference(

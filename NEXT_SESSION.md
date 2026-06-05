@@ -1,5 +1,89 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R36E — nova-dap: normalize `instructionReference` hex case for diff stability
+
+**Status: complete** — Closes the case-sensitivity caveat R35E
+exited with.  R35E keyed its diff-based replacement on the verbatim
+`instructionReference` string, so `"0X401000"` and `"0x401000"` would
+not collide as the same BP across re-sends; in production this was
+invisible (every IDE faithfully round-trips the server-emitted
+string) but a hand-crafted client that mixed casings would have seen
+spurious delete + reinstall churn.  R36E routes every reference
+through `_normalize_hex_address` before it becomes a diff key OR a
+response field, so casing-only differences collide cleanly.
+
+### Helper
+
+`_normalize_hex_address(s) -> str` lives in
+`tools/nova-dap/nova_dap/disassembly.py`:
+
+  - Strips an optional leading `0x` / `0X` prefix.
+  - Lowercases the hex digits via `int(digits, 16)` then re-emits
+    as `f"0x{value:x}"`.
+  - Returns the canonical form `"0x<lowercase_hex>"`, no zero
+    padding -- matches gdb's emitted shape.
+  - Raises `ValueError` on bad input (non-hex chars, empty / blank
+    string, non-string type, or prefix-only `"0x"`).
+
+### No-prefix policy (documented)
+
+A bare `"401000"` (no `0x` / `0X` prefix) is treated as **hex**, not
+decimal.  DAP spec semantics define `instructionReference` and
+`memoryReference` as hex addresses, and R34F's existing
+`_parse_hex_address` already falls back to `int(s, 16)` for
+un-prefixed inputs.  Decimal interpretation would silently change the
+address.
+
+### Application points
+
+`tools/nova-dap/nova_dap/server.py` -> `handle_set_instruction_breakpoints`
+canonicalises in three places:
+
+  - **Request side**: each incoming `instructionReference` is
+    normalised before becoming the `wanted` entry's diff key.
+    Rejection here surfaces as `verified: false` with an
+    `invalid instructionReference` message.
+  - **Existing side**: `existing_by_key` is built by re-normalising
+    each registered record's reference (defensive -- the install
+    path already stores the canonical form, but a pre-R36E session
+    state could carry mixed case).
+  - **Response side**: every emitted `instructionReference` (shared
+    path, fresh install path, gdb's `addr` field from the
+    `-break-insert` reply) goes through the normaliser so the IDE's
+    next request round-trips the same canonical case back.
+
+### Tests
+
+`tests/test_instruction_stepping.py` -- 309 total assertions (up
+from 254; 55 new R36E assertions).  Coverage:
+
+  - Normaliser unit tests: `"0X401000"` -> `"0x401000"`,
+    idempotence, lowercase hex digits, mixed-case digits, no-prefix
+    hex, whitespace stripping, leading-zero drop.
+  - Failure-mode tests: `"0xZZZZ"`, `""`, `"   "`, `"0x"`, `"0X"`,
+    non-string input all raise `ValueError`.
+  - Handler-level tests: two re-sends differing only in casing
+    diff to zero new BPs (no `-break-delete`, no `-break-insert`);
+    hit counter survives the casing-only re-send; response
+    references are canonical lowercase on both fresh-install and
+    shared paths; mixed-case multi-BP requests collide correctly
+    via canonical key; bad-hex entries surface `verified: false`
+    without polluting the install path; `-break-insert *0xADDR`
+    uses the canonical lowercase form; pre-existing canonical
+    records still match non-canonical re-sends.
+
+All 254 prior R35E assertions remain byte-identical.  Full DAP suite
+(R17F + R28F + R29E + R31E + R33F + R34F + R35E) green.
+
+### Honest caveat
+
+`_normalize_hex_address` rejects `"0x"` (prefix-only) as a bad input.
+That's the strictest possible policy; if a future DAP client ever
+emits `"0x"` to mean "address zero" (rather than the obviously-correct
+`"0x0"`) we'd return `verified: false` instead of installing a BP at
+address 0.  This seems improbable -- gdb itself never emits `"0x"`
+with no body -- but flagging it for future awareness.
+
 ## R35E — nova-dap: formal `setInstructionBreakpoints` DAP handler with condition + hit-count + offset
 
 **Status: complete** — Hardens R17F's instruction-breakpoint surface

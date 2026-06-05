@@ -155,6 +155,7 @@ from nova_dap.function_breakpoints import (
 from nova_dap.disassembly import (
     InstructionBreakpointManager,
     InstructionBreakpointRecord,
+    _normalize_hex_address,
     build_disassemble_command,
     build_instruction_breakpoint_command,
     extract_instruction_pointer,
@@ -1787,10 +1788,28 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
     # Snapshot current set so we can diff: which existing records
     # appear unchanged in the new list (keep), which appear changed or
     # absent (delete), which are net-new (install).
+    #
+    # R36E: every diff key goes through ``_normalize_hex_address`` so
+    # casing-only differences between re-sends (``"0X401000"`` vs
+    # ``"0x401000"``) collide into the same key instead of being
+    # treated as distinct BPs (which under R35E would force an
+    # unnecessary delete + reinstall). Existing records were stored
+    # with the canonical form too, so this is also a defensive
+    # re-normalisation in case an older session pre-R36E persisted a
+    # mixed-case reference.
     existing_records = session.instruction_breakpoints.snapshot()
-    existing_by_key: Dict[Tuple[str, int], InstructionBreakpointRecord] = {
-        (r.instruction_reference, r.offset): r for r in existing_records
-    }
+    existing_by_key: Dict[Tuple[str, int], InstructionBreakpointRecord] = {}
+    for r in existing_records:
+        try:
+            existing_key_ref = _normalize_hex_address(r.instruction_reference)
+        except ValueError:
+            # Pre-R36E stored a reference we now can't parse -- keep
+            # the verbatim form so the diff still finds it via the
+            # canonicalised request side IF the request happens to be
+            # equally malformed. (In practice this branch is dead --
+            # R35E only stored gdb-emitted addresses.)
+            existing_key_ref = r.instruction_reference
+        existing_by_key[(existing_key_ref, r.offset)] = r
     # Build the wanted set first so we can compute which existing ids
     # to delete. Each wanted entry is a normalised dict ready for the
     # install step.
@@ -1803,6 +1822,17 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
         ref = bp.get("instructionReference")
         if not isinstance(ref, str) or not ref.strip():
             wanted.append({"_invalid": "missing instructionReference"})
+            continue
+        # R36E: canonicalise the reference up front so diff keys +
+        # response references are case-stable. Rejection here surfaces
+        # via the same ``verified: false`` path other malformed refs
+        # take downstream.
+        try:
+            ref_canonical = _normalize_hex_address(ref)
+        except ValueError:
+            wanted.append(
+                {"_invalid": f"invalid instructionReference: {ref!r}"}
+            )
             continue
         offset_raw = bp.get("offset", 0)
         try:
@@ -1827,7 +1857,7 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
                 hit_condition_active = hit_condition_raw
         wanted.append(
             {
-                "instructionReference": ref.strip(),
+                "instructionReference": ref_canonical,
                 "offset": offset,
                 "condition": condition,
                 "hit_condition_raw": hit_condition_active,
@@ -1891,6 +1921,13 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
                 session.instruction_breakpoints.unregister(existing.gdb_id)
                 # Fall through to the install path below.
             else:
+                # R36E: also refresh the stored reference to the
+                # canonical form. If the IDE flipped casing without
+                # changing the address (e.g. ``"0X401000"`` instead
+                # of the prior ``"0x401000"``) we want the record to
+                # carry the canonical lowercase so subsequent
+                # snapshots + lookups stay stable.
+                existing.instruction_reference = ref
                 existing.hit_condition = hit_condition_active
                 existing.hit_predicate = hit_predicate
                 # The hit counter is preserved across re-send so a
@@ -1900,6 +1937,11 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
                     "verified": True,
                     "id": existing.gdb_id,
                 }
+                # R36E: response always carries the canonical lowercase
+                # form so the IDE's next request round-trips the same
+                # case we emitted -- guarantees diff-key stability
+                # even when the IDE doesn't faithfully round-trip the
+                # server-emitted string.
                 if existing.resolved_address is not None:
                     entry["instructionReference"] = (
                         f"0x{existing.resolved_address:x}"
@@ -1974,7 +2016,25 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
         )
         session.instruction_breakpoints.register(record)
         entry = {"verified": verified, "id": bp_id}
-        if isinstance(addr_resolved, str):
+        # R36E: response always carries the canonical lowercase form.
+        # ``addr_resolved`` is what gdb emitted -- normalise it before
+        # putting it on the wire so the IDE's follow-up requests see
+        # consistent casing. gdb in practice emits lowercase ``0x...``
+        # but we don't rely on that.
+        if isinstance(addr_resolved, str) and addr_resolved != "<PENDING>":
+            try:
+                entry["instructionReference"] = _normalize_hex_address(
+                    addr_resolved
+                )
+            except ValueError:
+                # gdb returned a non-hex address (shouldn't happen for
+                # real -break-insert *0xADDR replies); fall back to
+                # the parsed address we already canonicalised.
+                entry["instructionReference"] = f"0x{addr_int:x}"
+        elif isinstance(addr_resolved, str):
+            # ``<PENDING>`` -- surface verbatim so the IDE can render
+            # a pending indicator (verified=False has already been set
+            # above).
             entry["instructionReference"] = addr_resolved
         else:
             entry["instructionReference"] = f"0x{addr_int:x}"

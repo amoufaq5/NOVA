@@ -33,7 +33,7 @@ repo root and `make smoke-dwarf`).
 | `evaluate`                | `-data-evaluate-expression --thread <id> --frame <level> "<expr>"`; result string decoded into `{result, type}` where type is `int` / `str` / `char` / `bool` / `ptr` / `raw`. Used for watch panel, REPL, and hover tooltips. |
 | `dataBreakpointInfo`      | Returns `{dataId, description, accessTypes: ["write", "readWrite"], canPersist: false}` for a named variable. `dataId` is a base64-encoded JSON envelope `{n, f?, v?}` carrying the variable name + frame id so `setDataBreakpoints` can round-trip it without server-side state. |
 | `setDataBreakpoints`      | Tears down prior watchpoints via `-break-delete <id>` (per id, so source breakpoints are preserved) and installs gdb hardware watchpoints via `-break-watch <expr>` (write), `-break-watch -r <expr>` (read), or `-break-watch -a <expr>` (rw). Watchpoint hits surface as `stopped` events with `reason: "data breakpoint"` and a description like `Variable 'counter' changed (write): 5 -> 6`. |
-| `setInstructionBreakpoints` | **Diff-based replacement** (R35E): keeps shared BPs across re-sends (preserving gdb id + hit counter), deletes absent ones via `-break-delete <id>`, installs net-new ones via `-break-insert *0xADDR`. Each entry carries `{instructionReference: "0xADDR", offset?, condition?, hitCondition?}`. `condition` is forwarded inline via `-break-insert -c "<expr>"` so gdb pre-filters. `hitCondition` is parsed (`">N"`, `"%N"`, `"==N"`, etc. — same predicates as line BPs) and gated server-side. `offset` is per DAP spec a signed integer of **instructions**; we resolve it against R34F's `objdump`-driven disassembly window (non-zero offset rejects with a clear message if objdump is unavailable / anchor isn't in the binary). Hits surface as `stopped` events with `reason: "instruction breakpoint"` and a description like `Stopped at instruction 0x401045`; filtered hits (failed `hitCondition`) silent-resume without firing a DAP event. |
+| `setInstructionBreakpoints` | **Diff-based replacement** (R35E): keeps shared BPs across re-sends (preserving gdb id + hit counter), deletes absent ones via `-break-delete <id>`, installs net-new ones via `-break-insert *0xADDR`. Each entry carries `{instructionReference: "0xADDR", offset?, condition?, hitCondition?}`. R36E: every `instructionReference` is routed through `_normalize_hex_address` before being used as a diff key OR emitted as a response field, so casing-only differences (`"0X401000"` vs `"0x401000"`) collide as the same BP across re-sends instead of forcing a delete + reinstall. Canonical form: `"0x<lowercase_hex>"`; no-prefix input (`"401000"`) is treated as hex per DAP spec semantics. `condition` is forwarded inline via `-break-insert -c "<expr>"` so gdb pre-filters. `hitCondition` is parsed (`">N"`, `"%N"`, `"==N"`, etc. — same predicates as line BPs) and gated server-side. `offset` is per DAP spec a signed integer of **instructions**; we resolve it against R34F's `objdump`-driven disassembly window (non-zero offset rejects with a clear message if objdump is unavailable / anchor isn't in the binary). Hits surface as `stopped` events with `reason: "instruction breakpoint"` and a description like `Stopped at instruction 0x401045`; filtered hits (failed `hitCondition`) silent-resume without firing a DAP event. |
 | `disassemble`             | `-data-disassemble -s <start> -e <end> -- 0` — disassembles a range of memory around `memoryReference`, returning `DisassembledInstruction[]` of length exactly `instructionCount` (padded with `??` placeholders if gdb returns fewer). `instructionOffset` and byte `offset` shift the start address (we approximate 4 bytes/insn for instruction offsets). Each instruction's `location` carries `sourceReference: N` (R34F) pointing at a per-session cache of the enclosing function's `.s` listing. If gdb's MI form returns empty, we fall back to a static `objdump -d` parse. |
 | `source`                  | (R34F) Returns the cached `.s` listing for a `sourceReference` previously emitted by `disassemble`. Body: `{content, mimeType: "text/x-asm"}`. Content is built via `objdump --disassemble=<fn>` on first access then cached for the rest of the session. |
 | `continue` / `next` / `stepIn` / `stepOut` | `-exec-{continue,next,step,finish}` with `--thread <id>` when DAP carries `singleThread:true`, otherwise `--all`. When `granularity: "instruction"` is supplied, `next` -> `-exec-next-instruction` and `stepIn` -> `-exec-step-instruction` so the IDE's disassembly view can advance the PC by exactly one machine instruction. (`stepOut` keeps `-exec-finish` regardless — gdb has no per-instruction finish variant.) |
@@ -138,7 +138,19 @@ Capabilities advertised:
   the user clicks the breakpoint gutter next to a specific
   instruction. Hits surface as `stopped` events with `reason:
   "instruction breakpoint"`, `hitBreakpointIds: [<id>]`, and a
-  description like `Stopped at instruction 0x401045`.
+  description like `Stopped at instruction 0x401045`. R36E adds
+  hex-case normalisation: every `instructionReference` (request +
+  response) is canonicalised to lowercase `"0x<digits>"` via
+  `_normalize_hex_address`, so a hand-crafted client that mixes
+  casings across re-sends (`"0X401000"` then `"0x401000"`) collides
+  on the same diff key instead of triggering an unnecessary delete +
+  reinstall. The normaliser strips an optional `0x` / `0X` prefix,
+  lowercases the hex digits, and re-emits as `"0x" + int(digits, 16):x`;
+  no-prefix input is treated as **hex** (consistent with DAP spec
+  semantics — `instructionReference` / `memoryReference` are
+  documented as hex addresses). Non-hex characters raise
+  `ValueError`, which the handler surfaces as `verified: false` with
+  a clear `invalid instructionReference` message.
 * **`source` request + `sourceReference` mechanism (R34F).** The DAP
   client invokes `source({sourceReference: N})` to fetch the buffer
   content for a synthetic source descriptor — one whose
@@ -306,6 +318,10 @@ tools/nova-dap/
     disassembly.py                       Instruction-level stepping +
                                           disassembly view + instruction
                                           breakpoints: memoryReference parser,
+                                          `_normalize_hex_address` canonical-
+                                          form helper (R36E -- lowercases the
+                                          prefix + digits so diff keys are
+                                          case-stable across re-sends),
                                           `-data-disassemble` command builder
                                           + response parser, step-granularity
                                           remapper (`-exec-step` ->
@@ -478,8 +494,8 @@ breakpoints:
 ```sh
 python tools/nova-dap/tests/test_instruction_stepping.py
 # test_instruction_stepping: OK
-#   unit assertions:    125
-#   total assertions:   149
+#   unit assertions:    285
+#   total assertions:   309
 #   NOVA integration:   ok (PC advance 18 bytes, disasm 8 insns) (24 extra checks)
 ```
 

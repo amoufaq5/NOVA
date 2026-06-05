@@ -46,6 +46,7 @@ from nova_dap.disassembly import (  # noqa: E402
     DisassembledInstruction,
     InstructionBreakpointManager,
     InstructionBreakpointRecord,
+    _normalize_hex_address,
     build_disassemble_command,
     build_instruction_breakpoint_command,
     extract_instruction_pointer,
@@ -1568,6 +1569,425 @@ def test_r35e_capability_stays_advertised() -> None:
 
 
 # ---------------------------------------------------------------------------
+# R36E: instructionReference hex-case normalisation tests.
+#
+# R35E's diff was keyed on the verbatim ``instructionReference`` string,
+# so ``"0X401000"`` and ``"0x401000"`` would not collide as the same BP
+# across re-sends. R36E routes both sides through
+# ``_normalize_hex_address`` so casing-only differences no longer force
+# delete + reinstall.
+# ---------------------------------------------------------------------------
+
+
+def test_r36e_normalize_uppercase_prefix() -> None:
+    """``"0X401000"`` -> ``"0x401000"`` (lowercase the prefix)."""
+    check_eq(_normalize_hex_address("0X401000"), "0x401000")
+
+
+def test_r36e_normalize_idempotent_canonical() -> None:
+    """Already-canonical ``"0x401000"`` is a no-op (idempotent)."""
+    check_eq(_normalize_hex_address("0x401000"), "0x401000")
+
+
+def test_r36e_normalize_lowercases_hex_digits() -> None:
+    """Uppercase hex digits become lowercase: ``"0xDEADBEEF"`` ->
+    ``"0xdeadbeef"`` (matches gdb's emitted shape)."""
+    check_eq(_normalize_hex_address("0xDEADBEEF"), "0xdeadbeef")
+
+
+def test_r36e_normalize_mixed_case_digits() -> None:
+    """Mixed-case hex digits all lowercase, prefix lowercase:
+    ``"0XdEaDBeEf"`` -> ``"0xdeadbeef"``."""
+    check_eq(_normalize_hex_address("0XdEaDBeEf"), "0xdeadbeef")
+
+
+def test_r36e_normalize_no_prefix_is_hex() -> None:
+    """Policy: a bare ``"401000"`` (no ``0x`` / ``0X`` prefix) is
+    treated as HEX. DAP-spec semantics define ``instructionReference``
+    as a hex address; R34F's ``_parse_hex_address`` already falls back
+    to ``int(s, 16)`` for un-prefixed inputs. Decimal interpretation
+    would silently change the address. Documented behaviour."""
+    check_eq(_normalize_hex_address("401000"), "0x401000")
+
+
+def test_r36e_normalize_no_prefix_uppercase_digits() -> None:
+    """No-prefix + uppercase hex digits: ``"ABCDEF"`` -> ``"0xabcdef"``."""
+    check_eq(_normalize_hex_address("ABCDEF"), "0xabcdef")
+
+
+def test_r36e_normalize_strips_whitespace() -> None:
+    """Surrounding whitespace is stripped before normalisation (matches
+    the existing parser's ``.strip()`` semantics)."""
+    check_eq(_normalize_hex_address("  0x401000  "), "0x401000")
+    check_eq(_normalize_hex_address("\t0X4F\n"), "0x4f")
+
+
+def test_r36e_normalize_rejects_bad_hex() -> None:
+    """A reference containing non-hex characters must raise
+    ``ValueError`` so the handler surfaces ``verified: false``."""
+    raised = False
+    try:
+        _normalize_hex_address("0xZZZZ")
+    except ValueError:
+        raised = True
+    check(raised, "expected ValueError for '0xZZZZ'")
+
+
+def test_r36e_normalize_rejects_empty() -> None:
+    """An empty / whitespace-only string raises."""
+    raised = False
+    try:
+        _normalize_hex_address("")
+    except ValueError:
+        raised = True
+    check(raised, "expected ValueError for empty string")
+    raised = False
+    try:
+        _normalize_hex_address("   ")
+    except ValueError:
+        raised = True
+    check(raised, "expected ValueError for whitespace-only string")
+
+
+def test_r36e_normalize_rejects_prefix_only() -> None:
+    """``"0x"`` / ``"0X"`` with no body raises (no hex digits to
+    parse)."""
+    raised = False
+    try:
+        _normalize_hex_address("0x")
+    except ValueError:
+        raised = True
+    check(raised, "expected ValueError for '0x'")
+    raised = False
+    try:
+        _normalize_hex_address("0X")
+    except ValueError:
+        raised = True
+    check(raised, "expected ValueError for '0X'")
+
+
+def test_r36e_normalize_rejects_non_string() -> None:
+    """A non-string input raises (matches the ``_parse_hex_address``
+    failure surface where ``None`` / int wouldn't parse anyway)."""
+    raised = False
+    try:
+        _normalize_hex_address(None)  # type: ignore[arg-type]
+    except ValueError:
+        raised = True
+    check(raised, "expected ValueError for None")
+    raised = False
+    try:
+        _normalize_hex_address(0x401000)  # type: ignore[arg-type]
+    except ValueError:
+        raised = True
+    check(raised, "expected ValueError for int input")
+
+
+def test_r36e_normalize_drops_leading_zeros() -> None:
+    """Leading zeros in the hex body are dropped (canonical form is
+    ``int(...):x`` so ``"0x00401000"`` -> ``"0x401000"``)."""
+    check_eq(_normalize_hex_address("0x00401000"), "0x401000")
+    check_eq(_normalize_hex_address("00000000"), "0x0")
+
+
+def test_r36e_diff_zero_new_bps_when_only_casing_changes() -> None:
+    """Two ``setInstructionBreakpoints`` re-sends differing ONLY in
+    the casing of ``instructionReference`` MUST diff to zero new BPs
+    (shared via canonical key) -- no -break-delete and no
+    -break-insert traffic between the calls."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=500)
+    sess.bridge = bridge  # type: ignore[assignment]
+    # First install uses uppercase prefix.
+    req1 = {
+        "seq": 200,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [{"instructionReference": "0X401000"}],
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req1)
+    first_snap = sess.instruction_breakpoints.snapshot()
+    check_eq(len(first_snap), 1)
+    first_id = first_snap[0].gdb_id
+    # Accumulate hit count so we can prove the record's identity
+    # survived the second send.
+    sess.instruction_breakpoints.increment_hit(first_id)
+    sess.instruction_breakpoints.increment_hit(first_id)
+    bridge.sent_commands.clear()
+    # Second install uses lowercase prefix -- semantically the same BP.
+    req2 = {
+        "seq": 201,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [{"instructionReference": "0x401000"}],
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req2)
+    deletes = [c for c in bridge.sent_commands if c.startswith("-break-delete")]
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(deletes), 0, f"expected zero deletes: {bridge.sent_commands}")
+    check_eq(len(inserts), 0, f"expected zero inserts: {bridge.sent_commands}")
+    snap2 = sess.instruction_breakpoints.snapshot()
+    check_eq(len(snap2), 1)
+    check_eq(snap2[0].gdb_id, first_id, "id preserved across casing-only re-send")
+    check_eq(snap2[0].hit_count, 2, "hit counter survives casing-only re-send")
+
+
+def test_r36e_response_reference_is_canonical_lowercase() -> None:
+    """The response ``instructionReference`` MUST come back in
+    canonical lowercase form regardless of input casing -- so the
+    IDE's next request always round-trips the canonical case back."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=600)
+    sess.bridge = bridge  # type: ignore[assignment]
+    # Uppercase input.
+    req = {
+        "seq": 210,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [{"instructionReference": "0X401ABC"}],
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 1)
+    check_eq(entries[0].get("verified"), True)
+    # The response reference must be the canonical lowercase form,
+    # not the input verbatim.
+    check_eq(entries[0].get("instructionReference"), "0x401abc")
+
+
+def test_r36e_response_reference_canonical_on_shared_path() -> None:
+    """On the shared (re-send) path the response also emits canonical
+    lowercase regardless of which casing the request used."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=700)
+    sess.bridge = bridge  # type: ignore[assignment]
+    # Install with lowercase.
+    req1 = {
+        "seq": 220,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [{"instructionReference": "0x401abc"}],
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req1)
+    # Re-send with uppercase -- the shared path must canonicalise the
+    # response reference too.
+    req2 = {
+        "seq": 221,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [{"instructionReference": "0X401ABC"}],
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req2)
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 1)
+    check_eq(entries[0].get("verified"), True)
+    check_eq(entries[0].get("instructionReference"), "0x401abc")
+
+
+def test_r36e_mixed_case_multiple_bps_collide_correctly() -> None:
+    """A single request with multiple BPs at the same canonical address
+    but different casings still collide correctly via the canonical
+    key. The second entry shares the first's installed BP."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=800)
+    sess.bridge = bridge  # type: ignore[assignment]
+    # First send: install three distinct canonical addresses, each
+    # spelled in a different mixed case to prove the canonicaliser
+    # treats them as their canonical form.
+    req1 = {
+        "seq": 230,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0X401000"},   # uppercase prefix
+                {"instructionReference": "0x401ABC"},   # mixed digits
+                {"instructionReference": "401def"},     # no prefix
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req1)
+    snap1 = sess.instruction_breakpoints.snapshot()
+    check_eq(len(snap1), 3, "three distinct canonical addresses installed")
+    # Each stored reference is canonical lowercase.
+    refs = sorted(r.instruction_reference for r in snap1)
+    check_eq(refs, ["0x401000", "0x401abc", "0x401def"])
+    # Response references are canonical lowercase too.
+    resp1 = sess.out_stream.last_response()
+    entries1 = resp1.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries1), 3)
+    resp_refs = sorted(e.get("instructionReference") for e in entries1)
+    check_eq(resp_refs, ["0x401000", "0x401abc", "0x401def"])
+    bridge.sent_commands.clear()
+    # Second send: same canonical addresses, different casing. NONE
+    # of these are net-new under R36E's canonical diff -- they all
+    # collide with the existing records.
+    req2 = {
+        "seq": 231,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000"},   # was uppercase
+                {"instructionReference": "0XdEf"},      # was 401abc? no -- canonical 0xdef != 0x401abc
+                {"instructionReference": "0X401ABC"},   # collides with 0x401abc
+                {"instructionReference": "0x401DEF"},   # collides with 0x401def
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req2)
+    # The four-entry request: 0x401000 (shared), 0xdef (NEW), 0x401abc
+    # (shared), 0x401def (shared). So exactly one new install + zero
+    # deletes (no prior key dropped).
+    deletes = [c for c in bridge.sent_commands if c.startswith("-break-delete")]
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(deletes), 0, f"expected zero deletes: {bridge.sent_commands}")
+    check_eq(len(inserts), 1, f"expected exactly 1 insert: {bridge.sent_commands}")
+    check("*0xdef" in inserts[0], f"expected 0xdef install: {inserts[0]!r}")
+    snap2 = sess.instruction_breakpoints.snapshot()
+    check_eq(len(snap2), 4, "all four canonical addresses now installed")
+    refs2 = sorted(r.instruction_reference for r in snap2)
+    check_eq(refs2, ["0x401000", "0x401abc", "0x401def", "0xdef"])
+
+
+def test_r36e_invalid_hex_in_request_surfaces_unverified() -> None:
+    """An ``instructionReference`` containing non-hex characters MUST
+    come back ``verified: false`` -- the normaliser raises and the
+    handler surfaces a clear ``invalid instructionReference`` message
+    (parallel to the existing missing-ref path) without issuing
+    any -break-insert traffic for the bad entry."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=900)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req = {
+        "seq": 240,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0xZZZZ"},  # bad
+                {"instructionReference": "0X401000"},  # valid -- canonicalised
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 2)
+    check_eq(entries[0].get("verified"), False)
+    check(
+        "invalid instructionReference" in entries[0].get("message", ""),
+        f"expected invalid-ref message, got {entries[0]!r}",
+    )
+    # The valid entry installs cleanly with canonical reference.
+    check_eq(entries[1].get("verified"), True)
+    check_eq(entries[1].get("instructionReference"), "0x401000")
+    # Only ONE -break-insert (for the valid entry).
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(inserts), 1)
+
+
+def test_r36e_install_command_uses_canonical_address() -> None:
+    """The ``-break-insert *0xADDR`` MI command MUST carry the
+    canonical lowercase form so gdb's reply ``addr`` field matches what
+    we registered the record under (otherwise gdb-id <-> reference
+    lookups would race)."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=1000)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req = {
+        "seq": 250,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [{"instructionReference": "0XdEaD"}],
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(inserts), 1)
+    # The install command's address argument must be canonical
+    # lowercase form.
+    check(
+        "*0xdead" in inserts[0],
+        f"expected *0xdead in {inserts[0]!r}",
+    )
+    snap = sess.instruction_breakpoints.snapshot()
+    check_eq(len(snap), 1)
+    check_eq(snap[0].instruction_reference, "0xdead")
+
+
+def test_r36e_diff_against_existing_canonical_record() -> None:
+    """A pre-existing record stored under canonical form (the normal
+    case under R36E since the install path always normalises) must
+    still match a re-send that uses a non-canonical casing -- proving
+    the EXISTING side of the diff also runs through the normaliser
+    when building the lookup dict."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=1100)
+    sess.bridge = bridge  # type: ignore[assignment]
+    # Pre-populate the registry directly (simulates a record installed
+    # in a prior request).
+    sess.instruction_breakpoints.register(
+        InstructionBreakpointRecord(
+            gdb_id=42,
+            instruction_reference="0x401000",
+            offset=0,
+            resolved_address=0x401000,
+        )
+    )
+    # New request with uppercase casing MUST hit the shared path, NOT
+    # install a fresh BP.
+    req = {
+        "seq": 260,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [{"instructionReference": "0X401000"}],
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    deletes = [c for c in bridge.sent_commands if c.startswith("-break-delete")]
+    check_eq(len(inserts), 0, "no new install -- shared with existing")
+    check_eq(len(deletes), 0, "no delete -- record preserved")
+    snap = sess.instruction_breakpoints.snapshot()
+    check_eq(len(snap), 1)
+    check_eq(snap[0].gdb_id, 42, "preserved the pre-existing record id")
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 1)
+    check_eq(entries[0].get("id"), 42)
+    check_eq(entries[0].get("instructionReference"), "0x401000")
+
+
+# ---------------------------------------------------------------------------
 # End-to-end driver shared with the other DAP tests.
 # ---------------------------------------------------------------------------
 
@@ -1921,6 +2341,26 @@ def _run_unit_tests() -> None:
     test_r35e_bp_gate_no_skip_when_no_predicate()
     test_r35e_stopped_event_skip_does_not_emit_stopped()
     test_r35e_capability_stays_advertised()
+    # R36E: hex-case normalisation for instructionReference.
+    test_r36e_normalize_uppercase_prefix()
+    test_r36e_normalize_idempotent_canonical()
+    test_r36e_normalize_lowercases_hex_digits()
+    test_r36e_normalize_mixed_case_digits()
+    test_r36e_normalize_no_prefix_is_hex()
+    test_r36e_normalize_no_prefix_uppercase_digits()
+    test_r36e_normalize_strips_whitespace()
+    test_r36e_normalize_rejects_bad_hex()
+    test_r36e_normalize_rejects_empty()
+    test_r36e_normalize_rejects_prefix_only()
+    test_r36e_normalize_rejects_non_string()
+    test_r36e_normalize_drops_leading_zeros()
+    test_r36e_diff_zero_new_bps_when_only_casing_changes()
+    test_r36e_response_reference_is_canonical_lowercase()
+    test_r36e_response_reference_canonical_on_shared_path()
+    test_r36e_mixed_case_multiple_bps_collide_correctly()
+    test_r36e_invalid_hex_in_request_surfaces_unverified()
+    test_r36e_install_command_uses_canonical_address()
+    test_r36e_diff_against_existing_canonical_record()
 
 
 def main() -> int:
