@@ -17,8 +17,10 @@ The grammar produces a concrete syntax tree (CST) directly usable by:
 
 This grammar handles every everyday NOVA construct plus the
 declarative cognitive-DSL surface used by `mind`/`soul`/`system`
-examples. The R26B revision extends R24B's R17A–R23A coverage with
-the R25A brace-init struct construction and destructure patterns:
+examples. The R34E revision extends R26B's R17A/R23A/R25A coverage
+with the R31D match expression, R32D nested patterns + let
+destructure for variant + struct patterns, and R33C `if let` +
+match-arm guards:
 
 | Construct                       | Status          |
 | ------------------------------- | --------------- |
@@ -55,6 +57,12 @@ the R25A brace-init struct construction and destructure patterns:
 | `fn Type.method(self, ...)`     | full            |
 | Match guards `_ if cond =>`     | full            |
 | `match … { p => e }` expression | full            |
+| `match` arms with nested variant patterns (`Some(Some(v))`) | full (R32D) |
+| `match` arms with bare-ident variant patterns (`Some(x)`) | full (R32D) |
+| `match` arm guards with variant/value patterns | full (R33C) |
+| `let Pair(a, b) = pair` / `let Some(Some(v)) = e` destructure | full (R32D) |
+| `if let PAT = expr { ... } else { ... }` | full (R33C) |
+| `if let PAT = e { ... } else if let ... else if ...` chain | full (R33C) |
 | `is T` / `in xs` / `not in xs`  | full            |
 | `..` / `..=` range operators    | full            |
 | `\|>` pipe operator             | full            |
@@ -126,7 +134,7 @@ redesign that the editor experience does not need today.
 cd tools/tree-sitter-nova
 npm install                           # installs tree-sitter-cli
 npx tree-sitter generate              # writes src/parser.c
-npx tree-sitter test                  # 108 corpus tests should pass
+npx tree-sitter test                  # 131 corpus tests should pass
 npx tree-sitter parse path/to.nova    # print the CST for a file
 ```
 

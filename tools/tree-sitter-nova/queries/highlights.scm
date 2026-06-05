@@ -102,6 +102,14 @@
 (struct_pattern_field name: (identifier) @property)
 (rest_field_pattern) @punctuation.special
 
+; R32D: variant pattern at let-destructure / match-arm / if-let head.
+; Path-qualified `Type::Variant(...)` is already coloured by the
+; (path_expression type: ...) rule above; bare-ident `Some(v)` /
+; `Pair(a, b)` / `Ok(x)` highlights the leading identifier as a
+; constructor so editor users see it as the same colour as enum
+; variants declared in an `enum` body.
+(variant_pattern path: (identifier) @constructor)
+
 ; Type parameters
 (type_parameter name: (identifier) @type.parameter)
 

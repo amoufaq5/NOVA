@@ -51,6 +51,19 @@
 (if_statement
   alternative: (block) @fold)
 
+; R33C: if-let-statement / if-let-expression bodies fold the same as if/else.
+(if_let_statement
+  consequence: (block) @fold)
+
+(if_let_statement
+  alternative: (block) @fold)
+
+(if_let_expression
+  consequence: (block) @fold)
+
+(if_let_expression
+  alternative: (block) @fold)
+
 (while_statement
   body: (block) @fold)
 

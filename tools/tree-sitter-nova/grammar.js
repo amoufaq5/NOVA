@@ -41,6 +41,41 @@
  *     compatible grammar support (the compiler's strict parser owns
  *     "at most one base" / "field coverage" enforcement).
  *
+ * R34E extensions (this round):
+ *   * R31D match expression — the `match_expression` / `match_arm` /
+ *     `_pattern` rules were sketched in R17A / R25A; R34E rounds them
+ *     out with a dedicated corpus test set and adds the recursive
+ *     payload-binder cases (below).
+ *   * R32D nested variant patterns `Some(Some(v))`, `Ok(Pair(a, b))` —
+ *     `_variant_binder` is now recursive: each binder slot accepts not
+ *     only an `identifier` / `_` (R17A) but ALSO another
+ *     `variant_pattern` or `struct_pattern`, with no depth limit. The
+ *     CST keeps the same anonymous-child shape so R17A / R25A snapshots
+ *     stay byte-identical.
+ *   * R32D let-destructure with variant pattern — `let Pair(a, b) = e`,
+ *     `let Some(Some(v)) = e`. The `let_decl` rule gains a third pattern
+ *     branch (variant_pattern), sitting at the same dynamic precedence
+ *     as the struct-pattern branch (20) so the LR parser disambiguates
+ *     the `let IDENT (` lookahead from a future fn-call expression head.
+ *   * R32D bare-ident variant pattern — `variant_pattern` now accepts
+ *     either a `path_expression` (`Option::Some`) OR a bare `identifier`
+ *     (`Some`, `Ok`, `Pair`) at its `path` field. Same dynamic
+ *     precedence (10) — match arms that previously parsed `Some(x)` as
+ *     a call_expression now parse it as a variant_pattern. The R17A
+ *     path-qualified-only shape stays byte-identical because the
+ *     `path_expression` choice is still the first alternative.
+ *   * R33C `if let PAT = EXPR { ... } [else ...]` — modelled as both an
+ *     `if_let_statement` (statement context) and an `if_let_expression`
+ *     (expression context), mirroring the if-stmt / if-expr split. The
+ *     `else` branch may chain another if-let, a plain if-stmt, or a
+ *     bare block. The pattern slot reuses the `_pattern` rule from
+ *     match arms, so every R31D / R32D pattern shape that works at
+ *     match-arm head also works at if-let head.
+ *   * R33C match arm guards — the `match_arm` rule already accepted
+ *     an optional `if EXPR` between the pattern and `=>` from R24B
+ *     onward (no grammar change needed for R33C); R34E ships the
+ *     dedicated corpus snapshot suite.
+ *
  * The grammar intentionally accepts more than the compiler's strict
  * recursive-descent parser — tree-sitter is a tolerant CST builder used
  * by editors for syntax highlighting, structural search, code-folding,
@@ -125,6 +160,11 @@ module.exports = grammar({
     // context) and an `if_expression` (expression context). Same surface
     // syntax; GLR picks based on whether the result is being consumed.
     [$.if_statement, $.if_expression],
+    // R33C: `if let PAT = EXPR { ... } [else ...]` is both a statement
+    // and an expression in NOVA — mirrors the if-stmt / if-expr split.
+    // GLR keeps both alive until the surrounding context (used in a
+    // value position vs. on its own line) disambiguates.
+    [$.if_let_statement, $.if_let_expression],
     // R25A: inside a match arm, `IDENT { x, y }` could be either a
     // struct_pattern (shorthand-binder destructure) or a struct_init
     // expression that happens to contain shorthand fields. The arm's
@@ -424,6 +464,18 @@ module.exports = grammar({
           '=',
           field('value', $._expression),
         )),
+        // R32D: `let Pair(a, b) = pair`, `let Some(Some(v)) = nested`,
+        // `let Ok(Point { x, y }) = res`. The variant-pattern branch
+        // sits at the same dynamic-precedence (20) as struct_pattern
+        // so the parser commits to it over the fall-through call-
+        // expression reading. Path-qualified variants
+        // (`Result::Ok(v)`) and bare-identifier variants (`Some(v)`)
+        // share this branch via `variant_pattern`'s own grammar.
+        prec.dynamic(20, seq(
+          field('pattern', $.variant_pattern),
+          '=',
+          field('value', $._expression),
+        )),
       ),
       optional(';'),
     ),
@@ -509,6 +561,7 @@ module.exports = grammar({
       $.let_decl,                  // `let` may appear inside a block
       $.const_decl,
       $.if_statement,
+      $.if_let_statement,          // R33C: `if let PAT = expr { ... }`
       $.while_statement,
       $.do_while_statement,
       $.for_statement,
@@ -530,6 +583,28 @@ module.exports = grammar({
       optional(seq(
         'else',
         field('alternative', choice($.block, $.if_statement)),
+      )),
+    )),
+
+    // R33C: `if let PAT = expr { ... } [else { ... } | else if ... | else if let ...]`.
+    // The pattern slot reuses `_pattern` from match arms, so every
+    // R31D / R32D pattern shape that works at match-arm head also
+    // works at if-let head: wildcards, variant patterns (incl. nested
+    // payload binders), struct patterns, and bare literal / identifier
+    // patterns. `prec.right` resolves the dangling-else chain in favour
+    // of the closest preceding `if` / `if let`, matching the compiler's
+    // recursive-descent parser. The else branch may chain to another
+    // if-let, a plain if-stmt, or a bare block.
+    if_let_statement: $ => prec.right(seq(
+      'if',
+      'let',
+      field('pattern', $._pattern),
+      '=',
+      field('value', $._expression),
+      field('consequence', $.block),
+      optional(seq(
+        'else',
+        field('alternative', choice($.block, $.if_let_statement, $.if_statement)),
       )),
     )),
 
@@ -660,6 +735,8 @@ module.exports = grammar({
       $.spread_expression,
       // R15-era `if cond { a } else { b }` as expression.
       $.if_expression,
+      // R33C: `if let PAT = expr { ... } else { ... }` as expression.
+      $.if_let_expression,
       $.match_expression,
       $.lambda_expression,
       $.call_expression,
@@ -702,6 +779,24 @@ module.exports = grammar({
       field('consequence', $.block),
       'else',
       field('alternative', choice($.block, $.if_expression)),
+    )),
+
+    // R33C: `if let PAT = expr { ... } else { ... }` in expression
+    // position. The `else` branch is REQUIRED for the expression form
+    // (so the result is total) — the if-let-statement form above allows
+    // omitting the else. The else alternative may chain another
+    // if-let-expression or a plain if-expression (`else if cond` /
+    // `else if let pat = ...`). prec.right resolves the dangling-else
+    // chain to the closest preceding `if`.
+    if_let_expression: $ => prec.right(seq(
+      'if',
+      'let',
+      field('pattern', $._pattern),
+      '=',
+      field('value', $._expression),
+      field('consequence', $.block),
+      'else',
+      field('alternative', choice($.block, $.if_let_expression, $.if_expression)),
     )),
 
     // R17A: `match expr { pattern => expr ... }` — both expression and
@@ -752,15 +847,27 @@ module.exports = grammar({
     // precedence is bumped over the generic call_expression so that
     // match arm `Option::Some(v)` is recognised as a destructure
     // pattern rather than a regular constructor call.
+    // R17A path-qualified form `Type::Variant(...)` keeps the same
+    // CST shape (path: (path_expression ...)). R32D bare-identifier
+    // form `Some(...)` / `Ok(...)` / `Pair(...)` also accepted at the
+    // same dynamic precedence; the path field carries the identifier
+    // directly so consumers branch on the inner node type.
     variant_pattern: $ => prec.dynamic(10, seq(
-      field('path', $.path_expression),
+      field('path', choice($.path_expression, $.identifier)),
       '(',
       optional(commaSep1($._variant_binder)),
       ')',
     )),
 
-    // Each binder is either a name (`v`, `w`) or the wildcard `_`.
+    // Each binder is either a name (`v`, `w`), the wildcard `_`, or
+    // — R32D — another nested pattern. The recursive shapes allow
+    // `Some(Some(v))`, `Ok(Pair(a, b))`, `Result::Ok(Point { x, y })`
+    // at any depth. Identifier / `_` binders keep the same anonymous-
+    // child position they had in R17A, so the R17A / R25A corpus
+    // snapshots remain byte-identical.
     _variant_binder: $ => choice(
+      $.variant_pattern,
+      $.struct_pattern,
       $.identifier,
       $.wildcard_pattern,
     ),

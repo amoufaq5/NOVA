@@ -1,5 +1,80 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R34E — tree-sitter-nova: match expr + nested patterns + let destructure + if-let + arm guards
+
+**Status: complete** — the editor-facing tree-sitter grammar at
+`tools/tree-sitter-nova/grammar.js` now recognises every R31D / R32D /
+R33C surface form the self-hosted parser added. Syntax-aware editor
+tooling (folding, indent, highlights) no longer breaks on post-R28D
+NOVA source files.
+
+### Grammar additions
+
+  - **R31D match expression** — already present as `match_expression` /
+    `match_arm` (sketched in R17A, R24B added guards). R34E rounds it
+    out with a dedicated corpus test set (`test/corpus/r31_match_expression.txt`).
+
+  - **R32D nested variant patterns.** `_variant_binder` is now
+    recursive: each binder slot accepts an `identifier`, `_`, a nested
+    `variant_pattern`, or a `struct_pattern`. `Some(Some(v))`,
+    `Ok(Pair(a, b))`, `Result::Ok(Point { x, y })` parse to the
+    expected nested CST shape at any depth. R17A / R25A snapshots stay
+    byte-identical (the identifier / `_` binder positions are
+    unchanged).
+
+  - **R32D let-destructure with variant pattern.** `let_decl` gains a
+    fourth pattern branch: `prec.dynamic(20, seq(variant_pattern, '=',
+    expr))`. Sits at the same dynamic precedence as the R25A struct-
+    pattern branch so the LR parser disambiguates the
+    `let IDENT (` lookahead.
+
+  - **R32D bare-ident variant pattern.** `variant_pattern` now accepts
+    either a `path_expression` (`Option::Some`) OR a bare `identifier`
+    (`Some`, `Ok`, `Pair`). Both at the same dynamic precedence (10).
+
+  - **R33C `if let`.** Two new rules: `if_let_statement` (optional
+    `else`) and `if_let_expression` (required `else`, mirrors the
+    `if_expression` split). `else` may chain another if-let, a plain
+    if-stmt, or a bare block — supports `else if let` chains and mixed
+    `else if cond` chains. `prec.right` resolves the dangling-else
+    chain to the closest preceding `if`.
+
+  - **R33C match arm guards.** No grammar change needed — `match_arm`
+    has accepted an optional `if EXPR` between the pattern and `=>`
+    since R24B. R34E ships the dedicated corpus snapshot suite.
+
+### Tests
+
+  - 23 new corpus tests across 3 files: `r31_match_expression.txt` (8),
+    `r32_let_destructure.txt` (7), `r33_if_let.txt` (8).
+
+  - `tree-sitter test`: 131 / 131 pass (108 pre-R34E corpus tests
+    remain byte-identical).
+
+  - Real-world spot checks: `tests/unit/test_if_let.nova`,
+    `tests/unit/test_match_guards.nova`, `tests/unit/test_match_expr.nova`,
+    `tests/unit/test_let_destructure.nova`, `tests/test_sum_types.nova`,
+    `tests/test_struct_destructure.nova`, `tests/test_struct_brace_init.nova`
+    all parse with 0 ERROR / 0 MISSING nodes.
+
+### Caveats
+
+  - **Struct field destructure with literal field values inside variant
+    patterns is grammar-accepted via the existing `struct_pattern`
+    rule; the corpus only pins the binder + shorthand cases.** Existing
+    R25A struct-pattern coverage (literal field values, `_` field
+    wildcards, `..` rest) already nests inside variant patterns via the
+    recursive `_variant_binder` choice; not separately re-tested at
+    every depth.
+
+  - **`if_let_expression` requires the `else` branch.** The statement
+    form `if_let_statement` allows omitting `else`. This matches the
+    existing `if_expression` / `if_statement` split.
+
+  - Queries updated: `folds.scm` now folds if-let consequence/alternative
+    bodies; `highlights.scm` colours bare-ident `variant_pattern` paths
+    as `@constructor`.
+
 ## R33C — parser+codegen: `if let` shorthand + match arm guards
 
 **Status: complete** — `if let PAT = EXPR { ... } [else ...]` parses as
