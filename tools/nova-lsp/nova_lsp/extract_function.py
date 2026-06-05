@@ -40,14 +40,14 @@ content) still triggers; we just stop offering the action on tiny
 selections that produce no-op helpers. The line count is measured
 against non-empty lines so trailing blanks don't trick the heuristic.
 
-The "free variables" analysis is the same conservative shape the R3
-inline implementation used: identifiers in the selection that aren't
-keywords, aren't builtins, aren't bound by a ``let`` inside the
-selection, and ARE visible in the enclosing scope (parameter or a
-``let`` declared above the selection). Variables written inside the
-selection that are read AFTER the selection — a true "output" of the
-block — are NOT propagated as return values; that's R21F.2 follow-up
-work.
+R36D tightens the variable analysis: the textual heuristics R35F used
+(``_assigned_variables`` / ``_used_after``) are replaced by a proper
+scope-aware lookup driven by :mod:`nova_lsp.scope_index`. The new
+machinery handles let-shadowing inside nested blocks, block-scoped
+bindings that don't escape, and only flags a variable as live-out
+when a post-selection read resolves to the SAME binding the
+assignment targets. The failure mode shifts from R35F's over-
+conservative "extra return values" to a minimum-correct extraction.
 
 This module is independent of ``server.py``'s ``ServerState`` — it
 takes a UR, a range dict, and a document text string. The dispatcher
@@ -59,6 +59,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from nova_lsp.scope_index import (
+    ScopeIndex,
+    build_scope_index,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +288,12 @@ def _free_variables(
     *,
     builtins: Optional[Set[str]] = None,
 ) -> List[str]:
-    """Identifiers used in ``selection`` that count as **free**.
+    """Identifiers used in ``selection`` that count as **free**
+    (legacy textual heuristic).
+
+    R35F's textual implementation; kept for callers that don't have
+    a containing source document. The R36D scope-index path in
+    :func:`analyze_selection` supersedes this for normal use.
 
     The heuristic mirrors the R3 inline implementation:
 
@@ -328,6 +338,28 @@ def _free_variables(
     return seen
 
 
+def _scope_aware_free_variables(
+    scope_index: ScopeIndex,
+    selection_start: int,
+    selection_end: int,
+    *,
+    builtins: Optional[Set[str]] = None,
+) -> List[str]:
+    """R36D scope-aware free-variable computation.
+
+    Delegates to :meth:`ScopeIndex.live_at_range`. Identifiers READ
+    inside the selection that are declared in an OUTER scope become
+    the helper's parameter list. Block-scoped bindings declared
+    inside the selection (e.g. ``if cond { let tmp = ... }``) are
+    NOT flagged as params because the scope index correctly tracks
+    their declaring scope as a descendant of the selection's
+    enclosing scope.
+    """
+    return scope_index.live_at_range(
+        selection_start, selection_end, builtins=builtins
+    )
+
+
 def _common_leading_indent(lines: List[str]) -> int:
     """Return the common leading-whitespace column shared by every
     non-empty line in ``lines``, or ``0`` when all lines are empty."""
@@ -365,7 +397,13 @@ def _has_early_exit(selected_lines: List[str]) -> bool:
 
 
 def _assigned_variables(selection: str) -> List[str]:
-    """Return the names assigned inside ``selection``.
+    """Return the names assigned inside ``selection`` (legacy textual
+    heuristic).
+
+    R35F's original implementation. Kept as a fallback for callers
+    that pass a raw selection string without a containing source
+    document — the R36D scope-index path in
+    :func:`analyze_selection` supersedes this for normal use.
 
     Captures BOTH:
 
@@ -411,11 +449,13 @@ def _used_after(
     fn_lines: List[str], after_idx: int, candidates: Set[str]
 ) -> Set[str]:
     """Return the subset of ``candidates`` whose name appears in the
-    function body AFTER line index ``after_idx``.
+    function body AFTER line index ``after_idx`` (legacy textual
+    heuristic).
 
-    Used for the return-value computation: a name written inside the
-    selection AND mentioned in any later line of the enclosing fn body
-    is a "live-out" of the extracted block and should be returned.
+    R35F's original implementation. The :class:`ScopeIndex`-driven
+    path in :func:`analyze_selection` supersedes this for normal use
+    — the textual scan can't tell a shadow from a same-binding read,
+    so the R36D path uses ``ScopeIndex.assigned_used_after`` instead.
 
     Line comments and string literals are masked so a name mentioned
     only in a quoted log message or a ``//`` comment doesn't inflate
@@ -437,6 +477,22 @@ def _used_after(
         if found == candidates:
             break
     return found
+
+
+def _scope_aware_assigned_used_after(
+    scope_index: ScopeIndex,
+    selection_start: int,
+    selection_end: int,
+) -> List[str]:
+    """R36D scope-aware live-out computation.
+
+    Delegates to :meth:`ScopeIndex.assigned_used_after`. The scope
+    index tracks shadowing + block-scoping so a let bound inside the
+    selection that's shadowed by a later block's same-named let
+    isn't flagged as live-out (the post-selection read resolves to
+    the shadow, not the original binding).
+    """
+    return scope_index.assigned_used_after(selection_start, selection_end)
 
 
 def _first_indent(lines: List[str]) -> str:
@@ -537,26 +593,43 @@ def analyze_selection(
     fn_body_lines = lines[fn_start:fn_end + 1]
     rel_start = start_line - fn_start
     rel_end = end_line - fn_start
-    available = _locals_in_scope(fn_body_lines, rel_start)
     selection_text = "\n".join(selected_lines)
-    free_vars = _free_variables(
-        selection_text, available, builtins=builtins
-    )
 
-    # R35F: live-out / return-value computation.
-    # 1. Collect every name assigned inside the selection.
-    # 2. Find which of those are read AFTER the selection (still inside
-    #    the enclosing fn body).
-    # 3. Order by first-seen-assignment so the return tuple is
-    #    deterministic across edits.
-    assigned = _assigned_variables(selection_text)
-    if assigned:
-        used_after = _used_after(
-            fn_body_lines, rel_end + 1, set(assigned)
+    # R36D: scope-aware analysis via :mod:`nova_lsp.scope_index`.
+    # The scope index handles let-shadowing inside nested blocks and
+    # block-scoped bindings that don't escape — both cases where the
+    # R35F textual heuristic was over-conservative.
+    #
+    # Builds the index from the FULL document text so top-level fn
+    # references resolve as FILE-scope bindings (filtered out of the
+    # free-variable list since they're callable without being a
+    # param).
+    try:
+        scope_index = build_scope_index(doc_text)
+        free_vars = _scope_aware_free_variables(
+            scope_index, start_line, end_line, builtins=builtins
         )
-        return_vars = [n for n in assigned if n in used_after]
-    else:
-        return_vars = []
+        return_vars = _scope_aware_assigned_used_after(
+            scope_index, start_line, end_line
+        )
+    except Exception:
+        # Defensive fallback: if the scope-index build hits a wedge
+        # (malformed file, exotic syntax the textual walker
+        # mis-handles), drop back to the R35F textual path so the
+        # refactor still produces a usable — if over-conservative —
+        # result. Documented in the module docstring.
+        available = _locals_in_scope(fn_body_lines, rel_start)
+        free_vars = _free_variables(
+            selection_text, available, builtins=builtins
+        )
+        assigned = _assigned_variables(selection_text)
+        if assigned:
+            used_after = _used_after(
+                fn_body_lines, rel_end + 1, set(assigned)
+            )
+            return_vars = [n for n in assigned if n in used_after]
+        else:
+            return_vars = []
 
     indent = _first_indent(selected_lines)
     common = _common_leading_indent(selected_lines)

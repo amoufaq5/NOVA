@@ -480,6 +480,8 @@ python tools/nova-lsp/tests/test_type_hierarchy.py
 python tools/nova-lsp/tests/test_exhaustiveness_fix.py
 python tools/nova-lsp/tests/test_extract_function.py
 python tools/nova-lsp/tests/test_r35f_code_action.py
+python tools/nova-lsp/tests/test_scope_index.py
+python tools/nova-lsp/tests/test_extract_function_scope_aware.py
 python tools/nova-lsp/tests/test_folding_ranges.py
 python tools/nova-lsp/tests/test_document_symbols.py
 ```
@@ -546,6 +548,7 @@ tools/nova-lsp/
     type_hierarchy.py       # prepare / supertypes / subtypes resolver
     exhaustiveness_fix.py   # quickfix: auto-add missing match arms
     extract_function.py     # refactor.extract code-action analysis
+    scope_index.py          # R36D lexical scope tree + binding resolver
     folding_ranges.py       # collapse/expand markers for blocks + comments
     document_symbols.py     # hierarchical outline tree for the sidebar
     workspace_diagnostics.py # workspace/diagnostic aggregation (R23F)
@@ -567,6 +570,8 @@ tools/nova-lsp/
     test_type_hierarchy.py
     test_exhaustiveness_fix.py
     test_extract_function.py
+    test_scope_index.py
+    test_extract_function_scope_aware.py
     test_folding_ranges.py
     test_document_symbols.py
     test_workspace_diagnostics.py
@@ -639,3 +644,98 @@ qualifies, matching what `tests/run_tests.sh` actually discovers when
 it shells `nova` over the file. The implementation extends
 `nova_lsp/code_lens.py` so both lens kinds (reference count + test
 run/debug) coexist on the same `textDocument/codeLens` response.
+
+## R36D — scope index + tightened extract-function variable analysis
+
+R36D adds a tools-side **lexical scope index**
+(`nova_lsp/scope_index.py`) that the extract-function refactor uses
+to compute its parameter + return-value sets with proper scope
+awareness. R35F's analysis was textual: `_assigned_variables` walked
+the selection for `let NAME = ...` / `NAME = ...` patterns, and
+`_used_after` regex-scanned the post-selection lines of the
+enclosing fn body for any candidate name. The R35F caveat called out
+the failure mode as **over-conservative** — extra params and extra
+returns when a nested block shadowed a name or a block-scoped binding
+appeared to leak out.
+
+### Scope tree
+
+`build_scope_index(source)` parses the source textually (no parser
+AST yet — see honest design caveat below) into a scope tree with
+three kinds:
+
+  * `SCOPE_FILE` — implicit root, holds every top-level `fn` decl.
+  * `SCOPE_FN` — function body, bindings include parameters + lets
+    declared directly inside the body.
+  * `SCOPE_BLOCK` — brace-delimited block (any `{ ... }` opened by
+    `if`, `else`, `while`, `for`, `match` arm, or bare braces).
+
+Each scope tracks its source range (start/end line + column), its
+parent (None for FILE), its declared bindings (name -> declaration
+line), and its list of child scopes. The brace counter masks string
+literals and `//` comments so a `{` inside a quoted log message
+doesn't open a fake scope.
+
+### Public API
+
+  * `ScopeIndex.scope_at(line, col)` — most-nested scope containing
+    the position; falls back to FILE for out-of-fn positions.
+  * `ScopeIndex.resolve(name, line, col)` — walks the parent chain
+    from `scope_at(line, col)` outward, returns the innermost scope
+    whose bindings include `name`. FILE-scope fn definitions are
+    visible everywhere (NOVA hoisting); FN/BLOCK bindings are
+    visible only at or after their declaration line.
+  * `ScopeIndex.live_at_range(start, end)` — identifiers READ
+    inside the range whose declaring scope is an ancestor of (or
+    equal to) the range's enclosing scope. These are the
+    extract-fn's parameters.
+  * `ScopeIndex.assigned_used_after(start, end)` — names assigned
+    inside the range that are READ AFTER the range AND resolve to
+    the SAME binding (not a later shadow). These are the
+    extract-fn's return values.
+
+### Extract-function tightening
+
+`analyze_selection` in `extract_function.py` now drives both the
+free-variable and live-out computation through the scope index. The
+old `_free_variables` / `_assigned_variables` / `_used_after`
+helpers stay as a defensive fallback for callers that pass a raw
+selection string without a containing source document. The new
+behavioural wins:
+
+  * A let bound inside a nested block in the selection (e.g.
+    `if cond { let tmp = ... }`) is NOT a parameter, because the
+    scope index recognises the inner block as a child of the
+    selection's enclosing scope.
+  * Variable shadowing in a post-selection block doesn't inflate
+    returns: if the selection binds `tmp` and a later block has its
+    own `let tmp = ...`, the post-selection read of `tmp` resolves
+    to the shadow, not the selection's binding. The selection's
+    `tmp` is no longer flagged as live-out.
+  * Top-level fn references inside the selection are recognised as
+    FILE-scope bindings and excluded from the parameter list (a
+    helper called from the extract doesn't become a param).
+
+### Tests
+
+`tests/test_scope_index.py` — 66 assertions covering scope tree
+construction, `scope_at`, `resolve` (including shadowing), and the
+range queries. `tests/test_extract_function_scope_aware.py` — 34
+assertions covering the extract-function tightening end-to-end.
+Existing `test_extract_function.py` (66 assertions) and
+`test_r35f_code_action.py` (52 assertions) continue to pass — the
+R36D path produces strictly tighter results without breaking any
+existing happy-path expectation.
+
+### Honest design caveat
+
+The scope index is reconstructed by parsing source text rather than
+querying a parser-emitted AST: NOVA's parser doesn't yet expose a
+stable AST shape nova-lsp can consume. The textual walker handles
+string-literal braces, line-comment braces, fn declarations, plain
+blocks, and let bindings — but doesn't model brace-less single-
+statement bodies (NOVA's grammar requires braces, so this isn't a
+practical concern today) and may mis-handle exotic edge cases not
+yet observed. A future round can replace the textual walker with a
+parser-emitted query without changing the public API; the
+`ScopeIndex` contract is the same either way.
