@@ -152,9 +152,20 @@ Code actions surface five refactorings via the VS Code lightbulb menu:
   the enclosing function" when the file has no imports. The action
   is rejected when the selection is empty, single-line, spans a
   function boundary, or sits outside any function body — the
-  lightbulb stays clean of no-op extracts. Variables WRITTEN inside
-  the selection and read AFTER it are not yet propagated as return
-  values (tracked as R21F.2).
+  lightbulb stays clean of no-op extracts. **R35F** adds two
+  refinements: (1) **return-value computation** — variables assigned
+  inside the selection AND read after it in the enclosing fn body
+  become the helper's return list. Single live-out variable -> the
+  helper ends with `return <name>` and the call site is rewritten as
+  `<name> = extracted_N(args)`. Multiple live-outs -> tuple-return
+  placeholder (`return (a, b)` / `(a, b) = extracted_N(args)`)
+  pending real tuple support; documented limitation. (2)
+  **Early-exit rejection** — selections containing `return` /
+  `break` / `continue` at line-leading position are rejected
+  because moving them into a helper would diverge from the caller's
+  control flow. The conservative cut is to refuse rather than emit
+  a subtly-broken edit; pass `reject_early_exit=False` to the
+  analyzer to bypass for tests / tooling probes.
 * **Inline variable `x`** (`refactor.inline`) — only shown when the
   cursor sits on a `let NAME = RHS` line inside a `fn` body. The
   R25F implementation lives in `nova_lsp/inline_variable.py` with
@@ -182,7 +193,14 @@ Code actions surface five refactorings via the VS Code lightbulb menu:
 * **Organize imports** (`source.organizeImports`) — sorts the top-of-file
   `import "..."` block alphabetically and groups it: `std/` first,
   then `../src/`, then `../../tests/`, others last. Blank lines
-  separate adjacent groups.
+  separate adjacent groups. **R35F** adds deduplication on top of the
+  legacy sort: identical paths in the source collapse to a single line
+  in the output. The action is idempotent — a file whose imports are
+  already sorted+unique returns `None` (no lightbulb); a file with no
+  imports at all returns `None`. Comments between import lines are not
+  propagated to the rewritten block in this round (the sort would move
+  imports across comment boundaries so inline comments lose context);
+  doc-comment blocks above the first import line survive untouched.
 * **Sort top-level functions** (`source.organizeFns`) — sorts every
   top-level `fn` declaration by name, preserving each declaration's
   leading doc-comment block.
@@ -461,6 +479,7 @@ python tools/nova-lsp/tests/test_code_lens.py
 python tools/nova-lsp/tests/test_type_hierarchy.py
 python tools/nova-lsp/tests/test_exhaustiveness_fix.py
 python tools/nova-lsp/tests/test_extract_function.py
+python tools/nova-lsp/tests/test_r35f_code_action.py
 python tools/nova-lsp/tests/test_folding_ranges.py
 python tools/nova-lsp/tests/test_document_symbols.py
 ```

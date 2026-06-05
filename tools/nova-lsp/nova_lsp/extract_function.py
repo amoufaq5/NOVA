@@ -101,6 +101,22 @@ _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _IMPORT_RE = re.compile(r'^\s*import\s+"([^"]+)"')
 _EXTRACTED_NAME_RE = re.compile(r"\bextracted_(\d+)\b")
 _STRING_LITERAL_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+# Assignment to an already-declared name: ``NAME = expr`` (no leading
+# ``let``). The grouping captures the LHS identifier so callers can ask
+# "which variables did this line *write* to?" for the return-value
+# computation. Excludes ``==`` and ``=>`` so equality + match arrows
+# don't pollute the result.
+_ASSIGN_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=|>)"
+)
+# Early-control-flow tokens that disqualify a selection for extract:
+# we won't extract a block that contains a top-level ``return`` /
+# ``break`` / ``continue`` because the helper's control flow would
+# diverge from the caller's. The check is line-leading (``^\s*``) so
+# the keyword inside a string literal or comment doesn't trip it.
+_EARLY_RETURN_RE = re.compile(r"^\s*return\b")
+_BREAK_RE = re.compile(r"^\s*break\b")
+_CONTINUE_RE = re.compile(r"^\s*continue\b")
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +174,14 @@ class SelectionInfo:
     indent: str
     common_indent: int = 0
     non_empty_line_count: int = 0
+    # R35F: variables ASSIGNED inside the selection AND READ after the
+    # selection (still inside the enclosing fn body). These become the
+    # helper's return values — the call site is rewritten as
+    # ``<var> = helper(<args>)`` so the caller's downstream reads stay
+    # bound. Captures both ``let NAME = ...`` (newly declared in the
+    # selection but read after) and bare ``NAME = ...`` assignments to
+    # an already-declared name. Empty list = the helper returns void.
+    return_variables: List[str] = field(default_factory=list)
 
 
 def _find_fn_definitions(text: str) -> List[Tuple[str, int, int, int]]:
@@ -316,6 +340,105 @@ def _common_leading_indent(lines: List[str]) -> int:
     return common or 0
 
 
+def _has_early_exit(selected_lines: List[str]) -> bool:
+    """Return True if the selection contains a top-level ``return`` /
+    ``break`` / ``continue`` statement.
+
+    Heuristic: line-leading (``^\\s*KEYWORD\\b``) only — a keyword
+    inside a string literal or comment on a different line doesn't
+    count, and we don't try to track conditional flow (an early return
+    behind an ``if`` still trips the gate). The block-aware version
+    requires full AST analysis; this is the conservative cut that
+    matches the R35F spec's "skip extraction" recommendation.
+    """
+    for line in selected_lines:
+        # Strip string literals so a keyword inside ``"return x"``
+        # doesn't trip the check.
+        stripped = _STRING_LITERAL_RE.sub('""', line)
+        if _EARLY_RETURN_RE.match(stripped):
+            return True
+        if _BREAK_RE.match(stripped):
+            return True
+        if _CONTINUE_RE.match(stripped):
+            return True
+    return False
+
+
+def _assigned_variables(selection: str) -> List[str]:
+    """Return the names assigned inside ``selection``.
+
+    Captures BOTH:
+
+      * ``let NAME = ...`` (declared in the selection itself).
+      * ``NAME = ...`` (bare reassignment to an already-bound name).
+
+    First-seen order is preserved so the helper's return list mirrors
+    the source order. Duplicates are collapsed to a single name.
+
+    Strips string-literal contents so identifiers inside a quoted
+    string don't leak into the assignment set.
+    """
+    out: List[str] = []
+    seen: Set[str] = set()
+    for raw in selection.splitlines():
+        # Strip string literals + line comments before matching so the
+        # assignment regex doesn't false-positive inside a quote.
+        line = _STRING_LITERAL_RE.sub('""', raw)
+        # Strip ``//`` line comments — anything to the right of ``//``
+        # is comment text and shouldn't contribute assignments.
+        cmt = line.find("//")
+        if cmt >= 0:
+            line = line[:cmt]
+        m_let = _LET_BIND_RE.search(line)
+        if m_let:
+            name = m_let.group(1)
+            if name not in seen:
+                out.append(name)
+                seen.add(name)
+            continue
+        m_bare = _ASSIGN_RE.match(line)
+        if m_bare:
+            name = m_bare.group(1)
+            if name in _KEYWORDS:
+                continue
+            if name not in seen:
+                out.append(name)
+                seen.add(name)
+    return out
+
+
+def _used_after(
+    fn_lines: List[str], after_idx: int, candidates: Set[str]
+) -> Set[str]:
+    """Return the subset of ``candidates`` whose name appears in the
+    function body AFTER line index ``after_idx``.
+
+    Used for the return-value computation: a name written inside the
+    selection AND mentioned in any later line of the enclosing fn body
+    is a "live-out" of the extracted block and should be returned.
+
+    Line comments and string literals are masked so a name mentioned
+    only in a quoted log message or a ``//`` comment doesn't inflate
+    the live-out set.
+    """
+    if not candidates:
+        return set()
+    found: Set[str] = set()
+    for i in range(after_idx, len(fn_lines)):
+        raw = fn_lines[i]
+        # Mask out string literals + line comments.
+        line = _STRING_LITERAL_RE.sub('""', raw)
+        cmt = line.find("//")
+        if cmt >= 0:
+            line = line[:cmt]
+        for tok in _IDENT_RE.findall(line):
+            if tok in candidates and tok not in found:
+                found.add(tok)
+        if found == candidates:
+            break
+    return found
+
+
 def _first_indent(lines: List[str]) -> str:
     """Leading-whitespace string of the first non-empty line.
 
@@ -337,8 +460,10 @@ def analyze_selection(
     builtins: Optional[Set[str]] = None,
     min_lines: int = MIN_LINES_FOR_EXTRACT,
     require_min_lines: bool = True,
+    reject_early_exit: bool = True,
 ) -> Optional[SelectionInfo]:
-    """Classify a selection range and harvest its free variables.
+    """Classify a selection range and harvest its free variables +
+    return variables.
 
     Returns ``None`` when the selection is not extractable:
 
@@ -351,9 +476,17 @@ def analyze_selection(
         ``require_min_lines`` is True. Pass ``require_min_lines=False``
         to bypass for tests / callers that want the analysis without
         the gate.
+      * Selection contains an early ``return`` / ``break`` / ``continue``
+        at line-leading position and ``reject_early_exit`` is True
+        (default). These statements would change the caller's control
+        flow when moved into a helper; the conservative cut is to
+        decline the action rather than emit a subtly-broken edit.
 
     On success returns a fully-populated ``SelectionInfo`` ready to
-    feed into ``build_extract_edit``.
+    feed into ``build_extract_edit``. The ``return_variables`` field
+    captures every name assigned inside the selection AND read in the
+    enclosing fn body AFTER the selection — those become the helper's
+    return values + the rewritten call site's LHS.
     """
     lines = doc_text.splitlines()
     start_line = range_.get("start", {}).get("line", 0)
@@ -394,13 +527,37 @@ def analyze_selection(
     if require_min_lines and non_empty < min_lines:
         return None
 
+    # R35F: early return / break / continue would change the caller's
+    # control flow if moved into a helper. The conservative cut is to
+    # reject the selection so the editor doesn't surface a subtly-
+    # broken refactor.
+    if reject_early_exit and _has_early_exit(selected_lines):
+        return None
+
     fn_body_lines = lines[fn_start:fn_end + 1]
     rel_start = start_line - fn_start
+    rel_end = end_line - fn_start
     available = _locals_in_scope(fn_body_lines, rel_start)
     selection_text = "\n".join(selected_lines)
     free_vars = _free_variables(
         selection_text, available, builtins=builtins
     )
+
+    # R35F: live-out / return-value computation.
+    # 1. Collect every name assigned inside the selection.
+    # 2. Find which of those are read AFTER the selection (still inside
+    #    the enclosing fn body).
+    # 3. Order by first-seen-assignment so the return tuple is
+    #    deterministic across edits.
+    assigned = _assigned_variables(selection_text)
+    if assigned:
+        used_after = _used_after(
+            fn_body_lines, rel_end + 1, set(assigned)
+        )
+        return_vars = [n for n in assigned if n in used_after]
+    else:
+        return_vars = []
+
     indent = _first_indent(selected_lines)
     common = _common_leading_indent(selected_lines)
 
@@ -416,6 +573,7 @@ def analyze_selection(
         indent=indent,
         common_indent=common,
         non_empty_line_count=non_empty,
+        return_variables=return_vars,
     )
 
 
@@ -472,6 +630,7 @@ def _build_helper_text(
     args: List[str],
     selected_lines: List[str],
     common_indent: int,
+    return_vars: Optional[List[str]] = None,
 ) -> str:
     """Render the helper function definition as a multi-line string.
 
@@ -479,6 +638,13 @@ def _build_helper_text(
     selected line then re-indents by 4 spaces so the helper reads as
     a standalone fn regardless of how deeply the original block was
     nested.
+
+    When ``return_vars`` is non-empty, a ``return`` line is appended
+    inside the helper body. Single return var emits ``return <name>``;
+    multiple return vars emit ``return (a, b, c)`` (tuple form — NOVA
+    doesn't have first-class tuples in the parser yet, so this is the
+    documented "tuple return" placeholder shape; callers that ship
+    tuples will rewrite this when proper tuple support lands).
 
     No trailing newline — the caller decides whether to add one
     based on whether the insertion lands at end-of-file or mid-file.
@@ -490,6 +656,13 @@ def _build_helper_text(
             body_lines.append("    " + l[common_indent:])
         else:
             body_lines.append("")
+    # R35F: append a return line for live-out variables.
+    if return_vars:
+        if len(return_vars) == 1:
+            body_lines.append(f"    return {return_vars[0]}")
+        else:
+            tup = ", ".join(return_vars)
+            body_lines.append(f"    return ({tup})")
     return (
         f"fn {new_fn_name}({arg_list}) {{\n"
         + "\n".join(body_lines)
@@ -501,18 +674,33 @@ def _build_call_site(
     new_fn_name: str,
     args: List[str],
     indent: str,
+    return_vars: Optional[List[str]] = None,
 ) -> str:
     """Render the call-site replacement.
 
-    A bare function call — ``indent + new_fn_name(arg, arg, ...)`` —
-    so the call site reads exactly like the selection it replaced.
-    R21F.2 follow-up: when the selection produces an "output" (a
-    variable written inside and read after), wrap the call in
-    ``let result = ...`` and rewrite uses. For now we emit a bare
-    call and document the limitation.
+    Three shapes depending on what the helper produces:
+
+      * Void helper (no return values) -> ``indent + name(args)`` —
+        a bare statement-level call.
+      * One return value -> ``indent + name = helper(args)``. The
+        ``name`` here is the live-out var so the caller's downstream
+        reads still see a bound name. We deliberately don't emit
+        ``let`` because the variable was already declared inside the
+        selection (if R35F's _assigned_variables captured a ``let``)
+        or already declared above the selection (bare assignment).
+        Emitting ``let`` a second time would shadow / re-declare; a
+        bare assignment is the safer wire shape for both cases.
+      * Multiple return values -> ``indent + (a, b, c) = helper(args)``.
+        Same destructuring-into-tuple placeholder as the helper-side
+        return; documented limitation pending real tuple support.
     """
     arg_list = ", ".join(args)
-    return f"{indent}{new_fn_name}({arg_list})"
+    if not return_vars:
+        return f"{indent}{new_fn_name}({arg_list})"
+    if len(return_vars) == 1:
+        return f"{indent}{return_vars[0]} = {new_fn_name}({arg_list})"
+    tup = ", ".join(return_vars)
+    return f"{indent}({tup}) = {new_fn_name}({arg_list})"
 
 
 def _compute_helper_insertion_index(
@@ -594,9 +782,14 @@ def build_extract_edit(
     lines = doc_text.splitlines()
     new_lines = list(lines)
 
-    # 1. Replace the selected range with a call line.
+    # 1. Replace the selected range with a call line. When the
+    # selection has live-out variables, the call site is rewritten as
+    # ``<var> = helper(args)`` so downstream reads stay bound.
     call_line = _build_call_site(
-        new_fn_name, info.free_variables, info.indent
+        new_fn_name,
+        info.free_variables,
+        info.indent,
+        return_vars=info.return_variables,
     )
     new_lines[info.start_line:info.end_line + 1] = [call_line]
 
@@ -605,11 +798,13 @@ def build_extract_edit(
 
     # 3. Build the helper. Common-indent strip applied so the helper
     # body lives at column 4 regardless of the original nesting depth.
+    # Return-value list comes from the live-out analysis.
     helper_text = _build_helper_text(
         new_fn_name,
         info.free_variables,
         info.selected_lines,
         info.common_indent,
+        return_vars=info.return_variables,
     )
     # Append the helper with a blank separator line before it (so it
     # doesn't visually butt up against the enclosing fn's closing

@@ -1443,8 +1443,38 @@ def _import_group(path: str) -> int:
 
 
 def _organize_imports_text(text: str) -> Optional[str]:
-    """Return the document with its leading import block sorted+grouped,
-    or `None` if no rewrite is needed."""
+    """Return the document with its leading import block sorted, grouped,
+    and **deduplicated**, or ``None`` if no rewrite is needed.
+
+    R35F refinements on top of the legacy R3 behaviour:
+
+      * **Dedupe**: identical import paths are collapsed to a single
+        line. Two ``import "std/io.nova"`` lines yield one entry. This
+        makes the action useful as a clean-up after careless copy/paste
+        edits, not just a sort.
+      * **Single-import-block dedupe**: even when the original block has
+        only one *distinct* path, if the source contains duplicates we
+        still emit a rewrite. The legacy short-circuit on
+        ``len(block_paths) < 2`` skipped that case.
+      * **Empty file**: a file with no imports at all returns ``None``
+        (no action offered) rather than emitting an empty edit.
+      * **Idempotent**: a file whose import block is already
+        sorted+grouped+unique returns ``None`` — the lightbulb stays
+        clean.
+
+    Sort key remains ``(group, path)`` so std/-prefixed imports cluster
+    at the top — see ``_import_group`` for the bucket assignments. The
+    lexicographic-within-group order is the R35F spec's "sort
+    lexicographically" requirement; grouping is an LSP UX bonus.
+
+    Comments between imports are NOT propagated to the rewritten block
+    in this round — the sort moves imports across comment boundaries so
+    inline comments would land out of context. Doc-comment blocks above
+    the import block (before the first import line) survive untouched
+    because the scanner only starts collecting paths at the first
+    ``import "..."`` it sees and the splice preserves anything below
+    the last import line.
+    """
     lines = text.splitlines()
     # Collect the contiguous import block at the top (blank lines allowed
     # as separators inside the block).
@@ -1465,13 +1495,27 @@ def _organize_imports_text(text: str) -> Optional[str]:
         # First non-blank, non-import line ends the block.
         break
 
-    if len(block_paths) < 2 and last_import_idx == -1:
-        return None  # nothing to do
-    if len(block_paths) < 2:
-        return None  # only one import — already sorted
+    # R35F: a file with no imports at all -> no action.
+    if last_import_idx == -1:
+        return None
 
-    # Sort by (group, path).
-    sorted_paths = sorted(block_paths, key=lambda p: (_import_group(p), p))
+    # R35F: dedupe up front so the "single distinct path" case still
+    # triggers a rewrite when duplicates exist in the source.
+    unique_paths: List[str] = []
+    seen: set = set()
+    for p in block_paths:
+        if p not in seen:
+            unique_paths.append(p)
+            seen.add(p)
+
+    # If after deduping we have only one path AND no duplicates were
+    # present in the source, there's nothing to sort or rewrite.
+    had_duplicates = len(block_paths) != len(unique_paths)
+    if len(unique_paths) < 2 and not had_duplicates:
+        return None
+
+    # Sort by (group, path) — lexicographic within each group.
+    sorted_paths = sorted(unique_paths, key=lambda p: (_import_group(p), p))
     # Group block: separate adjacent groups with a blank line.
     rendered: List[str] = []
     prev_group: Optional[int] = None

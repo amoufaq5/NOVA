@@ -154,6 +154,118 @@ captures — last write wins).
   - All 4 prior unit-test files re-run: 33 + 38 + 83 + 45 = 199 OK,
     0 FAIL (unchanged).
 
+## R35F — nova-lsp: `textDocument/codeAction` -- organize imports + extract function refinements
+
+**Status: complete** — the existing R3/R21F code-action surface gets
+two refinements on top of the legacy behaviour:
+
+  - **Organize imports** now **deduplicates** identical paths in
+    addition to the legacy sort+group. The action stays idempotent —
+    a file with sorted+unique imports returns `None` (no lightbulb).
+    Empty files / files with no imports also return `None`. The
+    single-import-with-duplicates case (e.g. three copies of
+    `import "std/io.nova"`) now triggers a rewrite where the legacy
+    path short-circuited because the unique count was < 2.
+
+  - **Extract function** gains **return-value computation**.
+    `analyze_selection` now harvests `return_variables` alongside the
+    legacy `free_variables`: every name assigned inside the selection
+    (either `let NAME = ...` or bare `NAME = ...`) that is also read
+    in the enclosing fn body AFTER the selection becomes a live-out.
+    The helper appends `return <name>` (single live-out) or
+    `return (a, b)` (multi live-out tuple placeholder); the call site
+    is rewritten as `<name> = extracted_N(args)` so downstream reads
+    stay bound. Early `return` / `break` / `continue` at line-leading
+    position in the selection now rejects the action — moving those
+    keywords into a helper would diverge from the caller's control
+    flow, so the conservative cut is to decline rather than emit a
+    subtly-broken edit. Bypass via `reject_early_exit=False` on the
+    analyser API for tests / tooling probes.
+
+### Tests
+
+  - `tools/nova-lsp/tests/test_r35f_code_action.py` (NEW, 52
+    assertions): capability advertisement (`source.organizeImports`
+    + `refactor.extract` listed in `codeActionKinds`; other LSP
+    providers like renameProvider / semanticTokensProvider /
+    inlayHintProvider / codeLensProvider / documentLinkProvider
+    still advertised); organize-imports dedupe (two-identical →
+    one; five-with-two-dupes → three sorted; three-of-same-path →
+    one; preserves trailing newline; body untouched after sort);
+    organize-imports idempotency (sorted+unique → no rewrite;
+    empty file → no action; no-imports file → no action; second
+    pass is no-op); extract-function return-value (no return when
+    var not used after; single live-out → helper returns it +
+    call site rebinds; multi live-out → returned in first-seen
+    order; helper body has `return <var>` line; call site
+    rewritten as `<var> = extracted_1(...)`; void helper when no
+    live-out; bare `NAME = expr` assignment captured as live-out);
+    extract-function early-exit rejection (`return` rejected;
+    `break` rejected; `continue` rejected; bypass flag allows
+    through); extract-function counter (max+1 picks 6 from a file
+    with only `extracted_5`; gaps not reused — `extracted_1` +
+    `extracted_3` present → `extracted_4` next); dispatcher
+    integration (organize-imports via JSON-RPC dedupes; extract
+    with return value via JSON-RPC; no extract on early-return
+    selection; extract + organize-imports coexist in a single
+    response).
+
+  - `tools/nova-lsp/tests/test_extract_function.py` (66 assertions)
+    -- updated two tests to match R35F return-value rewriting:
+    `test_analyze_require_min_lines_bypass` now uses a let-statement
+    selection (the legacy `return x+1` fixture trips the new
+    early-exit reject); `test_build_edit_call_site_indent_matches_selection`
+    matches on `"extracted_1(" in l` instead of `startswith` since
+    the call site now starts with the live-out LHS
+    (`b = extracted_1(...)`). Substance of the assertions unchanged.
+
+  - All other LSP tests pass unchanged: base_spread_completion (41),
+    call_hierarchy (75), code_lens (64), code_lens_r33d (61),
+    document_link (69), document_symbols (65), exhaustiveness_fix (96),
+    folding_ranges (43), hover_docs (55), inlay_hints (104),
+    inline_variable (66), prepare_rename_r32e (131),
+    rename_workspace (101), semantic_tokens (119),
+    semantic_tokens_r29d (139), struct_field_completion (54),
+    type_completion (59), type_hierarchy (88),
+    workspace_diagnostics (55), workspace_symbols (52). All five
+    smoke tests (code_action, completion, definition_cross_file,
+    references, rename) green.
+
+### Caveats
+
+  - **Return-value heuristic is textual, not type-aware.** The
+    live-out scan is `_used_after(fn_body_lines, after_idx,
+    candidates)` — a regex walk over the post-selection lines of
+    the enclosing fn body checking which assigned names appear.
+    Comments + string literals are masked but the analysis doesn't
+    distinguish a read from a write (a name appearing as the LHS of
+    a later reassignment counts as a "read"); it doesn't track
+    branch flow (a name only read on one arm of an `if` is treated
+    the same as a name read unconditionally); and it has no scope
+    awareness (a name in a nested fn body would inflate the
+    live-out set if the names collide). The failure mode is
+    over-conservative (extra return values) rather than incorrect
+    (missing return values). Aligns with R35F's "documented
+    heuristic" allowance.
+
+  - **Multiple live-out variables emit a tuple-return placeholder.**
+    The helper body becomes `return (a, b)` and the call site
+    becomes `(a, b) = extracted_N(args)`. NOVA's parser doesn't yet
+    have first-class tuples; the wire shape is a placeholder that
+    compiles only when proper tuple support lands. Users who hit
+    this path get a refactor that's syntactically the desired shape
+    but won't `nova --check`-pass until tuples land. The
+    single-live-out path is the common case and fully working.
+
+  - **Early-exit rejection is line-leading only.** A `return` inside
+    an `if x { return y }` on a single line is still rejected
+    because the regex matches `^\s*return\b` after string-literal
+    masking. The miss case is `if x { return y }` written on one
+    physical line where `return` isn't at line-leading position —
+    that gets through, but extraction is unsafe. Tracked as a
+    follow-up; the line-leading variant is the more common case in
+    NOVA's style guide.
+
 ## R34F — nova-dap: `disassemble` + `sourceReference` + per-frame PC
 
 **Status: complete** — DAP `disassemble` now stamps each

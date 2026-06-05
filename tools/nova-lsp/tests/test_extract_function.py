@@ -433,14 +433,19 @@ def test_analyze_require_min_lines_bypass() -> None:
     """Passing ``require_min_lines=False`` allows a single-line
     selection through — useful for callers that want the analysis
     without the gate."""
+    # Note: avoid ``return`` in the single line so the R35F
+    # early-exit rejection doesn't fire — the bypass is for the
+    # min-lines gate specifically.
     src = (
         "fn run(x) {\n"
-        "    return x + 1\n"
+        "    let y = x + 1\n"
+        "    let z = y + 2\n"
+        "    return z\n"
         "}\n"
     )
     sel = {
         "start": {"line": 1, "character": 0},
-        "end": {"line": 1, "character": 16},
+        "end": {"line": 1, "character": 18},
     }
     info = analyze_selection(
         _uri("/t.nova"), sel, src,
@@ -583,10 +588,13 @@ def test_build_edit_call_site_indent_matches_selection() -> None:
     )
     edit = build_extract_edit(info, src, "extracted_1")
     new_text = _apply_edit(src, _uri("/t.nova"), edit)
-    # Find the call-site line.
+    # Find the call-site line. After R35F return-value rewriting the
+    # call site is ``<live_out> = extracted_1(args)`` so match any
+    # line that *contains* the call shape but isn't the helper's own
+    # definition line ``fn extracted_1(``.
     call_lines = [
         l for l in new_text.splitlines()
-        if l.lstrip().startswith("extracted_1(")
+        if "extracted_1(" in l and not l.lstrip().startswith("fn extracted_1(")
     ]
     assert_eq(len(call_lines), 1, "exactly one call site")
     leading = len(call_lines[0]) - len(call_lines[0].lstrip())
