@@ -4,6 +4,29 @@
 
 Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux/Windows syscalls.
 
+> **New here?** Start with [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md)
+> for compiler setup (Linux / Windows WSL2 / macOS) and
+> [`docs/IDE_SETUP.md`](docs/IDE_SETUP.md) for VS Code integration
+> (tree-sitter syntax + nova-lsp + nova-dap). Architecture decisions
+> live under [`docs/adr/`](docs/adr/) -- ADR 0001 (language design),
+> ADR 0002 (self-hosting bootstrap), ADR 0003 (pattern matching
+> evolution), ADR 0004 (LSP/DAP/tree-sitter strategy), ADR 0005
+> (R35C static-slot closure lowering + R37+ migration plan).
+
+## Status (through R35)
+
+| Track | Latest round | What landed |
+|---|---|---|
+| Self-hosting compiler | stage1..stage3 | `stage2.s == stage3.s` byte-identical (ADR 0002). |
+| Pattern matching | R17A / R21A / R31D / R32D / R33C | enums to if-let + arm guards (ADR 0003). |
+| Closures | R35C | static-slot capture; multi-instance "last write wins" documented; R37+ migration planned (ADR 0005). |
+| LSP (Python / pygls) | R3 .. R35F | hover / goto / rename (R32E) / inlay (R30E) / documentLink + codeLens (R33D) / code actions (R35F) / scope-aware extract-function (R36D). |
+| DAP (Python over gdb-mi) | R17F .. R35E | source / function / exception (R33F) / instruction (R17F+R35E) breakpoints; conditional + hit-count (R29E); reverse debug (R31E); profiler (R28F); disassembly (R34F). |
+| Tree-sitter grammar | R34E | match + nested patterns + let destructure + if-let + arm guards; **closure literals (R35C) deferred**. |
+| Codegen targets | v4.2 | Linux x86-64, Windows x86-64 PE32+, macOS x86-64, WASM (WASI), Linux ARM64, Windows ARM64. |
+
+See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
+
 ---
 
 | | |

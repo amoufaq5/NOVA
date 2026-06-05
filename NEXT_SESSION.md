@@ -1,5 +1,58 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R36F — docs sweep: ADRs + GETTING_STARTED + IDE_SETUP
+
+**Status: complete** — documentation-only round. No code modules
+touched. Adds `docs/adr/0001..0005`, `docs/GETTING_STARTED.md`,
+`docs/IDE_SETUP.md`, and refreshes the `README.md` top-of-file
+status section.
+
+### What R36F delivers
+  - **5 ADRs under `docs/adr/`** documenting the rounds-up rationale:
+    - `0001-nova-language-design.md` -- minimalism, what's
+      intentionally absent (async / traits / multi-instance closures).
+    - `0002-self-hosting.md` -- the stage1 -> stage2 -> stage3
+      bootstrap path + `stage2.s == stage3.s` invariant.
+    - `0003-pattern-matching-evolution.md` -- R17A enums to R33C
+      if-let + arm guards, what each round unlocked.
+    - `0004-lsp-dap-tooling-strategy.md` -- why Python (pygls) for
+      LSP / DAP, tree-sitter for syntax, what the split bought.
+    - `0005-static-slot-closure-lowering.md` -- R35C's choice +
+      the "last write wins" caveat for multi-instance + the planned
+      R37+ migration to `[fn_ptr, env_list]` tuple lowering.
+  - **`docs/GETTING_STARTED.md`** -- compiler setup walkthrough:
+    Linux native, Windows WSL2, macOS Intel, macOS Apple Silicon
+    (with honest perf note on Rosetta emulation), the three-stage
+    bootstrap verification, the test suite.
+  - **`docs/IDE_SETUP.md`** -- VS Code wiring: tree-sitter grammar
+    build, `nova-lsp` Python venv install + `.vscode/settings.json`
+    snippet, `nova-dap` install + `.vscode/launch.json` snippet,
+    feature summary per round (LSP: R29D/R30E/R32E/R33D/R35F; DAP:
+    R17F/R28F/R29E/R31E/R33F/R34F/R35E), and a troubleshooting
+    section.
+  - **`README.md`** -- top-of-file docs/ link + concise per-track
+    status table through R35.
+
+### Honest caveats
+  - **R36F is documentation, not validation.** The Getting Started
+    + IDE setup guides reflect existing supported configurations;
+    R36F did not re-run installs on Windows / macOS hardware.
+  - **No Marketplace listing for vscode-nova.** IDE_SETUP.md is
+    explicit about this -- install is manual today; R37+ may ship
+    the publish flow.
+  - **Tree-sitter lag on R35C closures.** Documented in ADR 0005,
+    in IDE_SETUP.md, and as a deferred-to-R37+ item.
+  - **Apple Silicon perf cost under Rosetta** (3-5x slowdown).
+    Documented in GETTING_STARTED.md.
+
+### Deferred to future rounds
+  - Tree-sitter closure literal grammar (R37+).
+  - vscode-nova Marketplace publish flow (R37+).
+  - Closure multi-instance + by-ref capture migration (R37+, per
+    ADR 0005).
+
+---
+
 ## R36D — nova-lsp: scope index + tighten extract-function variable analysis
 
 **Status: complete** — Closes the R35F exit caveat on the
