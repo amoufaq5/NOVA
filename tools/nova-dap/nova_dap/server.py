@@ -163,6 +163,14 @@ from nova_dap.disassembly import (
     parse_disassemble_response,
     parse_memory_reference,
 )
+from nova_dap.source_refs import (
+    SourceReferenceCache,
+    build_function_assembly_listing,
+    build_source_descriptor,
+    disassemble_via_objdump,
+    find_function_at_address,
+    objdump_available,
+)
 from nova_dap.profiler import (
     Profiler,
     SUPPORTED_FORMATS as PROFILER_FORMATS,
@@ -390,6 +398,13 @@ class Session:
     last_signal_name: Optional[str] = None
     last_signal_meaning: Optional[str] = None
     last_signal_thread_id: Optional[int] = None
+    # R34F: synthetic-source / sourceReference cache. The DAP
+    # ``disassemble`` handler allocates an id per (binary, function)
+    # pair and stamps ``location: {sourceReference: N}`` onto each
+    # ``DisassembledInstruction``. The IDE then issues a
+    # ``source { sourceReference: N }`` request to fetch the ``.s``
+    # listing for that function. See ``nova_dap.source_refs``.
+    source_refs: SourceReferenceCache = field(default_factory=SourceReferenceCache)
 
     def alloc_var_ref(self, frame_id: int) -> int:
         ref = self.next_var_ref
@@ -1286,6 +1301,11 @@ def handle_launch(session: Session, req: Dict[str, Any]) -> None:
     session.last_signal_name = None
     session.last_signal_meaning = None
     session.last_signal_thread_id = None
+    # R34F: drop cached synthetic-source buffers. The new binary may
+    # have moved functions around (different optimisation flags, code
+    # layout, even a different symbol set), so cached ``.s`` listings
+    # would mislead the IDE if served against the new gdb session.
+    session.source_refs.clear_all()
 
     # Try to negotiate non-stop + mi-async so individual threads can
     # be paused / continued. If gdb rejects either (e.g. it's running
@@ -1703,6 +1723,92 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
     send_response(session, req, body={"breakpoints": out})
 
 
+def _attach_source_reference(
+    session: Session, instructions: List[Any], anchor_address: int
+) -> None:
+    """R34F: stamp ``source_reference`` + ``source_name`` onto each
+    disassembled instruction so the IDE can fetch the synthetic ``.s``
+    listing via a follow-up ``source`` request.
+
+    We resolve the enclosing function name for ``anchor_address`` via
+    objdump (best-effort — if objdump isn't available we leave the
+    instructions untouched and the IDE falls back to whatever path /
+    line metadata gdb provided). Each instruction's ``location`` then
+    carries ``sourceReference: N`` pointing at the cached ``.s``
+    buffer.
+
+    This runs AFTER the disassemble call so the address window is
+    already known; we group all instructions in the response under the
+    function that contains the anchor (a single ``disassemble`` query
+    almost always sits inside one function — the IDE asks per-frame).
+    """
+    if not instructions:
+        return
+    binary_path = session.program
+    if not binary_path:
+        return
+    # Best-effort: try the gdb-reported symbol first (free, no
+    # subprocess), then fall back to objdump's function-header scan if
+    # the gdb reply didn't carry one.
+    function_name: Optional[str] = None
+    for insn in instructions:
+        sym = getattr(insn, "symbol", None)
+        if isinstance(sym, str) and sym:
+            function_name = sym
+            break
+    if function_name is None:
+        function_name = find_function_at_address(binary_path, anchor_address)
+    if not function_name:
+        return
+    ref_id = session.source_refs.allocate(binary_path, function_name)
+    short_name = f"{function_name}.s"
+    for insn in instructions:
+        # Don't overwrite an existing reference (the parser may have
+        # set a path-based location from DWARF; we just add the
+        # ``sourceReference`` alongside).
+        if getattr(insn, "source_reference", None) is None:
+            insn.source_reference = ref_id
+        if getattr(insn, "source_name", None) is None:
+            insn.source_name = short_name
+
+
+def _objdump_fallback_disassemble(
+    session: Session,
+    start_int: int,
+    count: int,
+) -> List[Any]:
+    """R34F: objdump-driven disassembly fallback used when gdb-MI's
+    ``-data-disassemble`` either isn't available or returns nothing.
+
+    Returns a list of :class:`DisassembledInstruction` covering the
+    requested address window, or an empty list if objdump itself
+    can't disassemble the binary (no objdump on PATH, binary not on
+    disk, address not in the static dump, etc.).
+
+    The returned instructions don't carry DWARF line info — objdump's
+    ``-d`` output doesn't interleave source by default. Callers
+    relying on source-line annotations must use the gdb-MI mode-4
+    path instead.
+    """
+    from nova_dap.disassembly import DisassembledInstruction
+    binary_path = session.program
+    if not binary_path:
+        return []
+    rows = disassemble_via_objdump(binary_path, start_int, count)
+    if not rows:
+        return []
+    out: List[DisassembledInstruction] = []
+    for row in rows:
+        out.append(
+            DisassembledInstruction(
+                address=f"0x{row.address}",
+                instruction=row.mnemonic,
+                symbol=row.function,
+            )
+        )
+    return out
+
+
 def handle_disassemble(session: Session, req: Dict[str, Any]) -> None:
     """DAP ``disassemble`` request.
 
@@ -1730,6 +1836,14 @@ def handle_disassemble(session: Session, req: Dict[str, Any]) -> None:
     instructions; if gdb returns fewer (e.g. a short function), we
     pad with ``{address, instruction: "??"}`` placeholders so the
     client's array slicing stays predictable.
+
+    R34F: each returned instruction's ``location`` carries a
+    ``sourceReference`` pointing at a per-session cache of the
+    enclosing function's ``.s`` listing (see
+    :class:`nova_dap.source_refs.SourceReferenceCache`). The IDE
+    fetches the listing via a follow-up ``source { sourceReference }``
+    request. If gdb's ``-data-disassemble`` returns nothing useful we
+    fall back to objdump.
     """
     args = req.get("arguments", {}) or {}
     bridge = session.bridge
@@ -1806,27 +1920,40 @@ def handle_disassemble(session: Session, req: Dict[str, Any]) -> None:
             message="could not compose disassemble command",
         )
         return
+    parsed: List[Any] = []
+    gdb_error: Optional[str] = None
     try:
         result = bridge.command(cmd, timeout=5.0)
     except TimeoutError as exc:
-        send_response(session, req, success=False, message=f"gdb timed out: {exc}")
-        return
+        gdb_error = f"gdb timed out: {exc}"
     except RuntimeError as exc:
-        send_response(session, req, success=False, message=f"gdb error: {exc}")
-        return
-    if not result.ok:
-        send_response(
-            session,
-            req,
-            success=False,
-            message=result.error_message or "disassemble failed",
-        )
-        return
-    parsed = parse_disassemble_response(result.fields)
+        gdb_error = f"gdb error: {exc}"
+    else:
+        if not result.ok:
+            gdb_error = result.error_message or "disassemble failed"
+        else:
+            parsed = parse_disassemble_response(result.fields)
+    # R34F: objdump fallback. If gdb errored OR returned an empty
+    # asm_insns array (some gdb builds quietly return ``^done``
+    # without entries when the address window is in a stripped
+    # section), reach for objdump as a static disassembler. The
+    # fallback can't carry DWARF line info, but for the IDE's
+    # "show me the bytes" view it's plenty.
+    if not parsed:
+        objdump_rows = _objdump_fallback_disassemble(session, start_int, count)
+        if objdump_rows:
+            parsed = objdump_rows
+            gdb_error = None
+        elif gdb_error is not None:
+            send_response(session, req, success=False, message=gdb_error)
+            return
     # Truncate or pad to the requested count so the client's array
     # slicing is predictable. DAP expects EXACTLY ``instructionCount``
     # entries.
     truncated = parsed[:count]
+    # Attach sourceReference + source_name BEFORE padding so the
+    # synthetic-source mapping covers the real instructions only.
+    _attach_source_reference(session, truncated, start_int)
     if len(truncated) < count:
         # Pad with placeholder rows. Address advances by 4 bytes
         # (same approximation as parse_memory_reference) so the IDE
@@ -1845,6 +1972,85 @@ def handle_disassemble(session: Session, req: Dict[str, Any]) -> None:
                 )
             )
     body = {"instructions": [i.to_dap_dict() for i in truncated]}
+    send_response(session, req, body=body)
+
+
+def handle_source(session: Session, req: Dict[str, Any]) -> None:
+    """DAP ``source`` request (R34F).
+
+    The IDE invokes this when it wants to open a synthetic source
+    buffer — one whose ``Source`` descriptor carried
+    ``sourceReference != 0`` instead of a real ``path``. For
+    nova-dap, that descriptor is created by ``handle_disassemble``
+    and points at a per-session cache of function-level ``.s``
+    listings (see :class:`nova_dap.source_refs.SourceReferenceCache`).
+
+    Args (per DAP spec):
+      * ``sourceReference`` (int, required) — the id the server
+        previously emitted in a ``DisassembledInstruction.location``.
+      * ``source`` (object, optional) — the full ``Source``
+        descriptor; we only consult ``sourceReference`` so this is
+        ignored.
+
+    Returns ``{content, mimeType}``. We always use ``text/x-asm`` so
+    VS Code applies its asm syntax theme.
+
+    Failure modes:
+      * Unknown ``sourceReference`` -> success=False, "no such
+        sourceReference".
+      * objdump unavailable / function not found in the binary ->
+        success=False with a clear message so the IDE renders its
+        default "source not available" placeholder.
+    """
+    args = req.get("arguments", {}) or {}
+    raw_ref = args.get("sourceReference")
+    # The DAP spec lets the client nest the reference under ``source``
+    # too: ``source { source: {sourceReference: N} }``. Honour both
+    # shapes for compatibility.
+    if raw_ref is None:
+        src = args.get("source") or {}
+        if isinstance(src, dict):
+            raw_ref = src.get("sourceReference")
+    try:
+        ref_id = int(raw_ref) if raw_ref is not None else 0
+    except (TypeError, ValueError):
+        ref_id = 0
+    if ref_id <= 0:
+        send_response(
+            session,
+            req,
+            success=False,
+            message="source requires positive 'sourceReference'",
+        )
+        return
+    entry = session.source_refs.get(ref_id)
+    if entry is None:
+        send_response(
+            session,
+            req,
+            success=False,
+            message=f"no such sourceReference: {ref_id}",
+        )
+        return
+    content = session.source_refs.materialise(ref_id)
+    if content is None:
+        # Best-effort fallback message — objdump may be missing or the
+        # function name didn't resolve in the binary.
+        send_response(
+            session,
+            req,
+            success=False,
+            message=(
+                f"could not materialise sourceReference {ref_id} "
+                f"({entry.cache_key[1]} in "
+                f"{os.path.basename(entry.cache_key[0])})"
+            ),
+        )
+        return
+    body: Dict[str, Any] = {
+        "content": content,
+        "mimeType": entry.mime_type,
+    }
     send_response(session, req, body=body)
 
 
@@ -2270,6 +2476,15 @@ def handle_stack_trace(session: Session, req: Dict[str, Any]) -> None:
             }
             if fullname:
                 frame["source"] = {"path": fullname, "name": short or os.path.basename(fullname)}
+            # R34F: surface the per-frame program counter so the IDE
+            # can pin its disassembly view (and any follow-up
+            # ``disassemble`` requests) to the exact instruction the
+            # frame is sitting at. gdb returns the PC in the ``addr``
+            # field of each ``-stack-list-frames`` entry; we forward it
+            # verbatim as ``instructionPointerReference``.
+            addr_raw = fr.get("addr")
+            if isinstance(addr_raw, str) and addr_raw.startswith("0x"):
+                frame["instructionPointerReference"] = addr_raw
             frames.append(frame)
     total = len(frames)
     sliced = frames[start : start + levels] if levels else frames[start:]
@@ -3060,6 +3275,11 @@ HANDLERS = {
     "dataBreakpointInfo": handle_data_breakpoint_info,
     "setDataBreakpoints": handle_set_data_breakpoints,
     "disassemble": handle_disassemble,
+    # R34F: ``source`` returns the synthetic ``.s`` listing for a
+    # sourceReference allocated by ``disassemble``. The IDE issues this
+    # when the user clicks "Show Disassembly" or navigates to the
+    # synthetic Source descriptor embedded in a DisassembledInstruction.
+    "source": handle_source,
     "continue": handle_continue,
     "next": handle_next,
     "stepIn": handle_step_in,

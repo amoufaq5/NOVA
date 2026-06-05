@@ -199,6 +199,19 @@ class DisassembledInstruction:
     location_path: Optional[str] = None      # absolute file path
     location_name: Optional[str] = None      # short file name
     line: Optional[int] = None               # 1-based source line
+    # R34F: source-reference into the per-session cache (see
+    # ``nova_dap.source_refs.SourceReferenceCache``). When set, the
+    # DAP wire shape's ``location`` carries ``sourceReference: N``
+    # alongside (or instead of) the real file path so the IDE knows to
+    # ask the server for the buffer content via the ``source`` request
+    # rather than reading a file off disk. Zero means "not synthetic"
+    # — the DAP spec reserves ``sourceReference: 0`` for "open the
+    # path"; we mirror that convention here.
+    source_reference: Optional[int] = None
+    # R34F: friendly source-buffer name shown as the IDE tab title.
+    # Used together with ``source_reference`` to populate the DAP
+    # ``location`` object; if both are absent the location is omitted.
+    source_name: Optional[str] = None
 
     def to_dap_dict(self) -> Dict[str, Any]:
         """Convert to the DAP wire shape (camelCase).
@@ -208,7 +221,13 @@ class DisassembledInstruction:
         (function name), and ``location`` + ``line`` for source
         mapping. Per the DAP spec, the IDE renders ``address`` in a
         gutter column, ``instruction`` as the mnemonic, and uses
-        ``location`` + ``line`` to anchor a source-line jump."""
+        ``location`` + ``line`` to anchor a source-line jump.
+
+        R34F: if ``source_reference`` is set we emit a
+        ``location: {sourceReference: N, name?}`` map alongside any
+        path-based location. ``sourceReference != 0`` signals the IDE
+        that the buffer is synthetic (must be fetched via the
+        ``source`` request) rather than a file on disk."""
         out: Dict[str, Any] = {
             "address": self.address,
             "instruction": self.instruction,
@@ -217,14 +236,31 @@ class DisassembledInstruction:
             out["instructionBytes"] = self.instruction_bytes
         if self.symbol:
             out["symbol"] = self.symbol
+        # Build ``location`` from whatever we have. The DAP spec lets
+        # us mix ``path`` and ``sourceReference``: the IDE prefers
+        # ``sourceReference`` when both are present and it's non-zero
+        # (the path is then treated as a label hint).
+        loc: Optional[Dict[str, Any]] = None
         if self.location_path:
-            loc: Dict[str, Any] = {"path": self.location_path}
+            loc = {"path": self.location_path}
             if self.location_name:
                 loc["name"] = self.location_name
             else:
                 # Best-effort basename so the IDE can render a tab
                 # title even if the caller didn't pre-split.
                 loc["name"] = self.location_path.rsplit("/", 1)[-1]
+        if self.source_reference is not None and self.source_reference > 0:
+            if loc is None:
+                loc = {}
+            loc["sourceReference"] = self.source_reference
+            if self.source_name and "name" not in loc:
+                loc["name"] = self.source_name
+            # Synthetic buffers come from the disassembler — give the
+            # IDE a visual hint so it renders the tab in italics /
+            # de-emphasized colour.
+            loc.setdefault("presentationHint", "deemphasize")
+            loc.setdefault("origin", "nova-dap disassembly")
+        if loc is not None:
             out["location"] = loc
         if self.line is not None:
             out["line"] = self.line

@@ -1,5 +1,95 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R34F — nova-dap: `disassemble` + `sourceReference` + per-frame PC
+
+**Status: complete** — DAP `disassemble` now stamps each
+`DisassembledInstruction.location` with a `sourceReference` pointing at
+a per-session cache of the enclosing function's `.s` listing. The new
+`source` request handler returns the cached listing as
+`{content, mimeType: "text/x-asm"}` so the IDE renders the synthetic
+buffer with asm syntax highlighting alongside the NOVA source.
+`stackTrace` frames now include `instructionPointerReference` so the
+IDE can pin disassembly to each frame, not just the current stop.
+
+Three integration points:
+
+  - **`nova_dap.source_refs.SourceReferenceCache`** (new). Thread-safe
+    per-session registry mapping `(binary_path, function_name)` ->
+    integer `sourceReference` ids. Allocation is lazy in
+    `handle_disassemble`; the same key reuses the same id within a
+    session so a follow-up `source` request from the IDE finds the
+    cached entry. `clear_all` runs on every `launch` because the new
+    binary may have moved functions and stale ids would mislead.
+
+  - **`objdump` fallback for `disassemble` + `source`.** When gdb's
+    `-data-disassemble` returns empty (stripped section, no DWARF, etc.)
+    `handle_disassemble` falls back to a static `objdump -d
+    --no-show-raw-insn --insn-width=8 -M intel` parse. `handle_source`
+    builds the function listing via `objdump --disassemble=<fn>` (with a
+    full-dump filter fallback for binutils versions that don't recognise
+    the `--disassemble=NAME` form). When `objdump` isn't on PATH the
+    `source` handler returns `success: false` with a clear message.
+
+  - **`stackTrace` frames carry `instructionPointerReference`.** Each
+    frame returned by `-stack-list-frames` now surfaces gdb's `addr`
+    field as the per-frame PC. Prior to R34F only `stopped` events
+    carried the PC, so the IDE couldn't pin its disassembly view to
+    older frames in the chain.
+
+### Tests
+
+  - `tools/nova-dap/tests/test_source_reference.py` (NEW, 134 assertions
+    total): SourceReferenceCache allocation + reuse + clear semantics,
+    objdump parser (function-header tracking, inline-comment stripping,
+    section-banner filtering, address case canonicalisation),
+    `DisassembledInstruction.to_dap_dict` sourceReference handling
+    (alone, combined with path, sourceReference=0 reserved case, legacy
+    no-ref case), server handlers (disassemble stamps a positive
+    sourceReference on each insn, source returns cached content, source
+    rejects ref=0 / unknown ref, accepts nested arg shape, stackTrace
+    carries instructionPointerReference, disassemble with
+    `instructionOffset: -3` resolves to a backwards address, disassemble
+    pads short responses to instructionCount, launch clears the cache),
+    stepping granularity routing (`"instruction"` -> `-exec-step-instruction`;
+    `"line"` -> default `-exec-step` regression), R29E / R31E / R33F
+    capability + module regressions, end-to-end against the NOVA
+    `hello_dwarf` binary (disassemble at main, fetch sourceReference,
+    verify >0 bytes of `.s` content).
+
+  - R17F instruction-stepping suite unchanged: 149 assertions still
+    pass byte-identical. R28F profiler 120 / R29E hit-count 168 /
+    R31E reverse-debug 100 / R33F exception-bp 141 — all green.
+
+  - All DAP smoke tests pass: `dap_smoke.py` (single-thread) +
+    `dap_multi_thread.py` (3-thread coordination).
+
+### Caveats
+
+  - **Instruction breakpoints out of scope for R34F (was already done in
+    R17F).** `supportsInstructionBreakpoints: true` stays advertised
+    because the prior round wired up `setInstructionBreakpoints`.
+    R34F focuses on the disassembly VIEW + sourceReference mechanism;
+    no changes to BP-tracking machinery.
+
+  - **DWARF source-line interleaving.** When gdb's `-data-disassemble`
+    mode 4 (mixed source + asm) runs and the binary has DWARF, the
+    parser already propagates `line` / `file` / `fullname` to each
+    insn. The R34F path uses mode 0 (asm-only) for the standard
+    disassemble call because mode 0's flat array is easier to map to
+    the DAP wire shape; mode 4 is available via
+    `build_disassemble_command(mode=4)` for callers that want the
+    interleave. NOVA's compiler does emit DWARF on Linux ELF (see
+    `DWARF_AUDIT.md`), so `line` is populated when the binary was
+    built with debug info.
+
+  - **objdump version fragility.** The parser tolerates the
+    `--no-show-raw-insn --insn-width=8 -M intel` form on modern
+    binutils (Ubuntu 22.04 / Fedora 39 / Debian 12 all confirmed).
+    Vendor builds that omit the tab separator between address-colon
+    and mnemonic will silently produce an empty parsed list; the
+    handler then falls back to gdb-MI. The format assumption is
+    documented at the top of `nova_dap/source_refs.py`.
+
 ## R34E — tree-sitter-nova: match expr + nested patterns + let destructure + if-let + arm guards
 
 **Status: complete** — the editor-facing tree-sitter grammar at

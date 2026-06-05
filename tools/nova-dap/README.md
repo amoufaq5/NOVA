@@ -34,7 +34,8 @@ repo root and `make smoke-dwarf`).
 | `dataBreakpointInfo`      | Returns `{dataId, description, accessTypes: ["write", "readWrite"], canPersist: false}` for a named variable. `dataId` is a base64-encoded JSON envelope `{n, f?, v?}` carrying the variable name + frame id so `setDataBreakpoints` can round-trip it without server-side state. |
 | `setDataBreakpoints`      | Tears down prior watchpoints via `-break-delete <id>` (per id, so source breakpoints are preserved) and installs gdb hardware watchpoints via `-break-watch <expr>` (write), `-break-watch -r <expr>` (read), or `-break-watch -a <expr>` (rw). Watchpoint hits surface as `stopped` events with `reason: "data breakpoint"` and a description like `Variable 'counter' changed (write): 5 -> 6`. |
 | `setInstructionBreakpoints` | Tears down prior instruction bps via `-break-delete <id>` (per id, so source-line / function / data breakpoints survive) and installs `-break-insert *0xADDR` per entry. Each entry carries `{instructionReference: "0xADDR", offset?, condition?}`; we add `offset` to the parsed address before the gdb call. Hits surface as `stopped` events with `reason: "instruction breakpoint"` and a description like `Stopped at instruction 0x401045`. |
-| `disassemble`             | `-data-disassemble -s <start> -e <end> -- 0` — disassembles a range of memory around `memoryReference`, returning `DisassembledInstruction[]` of length exactly `instructionCount` (padded with `??` placeholders if gdb returns fewer). `instructionOffset` and byte `offset` shift the start address (we approximate 4 bytes/insn for instruction offsets). |
+| `disassemble`             | `-data-disassemble -s <start> -e <end> -- 0` — disassembles a range of memory around `memoryReference`, returning `DisassembledInstruction[]` of length exactly `instructionCount` (padded with `??` placeholders if gdb returns fewer). `instructionOffset` and byte `offset` shift the start address (we approximate 4 bytes/insn for instruction offsets). Each instruction's `location` carries `sourceReference: N` (R34F) pointing at a per-session cache of the enclosing function's `.s` listing. If gdb's MI form returns empty, we fall back to a static `objdump -d` parse. |
+| `source`                  | (R34F) Returns the cached `.s` listing for a `sourceReference` previously emitted by `disassemble`. Body: `{content, mimeType: "text/x-asm"}`. Content is built via `objdump --disassemble=<fn>` on first access then cached for the rest of the session. |
 | `continue` / `next` / `stepIn` / `stepOut` | `-exec-{continue,next,step,finish}` with `--thread <id>` when DAP carries `singleThread:true`, otherwise `--all`. When `granularity: "instruction"` is supplied, `next` -> `-exec-next-instruction` and `stepIn` -> `-exec-step-instruction` so the IDE's disassembly view can advance the PC by exactly one machine instruction. (`stepOut` keeps `-exec-finish` regardless — gdb has no per-instruction finish variant.) |
 | `pause`                   | `-exec-interrupt --thread <id>` (or `--all`).     |
 | `reverseContinue`         | `-exec-reverse-continue`, after lazily enabling gdb's process-record mode on the first call. Honours `threadId` + `singleThread` the same way forward `continue` does. The follow-up `*stopped` surfaces as a normal DAP `stopped` event with `reason: "step"` (DAP has no distinct reverse-stop reason). |
@@ -138,6 +139,33 @@ Capabilities advertised:
   instruction. Hits surface as `stopped` events with `reason:
   "instruction breakpoint"`, `hitBreakpointIds: [<id>]`, and a
   description like `Stopped at instruction 0x401045`.
+* **`source` request + `sourceReference` mechanism (R34F).** The DAP
+  client invokes `source({sourceReference: N})` to fetch the buffer
+  content for a synthetic source descriptor — one whose
+  `sourceReference != 0`. nova-dap allocates these ids inside the
+  `disassemble` handler: each `DisassembledInstruction`'s `location`
+  carries `sourceReference: N` pointing at the enclosing function's
+  cached `.s` listing. The `source` handler then returns
+  `{content, mimeType: "text/x-asm"}` (so VS Code applies its asm
+  syntax theme). Cache key: `(binary_path, function_name)`. The cache
+  is per-session, allocated lazily on the first `disassemble`, and
+  cleared on every `launch` (the new binary may have moved functions,
+  so stale ids would mislead). When `objdump` is on PATH the listing
+  is built via `objdump -d --no-show-raw-insn --insn-width=8 -M intel
+  --disassemble=<fn>` (with a full-dump fallback for older binutils
+  that don't recognise the `--disassemble=NAME` form). When `objdump`
+  isn't installed the `source` handler returns `success: false` with
+  a clear message so the IDE renders its default placeholder.
+  `disassemble` itself also has an `objdump` fallback path for the
+  rare case gdb's `-data-disassemble` returns nothing (stripped section,
+  no DWARF, etc.) — gdb-MI is still tried first.
+* **`stackTrace` carries `instructionPointerReference` (R34F).** Every
+  frame returned by `stackTrace` now includes the PC (`gdb` reports it
+  in the `addr=` field of each `-stack-list-frames` entry). The IDE
+  uses this to pin its disassembly view to each frame and to anchor
+  follow-up `disassemble` requests; prior to R34F only `stopped`
+  events carried the PC. The frame chain still includes the per-frame
+  `source` + `line` + `column` for the source-level path.
 * `supportsExceptionInfoRequest: true` + `exceptionBreakpointFilters`
   — `setExceptionBreakpoints {filters: ["uncaught"]}` activates a
   server-side gate that converts gdb's `*stopped reason=signal-received`
