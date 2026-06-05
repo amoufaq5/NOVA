@@ -64,6 +64,10 @@ Module surface
   reply into a list of LSP ``DisassembledInstruction`` records.
 * :func:`build_instruction_breakpoint_command` — compose
   ``-break-insert *0xADDR``.
+* :func:`resolve_offset_to_address` — resolve a DAP-spec
+  instruction-count offset to an absolute address using a supplied
+  disassembly window (typically the output of
+  :func:`nova_dap.source_refs.disassemble_via_objdump`).
 * :class:`DisassembledInstruction` — typed value for a single
   decoded insn.
 * :class:`InstructionBreakpointRecord` /
@@ -389,9 +393,22 @@ def build_instruction_breakpoint_command(
     """Compose ``-break-insert *0xADDR`` (optionally with ``-c``).
 
     gdb's ``*`` prefix on the location selects "this exact address"
-    rather than symbol resolution. ``offset`` is a DAP-side byte
-    offset from ``instruction_reference``; the IDE uses it when the
-    user clicks a non-anchor instruction in the disassembly view.
+    rather than symbol resolution.
+
+    .. note::
+
+       Per the DAP spec, ``offset`` is a signed integer of
+       INSTRUCTIONS, not bytes. Computing the exact byte offset
+       requires disassembly context (variable-width instructions on
+       x86-64). This low-level builder treats ``offset`` as a raw
+       byte delta -- the calling handler is responsible for resolving
+       instruction-count offsets to a byte address upstream
+       (typically via :func:`resolve_offset_to_address` which consults
+       objdump). When the handler can't resolve a non-zero offset it
+       either rejects the BP with ``verified: false`` or rounds via
+       the 4-bytes-per-insn approximation; either way this builder
+       just emits ``-break-insert *<addr>`` against whatever address
+       arithmetic it was handed.
 
     Returns ``None`` for a malformed reference."""
     base = _parse_hex_address(instruction_reference)
@@ -409,6 +426,70 @@ def build_instruction_breakpoint_command(
     return " ".join(parts)
 
 
+def resolve_offset_to_address(
+    instruction_reference: str,
+    instruction_offset: int,
+    instructions: Optional[List[Any]] = None,
+) -> Optional[int]:
+    """Resolve a DAP-style instruction offset to an absolute address.
+
+    Per DAP spec, ``offset`` on a ``setInstructionBreakpoints`` entry
+    is a signed integer of INSTRUCTIONS, not bytes. To compute the
+    actual target address we need the instruction window around the
+    reference -- variable-width instructions on x86-64 mean we can't
+    just multiply by a fixed size.
+
+    Args:
+        instruction_reference: hex address of the anchor instruction
+            (e.g. ``"0x401045"``). Parsed via :func:`_parse_hex_address`.
+        instruction_offset: signed instruction count. ``0`` means
+            "use the anchor verbatim"; positive walks forward through
+            subsequent instructions, negative walks back.
+        instructions: optional list of objects with an ``address``
+            attribute (string ``"0x..."``) -- typically the output of
+            :func:`disassemble_via_objdump`. Each entry represents one
+            machine instruction in source order. When supplied AND the
+            anchor appears in the list, the resolver returns the
+            address of the ``anchor + offset``-th element.
+
+    Returns the resolved integer address on success or ``None`` when
+    the offset cannot be resolved against the supplied instruction
+    window (e.g. the anchor isn't in the list, or ``offset`` walks
+    past either end). When ``instructions`` is ``None`` and ``offset``
+    is zero we fall back to parsing the anchor itself; non-zero
+    offsets with no instruction context return ``None`` (caller must
+    reject the BP)."""
+    base = _parse_hex_address(instruction_reference)
+    if base is None:
+        return None
+    if instruction_offset == 0:
+        return base
+    if not instructions:
+        # No disassembly context available -- the caller must reject
+        # the non-zero offset (we refuse to silently misinterpret it
+        # as a byte offset).
+        return None
+    # Find the anchor position in the instruction list.
+    anchor_idx: Optional[int] = None
+    for i, insn in enumerate(instructions):
+        addr_attr = getattr(insn, "address", None)
+        if not isinstance(addr_attr, str):
+            continue
+        addr_int = _parse_hex_address(addr_attr)
+        if addr_int == base:
+            anchor_idx = i
+            break
+    if anchor_idx is None:
+        return None
+    target_idx = anchor_idx + instruction_offset
+    if target_idx < 0 or target_idx >= len(instructions):
+        return None
+    target_addr = getattr(instructions[target_idx], "address", None)
+    if not isinstance(target_addr, str):
+        return None
+    return _parse_hex_address(target_addr)
+
+
 @dataclass
 class InstructionBreakpointRecord:
     """Bookkeeping for one active instruction breakpoint.
@@ -417,14 +498,32 @@ class InstructionBreakpointRecord:
     ``instruction_reference`` is the original DAP-side address string
     (we keep it so a follow-up ``setInstructionBreakpoints`` call
     can match by address and re-use the gdb id where possible).
-    ``offset`` is the DAP-side byte offset; ``resolved_address`` is
-    the actual ``base + offset`` we passed to gdb."""
+    ``offset`` is the DAP-side offset (per DAP spec: a signed integer
+    of INSTRUCTIONS); ``resolved_address`` is the actual address we
+    passed to gdb after computing ``base + offset_in_instructions``.
+
+    R35E adds the condition + hit-count bookkeeping that parallels
+    :class:`nova_dap.breakpoints.SourceBreakpointRecord`:
+
+    * ``condition`` -- forwarded to gdb via ``-break-insert -c
+      "<expr>"`` so gdb pre-filters condition-false hits.
+    * ``hit_condition`` -- original DAP ``hitCondition`` string,
+      kept verbatim for diagnostics + re-validation.
+    * ``hit_predicate`` -- callable produced by
+      :func:`nova_dap.breakpoints.parse_hit_condition`. ``None`` when
+      no hit-count gate is installed.
+    * ``hit_count`` -- per-BP hit counter, bumped at every observed
+      ``*stopped,bkptno=<gdb_id>`` for this record before the
+      predicate is consulted."""
 
     gdb_id: int
     instruction_reference: str
     offset: int = 0
     resolved_address: Optional[int] = None
     condition: Optional[str] = None
+    hit_condition: Optional[str] = None
+    hit_predicate: Optional[Any] = None
+    hit_count: int = 0
 
 
 @dataclass
@@ -448,6 +547,41 @@ class InstructionBreakpointManager:
     ) -> Optional[InstructionBreakpointRecord]:
         with self._lock:
             return self.by_gdb_id.get(gdb_id)
+
+    def lookup_by_key(
+        self, instruction_reference: str, offset: int
+    ) -> Optional[InstructionBreakpointRecord]:
+        """Find a registered record by its ``(instructionReference,
+        offset)`` pair. Used by ``handle_set_instruction_breakpoints``
+        to diff old vs new sets so shared entries can be re-used (and
+        their gdb ids preserved) across re-sends instead of being
+        torn down and reinstalled."""
+        with self._lock:
+            for record in self.by_gdb_id.values():
+                if (
+                    record.instruction_reference == instruction_reference
+                    and record.offset == offset
+                ):
+                    return record
+            return None
+
+    def unregister(self, gdb_id: int) -> Optional[InstructionBreakpointRecord]:
+        """Drop a single record by gdb id. Returns the removed record
+        (so the caller can replay any per-id cleanup) or ``None`` if
+        the id wasn't registered."""
+        with self._lock:
+            return self.by_gdb_id.pop(gdb_id, None)
+
+    def increment_hit(self, gdb_id: int) -> Optional[int]:
+        """Bump the hit counter for ``gdb_id``. Returns the new count
+        or ``None`` if no record is registered for that id. Parallel
+        to :meth:`SourceBreakpointManager.increment_hit`."""
+        with self._lock:
+            record = self.by_gdb_id.get(gdb_id)
+            if record is None:
+                return None
+            record.hit_count += 1
+            return record.hit_count
 
     def clear_all(self) -> List[int]:
         """Forget every registered instruction breakpoint and return

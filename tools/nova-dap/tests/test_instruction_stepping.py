@@ -53,7 +53,9 @@ from nova_dap.disassembly import (  # noqa: E402
     map_step_command,
     parse_disassemble_response,
     parse_memory_reference,
+    resolve_offset_to_address,
 )
+from nova_dap.breakpoints import parse_hit_condition  # noqa: E402
 
 
 # Track every assertion so we can report a count at the end. Same
@@ -894,6 +896,678 @@ def test_launch_clears_instruction_bp_registry() -> None:
 
 
 # ---------------------------------------------------------------------------
+# R35E: condition + hit-count + offset + diff-based replacement tests.
+# ---------------------------------------------------------------------------
+
+
+def test_r35e_resolve_offset_zero_passthrough() -> None:
+    """``resolve_offset_to_address`` with offset=0 just parses the
+    reference (no disassembly window needed)."""
+    addr = resolve_offset_to_address("0x401045", 0, None)
+    check_eq(addr, 0x401045)
+
+
+def test_r35e_resolve_offset_positive_walks_window() -> None:
+    """A positive instruction offset walks forward through the
+    supplied disassembly window."""
+    insns = [
+        DisassembledInstruction(address="0x401000", instruction="push %rbp"),
+        DisassembledInstruction(address="0x401001", instruction="mov %rsp,%rbp"),
+        DisassembledInstruction(address="0x401004", instruction="sub $0x30,%rsp"),
+        DisassembledInstruction(address="0x401008", instruction="ret"),
+    ]
+    check_eq(resolve_offset_to_address("0x401001", 1, insns), 0x401004)
+    check_eq(resolve_offset_to_address("0x401001", 2, insns), 0x401008)
+    check_eq(resolve_offset_to_address("0x401000", 3, insns), 0x401008)
+
+
+def test_r35e_resolve_offset_negative_walks_window() -> None:
+    """A negative instruction offset walks back through the supplied
+    disassembly window."""
+    insns = [
+        DisassembledInstruction(address="0x401000", instruction="push %rbp"),
+        DisassembledInstruction(address="0x401001", instruction="mov %rsp,%rbp"),
+        DisassembledInstruction(address="0x401004", instruction="sub $0x30,%rsp"),
+    ]
+    check_eq(resolve_offset_to_address("0x401004", -1, insns), 0x401001)
+    check_eq(resolve_offset_to_address("0x401004", -2, insns), 0x401000)
+
+
+def test_r35e_resolve_offset_no_context_rejected() -> None:
+    """Non-zero offset without disassembly context returns None so the
+    caller refuses the BP rather than silently misinterpreting the
+    offset as bytes."""
+    check_eq(resolve_offset_to_address("0x401000", 2, None), None)
+    check_eq(resolve_offset_to_address("0x401000", 2, []), None)
+
+
+def test_r35e_resolve_offset_anchor_missing() -> None:
+    """If the anchor isn't in the supplied window the resolver returns
+    None and the caller surfaces a clear error message."""
+    insns = [
+        DisassembledInstruction(address="0x401000", instruction="push %rbp"),
+        DisassembledInstruction(address="0x401004", instruction="ret"),
+    ]
+    check_eq(resolve_offset_to_address("0xdeadbeef", 1, insns), None)
+
+
+def test_r35e_resolve_offset_walks_past_window() -> None:
+    """Offset that walks past the end (or start) of the window
+    returns None."""
+    insns = [
+        DisassembledInstruction(address="0x401000", instruction="push %rbp"),
+        DisassembledInstruction(address="0x401001", instruction="ret"),
+    ]
+    check_eq(resolve_offset_to_address("0x401001", 5, insns), None)
+    check_eq(resolve_offset_to_address("0x401000", -1, insns), None)
+
+
+def test_r35e_record_carries_hit_condition_fields() -> None:
+    """The dataclass exposes the new R35E hit-condition / predicate
+    fields with sensible defaults."""
+    rec = InstructionBreakpointRecord(
+        gdb_id=1,
+        instruction_reference="0x401000",
+    )
+    check_eq(rec.hit_condition, None)
+    check_eq(rec.hit_predicate, None)
+    check_eq(rec.hit_count, 0)
+
+
+def test_r35e_manager_lookup_by_key() -> None:
+    """``lookup_by_key`` returns the registered record matching
+    (instructionReference, offset) -- powers the diff-based
+    replacement path."""
+    mgr = InstructionBreakpointManager()
+    rec_a = InstructionBreakpointRecord(
+        gdb_id=1, instruction_reference="0x401000", offset=0
+    )
+    rec_b = InstructionBreakpointRecord(
+        gdb_id=2, instruction_reference="0x401010", offset=2
+    )
+    mgr.register(rec_a)
+    mgr.register(rec_b)
+    check(mgr.lookup_by_key("0x401000", 0) is rec_a)
+    check(mgr.lookup_by_key("0x401010", 2) is rec_b)
+    # Mismatched offset doesn't match.
+    check_eq(mgr.lookup_by_key("0x401000", 1), None)
+    # Unknown reference returns None.
+    check_eq(mgr.lookup_by_key("0xfffe", 0), None)
+
+
+def test_r35e_manager_unregister_drops_single() -> None:
+    """``unregister(gdb_id)`` removes a single record and returns it."""
+    mgr = InstructionBreakpointManager()
+    mgr.register(InstructionBreakpointRecord(
+        gdb_id=5, instruction_reference="0x401000"
+    ))
+    mgr.register(InstructionBreakpointRecord(
+        gdb_id=6, instruction_reference="0x401010"
+    ))
+    removed = mgr.unregister(5)
+    check(removed is not None)
+    check_eq(removed.gdb_id, 5)
+    check_eq(mgr.lookup_by_gdb_id(5), None)
+    check(mgr.lookup_by_gdb_id(6) is not None)
+
+
+def test_r35e_manager_increment_hit_counts() -> None:
+    """``increment_hit`` mirrors the SourceBreakpointManager API --
+    bumps the per-record hit_count and returns the new value."""
+    mgr = InstructionBreakpointManager()
+    mgr.register(InstructionBreakpointRecord(
+        gdb_id=11, instruction_reference="0x401045"
+    ))
+    check_eq(mgr.increment_hit(11), 1)
+    check_eq(mgr.increment_hit(11), 2)
+    check_eq(mgr.increment_hit(11), 3)
+    check_eq(mgr.lookup_by_gdb_id(11).hit_count, 3)
+    # Unknown id returns None (no implicit record).
+    check_eq(mgr.increment_hit(999), None)
+
+
+def test_r35e_set_instruction_breakpoints_with_condition() -> None:
+    """A ``setInstructionBreakpoints`` entry with a ``condition`` MUST
+    forward it to gdb via ``-break-insert -c "<expr>"``."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=20)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req = {
+        "seq": 100,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {
+                    "instructionReference": "0x401000",
+                    "condition": "x > 10",
+                }
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(inserts), 1)
+    check("-c" in inserts[0], f"missing -c flag in {inserts[0]!r}")
+    check('"x > 10"' in inserts[0], f"missing condition in {inserts[0]!r}")
+    check("*0x401000" in inserts[0])
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 1)
+    check_eq(entries[0].get("verified"), True)
+    record = sess.instruction_breakpoints.lookup_by_gdb_id(20)
+    check(record is not None)
+    check_eq(record.condition, "x > 10")
+
+
+def test_r35e_set_instruction_breakpoints_with_hit_condition() -> None:
+    """A ``setInstructionBreakpoints`` entry with ``hitCondition``
+    parses the predicate and registers it on the manager record so
+    ``_bp_gate_should_skip`` can consult it on every hit."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=30)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req = {
+        "seq": 101,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {
+                    "instructionReference": "0x401050",
+                    "hitCondition": "3",
+                }
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 1)
+    check_eq(entries[0].get("verified"), True)
+    check_eq(entries[0].get("id"), 30)
+    record = sess.instruction_breakpoints.lookup_by_gdb_id(30)
+    check(record is not None)
+    check_eq(record.hit_condition, "3")
+    check(record.hit_predicate is not None)
+    # The bare "3" predicate fires on exactly the 3rd hit.
+    check_eq(record.hit_predicate(2), False)
+    check_eq(record.hit_predicate(3), True)
+    check_eq(record.hit_predicate(4), False)
+
+
+def test_r35e_set_instruction_breakpoints_with_modulo_hit_condition() -> None:
+    """``hitCondition: "%5"`` fires on every 5th hit -- the predicate
+    is the same one R29E uses for line BPs."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=40)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req = {
+        "seq": 102,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {
+                    "instructionReference": "0x401100",
+                    "hitCondition": "%5",
+                }
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    record = sess.instruction_breakpoints.lookup_by_gdb_id(40)
+    check(record is not None)
+    check(record.hit_predicate is not None)
+    check_eq(record.hit_predicate(1), False)
+    check_eq(record.hit_predicate(5), True)
+    check_eq(record.hit_predicate(10), True)
+
+
+def test_r35e_set_instruction_breakpoints_rejects_malformed_hit_condition() -> None:
+    """A malformed ``hitCondition`` MUST come back ``verified: false``
+    with the parser's error message."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=50)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req = {
+        "seq": 103,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {
+                    "instructionReference": "0x401000",
+                    "hitCondition": "%0",
+                }
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 1)
+    check_eq(entries[0].get("verified"), False)
+    check(
+        "validation-error" in entries[0].get("message", "")
+        or "invalid" in entries[0].get("message", "")
+    )
+    # The malformed entry must NOT issue -break-insert.
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(inserts), 0)
+
+
+def test_r35e_set_instruction_breakpoints_multiple_entries() -> None:
+    """A request with multiple entries installs each + returns all in
+    the same order. Verifies the multi-BP path works alongside the
+    diff-based replacement code."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=200)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req = {
+        "seq": 104,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000"},
+                {"instructionReference": "0x401010"},
+                {"instructionReference": "0x401020"},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(inserts), 3)
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 3)
+    for e in entries:
+        check_eq(e.get("verified"), True)
+        check(isinstance(e.get("id"), int))
+    snap = sess.instruction_breakpoints.snapshot()
+    check_eq(len(snap), 3)
+
+
+def test_r35e_diff_based_replacement_preserves_shared() -> None:
+    """A second ``setInstructionBreakpoints`` call that re-sends some
+    of the existing BPs MUST preserve their gdb ids + hit counters
+    instead of deleting + reinstalling unchanged entries."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=70)
+    sess.bridge = bridge  # type: ignore[assignment]
+    # Install two BPs.
+    req1 = {
+        "seq": 110,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000"},
+                {"instructionReference": "0x401010"},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req1)
+    first_snap = sess.instruction_breakpoints.snapshot()
+    check_eq(len(first_snap), 2)
+    first_ids_by_ref = {r.instruction_reference: r.gdb_id for r in first_snap}
+    # Simulate accumulated hit counts on the shared BP.
+    sess.instruction_breakpoints.increment_hit(first_ids_by_ref["0x401000"])
+    sess.instruction_breakpoints.increment_hit(first_ids_by_ref["0x401000"])
+    bridge.sent_commands.clear()
+    # Second send: keep 0x401000, drop 0x401010, add 0x401020.
+    req2 = {
+        "seq": 111,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000"},
+                {"instructionReference": "0x401020"},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req2)
+    # Only the dropped BP (0x401010) must be deleted -- shared keeps
+    # its gdb id.
+    deletes = [c for c in bridge.sent_commands if c.startswith("-break-delete")]
+    check_eq(len(deletes), 1, f"expected exactly 1 delete: {bridge.sent_commands}")
+    check_eq(
+        int(deletes[0].split()[-1]),
+        first_ids_by_ref["0x401010"],
+        "must delete the absent BP, not the shared one",
+    )
+    # Only the new BP (0x401020) must be inserted.
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(inserts), 1, f"expected exactly 1 insert: {bridge.sent_commands}")
+    check("*0x401020" in inserts[0])
+    # Shared BP keeps its gdb id and accumulated hit counter.
+    snap2 = sess.instruction_breakpoints.snapshot()
+    check_eq(len(snap2), 2)
+    shared = next(
+        r for r in snap2 if r.instruction_reference == "0x401000"
+    )
+    check_eq(shared.gdb_id, first_ids_by_ref["0x401000"], "shared id preserved")
+    check_eq(shared.hit_count, 2, "hit counter survives re-send")
+
+
+def test_r35e_diff_replacement_reinstall_on_condition_change() -> None:
+    """When the user changes a BP's condition (same address) the
+    handler MUST delete + reinstall so gdb's ``-c`` install picks up
+    the new expression. Hit-count progress legitimately resets in
+    this case because gdb assigns a fresh id."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=80)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req1 = {
+        "seq": 120,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000", "condition": "x == 1"},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req1)
+    first_id = sess.instruction_breakpoints.snapshot()[0].gdb_id
+    bridge.sent_commands.clear()
+    # Same address, NEW condition -> delete + reinstall.
+    req2 = {
+        "seq": 121,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000", "condition": "x == 2"},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req2)
+    deletes = [c for c in bridge.sent_commands if c.startswith("-break-delete")]
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(deletes), 1)
+    check_eq(int(deletes[0].split()[-1]), first_id)
+    check_eq(len(inserts), 1)
+    check('"x == 2"' in inserts[0])
+
+
+def test_r35e_diff_replacement_hit_condition_only_update_preserves_id() -> None:
+    """Changing ONLY the hit predicate (same condition + same address)
+    is a server-side bookkeeping change -- gdb's install doesn't need
+    to be touched, so the id + hit_count survive."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=90)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req1 = {
+        "seq": 130,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000", "hitCondition": ">2"},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req1)
+    first_id = sess.instruction_breakpoints.snapshot()[0].gdb_id
+    sess.instruction_breakpoints.increment_hit(first_id)
+    bridge.sent_commands.clear()
+    # Same address, NEW hitCondition.
+    req2 = {
+        "seq": 131,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000", "hitCondition": "%4"},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req2)
+    deletes = [c for c in bridge.sent_commands if c.startswith("-break-delete")]
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    # No gdb-side traffic should fire for a pure hit-count bookkeeping
+    # change.
+    check_eq(len(deletes), 0)
+    check_eq(len(inserts), 0)
+    snap = sess.instruction_breakpoints.snapshot()
+    check_eq(len(snap), 1)
+    check_eq(snap[0].gdb_id, first_id, "id preserved across hit-only change")
+    check_eq(snap[0].hit_condition, "%4")
+    check_eq(snap[0].hit_count, 1, "counter not reset on hit-only change")
+
+
+def test_r35e_diff_replacement_empty_clears_all() -> None:
+    """A ``setInstructionBreakpoints`` with an empty list tears down
+    every previously-installed BP."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=300)
+    sess.bridge = bridge  # type: ignore[assignment]
+    server.handle_set_instruction_breakpoints(sess, {
+        "seq": 140,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000"},
+                {"instructionReference": "0x401010"},
+            ]
+        },
+    })
+    check_eq(len(sess.instruction_breakpoints.snapshot()), 2)
+    bridge.sent_commands.clear()
+    server.handle_set_instruction_breakpoints(sess, {
+        "seq": 141,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {"breakpoints": []},
+    })
+    deletes = [c for c in bridge.sent_commands if c.startswith("-break-delete")]
+    check_eq(len(deletes), 2)
+    check_eq(len(sess.instruction_breakpoints.snapshot()), 0)
+
+
+def test_r35e_offset_nonzero_no_binary_rejected() -> None:
+    """A non-zero offset without a binary on disk MUST come back
+    ``verified: false`` with a clear message, NOT silently get
+    misinterpreted as a byte offset."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge()
+    sess.bridge = bridge  # type: ignore[assignment]
+    # No session.program set, so offset resolution must fail.
+    req = {
+        "seq": 150,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000", "offset": 2},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 1)
+    check_eq(entries[0].get("verified"), False)
+    msg = entries[0].get("message", "")
+    check(
+        "offset" in msg or "objdump" in msg,
+        f"expected offset/objdump message, got: {msg!r}",
+    )
+    # No gdb-side install for an unresolved offset.
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(inserts), 0)
+
+
+def test_r35e_offset_zero_no_objdump_required() -> None:
+    """``offset == 0`` is the common case -- no disassembly window
+    needed. The handler installs directly even when there's no binary
+    available."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    bridge = CaptureBridge(next_bp_id=400)
+    sess.bridge = bridge  # type: ignore[assignment]
+    req = {
+        "seq": 160,
+        "type": "request",
+        "command": "setInstructionBreakpoints",
+        "arguments": {
+            "breakpoints": [
+                {"instructionReference": "0x401000", "offset": 0},
+            ]
+        },
+    }
+    server.handle_set_instruction_breakpoints(sess, req)
+    resp = sess.out_stream.last_response()
+    entries = resp.get("body", {}).get("breakpoints") or []
+    check_eq(len(entries), 1)
+    check_eq(entries[0].get("verified"), True)
+    inserts = [c for c in bridge.sent_commands if c.startswith("-break-insert")]
+    check_eq(len(inserts), 1)
+    check("*0x401000" in inserts[0])
+
+
+def test_r35e_bp_gate_skip_instruction_hit_count() -> None:
+    """``_bp_gate_should_skip`` MUST gate hits via the
+    instruction-breakpoint manager when the hit predicate says skip,
+    parallel to the source-line gate path."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    # Register an instruction BP with hitCondition ">2": skip hits 1
+    # + 2, fire on hit 3 onwards.
+    predicate = parse_hit_condition(">2")
+    sess.instruction_breakpoints.register(
+        InstructionBreakpointRecord(
+            gdb_id=55,
+            instruction_reference="0x401045",
+            hit_condition=">2",
+            hit_predicate=predicate,
+        )
+    )
+    check_eq(server._bp_gate_should_skip(sess, 55, 1), True)   # hit 1 -> skip
+    check_eq(server._bp_gate_should_skip(sess, 55, 1), True)   # hit 2 -> skip
+    check_eq(server._bp_gate_should_skip(sess, 55, 1), False)  # hit 3 -> fire
+    check_eq(server._bp_gate_should_skip(sess, 55, 1), False)  # hit 4 -> fire
+
+
+def test_r35e_bp_gate_no_skip_for_unregistered_id() -> None:
+    """An unregistered gdb id MUST return False (don't skip) so
+    instruction BPs without hit-count gating still surface stops
+    normally."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    check_eq(server._bp_gate_should_skip(sess, 999, 1), False)
+
+
+def test_r35e_bp_gate_no_skip_when_no_predicate() -> None:
+    """An instruction BP without a hit predicate (the common case --
+    unconditional breakpoint at address) MUST NOT be gated."""
+    from nova_dap import server  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+    sess.instruction_breakpoints.register(
+        InstructionBreakpointRecord(
+            gdb_id=77, instruction_reference="0x401000"
+        )
+    )
+    check_eq(server._bp_gate_should_skip(sess, 77, 1), False)
+
+
+def test_r35e_stopped_event_skip_does_not_emit_stopped() -> None:
+    """A breakpoint-hit on an instruction BP whose hit-count predicate
+    says skip MUST NOT produce a DAP ``stopped`` event -- the gate
+    silent-resumes instead."""
+    from nova_dap import server  # noqa: WPS433
+    from nova_dap.gdb_bridge import GdbAsyncRecord  # noqa: WPS433
+
+    sess = server.Session(out_stream=_CaptureStream())
+
+    # Stub bridge so the silent-resume worker can execute synchronously
+    # (matching the test pattern used elsewhere).
+    class StubBridge:
+        _supports_inline_eval = True
+        def __init__(self) -> None:
+            self.sent: List[str] = []
+        def command(self, cmd: str, timeout: float = 10.0) -> GdbResult:
+            self.sent.append(cmd)
+            return GdbResult(token=None, cls="done", fields={})
+
+    sess.bridge = StubBridge()  # type: ignore[assignment]
+    # Predicate that skips the first hit ("==2") -> first hit is gated.
+    predicate = parse_hit_condition("==2")
+    sess.instruction_breakpoints.register(
+        InstructionBreakpointRecord(
+            gdb_id=88,
+            instruction_reference="0x401200",
+            hit_condition="==2",
+            hit_predicate=predicate,
+        )
+    )
+    rec = GdbAsyncRecord(
+        kind="exec",
+        cls="stopped",
+        fields={
+            "reason": "breakpoint-hit",
+            "bkptno": "88",
+            "thread-id": "1",
+            "stopped-threads": "all",
+            "frame": {"addr": "0x401200"},
+        },
+    )
+    server._handle_stopped(sess, rec)
+    events = sess.out_stream.events
+    stopped_events = [e for e in events if e.get("event") == "stopped"]
+    # First hit -> predicate says skip -> NO stopped event.
+    check_eq(len(stopped_events), 0, "filtered hit must not emit stopped")
+    # Second hit -> predicate says fire -> stopped event with
+    # reason="instruction breakpoint".
+    server._handle_stopped(sess, rec)
+    stopped_events = [e for e in sess.out_stream.events if e.get("event") == "stopped"]
+    check_eq(len(stopped_events), 1)
+    check_eq(stopped_events[0].get("body", {}).get("reason"), "instruction breakpoint")
+
+
+def test_r35e_capability_stays_advertised() -> None:
+    """R34F kept ``supportsInstructionBreakpoints: true``; R35E pins
+    that and asserts the dispatch entry is still in place."""
+    from nova_dap.server import _capabilities, HANDLERS  # noqa: WPS433
+
+    caps = _capabilities()
+    check_eq(caps.get("supportsInstructionBreakpoints"), True)
+    check("setInstructionBreakpoints" in HANDLERS)
+    # R29E + R33F + R34F capabilities all still on.
+    check_eq(caps.get("supportsConditionalBreakpoints"), True)
+    check_eq(caps.get("supportsHitConditionalBreakpoints"), True)
+    check_eq(caps.get("supportsDisassembleRequest"), True)
+
+
+# ---------------------------------------------------------------------------
 # End-to-end driver shared with the other DAP tests.
 # ---------------------------------------------------------------------------
 
@@ -1220,6 +1894,33 @@ def _run_unit_tests() -> None:
     test_stopped_event_carries_instruction_pointer()
     test_stopped_event_routes_instruction_bp_reason()
     test_launch_clears_instruction_bp_registry()
+    # R35E: condition + hit-count + offset + diff-based replacement.
+    test_r35e_resolve_offset_zero_passthrough()
+    test_r35e_resolve_offset_positive_walks_window()
+    test_r35e_resolve_offset_negative_walks_window()
+    test_r35e_resolve_offset_no_context_rejected()
+    test_r35e_resolve_offset_anchor_missing()
+    test_r35e_resolve_offset_walks_past_window()
+    test_r35e_record_carries_hit_condition_fields()
+    test_r35e_manager_lookup_by_key()
+    test_r35e_manager_unregister_drops_single()
+    test_r35e_manager_increment_hit_counts()
+    test_r35e_set_instruction_breakpoints_with_condition()
+    test_r35e_set_instruction_breakpoints_with_hit_condition()
+    test_r35e_set_instruction_breakpoints_with_modulo_hit_condition()
+    test_r35e_set_instruction_breakpoints_rejects_malformed_hit_condition()
+    test_r35e_set_instruction_breakpoints_multiple_entries()
+    test_r35e_diff_based_replacement_preserves_shared()
+    test_r35e_diff_replacement_reinstall_on_condition_change()
+    test_r35e_diff_replacement_hit_condition_only_update_preserves_id()
+    test_r35e_diff_replacement_empty_clears_all()
+    test_r35e_offset_nonzero_no_binary_rejected()
+    test_r35e_offset_zero_no_objdump_required()
+    test_r35e_bp_gate_skip_instruction_hit_count()
+    test_r35e_bp_gate_no_skip_for_unregistered_id()
+    test_r35e_bp_gate_no_skip_when_no_predicate()
+    test_r35e_stopped_event_skip_does_not_emit_stopped()
+    test_r35e_capability_stays_advertised()
 
 
 def main() -> int:

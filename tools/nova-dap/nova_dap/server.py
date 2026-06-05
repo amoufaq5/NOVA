@@ -162,6 +162,7 @@ from nova_dap.disassembly import (
     map_step_command,
     parse_disassemble_response,
     parse_memory_reference,
+    resolve_offset_to_address,
 )
 from nova_dap.source_refs import (
     SourceReferenceCache,
@@ -551,8 +552,9 @@ def _stopped_threads(rec: GdbAsyncRecord) -> Tuple[List[int], bool]:
 def _bp_gate_should_skip(
     session: Session, gdb_id: int, thread_id: Optional[int]
 ) -> bool:
-    """Decide whether a source-line BP hit should be silently
-    skipped (resumed without firing the DAP ``stopped`` event).
+    """Decide whether a source-line / instruction BP hit should be
+    silently skipped (resumed without firing the DAP ``stopped``
+    event).
 
     Returns True when the **hit-count gate** fails: the BP has a
     parsed ``hitCondition`` predicate and, after incrementing the
@@ -560,19 +562,20 @@ def _bp_gate_should_skip(
 
     The **condition gate** is enforced upstream by gdb's
     ``-break-insert -c "<expr>"`` install flag (see
-    ``handle_set_breakpoints``). gdb evaluates the condition at the
-    actual hit site and only emits a ``*stopped`` record when the
-    expression is non-zero, so every hit we observe is already
-    condition-true by definition. A server-side re-evaluation via
-    ``-data-evaluate-expression`` would be functionally redundant
-    AND would deadlock the bridge: ``_handle_stopped`` runs on the
-    gdb-MI reader thread, and ``bridge.command()`` blocks waiting
-    for a response that only the reader thread can deliver. The
-    re-eval helper :func:`evaluate_condition_via_bridge` exists for
-    unit tests and worker-thread callers per the deliverables, but
-    must not be invoked from this path. (See
-    :func:`_resume_silently` for how we DO drive a bridge command
-    from the reader thread -- via a fire-and-forget worker.)
+    ``handle_set_breakpoints`` / ``handle_set_instruction_breakpoints``).
+    gdb evaluates the condition at the actual hit site and only emits
+    a ``*stopped`` record when the expression is non-zero, so every
+    hit we observe is already condition-true by definition. A
+    server-side re-evaluation via ``-data-evaluate-expression`` would
+    be functionally redundant AND would deadlock the bridge:
+    ``_handle_stopped`` runs on the gdb-MI reader thread, and
+    ``bridge.command()`` blocks waiting for a response that only the
+    reader thread can deliver. The re-eval helper
+    :func:`evaluate_condition_via_bridge` exists for unit tests and
+    worker-thread callers per the deliverables, but must not be
+    invoked from this path. (See :func:`_resume_silently` for how we
+    DO drive a bridge command from the reader thread -- via a fire-
+    and-forget worker.)
 
     Hits are counted on every gdb-reported breakpoint-hit. Since
     gdb's ``-c`` filters condition first, the counter naturally
@@ -582,9 +585,27 @@ def _bp_gate_should_skip(
 
     BPs without a registered record (unconditional, no hit-count)
     return False (don't skip) and never trigger the gate -- this is
-    the path the dap_smoke / R28F profiler regressions exercise."""
+    the path the dap_smoke / R28F profiler regressions exercise.
+
+    R35E: instruction breakpoints share the same gate path so a
+    ``setInstructionBreakpoints`` entry with a ``hitCondition``
+    (e.g. ``"%3"`` for "every 3rd hit") behaves identically to the
+    R29E source-line case. We check the source-line registry first
+    (its record carries source path / line for log messages); if no
+    source-line record matches we then check the instruction
+    registry. Watchpoint + function-BP hits don't carry hit-count
+    gating today and so fall through to "don't skip"."""
     record = session.breakpoints.lookup_by_gdb_id(gdb_id)
     if record is None:
+        # R35E: instruction breakpoints get the same condition + hit-
+        # count gate via their own manager. The two registries are
+        # disjoint by gdb id (we install one BP per id), so there's no
+        # ambiguity in the dispatch.
+        ibp_record = session.instruction_breakpoints.lookup_by_gdb_id(gdb_id)
+        if ibp_record is not None:
+            return _instruction_bp_gate_should_skip(
+                session, ibp_record, thread_id
+            )
         return False
     # Defensive condition-fallback: only consulted when the BP has a
     # condition AND no gdb-c install (record.condition is set even
@@ -635,6 +656,45 @@ def _bp_gate_should_skip(
             return False
         if not should_fire:
             return True
+    return False
+
+
+def _instruction_bp_gate_should_skip(
+    session: Session,
+    record: "InstructionBreakpointRecord",
+    thread_id: Optional[int],
+) -> bool:
+    """Hit-count gate for an instruction-breakpoint record.
+
+    Parallel to the source-line gate inside :func:`_bp_gate_should_skip`:
+    if the record has a parsed ``hit_predicate`` we bump the hit
+    counter and consult the predicate; if it says skip we return
+    ``True`` so the caller silently ``-exec-continue``s. Records
+    without a hit predicate (the ``setInstructionBreakpoints``
+    requests that don't carry a ``hitCondition``) never fail the
+    gate -- they just need the registry entry so the stop-event
+    annotator can refine the DAP ``reason`` to ``"instruction
+    breakpoint"``.
+
+    The condition gate is enforced by gdb upstream via the
+    ``-break-insert -c "<expr>"`` install flag (see
+    ``handle_set_instruction_breakpoints``), so we don't re-evaluate
+    it here -- mirrors the source-line gate semantics."""
+    if record.hit_predicate is None:
+        return False
+    new_count = session.instruction_breakpoints.increment_hit(record.gdb_id)
+    if new_count is None:
+        return False
+    try:
+        should_fire = bool(record.hit_predicate(new_count))
+    except Exception as exc:  # noqa: BLE001 - defensive predicate
+        _log(
+            f"insn bp gate: hit predicate for bp {record.gdb_id} raised "
+            f"{type(exc).__name__}: {exc}; firing stop conservatively"
+        )
+        return False
+    if not should_fire:
+        return True
     return False
 
 
@@ -1590,6 +1650,78 @@ def handle_set_function_breakpoints(session: Session, req: Dict[str, Any]) -> No
     send_response(session, req, body={"breakpoints": out})
 
 
+def _resolve_instruction_offset(
+    session: Session, instruction_reference: str, offset: int
+) -> Tuple[Optional[int], Optional[str]]:
+    """Resolve a DAP-spec ``(instructionReference, offset)`` pair to an
+    absolute address.
+
+    Per DAP spec the ``offset`` field is a signed integer of INSTRUCTIONS,
+    not bytes. For ``offset == 0`` we just parse the reference. For
+    non-zero offsets we need a disassembly window around the anchor so
+    we can walk by instruction count -- variable-width insns on x86-64
+    rule out a fixed multiplier.
+
+    R34F's :func:`disassemble_via_objdump` gives us exactly that
+    window when the binary is on disk and objdump is on PATH. We ask
+    for ``max(64, |offset| * 4)`` instructions starting at the anchor
+    (a generous overshoot so the resolver doesn't miss the target),
+    then delegate to :func:`resolve_offset_to_address`.
+
+    Returns ``(addr, error_message)``:
+
+    * ``(int, None)`` -- the resolved address.
+    * ``(None, str)`` -- the offset couldn't be resolved (no binary on
+      disk, objdump not available, anchor not in the binary's
+      disassembly, or the offset walked past the disassembly window
+      we asked for). The caller surfaces ``error_message`` as the
+      ``message`` field of a ``verified: false`` response so the IDE
+      shows a clear diagnostic.
+    """
+    if offset == 0:
+        addr = resolve_offset_to_address(instruction_reference, 0, None)
+        if addr is None:
+            return (None, f"invalid instructionReference: {instruction_reference!r}")
+        return (addr, None)
+    # Non-zero offset -- need disassembly context.
+    binary = session.program
+    if not binary or not os.path.isfile(binary):
+        return (
+            None,
+            (
+                "instructionReference offset != 0 requires a launched binary "
+                "with an objdump-readable image"
+            ),
+        )
+    if not objdump_available():
+        return (
+            None,
+            (
+                "instructionReference offset != 0 requires objdump on PATH "
+                "(install binutils)"
+            ),
+        )
+    base = resolve_offset_to_address(instruction_reference, 0, None)
+    if base is None:
+        return (None, f"invalid instructionReference: {instruction_reference!r}")
+    # When offset is negative we still need to start the window AT
+    # the anchor and lean on objdump's pre-extra-padding -- the helper
+    # returns instructions BEFORE the anchor too. For positive offsets
+    # the window walks forward so we just ask for plenty of room.
+    needed = max(64, abs(offset) * 4 + 8)
+    insns = disassemble_via_objdump(binary, base, needed, extra_padding=needed)
+    addr = resolve_offset_to_address(instruction_reference, offset, insns)
+    if addr is None:
+        return (
+            None,
+            (
+                f"could not resolve offset {offset} from "
+                f"{instruction_reference} (anchor not in disassembly window)"
+            ),
+        )
+    return (addr, None)
+
+
 def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) -> None:
     """DAP ``setInstructionBreakpoints`` request.
 
@@ -1597,29 +1729,50 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
     supplied list. Each entry has
     ``{instructionReference, offset?, condition?, hitCondition?}``;
     we forward each to gdb via ``-break-insert *0xADDR`` (with
-    ``offset`` added to the parsed address) and record the assigned
-    breakpoint number so a later ``*stopped,bkptno=...`` can be
-    routed to the right ``"Stopped at instruction <ref>"``
-    description.
+    ``offset`` interpreted per DAP spec as a signed integer of
+    INSTRUCTIONS, resolved against R34F's objdump-driven disassembly
+    when non-zero) and record the assigned breakpoint number so a
+    later ``*stopped,bkptno=...`` can be routed to the right
+    ``"Stopped at instruction <ref>"`` description.
 
     Behaviour notes:
 
-    * Complete-replacement semantics — every call tears down the
-      previously-installed instruction breakpoints via
-      ``-break-delete <id>`` (per id, so source-line breakpoints +
-      watchpoints + function breakpoints survive) and reinstalls
-      from scratch.
-    * References that gdb can't parse (malformed hex, negative
-      addresses) come back ``verified: false`` with a clear
-      ``message`` — the entry is reported but not active. Other
-      gdb errors (e.g. address not in any loaded module yet) get
-      the same shape; the DAP client can render them differently
-      based on the message.
-    * The ``hitCondition`` field is accepted but currently ignored
-      for instruction breakpoints. Source-line BPs (R29E) honour
-      it via the ``SourceBreakpointManager`` gate; the analogous
-      wiring for instruction bps is a follow-up — for now we
-      tolerate the field for robustness without server-side gating.
+    * **Diff-based replacement.** We compare the new request against
+      the currently-registered set keyed by ``(instructionReference,
+      offset)``: BPs that appear in both are kept (their gdb id +
+      hit counter survives unchanged) so the user's hit-count
+      progress across a re-send doesn't reset. BPs absent from the
+      new list are torn down via ``-break-delete <id>``; new BPs are
+      installed via ``-break-insert *<addr>``. This is friendlier
+      than the clear-all-and-reinstall path (which would reset
+      hit-count state mid-debug) while still matching the DAP
+      "the new list is the complete current set" semantic.
+    * **Condition + hit-count.** ``condition`` is forwarded inline
+      via ``-break-insert -c "<expr>"`` so gdb pre-filters condition-
+      false hits (matches R29E's source-line BP path). ``hitCondition``
+      is parsed via :func:`parse_hit_condition` into a predicate;
+      :func:`_bp_gate_should_skip` consults the registry on every
+      hit so e.g. ``"%3"`` (every 3rd) fires only on hits 3, 6, 9,
+      ... A malformed ``hitCondition`` surfaces as ``verified:
+      false`` with the parser's error message.
+    * **Offset semantics.** DAP says ``offset`` is in instructions.
+      For ``offset == 0`` (the common case -- the IDE clicks the
+      reference instruction itself) we just parse the reference.
+      For non-zero offsets we ask objdump for a disassembly window
+      around the anchor and walk by instruction count
+      (:func:`_resolve_instruction_offset`). If objdump isn't
+      available (binary not on disk, binutils missing) the BP comes
+      back ``verified: false`` with a clear message rather than
+      silently misinterpreting the offset as bytes.
+    * **References gdb can't parse** (malformed hex, addresses not
+      in any loaded module) come back ``verified: false`` with a
+      clear ``message`` -- the entry is reported but not active.
+    * **Hit semantics.** Stops at an instruction BP fire as a DAP
+      ``stopped`` event with ``reason: "instruction breakpoint"``
+      and a description like ``"Stopped at instruction 0x401045"``.
+      The annotation lives in :func:`_handle_stopped` and was
+      already wired by R34F; R35E adds the hit-count gate on top so
+      filtered hits stay invisible to the client.
     """
     args = req.get("arguments", {}) or {}
     bridge = session.bridge
@@ -1628,26 +1781,28 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
             session, req, success=False, message="not launched"
         )
         return
-    # Tear down any previously-installed instruction breakpoints. Use
-    # the per-id delete so other breakpoint kinds aren't affected.
-    for old_id in session.instruction_breakpoints.clear_all():
-        try:
-            bridge.command(f"-break-delete {old_id}", timeout=2.0)
-        except (TimeoutError, RuntimeError):
-            pass
     raw_breakpoints = args.get("breakpoints") or []
     if not isinstance(raw_breakpoints, list):
         raw_breakpoints = []
+    # Snapshot current set so we can diff: which existing records
+    # appear unchanged in the new list (keep), which appear changed or
+    # absent (delete), which are net-new (install).
+    existing_records = session.instruction_breakpoints.snapshot()
+    existing_by_key: Dict[Tuple[str, int], InstructionBreakpointRecord] = {
+        (r.instruction_reference, r.offset): r for r in existing_records
+    }
+    # Build the wanted set first so we can compute which existing ids
+    # to delete. Each wanted entry is a normalised dict ready for the
+    # install step.
+    wanted: List[Dict[str, Any]] = []
     out: List[Dict[str, Any]] = []
     for bp in raw_breakpoints:
         if not isinstance(bp, dict):
-            out.append({"verified": False, "message": "malformed breakpoint entry"})
+            wanted.append({"_invalid": "malformed breakpoint entry"})
             continue
         ref = bp.get("instructionReference")
         if not isinstance(ref, str) or not ref.strip():
-            out.append(
-                {"verified": False, "message": "missing instructionReference"}
-            )
+            wanted.append({"_invalid": "missing instructionReference"})
             continue
         offset_raw = bp.get("offset", 0)
         try:
@@ -1659,8 +1814,107 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
             condition = None
         elif not condition.strip():
             condition = None
+        hit_condition_raw = bp.get("hitCondition")
+        hit_predicate = None
+        hit_condition_active: Optional[str] = None
+        hit_parse_err: Optional[str] = None
+        if isinstance(hit_condition_raw, str) and hit_condition_raw.strip():
+            try:
+                hit_predicate = parse_hit_condition(hit_condition_raw)
+            except HitConditionError as exc:
+                hit_parse_err = f"breakpoint-validation-error: {exc}"
+            else:
+                hit_condition_active = hit_condition_raw
+        wanted.append(
+            {
+                "instructionReference": ref.strip(),
+                "offset": offset,
+                "condition": condition,
+                "hit_condition_raw": hit_condition_active,
+                "hit_predicate": hit_predicate,
+                "_hit_err": hit_parse_err,
+            }
+        )
+    # Build wanted-key set so we can compute the deletions. Skip
+    # entries that already errored out at parse time (malformed input
+    # or invalid hitCondition) so the diff doesn't preserve a phantom
+    # entry that the response would mark unverified anyway.
+    wanted_keys = {
+        (w["instructionReference"], w["offset"])
+        for w in wanted
+        if "_invalid" not in w and not w.get("_hit_err")
+    }
+    # Delete existing records whose key no longer appears in the new
+    # list. We use per-id ``-break-delete`` so other breakpoint kinds
+    # (source-line, function, watchpoints) aren't affected.
+    for record in existing_records:
+        key = (record.instruction_reference, record.offset)
+        if key in wanted_keys:
+            continue
+        try:
+            bridge.command(f"-break-delete {record.gdb_id}", timeout=2.0)
+        except (TimeoutError, RuntimeError):
+            pass
+        session.instruction_breakpoints.unregister(record.gdb_id)
+    # Re-walk the wanted list to compute response entries + install
+    # any new BPs.
+    for w in wanted:
+        if "_invalid" in w:
+            out.append({"verified": False, "message": w["_invalid"]})
+            continue
+        if w.get("_hit_err"):
+            out.append({"verified": False, "message": w["_hit_err"]})
+            continue
+        ref = w["instructionReference"]
+        offset = w["offset"]
+        condition = w["condition"]
+        hit_condition_active = w["hit_condition_raw"]
+        hit_predicate = w["hit_predicate"]
+        existing = existing_by_key.get((ref, offset))
+        if existing is not None:
+            # Shared entry -- the BP already exists in gdb under
+            # this gdb id. We may still need to update the condition
+            # / hit predicate (the IDE could have flipped a knob
+            # without changing the anchor). We refresh the in-memory
+            # record's gating fields; gdb's existing -c install is
+            # left alone because changing it would require a delete
+            # + reinstall, which would void the hit counter. If the
+            # user actually changed the condition expression we
+            # delete + reinstall this single BP.
+            if existing.condition != condition:
+                try:
+                    bridge.command(
+                        f"-break-delete {existing.gdb_id}", timeout=2.0
+                    )
+                except (TimeoutError, RuntimeError):
+                    pass
+                session.instruction_breakpoints.unregister(existing.gdb_id)
+                # Fall through to the install path below.
+            else:
+                existing.hit_condition = hit_condition_active
+                existing.hit_predicate = hit_predicate
+                # The hit counter is preserved across re-send so a
+                # ``hitCondition: "%3"`` user doesn't lose state when
+                # the IDE re-syncs.
+                entry: Dict[str, Any] = {
+                    "verified": True,
+                    "id": existing.gdb_id,
+                }
+                if existing.resolved_address is not None:
+                    entry["instructionReference"] = (
+                        f"0x{existing.resolved_address:x}"
+                    )
+                else:
+                    entry["instructionReference"] = ref
+                out.append(entry)
+                continue
+        # Install path -- new BP or condition-changed BP.
+        addr_int, err = _resolve_instruction_offset(session, ref, offset)
+        if addr_int is None:
+            out.append({"verified": False, "message": err or "could not resolve offset"})
+            continue
         cmd = build_instruction_breakpoint_command(
-            ref, offset=offset, condition=condition
+            f"0x{addr_int:x}", offset=0, condition=condition
         )
         if cmd is None:
             out.append(
@@ -1696,7 +1950,8 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
                 bp_id = int(num)
             elif isinstance(num, int):
                 bp_id = num
-            addr_resolved = bk.get("addr") if isinstance(bk.get("addr"), str) else None
+            raw_addr = bk.get("addr")
+            addr_resolved = raw_addr if isinstance(raw_addr, str) else None
         if bp_id is None:
             out.append(
                 {"verified": False, "message": "gdb returned no breakpoint id"}
@@ -1712,13 +1967,17 @@ def handle_set_instruction_breakpoints(session: Session, req: Dict[str, Any]) ->
             gdb_id=bp_id,
             instruction_reference=ref,
             offset=offset,
-            resolved_address=None,
+            resolved_address=addr_int,
             condition=condition,
+            hit_condition=hit_condition_active,
+            hit_predicate=hit_predicate,
         )
         session.instruction_breakpoints.register(record)
-        entry: Dict[str, Any] = {"verified": verified, "id": bp_id}
+        entry = {"verified": verified, "id": bp_id}
         if isinstance(addr_resolved, str):
             entry["instructionReference"] = addr_resolved
+        else:
+            entry["instructionReference"] = f"0x{addr_int:x}"
         out.append(entry)
     send_response(session, req, body={"breakpoints": out})
 

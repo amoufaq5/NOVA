@@ -1,5 +1,96 @@
 # NEXT_SESSION.md — Nova Implementation Status
 
+## R35E — nova-dap: formal `setInstructionBreakpoints` DAP handler with condition + hit-count + offset
+
+**Status: complete** — Hardens R17F's instruction-breakpoint surface
+into a fully DAP-spec-compliant handler.  The pre-R35E handler accepted
+the request shape but treated `offset` as raw bytes (DAP says
+instructions), ignored `hitCondition` outright, and used a
+clear-all + reinstall replacement that voided the user's hit-count
+state on every IDE re-sync.  R35E closes those gaps.
+
+### Wire shape
+
+```json
+{
+  "command": "setInstructionBreakpoints",
+  "arguments": {
+    "breakpoints": [
+      { "instructionReference": "0x401234", "offset": 0,
+        "condition": "x > 10", "hitCondition": "%3" }
+    ]
+  }
+}
+```
+
+Response:
+
+```json
+{ "body": { "breakpoints": [
+  { "id": 1, "verified": true, "instructionReference": "0x401234" }
+]}}
+```
+
+### Knob handling
+
+  - `condition`: forwarded inline via `-break-insert -c "<expr>"` so
+    gdb pre-filters condition-false hits (matches R29E's source-line
+    path).
+  - `hitCondition`: parsed into a predicate
+    (`parse_hit_condition` -- shared with R29E line BPs). The stop
+    handler (`_handle_stopped` -> `_bp_gate_should_skip` ->
+    `_instruction_bp_gate_should_skip`) consults the registered
+    record on every hit; filtered hits silent-resume via the same
+    `_resume_silently` worker R29E uses. Predicates supported:
+    `">N"`, `">=N"`, `"<N"`, `"<=N"`, `"==N"`, `"=N"`, `"!=N"`,
+    `"%N"` (every Nth), and bare `"N"` (DAP equality shorthand).
+  - `offset`: DAP-spec says signed integer of **instructions**, not
+    bytes.  R35E resolves it against R34F's `objdump`-driven
+    disassembly window via `resolve_offset_to_address`. `offset == 0`
+    (common case) skips the resolution entirely.  Non-zero offset
+    with no binary on disk / no objdump on PATH returns
+    `verified: false` with a clear message rather than silently
+    misinterpreting the offset as bytes.
+
+### Diff-based replacement
+
+Subsequent `setInstructionBreakpoints` calls REPLACE the previous set
+per DAP semantics, but R35E diffs old vs new keyed by
+`(instructionReference, offset)`:
+
+  - Shared BPs are kept (gdb id + hit counter preserved -- so a
+    user's `hitCondition: "%5"` doesn't reset every time the IDE
+    re-syncs).
+  - Removed BPs are torn down via `-break-delete <id>` (per id, so
+    source-line / function / data breakpoints in other managers
+    aren't affected).
+  - New BPs are installed via `-break-insert *0xADDR`.
+  - Condition-CHANGED BPs are delete + reinstall (gdb's `-c` install
+    is sticky; changing the predicate requires a fresh install).
+  - Hit-condition-only changes are pure server-side bookkeeping --
+    no gdb traffic, no hit-counter reset.
+
+### Stop event annotation
+
+A `*stopped,bkptno=<id>` whose id maps to an instruction-bp record
+surfaces as `reason: "instruction breakpoint"` with description
+`"Stopped at instruction 0x401045"` (R34F wired the annotation;
+R35E adds the hit-count gate on top so filtered hits stay invisible
+to the IDE).
+
+### Tests
+
+`tests/test_instruction_stepping.py` -- 254 total assertions (up
+from 149).  New R35E tests cover: `resolve_offset_to_address` with
+zero / positive / negative / out-of-window / no-context cases;
+`InstructionBreakpointRecord` carrying hit-condition fields;
+manager `lookup_by_key` / `unregister` / `increment_hit`; handler
+with condition + hitCondition (`">N"`, `"%N"`, bare `N`);
+malformed hitCondition rejection; diff-based replacement
+(shared-preserve, condition-change reinstall, hit-only no-op,
+empty list clears all); offset!=0 binary-missing rejection;
+gate behaviour for instruction-BP hits.
+
 ## R35C — parser+codegen: closure literals `|x| x + 1` + capture analysis
 
 **Status: complete** — NOVA gains the `|...|` closure literal syntax
