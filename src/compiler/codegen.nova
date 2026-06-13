@@ -16695,7 +16695,9 @@ fn gen_runtime() {
     // --- char_at(str, idx) -> char code ---
     out("")
     out_label("_nova_char_at")
+    out("    sar rsi, 1")                  // untag index
     out("    movzx eax, byte ptr [rdi + rsi]")
+    out("    lea rax, [rax + rax + 1]")    // tag char-code result
     out("    ret")
 
     // --- substr(str, start, len) -> new string ---
@@ -16705,6 +16707,8 @@ fn gen_runtime() {
     out("    mov rbp, rsp")
     out("    push r12")
     out("    push r13")
+    out("    sar rsi, 1")                 // untag start
+    out("    sar rdx, 1")                 // untag len
     out("    lea r12, [rdi + rsi]")
     out("    mov r13, rdx")
     out("    lea rdi, [rdx + 1]")
@@ -16744,6 +16748,7 @@ fn gen_runtime() {
     out("    jz .sti_ret")
     out("    neg rax")
     out(".sti_ret:")
+    out("    lea rax, [rax + rax + 1]")    // tag integer result
     out("    ret")
 
     // --- __arg(n) -> string or "" ---
@@ -16780,12 +16785,13 @@ fn gen_runtime() {
     out("    mov rax, [rcx+rax*8]")
     out("    ret")
     out(".pop_empty:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                  // tagged 0 / None
     out("    ret")
 
     // --- list_set(list, idx, val) -> sets list[idx] = val ---
     out("")
     out_label("_nova_list_set")
+    out("    sar rsi, 1")                  // untag index
     out("    mov rax, [rdi+24]")
     out("    mov [rax+rsi*8], rdx")
     out("    ret")
@@ -16985,6 +16991,7 @@ fn gen_runtime() {
     out("    test rdi, rdi")
     out("    jns .abs_done")
     out("    neg rax")
+    out("    add rax, 2")                  // tagged negate
     out(".abs_done:")
     out("    ret")
 
@@ -21018,6 +21025,7 @@ fn gen_runtime() {
     out("    inc rax")
     out("    jmp .iof_loop")
     out(".iof_found:")
+    out("    lea rax, [rax + rax + 1]")    // tag found index
     out("    pop rbp")
     out("    ret")
     out(".iof_notfound:")
@@ -21042,6 +21050,7 @@ fn gen_runtime() {
     out("    dec rax")
     out("    jmp .liof_loop")
     out(".liof_found:")
+    out("    lea rax, [rax + rax + 1]")    // tag found index
     out("    pop rbp")
     out("    ret")
     out(".liof_notfound:")
