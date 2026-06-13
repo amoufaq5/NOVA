@@ -151,7 +151,38 @@ setarch -R stage1 c.nova -o stage2.s                  # stage2 (FULLY TAGGED)
 stage2 c.nova -o stage3.s                              # fixpoint: stage2.s == stage3.s
 ```
 
-**Remaining (stage2 self-host not yet reached).** stage2 (fully tagged) builds,
+## 6c. SELF-HOST FIXPOINT ACHIEVED + bug-#11 fixed
+
+**`stage3 == stage4 == stage5` byte-identical** — the low-bit value-tagged
+compiler self-hosts. **Bug-#11 is fixed**: `20000000000 + 20000000001` →
+`40000000001` (and other >16 GiB arithmetic) now correct; the magnitude/range
+classifier is gone entirely (bit-0 dispatch, no ceiling).
+
+Additional fixes that got to the fixpoint (commits Phase 5+):
+- `AST_INDEX_ASSIGN` inline write used a tagged index (`mov [rcx+rsi*8]`) → untag
+- `gen_expr` inline constant-fold emitted result untagged → `result*2+1`
+  (this + `FOLD_SENTINEL = 0-999999999` self-collision caused a fixpoint
+  oscillation)
+- `AST_FOR_INDEXED` stored the raw loop counter as the index → tag it
+- `_nova_map_get/set/remove`, `contains`: `test rax,rax` after `call _nova_eq`
+  treated tagged-false(1) as true → `cmp rax,1`/`jne`
+- float comparison results (`gen_float_binop`) tagged
+
+**Test status: 112/183 NOVA tests pass** under the fixpoint compiler. The 71
+remaining failures are independent feature-level tagging bugs not yet audited:
+floats used as generic/boxed values and float printing, closure captures
+(R37A), FFI, sets, and the float-heavy cognitive suite (active_inference,
+belief, hdc, mind, …). **`bin/nova` must NOT be replaced until these pass** —
+installing now would regress 71 tests. The bug fix is proven and self-hosting
+on this branch, but not yet shippable.
+
+**Transitional build note:** run `boot` and `stage1` under `setarch -R` (ASLR
+off) to dodge the *old* range-classifier heisenbug; stage2+ (tagged) need no
+such workaround.
+
+---
+
+**Earlier note (now superseded by 6c):** stage2 (fully tagged) builds,
 runs, parses argv, does file I/O, lexes and parses, and reaches the const-fold
 pass, where it hits a **control-flow/stack corruption** that surfaces as a
 spurious `_div_zero` on every program (the "caller" resolves to a function
