@@ -16563,7 +16563,7 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
     out(".rf_fail:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                 // tagged 0 (so NOVA `== 0` / falsy detects failure)
     out("    lea rsp, [rbp - 8]")
     out("    pop r12")
     out("    pop rbp")
