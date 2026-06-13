@@ -4548,7 +4548,8 @@ fn gen_expr(nd) {
     let tag = ast_tag(nd)
 
     if tag == AST_INT_LIT {
-        out("    mov rax, " + int_to_str(nd[1]))
+        // value tagging: integer n is represented as (n<<1)|1
+        out("    mov rax, " + int_to_str(nd[1] * 2 + 1))
         return 0
     }
 
@@ -4563,12 +4564,14 @@ fn gen_expr(nd) {
     }
 
     if tag == AST_BOOL_LIT {
-        out("    mov rax, " + int_to_str(nd[1]))
+        // booleans are tagged ints: false->1, true->3
+        out("    mov rax, " + int_to_str(nd[1] * 2 + 1))
         return 0
     }
 
     if tag == AST_NONE_LIT {
-        out("    xor eax, eax")
+        // None is tagged integer 0 (so it never classifies as a pointer)
+        out("    mov eax, 1")
         return 0
     }
 
@@ -4711,7 +4714,9 @@ fn gen_expr(nd) {
                     let sr_shift = log2_exact(rv2)
                     if sr_shift >= 0 {
                         gen_expr(nd[2])
+                        out("    sar rax, 1")                              // untag
                         out("    sar rax, " + int_to_str(sr_shift))
+                        out("    lea rax, [rax + rax + 1]")                // retag
                         sr_done = 1
                     }
                 }
@@ -4743,24 +4748,32 @@ fn gen_expr(nd) {
             out("    mov rsi, rcx")
             out("    call _nova_add")
         }
-        else { if op == "-" { out("    sub rax, rcx") }
+        else { if op == "-" {
+            out("    sub rax, rcx")
+            out("    inc rax")
+        }
         else { if op == "*" {
             out("    mov rdi, rax")
             out("    mov rsi, rcx")
             out("    call _nova_mul")
         }
         else { if op == "/" {
+            out("    sar rax, 1")                       // untag dividend
+            out("    sar rcx, 1")                       // untag divisor
             out("    test rcx, rcx")
             out("    jz _div_zero_handler")
             out("    cqo")
             out("    idiv rcx")
+            out("    lea rax, [rax + rax + 1]")          // retag quotient
         }
         else { if op == "%" {
+            out("    sar rax, 1")                       // untag dividend
+            out("    sar rcx, 1")                       // untag divisor
             out("    test rcx, rcx")
             out("    jz _div_zero_handler")
             out("    cqo")
             out("    idiv rcx")
-            out("    mov rax, rdx")
+            out("    lea rax, [rdx + rdx + 1]")          // retag remainder
         }
         else { if op == "**" {
             out("    mov rdi, rax")
@@ -4781,21 +4794,25 @@ fn gen_expr(nd) {
             out("    cmp rax, rcx")
             out("    setl al")
             out("    movzx rax, al")
+            out("    lea rax, [rax + rax + 1]")
         }
         else { if op == ">" {
             out("    cmp rax, rcx")
             out("    setg al")
             out("    movzx rax, al")
+            out("    lea rax, [rax + rax + 1]")
         }
         else { if op == "<=" {
             out("    cmp rax, rcx")
             out("    setle al")
             out("    movzx rax, al")
+            out("    lea rax, [rax + rax + 1]")
         }
         else { if op == ">=" {
             out("    cmp rax, rcx")
             out("    setge al")
             out("    movzx rax, al")
+            out("    lea rax, [rax + rax + 1]")
         }
         else { if op == "&" {
             out("    and rax, rcx")
@@ -4805,12 +4822,19 @@ fn gen_expr(nd) {
         }
         else { if op == "^" {
             out("    xor rax, rcx")
+            out("    or rax, 1")
         }
         else { if op == "<<" {
+            out("    sar rcx, 1")
+            out("    sar rax, 1")
             out("    shl rax, cl")
+            out("    lea rax, [rax + rax + 1]")
         }
         else { if op == ">>" {
+            out("    sar rcx, 1")
+            out("    sar rax, 1")
             out("    sar rax, cl")
+            out("    lea rax, [rax + rax + 1]")
         }
         else {
             out("    # unknown op: " + op)
@@ -4834,14 +4858,18 @@ fn gen_expr(nd) {
         gen_expr(nd[2])
         if op == "-" {
             out("    neg rax")
+            out("    add rax, 2")
         }
         if op == "!" {
-            out("    test rax, rax")
+            // tagged truthiness: only tagged-0 (== 1) is falsy
+            out("    cmp rax, 1")
             out("    sete al")
             out("    movzx rax, al")
+            out("    lea rax, [rax + rax + 1]")
         }
         if op == "~" {
             out("    not rax")
+            out("    or rax, 1")
         }
         return 0
     }
@@ -15615,8 +15643,13 @@ fn gen_runtime() {
     // call-site sequence to exactly two instructions per check, the same
     // as the legacy "cmp rdi, 0x100000; jl .X" pair it replaces.
     out_label("_nova_check_rdi")
-    // Signed-negative values are always integers (high bit set / two's
-    // complement), never pointers.
+    // Pointer-tagging classifier: bit 0 = 1 -> integer; bit 0 = 0 -> pointer.
+    // Contract preserved: ZF=1 (rax=0) means integer; ZF=0 (rax=1) pointer.
+    out("    test rdi, 1")
+    out("    jz .ccr_yes")
+    out("    xor eax, eax")
+    out("    ret")
+    // --- legacy range classifier below is now unreachable (kept for ref) ---
     out("    test rdi, rdi")
     out("    js .ccr_no")
     // Range 1: string literals (link-time fixed, low addresses).
@@ -15654,6 +15687,10 @@ fn gen_runtime() {
 
     out("")
     out_label("_nova_check_rsi")
+    out("    test rsi, 1")
+    out("    jz .ccs_yes")
+    out("    xor eax, eax")
+    out("    ret")
     out("    test rsi, rsi")
     out("    js .ccs_no")
     out("    lea rax, [rip + _strlit_start]")
@@ -15693,6 +15730,7 @@ fn gen_runtime() {
     out("    jmp _nova_concat")
     out(".add_int:")
     out("    lea rax, [rdi + rsi]")
+    out("    dec rax")                 // tagged add: a + b - 1
     out("    ret")
 
     // --- Smart multiply: integer mul, string repeat, or list repeat ---
@@ -15702,8 +15740,11 @@ fn gen_runtime() {
     out("    jnz .mul_ptr")
     out("    call _nova_check_rsi")
     out("    jnz .mul_ptr_swap")
-    out("    mov rax, rdi")
-    out("    imul rax, rsi")
+    out("    lea rax, [rdi - 1]")       // a-1 = x<<1
+    out("    mov rcx, rsi")
+    out("    sar rcx, 1")               // b>>1 = y
+    out("    imul rax, rcx")            // (x<<1)*y = (x*y)<<1
+    out("    inc rax")                  // retag -> tagged(x*y)
     out("    ret")
     out(".mul_ptr_swap:")
     out("    xchg rdi, rsi")
@@ -15791,13 +15832,14 @@ fn gen_runtime() {
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call _nova_str_eq")
+    out("    lea rax, [rax + rax + 1]")    // tag 0/1 result
     out("    pop rbp")
     out("    ret")
     out(".eq_true:")
-    out("    mov eax, 1")
+    out("    mov eax, 3")                  // tagged true
     out("    ret")
     out(".eq_false:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                  // tagged false
     out("    ret")
 
     // --- Smart not-equal ---
@@ -15813,13 +15855,14 @@ fn gen_runtime() {
     out("    mov rbp, rsp")
     out("    call _nova_str_eq")
     out("    xor eax, 1")
+    out("    lea rax, [rax + rax + 1]")    // tag 0/1 result
     out("    pop rbp")
     out("    ret")
     out(".neq_true:")
-    out("    mov eax, 1")
+    out("    mov eax, 3")                  // tagged true
     out("    ret")
     out(".neq_false:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                  // tagged false
     out("    ret")
 
     // --- Smart less-than: int or string comparison ---
@@ -16246,6 +16289,7 @@ fn gen_runtime() {
     out("    mov rbp, rsp")
     out("    sub rsp, 32")
     out("    mov rax, rdi")
+    out("    sar rax, 1")                 // untag tagged integer argument
     out("    lea rsi, [rbp-1]")
     out("    mov byte ptr [rsi], 0")
     out("    xor ecx, ecx")
