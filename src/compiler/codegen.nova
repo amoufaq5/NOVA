@@ -4506,6 +4506,7 @@ fn gen_float_binop(nd) {
         out("    setnp cl")
         out("    and al, cl")
         out("    movzx rax, al")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     if op == "!=" {
@@ -4514,30 +4515,35 @@ fn gen_float_binop(nd) {
         out("    setp cl")
         out("    or al, cl")
         out("    movzx rax, al")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     if op == "<" {
         out("    ucomisd xmm0, xmm1")
         out("    setb al")
         out("    movzx rax, al")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     if op == ">" {
         out("    ucomisd xmm0, xmm1")
         out("    seta al")
         out("    movzx rax, al")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     if op == "<=" {
         out("    ucomisd xmm0, xmm1")
         out("    setbe al")
         out("    movzx rax, al")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     if op == ">=" {
         out("    ucomisd xmm0, xmm1")
         out("    setae al")
         out("    movzx rax, al")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     out("    movq rax, xmm0")
@@ -6627,7 +6633,8 @@ fn gen_stmt(nd) {
         out("    je " + fi_map_path)
         out("    cmp rcx, [rdi+8]")
         out("    jge " + fi_end)
-        out("    mov [rbp - " + int_to_str(idx_off) + "], rcx")
+        out("    lea rdx, [rcx + rcx + 1]")     // tag index
+        out("    mov [rbp - " + int_to_str(idx_off) + "], rdx")
         out("    mov rdi, [rdi+24]")
         out("    mov rax, [rdi+rcx*8]")
         out("    mov [rbp - " + int_to_str(val_off) + "], rax")
@@ -16833,8 +16840,8 @@ fn gen_runtime() {
     out("    push rcx")
     out("    call _nova_eq")
     out("    pop rcx")
-    out("    test rax, rax")
-    out("    jnz .contains_found")
+    out("    cmp rax, 1")
+    out("    jne .contains_found")
     out("    inc rcx")
     out("    jmp .contains_loop")
     out(".contains_found:")
@@ -19546,8 +19553,8 @@ fn gen_runtime() {
     out("    mov rdi, [rax]")
     out("    mov rsi, r13")
     out("    call _nova_eq")
-    out("    test rax, rax")
-    out("    jnz .ms_update")
+    out("    cmp rax, 1")
+    out("    jne .ms_update")
     out("    inc r15")
     out("    cmp r15, [r12 + 16]")
     out("    jl .ms_probe")
@@ -19607,9 +19614,9 @@ fn gen_runtime() {
     out("    mov rdi, [rax]")
     out("    mov rsi, r13")
     out("    call _nova_eq")
-    out("    test rax, rax")
+    out("    cmp rax, 1")
     out("    pop rax")
-    out("    jnz .mg_found")
+    out("    jne .mg_found")
     out("    inc r14")
     out("    cmp r14, r15")
     out("    jl .mg_no_wrap")
@@ -21087,8 +21094,8 @@ fn gen_runtime() {
     out("    pop rdi")
     out("    pop rcx")
     out("    pop rsi")
-    out("    test rax, rax")
-    out("    jz .mr_next2")
+    out("    cmp rax, 1")
+    out("    je .mr_next2")
     out("    imul rax, rsi, 24")
     out("    add rax, rdi")
     out("    mov qword ptr [rax + 16], 0")
