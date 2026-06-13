@@ -5225,8 +5225,8 @@ fn gen_expr(nd) {
         out("    mov rdi, rax")
         out("    mov rsi, 0")
         out("    call _nova_index")
-        out("    test rax, rax")
-        out("    jz " + ok_lbl)
+        out("    cmp rax, 2")
+        out("    jb " + ok_lbl)
         // Err path: return the original tagged tuple unchanged.
         if cg_defer_count > 0 {
             gen_defers()
@@ -5368,12 +5368,12 @@ fn gen_expr(nd) {
     if tag == AST_AND_EXPR {
         let end_lbl = new_label()
         gen_expr(nd[1])
-        out("    test rax, rax")
-        out("    jz " + end_lbl)
+        out("    cmp rax, 2")
+        out("    jb " + end_lbl)
         gen_expr(nd[2])
-        out("    test rax, rax")
-        out("    jz " + end_lbl)
-        out("    mov rax, 1")
+        out("    cmp rax, 2")
+        out("    jb " + end_lbl)
+        out("    mov rax, 3")
         out_label(end_lbl)
         return 0
     }
@@ -5382,15 +5382,15 @@ fn gen_expr(nd) {
         let true_lbl = new_label()
         let end_lbl = new_label()
         gen_expr(nd[1])
-        out("    test rax, rax")
-        out("    jnz " + true_lbl)
+        out("    cmp rax, 2")
+        out("    jae " + true_lbl)
         gen_expr(nd[2])
-        out("    test rax, rax")
-        out("    jnz " + true_lbl)
-        out("    xor eax, eax")
+        out("    cmp rax, 2")
+        out("    jae " + true_lbl)
+        out("    mov eax, 1")
         out("    jmp " + end_lbl)
         out_label(true_lbl)
-        out("    mov rax, 1")
+        out("    mov rax, 3")
         out_label(end_lbl)
         return 0
     }
@@ -5399,8 +5399,8 @@ fn gen_expr(nd) {
         let else_lbl = new_label()
         let end_lbl = new_label()
         gen_expr(nd[1])
-        out("    test rax, rax")
-        out("    jnz " + end_lbl)
+        out("    cmp rax, 2")
+        out("    jae " + end_lbl)
         gen_expr(nd[2])
         out_label(end_lbl)
         return 0
@@ -5428,8 +5428,8 @@ fn gen_expr(nd) {
         let else_lbl = new_label()
         let end_lbl = new_label()
         gen_expr(nd[1])
-        out("    test rax, rax")
-        out("    jz " + else_lbl)
+        out("    cmp rax, 2")
+        out("    jb " + else_lbl)
         gen_expr(nd[2])
         out("    jmp " + end_lbl)
         out_label(else_lbl)
@@ -5478,8 +5478,8 @@ fn gen_expr(nd) {
         } else {
             let comp_skip = new_label()
             gen_expr(comp_cond)
-            out("    test rax, rax")
-            out("    jz " + comp_skip)
+            out("    cmp rax, 2")
+            out("    jb " + comp_skip)
             gen_expr(comp_expr)
             out("    mov rsi, rax")
             out("    mov rdi, [rsp+16]")
@@ -5553,8 +5553,8 @@ fn gen_expr(nd) {
         } else {
             let mc_skip = new_label()
             gen_expr(mc_cond)
-            out("    test rax, rax")
-            out("    jz " + mc_skip)
+            out("    cmp rax, 2")
+            out("    jb " + mc_skip)
             gen_expr(mc_key_expr)
             out("    push rax")
             gen_expr(mc_val_expr)
@@ -5588,8 +5588,8 @@ fn gen_expr(nd) {
     if tag == AST_NULL_ACCESS {
         let null_end = new_label()
         gen_expr(nd[1])
-        out("    test rax, rax")
-        out("    jz " + null_end)
+        out("    cmp rax, 2")
+        out("    jb " + null_end)
         let nf_name = nd[2]
         let nf_idx = find_field_index(nf_name)
         out("    mov rcx, [rax + 24]")
@@ -5642,8 +5642,8 @@ fn gen_expr(nd) {
                 let mnxt_w = new_label()
                 if mhas_guard == 1 {
                     gen_expr(marm[3])
-                    out("    test rax, rax")
-                    out("    jz " + mnxt_w)
+                    out("    cmp rax, 2")
+                    out("    jb " + mnxt_w)
                 }
                 out("    add rsp, 8")
                 if ast_tag(mbody) == AST_EXPR_STMT {
@@ -5664,8 +5664,8 @@ fn gen_expr(nd) {
                 out("    jne " + mnxt_t)
                 if mhas_guard == 1 {
                     gen_expr(marm[3])
-                    out("    test rax, rax")
-                    out("    jz " + mnxt_t)
+                    out("    cmp rax, 2")
+                    out("    jb " + mnxt_t)
                 }
                 out("    add rsp, 8")
                 if ast_tag(mbody) == AST_EXPR_STMT {
@@ -5712,8 +5712,8 @@ fn gen_expr(nd) {
                 }
                 if mhas_guard == 1 {
                     gen_expr(marm[3])
-                    out("    test rax, rax")
-                    out("    jz " + mnxt_e)
+                    out("    cmp rax, 2")
+                    out("    jb " + mnxt_e)
                 }
                 out("    add rsp, 8")
                 if ast_tag(mbody) == AST_EXPR_STMT {
@@ -5733,12 +5733,12 @@ fn gen_expr(nd) {
                 out("    mov rdi, rax")
                 out("    mov rsi, rcx")
                 out("    call _nova_eq")
-                out("    test rax, rax")
-                out("    jz " + mnxt)
+                out("    cmp rax, 2")
+                out("    jb " + mnxt)
                 if mhas_guard == 1 {
                     gen_expr(marm[3])
-                    out("    test rax, rax")
-                    out("    jz " + mnxt)
+                    out("    cmp rax, 2")
+                    out("    jb " + mnxt)
                 }
                 out("    add rsp, 8")
                 if ast_tag(mbody) == AST_EXPR_STMT {
@@ -5766,8 +5766,8 @@ fn gen_expr(nd) {
         let ielse_lbl = new_label()
         let iend_lbl = new_label()
         gen_expr(icond)
-        out("    test rax, rax")
-        out("    jz " + ielse_lbl)
+        out("    cmp rax, 2")
+        out("    jb " + ielse_lbl)
         if ast_tag(ithen) == AST_BLOCK {
             gen_block(ithen)
         } else {
@@ -5974,8 +5974,8 @@ fn gen_stmt(nd) {
         let else_lbl = new_label()
         let end_lbl = new_label()
         gen_expr(cond)
-        out("    test rax, rax")
-        out("    jz " + else_lbl)
+        out("    cmp rax, 2")
+        out("    jb " + else_lbl)
         gen_block(then_body)
         out("    jmp " + end_lbl)
         out_label(else_lbl)
@@ -6028,8 +6028,8 @@ fn gen_stmt(nd) {
         }
         out_label(loop_lbl)
         gen_expr(cond)
-        out("    test rax, rax")
-        out("    jz " + nobreak_lbl)
+        out("    cmp rax, 2")
+        out("    jb " + nobreak_lbl)
         gen_block(body)
         out("    jmp " + loop_lbl)
         if while_else != 0 {
@@ -6071,7 +6071,7 @@ fn gen_stmt(nd) {
             let argc = len(args)
             let has_step = 0
             if argc == 1 {
-                out("    mov qword ptr [rbp - " + int_to_str(var_off) + "], 0")
+                out("    mov qword ptr [rbp - " + int_to_str(var_off) + "], 1")  // tagged 0
                 gen_expr(args[0])
                 out("    push rax")
             } else {
@@ -6125,8 +6125,9 @@ fn gen_stmt(nd) {
             if has_step == 1 {
                 out("    mov rax, [rsp]")
                 out("    add [rbp - " + int_to_str(var_off) + "], rax")
+                out("    dec qword ptr [rbp - " + int_to_str(var_off) + "]")   // tagged step
             } else {
-                out("    inc qword ptr [rbp - " + int_to_str(var_off) + "]")
+                out("    add qword ptr [rbp - " + int_to_str(var_off) + "], 2")  // tagged +1
             }
             out("    jmp " + loop_lbl)
             if for_else != 0 {
@@ -6238,8 +6239,8 @@ fn gen_stmt(nd) {
         gen_block(body)
         out_label(cont_lbl)
         gen_expr(cond)
-        out("    test rax, rax")
-        out("    jnz " + loop_lbl)
+        out("    cmp rax, 2")
+        out("    jae " + loop_lbl)
         out_label(end_lbl)
         cg_break_label = prev_break
         cg_continue_label = prev_continue
@@ -6355,8 +6356,8 @@ fn gen_stmt(nd) {
                 let next_arm_w = new_label()
                 if has_guard == 1 {
                     gen_expr(arm[3])
-                    out("    test rax, rax")
-                    out("    jz " + next_arm_w)
+                    out("    cmp rax, 2")
+                    out("    jb " + next_arm_w)
                 }
                 out("    add rsp, 8")
                 if ast_tag(body) == AST_BLOCK {
@@ -6377,8 +6378,8 @@ fn gen_stmt(nd) {
                 out("    jne " + next_arm_t)
                 if has_guard == 1 {
                     gen_expr(arm[3])
-                    out("    test rax, rax")
-                    out("    jz " + next_arm_t)
+                    out("    cmp rax, 2")
+                    out("    jb " + next_arm_t)
                 }
                 out("    add rsp, 8")
                 if ast_tag(body) == AST_BLOCK {
@@ -6422,8 +6423,8 @@ fn gen_stmt(nd) {
                 }
                 if has_guard == 1 {
                     gen_expr(arm[3])
-                    out("    test rax, rax")
-                    out("    jz " + next_arm_e)
+                    out("    cmp rax, 2")
+                    out("    jb " + next_arm_e)
                 }
                 out("    add rsp, 8")
                 if ast_tag(body) == AST_BLOCK {
@@ -6442,12 +6443,12 @@ fn gen_stmt(nd) {
                 out("    mov rdi, rax")
                 out("    mov rsi, rcx")
                 out("    call _nova_eq")
-                out("    test rax, rax")
-                out("    jz " + next_arm)
+                out("    cmp rax, 2")
+                out("    jb " + next_arm)
                 if has_guard == 1 {
                     gen_expr(arm[3])
-                    out("    test rax, rax")
-                    out("    jz " + next_arm)
+                    out("    cmp rax, 2")
+                    out("    jb " + next_arm)
                 }
                 // Match! Execute body
                 out("    add rsp, 8")
@@ -10892,6 +10893,7 @@ fn gen_program(program) {
     out_label("_strlit_start")
     i = 0
     while i < cg_str_count {
+        out("    .align 2")     // tagging: every string pointer must be even (bit0=0)
         out_label("_str_" + int_to_str(i))
         out("    .asciz " + DQ + escape_for_asm(cg_strings[i]) + DQ)
         i = i + 1
@@ -15986,6 +15988,7 @@ fn gen_runtime() {
     out("    mov rbp, rsp")
     out("    sub rsp, 32")
     out("    mov rsi, rdi")
+    out("    sar rsi, 1")                 // untag tagged integer argument
     out("    test rsi, rsi")
     out("    jnz .pi_nonzero")
     out("    mov byte ptr [rbp-1], 48")
@@ -16434,9 +16437,10 @@ fn gen_runtime() {
     out(".len_list:")
     out("    mov rax, [rdi+8]")
     out(".len_done:")
+    out("    lea rax, [rax + rax + 1]")    // tag length result
     out("    ret")
     out(".len_zero:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                  // tagged 0
     out("    ret")
 
     // --- str_len(ptr): count bytes until null ---
@@ -16626,6 +16630,7 @@ fn gen_runtime() {
     // --- index(obj, idx): list[idx] or str[idx] -> char code ---
     out("")
     out_label("_nova_index")
+    out("    sar rsi, 1")                 // untag NOVA index -> raw
     out("    test rdi, rdi")
     out("    jz .idx_null")
     out("    cmp qword ptr [rdi], -1")
@@ -16642,6 +16647,7 @@ fn gen_runtime() {
     out("    jl .idx_oob")
     out(".idx_str_positive:")
     out("    movzx eax, byte ptr [rdi + rsi]")
+    out("    lea rax, [rax + rax + 1]")    // tag char-code result
     out("    ret")
     out(".idx_list:")
     out("    // Handle negative index")
@@ -16679,6 +16685,7 @@ fn gen_runtime() {
     out("    mov rdi, 2")
     out("    call _nova_alloc")
     out("    pop rcx")
+    out("    sar rcx, 1")                  // untag char code
     out("    mov [rax], cl")
     out("    mov byte ptr [rax+1], 0")
     out("    ret")
@@ -20846,7 +20853,7 @@ fn gen_runtime() {
     out("    mov rdi, [rsp]")
     out("    mov rsi, r12")
     out("    call _nova_push")
-    out("    inc r12")
+    out("    add r12, 2")              // tagged counter: +1 in untagged space
     out("    jmp .rgl_loop")
     out(".rgl_done:")
     out("    pop rax")
@@ -20868,8 +20875,8 @@ fn gen_runtime() {
     out("    mov r14, rdx")
     out("    call _nova_list_new")
     out("    push rax")
-    out("    test r14, r14")
-    out("    jz .rgs_done")
+    out("    cmp r14, 1")
+    out("    je .rgs_done")
     out("    jg .rgs_pos")
     out(".rgs_neg:")
     out("    cmp r12, r13")
@@ -20878,6 +20885,7 @@ fn gen_runtime() {
     out("    mov rsi, r12")
     out("    call _nova_push")
     out("    add r12, r14")
+    out("    dec r12")                 // tagged step add
     out("    jmp .rgs_neg")
     out(".rgs_pos:")
     out("    cmp r12, r13")
@@ -20886,6 +20894,7 @@ fn gen_runtime() {
     out("    mov rsi, r12")
     out("    call _nova_push")
     out("    add r12, r14")
+    out("    dec r12")                 // tagged step add
     out("    jmp .rgs_pos")
     out(".rgs_done:")
     out("    pop rax")
