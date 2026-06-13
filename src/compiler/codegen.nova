@@ -22228,9 +22228,11 @@ fn gen_runtime() {
     out_label("coro_state")
     out("    jmp _nova_coro_state")
     out_label("store64")
+    out("    sar rdi, 1")                 // untag address (value stored as-is for round-trip)
     out("    mov [rdi], rsi")
     out("    ret")
     out_label("load64")
+    out("    sar rdi, 1")                 // untag address
     out("    mov rax, [rdi]")
     out("    ret")
     out_label("store8")
