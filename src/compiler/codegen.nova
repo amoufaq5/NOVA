@@ -21193,6 +21193,7 @@ fn gen_runtime() {
     out("    push rax")
     out("    mov rdi, rax")
     out("    mov rsi, [rsp + 8]")
+    out("    lea rsi, [rsi + rsi + 1]")    // tag index for the pair
     out("    call _nova_push")
     out("    mov rdi, [rsp]")
     out("    mov rcx, [rsp + 8]")
