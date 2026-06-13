@@ -168,27 +168,29 @@ Additional fixes that got to the fixpoint (commits Phase 5+):
   treated tagged-false(1) as true → `cmp rax,1`/`jne`
 - float comparison results (`gen_float_binop`) tagged
 
-**Test status (real harness, full COMPILER_SRC): 147 pass / 30 fail / 6 skip**
-(baseline original bin/nova: 177 / 0 / 6 — so 30 regressions remain). Fixed
-this far: imports, predicate-bool returns, str/list repeat counts,
-str_to_chars/char_at/substr, closures, enumerate, for-indexed, _empty_str +
-runtime returned-string alignment (odd addresses misclassify as ints in
-concat/+), args, interpolation.
+**Test status (real harness, full COMPILER_SRC): 164 pass / 13 fail / 6 skip**
+(baseline original bin/nova: 177 / 0 / 6). The two architectural gaps are
+RESOLVED:
+- **Raw memory** — convention: raw buffers are *tagged addresses*. `alloc`
+  returns `tag(addr)`; `int_*` do tagged arithmetic; `store8/64`, `load8/64`,
+  the SIMD intrinsics (`simd_*_i32x8`, `simd_sad_u8`, `simd_mul_acc_*`,
+  `simd_sum_abs_diff`) and `mem.nova`/`simd.nova` asm blocks untag pointer/count
+  args at the hardware boundary and tag scalar results. (Unblocked simd ×5,
+  tensor ×2, embedding, associative, node_pool, hdc.)
+- **Float↔int boundary** — `to_float` untags its int arg, `from_float` tags its
+  result. (Unblocked tensor, hdc, ieee754, float constants.)
 
-**Remaining 30, two groups:**
-1. **Raw-memory cluster (~8: simd_intrinsics×4, simd_wasm_v128, tensor,
-   tensor_perf, persistent_alloc, audio).** These do manual byte layout via
-   `int_*` + `store8`/`load8`, e.g. `int_add(buf, off)` mixing a *pointer*
-   (bit0=0) with a *tagged int*. Needs a DESIGN DECISION: `int_*` cannot tell a
-   pointer operand from a tagged-int operand, so raw-memory NOVA code needs a
-   defined raw-int convention (or boxed buffers). Not a one-line fix.
-2. **Individual feature bugs (~22):** sum_types (`_nova_index` on variant
-   tuples), json (`_nova_map_get`), flow_ops, profiler, knowledge, imagination,
-   predictive_coding, resonance, sdr, hdc, ffi_syscall, udp_syscalls, security,
-   secure_random, cognitive_llm, stdlib, new_features, coro_advanced — each a
-   separate backtrace+fix.
+Earlier common-cause fixes: imports (read_file sentinel), predicate-bool
+returns, str/list repeat counts, str_to_chars/char_at/substr, closures,
+enumerate, for-indexed, runtime returned-string alignment, args, interpolation.
 
-`bin/nova` must NOT be replaced until these clear.
+**Remaining 13 — individual feature audits** (no more common causes): sum_types
+(direct `variant[i]` indexing), json (`_nova_map_get`), coro_advanced
+(`_nova_coro_entry`), ffi_syscall / udp_syscalls (raw syscall ABI),
+persistent_alloc (file/mmap returns null in this env), imagination / knowledge /
+cognitive_llm (cognitive modules), flow_ops / stdlib / float_utils (specific
+function assertions). Each is a separate backtrace+fix; several are
+environment/syscall-specific. `bin/nova` must NOT be replaced until these clear.
 
 ---
 
