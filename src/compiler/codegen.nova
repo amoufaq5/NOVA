@@ -2415,37 +2415,47 @@ fn is_inline_builtin_fn(name) {
 fn emit_inline_simd(name) {
     // simd_add_i32x8(a_ptr, b_ptr, dst_ptr) -> dst_ptr in rax.
     if name == "simd_add_i32x8" {
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
+        out("    sar rdx, 1")
         out("    vmovdqu ymm0, [rdi]")
         out("    vmovdqu ymm1, [rsi]")
         out("    vpaddd ymm0, ymm0, ymm1")
         out("    vmovdqu [rdx], ymm0")
-        out("    mov rax, rdx")
+        out("    lea rax, [rdx + rdx + 1]")
         out("    vzeroupper")
         return 0
     }
     // simd_sub_i32x8(a_ptr, b_ptr, dst_ptr) -> dst_ptr in rax.
     if name == "simd_sub_i32x8" {
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
+        out("    sar rdx, 1")
         out("    vmovdqu ymm0, [rdi]")
         out("    vmovdqu ymm1, [rsi]")
         out("    vpsubd ymm0, ymm0, ymm1")
         out("    vmovdqu [rdx], ymm0")
-        out("    mov rax, rdx")
+        out("    lea rax, [rdx + rdx + 1]")
         out("    vzeroupper")
         return 0
     }
     // simd_load_i32x8(src_ptr, dst_ptr) -> dst_ptr in rax.
     if name == "simd_load_i32x8" {
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
         out("    vmovdqu ymm0, [rdi]")
         out("    vmovdqu [rsi], ymm0")
-        out("    mov rax, rsi")
+        out("    lea rax, [rsi + rsi + 1]")
         out("    vzeroupper")
         return 0
     }
     // simd_store_i32x8(dst_ptr, src_ptr) -> dst_ptr in rax.
     if name == "simd_store_i32x8" {
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
         out("    vmovdqu ymm0, [rsi]")
         out("    vmovdqu [rdi], ymm0")
-        out("    mov rax, rdi")
+        out("    lea rax, [rdi + rdi + 1]")
         out("    vzeroupper")
         return 0
     }
@@ -2455,6 +2465,9 @@ fn emit_inline_simd(name) {
         let lbl_tail = new_label()
         let lbl_tail_loop = new_label()
         let lbl_done = new_label()
+        out("    sar rdi, 1")              // untag a_ptr
+        out("    sar rsi, 1")              // untag b_ptr
+        out("    sar rdx, 1")              // untag count
         out("    xor eax, eax")
         out("    vpxor ymm2, ymm2, ymm2")
         out("    mov rcx, rdx")
@@ -2495,6 +2508,7 @@ fn emit_inline_simd(name) {
         out("    dec rdx")
         out("    jnz " + lbl_tail_loop)
         out_label(lbl_done)
+        out("    lea rax, [rax + rax + 1]")  // tag scalar result
         out("    vzeroupper")
         return 0
     }
@@ -2678,33 +2692,41 @@ fn emit_inline_simd(name) {
     // are already in rdi (arg 0) and rsi (arg 1) per the System V ABI.
     if name == "int_add" {
         out("    lea rax, [rdi + rsi]")
+        out("    dec rax")
         return 0
     }
     if name == "int_sub" {
         out("    mov rax, rdi")
         out("    sub rax, rsi")
+        out("    inc rax")
         return 0
     }
     if name == "int_mul" {
-        out("    mov rax, rdi")
-        out("    imul rax, rsi")
+        out("    lea rax, [rdi - 1]")
+        out("    mov rcx, rsi")
+        out("    sar rcx, 1")
+        out("    imul rax, rcx")
+        out("    inc rax")
         return 0
     }
     if name == "int_div" {
-        // Signed 64-bit divide: rax / rsi -> rax. cqo sign-extends rax
-        // into rdx:rax for idiv. Clobbers rdx, which the call-site ABI
-        // leaves undefined for 2-arg calls.
         out("    mov rax, rdi")
+        out("    sar rax, 1")
+        out("    mov rcx, rsi")
+        out("    sar rcx, 1")
         out("    cqo")
-        out("    idiv rsi")
+        out("    idiv rcx")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     if name == "int_mod" {
-        // Signed 64-bit remainder: rax mod rsi -> rdx, copied to rax.
         out("    mov rax, rdi")
+        out("    sar rax, 1")
+        out("    mov rcx, rsi")
+        out("    sar rcx, 1")
         out("    cqo")
-        out("    idiv rsi")
-        out("    mov rax, rdx")
+        out("    idiv rcx")
+        out("    lea rax, [rdx + rdx + 1]")
         return 0
     }
     if name == "int_and" {
@@ -2720,20 +2742,25 @@ fn emit_inline_simd(name) {
     if name == "int_xor" {
         out("    mov rax, rdi")
         out("    xor rax, rsi")
+        out("    or rax, 1")
         return 0
     }
     if name == "int_shl" {
-        // shl needs rcx as the shift count; runtime label moves rsi to rcx.
         out("    mov rax, rdi")
+        out("    sar rax, 1")
         out("    mov rcx, rsi")
+        out("    sar rcx, 1")
         out("    shl rax, cl")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     if name == "int_shr" {
-        // sar (arithmetic shift right) mirrors the runtime label.
         out("    mov rax, rdi")
+        out("    sar rax, 1")
         out("    mov rcx, rsi")
+        out("    sar rcx, 1")
         out("    sar rax, cl")
+        out("    lea rax, [rax + rax + 1]")
         return 0
     }
     return 0
@@ -21876,7 +21903,10 @@ fn gen_runtime() {
     out_label("debug_print")
     out("    jmp _nova_debug_print")
     out_label("alloc")
-    out("    jmp _nova_alloc")
+    out("    sar rdi, 1")                 // untag size
+    out("    call _nova_alloc")
+    out("    lea rax, [rax + rax + 1]")    // tag returned address (raw buffers are tagged addresses)
+    out("    ret")
     out_label("time")
     out("    jmp _nova_time")
     out_label("sleep_ms")
@@ -22190,10 +22220,14 @@ fn gen_runtime() {
     out("    mov rax, [rdi]")
     out("    ret")
     out_label("store8")
+    out("    sar rdi, 1")                 // untag address
+    out("    sar rsi, 1")                 // untag byte value
     out("    mov byte ptr [rdi], sil")
     out("    ret")
     out_label("load8")
+    out("    sar rdi, 1")                 // untag address
     out("    movzx eax, byte ptr [rdi]")
+    out("    lea rax, [rax + rax + 1]")    // tag byte result
     out("    ret")
     out_label("memcpy_raw")
     out("    push rdi")
