@@ -19988,6 +19988,7 @@ fn gen_runtime() {
     // --- to_float(n) -> convert integer to IEEE 754 double ---
     out("")
     out_label("_nova_to_float")
+    out("    sar rdi, 1")                 // untag int before converting
     out("    cvtsi2sd xmm0, rdi")
     out("    movq rax, xmm0")
     out("    ret")
@@ -19997,6 +19998,7 @@ fn gen_runtime() {
     out_label("_nova_from_float")
     out("    movq xmm0, rdi")
     out("    cvttsd2si rax, xmm0")
+    out("    lea rax, [rax + rax + 1]")    // tag resulting int
     out("    ret")
 
     // --- R38A float builtins (operate on IEEE 754 doubles in rdi/rsi) ---
