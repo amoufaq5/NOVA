@@ -168,18 +168,27 @@ Additional fixes that got to the fixpoint (commits Phase 5+):
   treated tagged-false(1) as true → `cmp rax,1`/`jne`
 - float comparison results (`gen_float_binop`) tagged
 
-**Test status (real harness `tests/run_tests.sh`, full `COMPILER_SRC`):
-145 pass / 32 fail / 6 skip.** Baseline (original `bin/nova`): 177 pass / 0 fail
-/ 6 skip — so **32 tagging regressions remain**, in specialized clusters: SIMD
-intrinsics (lane/count int handling), float/tensor, several cognitive modules,
-and misc syscall/ffi/interpolation. The high-leverage common bugs are fixed:
-imports (read_file failure sentinel), predicate-bool returns
-(starts_with/ends_with/contains/map_has/map_get), str/list repeat counts,
-str_to_chars / char_at / substr, closures (starts_with → lambda detection),
-enumerate, for-indexed. **`bin/nova` must NOT be replaced until the 32 clear.**
-NOTE: the build must use the *complete* COMPILER_SRC (ast, lexer, parser, ir,
-regalloc, lower_x64, codegen, pkg, compiler) — an earlier reduced build hid the
-pkg/std-package paths.
+**Test status (real harness, full COMPILER_SRC): 147 pass / 30 fail / 6 skip**
+(baseline original bin/nova: 177 / 0 / 6 — so 30 regressions remain). Fixed
+this far: imports, predicate-bool returns, str/list repeat counts,
+str_to_chars/char_at/substr, closures, enumerate, for-indexed, _empty_str +
+runtime returned-string alignment (odd addresses misclassify as ints in
+concat/+), args, interpolation.
+
+**Remaining 30, two groups:**
+1. **Raw-memory cluster (~8: simd_intrinsics×4, simd_wasm_v128, tensor,
+   tensor_perf, persistent_alloc, audio).** These do manual byte layout via
+   `int_*` + `store8`/`load8`, e.g. `int_add(buf, off)` mixing a *pointer*
+   (bit0=0) with a *tagged int*. Needs a DESIGN DECISION: `int_*` cannot tell a
+   pointer operand from a tagged-int operand, so raw-memory NOVA code needs a
+   defined raw-int convention (or boxed buffers). Not a one-line fix.
+2. **Individual feature bugs (~22):** sum_types (`_nova_index` on variant
+   tuples), json (`_nova_map_get`), flow_ops, profiler, knowledge, imagination,
+   predictive_coding, resonance, sdr, hdc, ffi_syscall, udp_syscalls, security,
+   secure_random, cognitive_llm, stdlib, new_features, coro_advanced — each a
+   separate backtrace+fix.
+
+`bin/nova` must NOT be replaced until these clear.
 
 ---
 
