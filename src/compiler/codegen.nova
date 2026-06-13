@@ -4680,7 +4680,7 @@ fn gen_expr(nd) {
                 if op == ">=" {
                     if left_val >= right_val { result = 1 } else { result = 0 }
                 }
-                out("    mov rax, " + int_to_str(result))
+                out("    mov rax, " + int_to_str(result * 2 + 1))   // tag folded constant
                 return 0
             }
         }
@@ -6301,6 +6301,7 @@ fn gen_stmt(nd) {
         gen_expr(base)
         out("    mov rcx, [rax + 24]")
         out("    pop rsi")
+        out("    sar rsi, 1")               // untag index
         out("    pop rdx")
         out("    mov [rcx + rsi*8], rdx")
         return 0
