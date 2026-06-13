@@ -6,6 +6,7 @@ fn mem_read_i8(ptr) {
     let val = 0
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "movsx rax, byte ptr [rdi]"
         "mov [rbp - 16], rax"
     }
@@ -15,6 +16,7 @@ fn mem_read_i8(ptr) {
 fn mem_write_i8(ptr, val) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rax, [rbp - 16]"
         "mov byte ptr [rdi], al"
     }
@@ -24,6 +26,7 @@ fn mem_read_i16(ptr) {
     let val = 0
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "movsx rax, word ptr [rdi]"
         "mov [rbp - 16], rax"
     }
@@ -33,6 +36,7 @@ fn mem_read_i16(ptr) {
 fn mem_write_i16(ptr, val) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rax, [rbp - 16]"
         "mov word ptr [rdi], ax"
     }
@@ -42,6 +46,7 @@ fn mem_read_i32(ptr) {
     let val = 0
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "movsxd rax, dword ptr [rdi]"
         "mov [rbp - 16], rax"
     }
@@ -51,6 +56,7 @@ fn mem_read_i32(ptr) {
 fn mem_write_i32(ptr, val) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rax, [rbp - 16]"
         "mov dword ptr [rdi], eax"
     }
@@ -60,6 +66,7 @@ fn mem_read_i64(ptr) {
     let val = 0
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rax, [rdi]"
         "mov [rbp - 16], rax"
     }
@@ -69,6 +76,7 @@ fn mem_read_i64(ptr) {
 fn mem_write_i64(ptr, val) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rax, [rbp - 16]"
         "mov [rdi], rax"
     }
@@ -86,6 +94,7 @@ fn mem_read_f64(ptr) {
     let val = 0
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "movsd xmm0, [rdi]"
         "movq rax, xmm0"
         "mov [rbp - 16], rax"
@@ -96,6 +105,7 @@ fn mem_read_f64(ptr) {
 fn mem_write_f64(ptr, val) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rax, [rbp - 16]"
         "movq xmm0, rax"
         "movsd [rdi], xmm0"

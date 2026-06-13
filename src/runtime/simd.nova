@@ -23,9 +23,13 @@ fn simd_add_f64(a_ptr, b_ptr, c_ptr, n) {
     let remainder = n % 2
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rsi, [rbp - 16]"
+        "sar rsi, 1"
         "mov rdx, [rbp - 24]"
+        "sar rdx, 1"
         "mov rcx, [rbp - 32]"
+        "sar rcx, 1"
         "shr rcx, 1"
         ".simd_add_loop:"
         "test rcx, rcx"
@@ -53,9 +57,13 @@ fn simd_add_f64(a_ptr, b_ptr, c_ptr, n) {
 fn simd_mul_f64(a_ptr, b_ptr, c_ptr, n) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rsi, [rbp - 16]"
+        "sar rsi, 1"
         "mov rdx, [rbp - 24]"
+        "sar rdx, 1"
         "mov rcx, [rbp - 32]"
+        "sar rcx, 1"
         "shr rcx, 1"
         ".simd_mul_loop:"
         "test rcx, rcx"
@@ -83,9 +91,13 @@ fn simd_mul_f64(a_ptr, b_ptr, c_ptr, n) {
 fn simd_sub_f64(a_ptr, b_ptr, c_ptr, n) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rsi, [rbp - 16]"
+        "sar rsi, 1"
         "mov rdx, [rbp - 24]"
+        "sar rdx, 1"
         "mov rcx, [rbp - 32]"
+        "sar rcx, 1"
         "shr rcx, 1"
         ".simd_sub_loop:"
         "test rcx, rcx"
@@ -114,8 +126,11 @@ fn simd_dot_f64(a_ptr, b_ptr, n) {
     let result = to_float(0)
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rsi, [rbp - 16]"
+        "sar rsi, 1"
         "mov rcx, [rbp - 24]"
+        "sar rcx, 1"
         "xorpd xmm0, xmm0"
         "xorpd xmm2, xmm2"
         "shr rcx, 2"
@@ -155,9 +170,11 @@ fn simd_dot_f64(a_ptr, b_ptr, n) {
 fn simd_scale_f64(ptr, scalar, n) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "movq xmm1, [rbp - 16]"
         "unpcklpd xmm1, xmm1"
         "mov rcx, [rbp - 24]"
+        "sar rcx, 1"
         "shr rcx, 1"
         ".simd_scale_loop:"
         "test rcx, rcx"
@@ -182,7 +199,9 @@ fn simd_sum_f64(ptr, n) {
     let result = to_float(0)
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rcx, [rbp - 16]"
+        "sar rcx, 1"
         "xorpd xmm0, xmm0"
         "shr rcx, 1"
         ".simd_sum2_loop:"
@@ -216,9 +235,13 @@ fn simd_norm_f64(ptr, n) {
 fn simd_div_f64(a_ptr, b_ptr, c_ptr, n) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rsi, [rbp - 16]"
+        "sar rsi, 1"
         "mov rdx, [rbp - 24]"
+        "sar rdx, 1"
         "mov rcx, [rbp - 32]"
+        "sar rcx, 1"
         "shr rcx, 1"
         ".simd_div_loop:"
         "test rcx, rcx"
@@ -246,10 +269,15 @@ fn simd_div_f64(a_ptr, b_ptr, c_ptr, n) {
 fn simd_fma_f64(a_ptr, b_ptr, c_ptr, out_ptr, n) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rsi, [rbp - 16]"
+        "sar rsi, 1"
         "mov rdx, [rbp - 24]"
+        "sar rdx, 1"
         "mov rcx, [rbp - 32]"
+        "sar rcx, 1"
         "mov r8, [rbp - 40]"
+        "sar r8, 1"
         "shr r8, 1"
         ".simd_fma_loop:"
         "test r8, r8"
@@ -282,7 +310,9 @@ fn simd_relu_f64(ptr, n) {
     let zero = to_float(0)
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rcx, [rbp - 16]"
+        "sar rcx, 1"
         "shr rcx, 1"
         "pxor xmm1, xmm1"
         ".simd_relu_loop:"
@@ -309,9 +339,13 @@ fn simd_relu_f64(ptr, n) {
 fn simd_max_f64(a_ptr, b_ptr, c_ptr, n) {
     asm {
         "mov rdi, [rbp - 8]"
+        "sar rdi, 1"
         "mov rsi, [rbp - 16]"
+        "sar rsi, 1"
         "mov rdx, [rbp - 24]"
+        "sar rdx, 1"
         "mov rcx, [rbp - 32]"
+        "sar rcx, 1"
         "shr rcx, 1"
         ".simd_max_loop:"
         "test rcx, rcx"
