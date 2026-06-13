@@ -10789,19 +10789,21 @@ fn gen_program(program) {
     } else {
         if cg_link_libc == 1 {
             // libc main(argc, argv, envp)
-            out("    mov [rip + _g___argc], rdi")
+            out("    lea rax, [rdi + rdi + 1]")    // tag argc -> (argc<<1)|1
+            out("    mov [rip + _g___argc], rax")
             out("    mov [rip + _g___argv], rsi")
             out("    mov [rip + _g___envp], rdx")
         } else {
             out("    mov rdi, [rsp]")
             out("    lea rsi, [rsp + 8]")
-            out("    mov [rip + _g___argc], rdi")
             out("    mov [rip + _g___argv], rsi")
-            // envp is after argv: at rsp + 8 + (argc+1)*8
+            // envp is after argv: at rsp + 8 + (argc+1)*8  (uses raw argc)
             out("    mov rax, rdi")
             out("    inc rax")
             out("    lea rax, [rsp + 8 + rax*8]")
             out("    mov [rip + _g___envp], rax")
+            out("    lea rax, [rdi + rdi + 1]")    // tag argc -> (argc<<1)|1
+            out("    mov [rip + _g___argc], rax")
         }
     }
     out("    push rbp")
@@ -16613,14 +16615,14 @@ fn gen_runtime() {
         emit_syscall(1)
         out("    mov rdi, r12")
         emit_syscall(3)
-        out("    mov rax, 1")
+        out("    mov rax, 3")              // tagged true
     }
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
     out("    ret")
     out(".wf_fail:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                  // tagged false
     out("    lea rsp, [rbp - 16]")
     out("    pop r13")
     out("    pop r12")
@@ -16749,11 +16751,16 @@ fn gen_runtime() {
     out_label("_nova___arg")
     out("    push rbp")
     out("    mov rbp, rsp")
-    out("    inc rdi")
-    out("    cmp rdi, [rip + _g___argc]")
+    out("    sar rdi, 1")                  // untag n -> raw
+    out("    inc rdi")                      // skip argv[0]
+    out("    mov rcx, [rip + _g___argc]")
+    out("    sar rcx, 1")                  // untag argc -> raw
+    out("    cmp rdi, rcx")
     out("    jge .arg_empty")
     out("    mov rax, [rip + _g___argv]")
-    out("    mov rax, [rax + rdi*8]")
+    out("    mov rdi, [rax + rdi*8]")       // raw argv string (may be odd-aligned)
+    out("    lea rsi, [rip + _empty_str]")
+    out("    call _nova_concat")            // aligned heap copy (bit0=0)
     out("    pop rbp")
     out("    ret")
     out(".arg_empty:")
