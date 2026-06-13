@@ -2531,6 +2531,9 @@ fn emit_inline_simd(name) {
         let lbl_tail_u8 = new_label()
         let lbl_tail_loop_u8 = new_label()
         let lbl_done_u8 = new_label()
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
+        out("    sar rdx, 1")
         out("    xor eax, eax")
         out("    vpxor ymm2, ymm2, ymm2")
         out("    mov rcx, rdx")
@@ -2570,6 +2573,7 @@ fn emit_inline_simd(name) {
         out("    dec rdx")
         out("    jnz " + lbl_tail_loop_u8)
         out_label(lbl_done_u8)
+        out("    lea rax, [rax + rax + 1]")
         out("    vzeroupper")
         return 0
     }
@@ -2591,6 +2595,9 @@ fn emit_inline_simd(name) {
         let lbl_tail_us = new_label()
         let lbl_tail_loop_us = new_label()
         let lbl_done_us = new_label()
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
+        out("    sar rdx, 1")
         out("    xor eax, eax")
         out("    vpxor ymm2, ymm2, ymm2")
         out("    mov rcx, rdx")
@@ -2627,6 +2634,7 @@ fn emit_inline_simd(name) {
         out("    dec rdx")
         out("    jnz " + lbl_tail_loop_us)
         out_label(lbl_done_us)
+        out("    lea rax, [rax + rax + 1]")
         out("    vzeroupper")
         return 0
     }
@@ -2646,6 +2654,9 @@ fn emit_inline_simd(name) {
         let lbl_tail_ss = new_label()
         let lbl_tail_loop_ss = new_label()
         let lbl_done_ss = new_label()
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
+        out("    sar rdx, 1")
         out("    xor eax, eax")
         out("    vpxor ymm2, ymm2, ymm2")
         out("    mov rcx, rdx")
@@ -2682,6 +2693,7 @@ fn emit_inline_simd(name) {
         out("    dec rdx")
         out("    jnz " + lbl_tail_loop_ss)
         out_label(lbl_done_ss)
+        out("    lea rax, [rax + rax + 1]")
         out("    vzeroupper")
         return 0
     }
