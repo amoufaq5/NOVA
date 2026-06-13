@@ -15799,6 +15799,7 @@ fn gen_runtime() {
     out("    push r15")
     out("    mov r12, rdi")
     out("    mov r13, rsi")
+    out("    sar r13, 1")                 // untag repeat count
     out("    call _nova_list_new")
     out("    mov r14, rax")
     out("    xor r15, r15")
@@ -20829,6 +20830,7 @@ fn gen_runtime() {
     out("    push r13")
     out("    mov r12, rdi")
     out("    mov r13, rsi")
+    out("    sar r13, 1")                 // untag repeat count
     out("    lea rax, [rip + _empty_str]")
     out("    push rax")
     out(".srp_loop:")
@@ -22749,7 +22751,7 @@ fn gen_runtime() {
     out("    test al, al")
     out("    jz .stc_done")
     out("    mov rdi, r14")
-    out("    mov rsi, rax")
+    out("    lea rsi, [rax + rax + 1]")    // tag char code
     out("    call _nova_push")
     out("    inc r13")
     out("    jmp .stc_loop")
