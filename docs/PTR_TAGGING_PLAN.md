@@ -119,6 +119,49 @@ All work on branch `claude/adoring-wozniak-gdnye9`; `bin/nova` untouched until
   and `<16 GiB` cases (already fixed) and for everything once tagging lands;
   retire it then, or keep the `>2^62` guard.
 
+## 6b. Implementation progress (branch `claude/adoring-wozniak-gdnye9`)
+
+**Done & verified.** The tag scheme is implemented and proven correct on a broad
+language subset. Using **stage1** (the transitional compiler that runs untagged
+but *emits* tagged code), these programs compile and run correctly under
+tagging: `comp.nova`/`comp2.nova` (arithmetic, lists, index, `len`, `while`/`for`,
+`range`, recursion, `and`/`or`, strings, `==`, `if/else`), plus repo examples
+`binary_search`, `brainfuck`, `calculator`.
+
+Implemented (commits Phase 1–3):
+- bit-0 classifier (`_nova_check_rdi/rsi`); literals `(n<<1)|1`; None = tagged 0
+- `+ - * / %`, strength-reduced `/`, `< > <= >= == !=` (inline + smart), `& | ^
+  << >>`, unary `- ! ~` — all tag-correct
+- truthiness: 24 NOVA-level sites → `cmp rax,2; jb|jae`; `and/or/ternary/nullish`
+  bool results tagged
+- boundaries: `_nova_print_int`, `_nova_int_to_str`, `_nova_index` (untag idx,
+  tag char result), `_nova_len`, `_nova_chr`, `range` (inline for-loop +
+  `_nova_range_list/_step`), string-literal `.align 2`, `_start` argc tag,
+  `__arg` (untag + aligned copy), `_nova_write_file` tagged return
+
+**Bootstrap procedure (transitional).** Run the pre-tagging stages under
+`setarch -R` (ASLR off): the *old* range-based classifier in `boot`/stage1 has
+an ASLR-dependent misclassification on large inputs (e.g. compiling
+`codegen.nova`). Tagging removes that classifier in stage2+, so it is a
+transitional concern only.
+
+```
+setarch -R boot/nova_boot c.nova c.nova -o stage1.s   # stage1 (untagged, emits tagged)
+setarch -R stage1 c.nova -o stage2.s                  # stage2 (FULLY TAGGED)
+stage2 c.nova -o stage3.s                              # fixpoint: stage2.s == stage3.s
+```
+
+**Remaining (stage2 self-host not yet reached).** stage2 (fully tagged) builds,
+runs, parses argv, does file I/O, lexes and parses, and reaches the const-fold
+pass, where it hits a **control-flow/stack corruption** that surfaces as a
+spurious `_div_zero` on every program (the "caller" resolves to a function
+*epilogue*, i.e. a wild jump, not a real division). Also an **off-by-one in the
+error-context printer**. These are the long-tail tagged-*execution* bugs — the
+compiler exercises tagging in code paths the small tests don't (symbol-table
+hashing, deep recursion, the fold/codegen interplay on AST-stored literal
+values). Each must be found (gdb + the `setarch -R` stage1/stage2 loop) before
+the stage2≡stage3 fixpoint and `bin/nova` install.
+
 ## 7. Effort
 
 Consistent with the doc's original estimate: ~2-3 weeks. The change is
