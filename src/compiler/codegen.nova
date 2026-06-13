@@ -16814,10 +16814,10 @@ fn gen_runtime() {
     out("    call _nova_str_find")
     out("    cmp rax, 0")
     out("    jl .contains_str_no")
-    out("    mov eax, 1")
+    out("    mov eax, 3")                 // tagged true
     out("    ret")
     out(".contains_str_no:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                 // tagged false
     out("    ret")
     out(".contains_is_map:")
     out("    jmp _nova_map_has")
@@ -16845,14 +16845,14 @@ fn gen_runtime() {
     out("    inc rcx")
     out("    jmp .contains_loop")
     out(".contains_found:")
-    out("    mov eax, 1")
+    out("    mov eax, 3")                 // tagged true
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
     out("    ret")
     out(".contains_not_found:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                 // tagged false
     out("    pop r14")
     out("    pop r13")
     out("    pop r12")
@@ -16880,7 +16880,7 @@ fn gen_runtime() {
     // --- starts_with(str, prefix) -> 1 or 0 ---
     out("")
     out_label("_nova_starts_with")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                 // tagged false (default)
     out(".sw_loop:")
     out("    mov cl, [rsi]")
     out("    test cl, cl")
@@ -16891,7 +16891,7 @@ fn gen_runtime() {
     out("    inc rsi")
     out("    jmp .sw_loop")
     out(".sw_yes:")
-    out("    mov eax, 1")
+    out("    mov eax, 3")                 // tagged true
     out(".sw_no:")
     out("    ret")
 
@@ -16923,13 +16923,13 @@ fn gen_runtime() {
     out("    inc rsi")
     out("    jmp .ew_loop")
     out(".ew_yes:")
-    out("    mov eax, 1")
+    out("    mov eax, 3")                 // tagged true
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
     out("    ret")
     out(".ew_no:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                 // tagged false
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
@@ -19651,11 +19651,11 @@ fn gen_runtime() {
     out("    call _nova_map_get")
     out("    test rax, rax")
     out("    jz .mh_no")
-    out("    mov eax, 1")
+    out("    mov eax, 3")                 // tagged true
     out("    pop rbp")
     out("    ret")
     out(".mh_no:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")                 // tagged false
     out("    pop rbp")
     out("    ret")
 
