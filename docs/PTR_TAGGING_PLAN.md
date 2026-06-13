@@ -168,7 +168,22 @@ Additional fixes that got to the fixpoint (commits Phase 5+):
   treated tagged-false(1) as true → `cmp rax,1`/`jne`
 - float comparison results (`gen_float_binop`) tagged
 
-**Test status: 112/183 NOVA tests pass** under the fixpoint compiler. The 71
+**Test status (real harness `tests/run_tests.sh`, full `COMPILER_SRC`):
+145 pass / 32 fail / 6 skip.** Baseline (original `bin/nova`): 177 pass / 0 fail
+/ 6 skip — so **32 tagging regressions remain**, in specialized clusters: SIMD
+intrinsics (lane/count int handling), float/tensor, several cognitive modules,
+and misc syscall/ffi/interpolation. The high-leverage common bugs are fixed:
+imports (read_file failure sentinel), predicate-bool returns
+(starts_with/ends_with/contains/map_has/map_get), str/list repeat counts,
+str_to_chars / char_at / substr, closures (starts_with → lambda detection),
+enumerate, for-indexed. **`bin/nova` must NOT be replaced until the 32 clear.**
+NOTE: the build must use the *complete* COMPILER_SRC (ast, lexer, parser, ir,
+regalloc, lower_x64, codegen, pkg, compiler) — an earlier reduced build hid the
+pkg/std-package paths.
+
+---
+
+(historical) **Earlier status: 112/183** under the fixpoint compiler. The 71
 remaining failures are independent feature-level tagging bugs not yet audited:
 floats used as generic/boxed values and float printing, closure captures
 (R37A), FFI, sets, and the float-heavy cognitive suite (active_inference,
