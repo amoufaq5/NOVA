@@ -23058,6 +23058,7 @@ fn gen_runtime() {
     // --- Data for runtime ---
     out("")
     out_section("rodata")
+    out("    .align 2")
     out_label("_empty_str")
     out("    .asciz " + DQ + DQ)
     out_label("_err_null_access")
