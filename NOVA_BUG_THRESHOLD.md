@@ -1,7 +1,29 @@
 # NOVA Codegen Pointer-Threshold Bug
 
-**Status:** known, worked around with `int_*` builtins (see "Escape hatch" below).
-Full type-tag fix tracked under "Future work".
+**Status (updated 2026-06-13):** the 1 MB magnitude heuristic described below is
+**no longer how the shipped compiler works** — it was replaced by **range-based
+pointer classification** (`_nova_check_rdi`/`_nova_check_rsi` in
+`gen_runtime()`, `src/compiler/codegen.nova` ≈ line 15604), which is live in
+`bin/nova`. Verified: the "Reproduction" crash below (`2097152 * 2097153`) now
+prints the correct result, and `x == 0 - 1` works.
+
+The bug *class* survives only as a **16 GiB residual**: `_nova_check_*` still
+assumes any address `≥ 0x400000000` is a pointer, so integer arithmetic where
+**both** operands are `≥ 16 GiB` still faults (e.g. `20000000000 + 20000000001`).
+The ceiling moved 1 MB → 16 GiB (16,384×); `int_*` remains the escape hatch for
+huge integers (nanotimes, big products).
+
+`PTR_THRESHOLD = "100000"` (line 8) is now **dead** (referenced only in a
+comment) — kept pending the tagging rework that removes the heuristic entirely.
+
+The complete root fix (low-bit value tagging, which removes the residual) is
+specced in **`docs/PTR_TAGGING_PLAN.md`** (~2-3 weeks, monolithic). The text
+below is retained as the historical bug description and incident log.
+
+---
+
+**Original status:** known, worked around with `int_*` builtins (see "Escape
+hatch" below). Full type-tag fix tracked under "Future work".
 
 ## Symptom
 
