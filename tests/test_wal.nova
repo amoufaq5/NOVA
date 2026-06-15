@@ -1,0 +1,145 @@
+// Tests for the write-ahead log (src/storage/wal.nova) -- ADR NOVA-0007.
+//
+// Exercises: append + assigned sequence numbers, durable sync, sequential
+// replay with payload verification, next-seq recovery across reopen, torn-tail
+// recovery (a partial trailing write is ignored, valid prefix preserved),
+// physical truncation of a torn tail, and CRC detection of payload corruption.
+//
+// This test does real file I/O under /tmp, so the standard tests/run_tests.sh
+// harness skips it (like test_fileio). Run it directly via the bootstrap:
+//   cat src/runtime/syscall.nova src/storage/wal.nova \
+//       <(grep -v '^import' tests/test_wal.nova) > /tmp/t.nova
+//   boot/nova_boot /tmp/t.nova /tmp/t.nova -o /tmp/t.s && as -o /tmp/t.o /tmp/t.s \
+//       && ld -o /tmp/t /tmp/t.o && /tmp/t
+
+import "../src/runtime/syscall.nova"
+import "../src/storage/wal.nova"
+
+fn check(cond, label) {
+    if cond {
+        println(label)
+    } else {
+        println("FAIL")
+        println(label)
+        sys_exit(1)
+    }
+}
+
+fn main() {
+    let path = "/tmp/nova_wal_test.log"
+    sys_unlink(path)
+
+    // --- append three records, sync, close ---
+    let w = wal_open(path)
+    check(w != 0, "open writer")
+    let p = alloc(8)
+    store8(p + 0, 10)
+    store8(p + 1, 20)
+    store8(p + 2, 30)
+    let s0 = wal_append(w, p, 3)
+    store8(p + 0, 40)
+    store8(p + 1, 50)
+    store8(p + 2, 60)
+    let s1 = wal_append(w, p, 3)
+    store8(p + 0, 70)
+    store8(p + 1, 80)
+    store8(p + 2, 90)
+    let s2 = wal_append(w, p, 3)
+    check(s0 == 0, "seq 0 assigned")
+    check(s1 == 1, "seq 1 assigned")
+    check(s2 == 2, "seq 2 assigned")
+    check(wal_sync(w) == 0, "fdatasync ok")
+    wal_close(w)
+
+    // --- recovery sees exactly three valid records ---
+    check(wal_recover_count(path) == 3, "recover count = 3")
+
+    // --- replay and verify sequence + payload bytes ---
+    let r = wal_read_open(path)
+    let out = alloc(64)
+    let n0 = wal_read_next(r, out, 64)
+    check(n0 == 3, "rec0 payload len 3")
+    check(wal_read_seq(r) == 0, "rec0 seq 0")
+    check(load8(out + 0) == 10, "rec0 byte0")
+    check(load8(out + 2) == 30, "rec0 byte2")
+    let n1 = wal_read_next(r, out, 64)
+    check(n1 == 3, "rec1 payload len 3")
+    check(load8(out + 1) == 50, "rec1 byte1")
+    let n2 = wal_read_next(r, out, 64)
+    check(load8(out + 2) == 90, "rec2 byte2")
+    let n3 = wal_read_next(r, out, 64)
+    check(n3 == -1, "clean EOF after 3")
+    wal_read_close(r)
+
+    // --- next_seq persists across reopen ---
+    let w2 = wal_open(path)
+    check(wal_next_seq(w2) == 3, "next_seq recovered = 3")
+    wal_close(w2)
+
+    // --- torn tail: append a partial (sub-header) fragment, simulating a crash
+    //     mid-write. Recovery must ignore it and keep the 3 committed records. ---
+    let jfd = sys_open(path, O_WRONLY | O_APPEND, 420)
+    let junk = alloc(5)
+    store8(junk + 0, 1)
+    store8(junk + 1, 2)
+    store8(junk + 2, 3)
+    store8(junk + 3, 4)
+    store8(junk + 4, 5)
+    sys_write(jfd, junk, 5)
+    sys_fsync(jfd)
+    sys_close(jfd)
+    check(wal_recover_count(path) == 3, "torn tail ignored, count = 3")
+    let r2 = wal_read_open(path)
+    wal_read_next(r2, out, 64)
+    wal_read_next(r2, out, 64)
+    wal_read_next(r2, out, 64)
+    let nt = wal_read_next(r2, out, 64)
+    check(nt == -2, "torn trailing record detected")
+    wal_read_close(r2)
+
+    // --- physically truncate the torn tail; log is clean and appendable again ---
+    check(wal_truncate_to(path, 3) == 0, "truncate torn tail")
+    check(wal_recover_count(path) == 3, "count 3 after truncate")
+    let w3 = wal_open(path)
+    check(wal_next_seq(w3) == 3, "next_seq 3 after truncate")
+    store8(p + 0, 111)
+    store8(p + 1, 122)
+    store8(p + 2, 123)
+    let s3 = wal_append(w3, p, 3)
+    check(s3 == 3, "append after recovery gets seq 3")
+    wal_sync(w3)
+    wal_close(w3)
+    check(wal_recover_count(path) == 4, "count 4 after fresh append")
+
+    // --- CRC detects payload corruption ---
+    let cpath = "/tmp/nova_wal_corrupt.log"
+    sys_unlink(cpath)
+    let cw = wal_open(cpath)
+    store8(p + 0, 200)
+    store8(p + 1, 201)
+    store8(p + 2, 202)
+    wal_append(cw, p, 3)
+    store8(p + 0, 1)
+    store8(p + 1, 2)
+    store8(p + 2, 3)
+    wal_append(cw, p, 3)
+    wal_sync(cw)
+    wal_close(cw)
+    check(wal_recover_count(cpath) == 2, "corrupt-case pre-count 2")
+    // flip one payload byte of record 0 (payload begins at offset WAL_HDR = 20)
+    let one = alloc(1)
+    store8(one + 0, 99)
+    let cfd = sys_open(cpath, O_RDWR, 0)
+    sys_pwrite(cfd, one, 1, 20)
+    sys_fsync(cfd)
+    sys_close(cfd)
+    check(wal_recover_count(cpath) == 0, "corruption detected, 0 valid")
+    let cr = wal_read_open(cpath)
+    let cn = wal_read_next(cr, out, 64)
+    check(cn == -2, "CRC mismatch reported as torn")
+    wal_read_close(cr)
+
+    println("ALL-WAL-TESTS-PASSED")
+}
+
+main()

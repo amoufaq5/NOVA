@@ -173,3 +173,34 @@ its buffers in arenas.**
     subtle, and the model is awkward to drive cleanly without libc.
     Explicit positioned I/O is easier to reason about and to crash-
     test.
+
+## Implementation status
+
+**Increment 1 (landed): the write-ahead log.** `src/storage/wal.nova`
+implements the durable append-only log the LSM/index layers will build on.
+Records are framed `[magic][seq][len][crc32][payload]` (little-endian);
+`wal_append` writes a whole record per `write()` and `wal_sync` calls
+`fdatasync`. Recovery (`wal_read_*`, `wal_recover_count`,
+`wal_recover_next_seq`) replays from the start and stops at the first torn
+(short read at a boundary) or corrupt (bad magic / CRC mismatch) record,
+preserving exactly the durably-committed prefix; `wal_truncate_to`
+physically drops a torn tail. The four durability syscalls this needs --
+`pread`(17), `pwrite`(18), `fdatasync`(75), `ftruncate`(77) -- were added
+to `src/runtime/syscall.nova`.
+
+Verified by `tests/test_wal.nova` (compiled and run via the bootstrap; the
+standard harness skips file-I/O tests): append + sequence assignment,
+fdatasync, replay with payload/seq verification, clean EOF, next-seq
+recovery across reopen, torn-tail recovery, physical truncation + fresh
+append, and CRC detection of payload corruption -- all green.
+
+Two findings worth recording for later increments:
+  - **Pointer-safe equality is mandatory for 32-bit values.** Nova's
+    `==`/`!=` structurally dereference operands above the `0x100000`
+    pointer threshold, so comparing two unequal ~4e9 values (magic words,
+    CRCs) faults. The WAL uses `wal_u32_eq` (`int_sub(a,b) == 0`, the same
+    idiom as `runtime/crypto.nova`'s `int_eq`); offset/seq arithmetic uses
+    `int_add`. The LSM layer must follow the same discipline.
+  - **Scope still open:** records capped at 4 KiB; seq is effectively
+    32-bit under Nova's tagged-integer width; the LSM index, compaction,
+    and checkpoints remain future increments (per NOVA-0006).

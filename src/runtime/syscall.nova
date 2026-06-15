@@ -140,6 +140,55 @@ fn sys_rename(oldpath, newpath) {
     }
 }
 
+// Positioned read: pread(fd, buf, count, offset) -- read at an absolute file
+// offset without moving the file's read/write cursor (syscall 17). The 4th
+// syscall argument is passed in r10, not rcx. Returns bytes read, or < 0.
+fn sys_pread(fd, buf, count, offset) {
+    asm {
+        "mov rax, 17"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "mov r10, [rbp-32]"
+        "syscall"
+    }
+}
+
+// Positioned write: pwrite(fd, buf, count, offset) -- write at an absolute file
+// offset without moving the cursor (syscall 18). Returns bytes written, or < 0.
+fn sys_pwrite(fd, buf, count, offset) {
+    asm {
+        "mov rax, 18"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "mov r10, [rbp-32]"
+        "syscall"
+    }
+}
+
+// fdatasync(fd) -- flush file DATA to stable storage, skipping non-essential
+// metadata (syscall 75). Cheaper than fsync for the append-only WAL hot path,
+// while still guaranteeing the written bytes survive a crash. Returns 0, or < 0.
+fn sys_fdatasync(fd) {
+    asm {
+        "mov rax, 75"
+        "mov rdi, [rbp-8]"
+        "syscall"
+    }
+}
+
+// ftruncate(fd, length) -- set the file size to `length` (syscall 77). Used by
+// recovery to drop a torn trailing record. Returns 0, or < 0.
+fn sys_ftruncate(fd, length) {
+    asm {
+        "mov rax, 77"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "syscall"
+    }
+}
+
 // Constants
 let O_RDONLY = 0
 let O_WRONLY = 1
