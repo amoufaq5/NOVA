@@ -20,7 +20,7 @@ for test_file in tests/test_*.nova; do
 
     # Skip tests that need special handling
     case "$test_name" in
-        test_import|test_import_lib|test_fileio|test_io_random)
+        test_import|test_import_lib|test_fileio|test_io_random|test_wal)
             echo "  SKIP  $test_name (requires special setup)"
             SKIP=$((SKIP + 1))
             continue

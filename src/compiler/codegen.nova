@@ -4594,7 +4594,7 @@ fn gen_expr(nd) {
 
     if tag == AST_INT_LIT {
         // value tagging: integer n is represented as (n<<1)|1
-        out("    mov rax, " + int_to_str(nd[1] * 2 + 1))
+        out("    mov rax, " + int_to_str((nd[1] << 1) | 1))
         return 0
     }
 
@@ -4610,7 +4610,7 @@ fn gen_expr(nd) {
 
     if tag == AST_BOOL_LIT {
         // booleans are tagged ints: false->1, true->3
-        out("    mov rax, " + int_to_str(nd[1] * 2 + 1))
+        out("    mov rax, " + int_to_str((nd[1] << 1) | 1))
         return 0
     }
 
@@ -4725,7 +4725,7 @@ fn gen_expr(nd) {
                 if op == ">=" {
                     if left_val >= right_val { result = 1 } else { result = 0 }
                 }
-                out("    mov rax, " + int_to_str(result * 2 + 1))   // tag folded constant
+                out("    mov rax, " + int_to_str((result << 1) | 1))   // tag folded constant
                 return 0
             }
         }
