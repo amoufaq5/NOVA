@@ -25,6 +25,26 @@ below is retained as the historical bug description and incident log.
 **Original status:** known, worked around with `int_*` builtins (see "Escape
 hatch" below). Full type-tag fix tracked under "Future work".
 
+## Incident 2026-06-16: self-host build blocked at stage2
+
+The self-host build (`make self-host` / `make bin/nova`) segfaulted at
+stage2. Root cause: **stage1 carries the seed bootstrap's OLD 1 MB-threshold
+smart-op runtime** (the range-based `_nova_check_*` runtime only exists from
+stage2 onward, since it lives in codegen's `gen_runtime`). `gen_expr` tagged
+integer/bool/folded literals with `n * 2 + 1`; when stage1 compiled codegen
+and reached the macOS syscall constant `33554435` (`0x2000003`), the smart
+`*` dereferenced it as a list pointer and faulted in `mul_ptr`. The crash was
+ASLR-sensitive (the bogus address faults only when unmapped), which masked it
+under gdb.
+
+Fix: tag with bitwise `(n << 1) | 1` at the three `gen_expr` tagging sites —
+shift/or are not smart-overloaded, and the immediate is identical
+(`n*2+1 == (n<<1)|1`), so emitted output is byte-for-byte unchanged and the
+`stage2.s == stage3.s` fixpoint is preserved. This unblocks building `bin/nova`
+at all; the residual arg/syscall-tagging bugs that still affect file-I/O and
+large programs under `bin/nova` are the separate, pre-existing items the
+`PTR_TAGGING_PLAN.md` rework addresses.
+
 ## Symptom
 
 NOVA programs that perform integer arithmetic on values >= **0x100000
