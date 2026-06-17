@@ -19027,7 +19027,7 @@ fn gen_runtime() {
     out("    add rdi, 8")
     out("    jmp .ge_loop")
     out(".ge_not_found:")
-    out("    xor eax, eax")
+    out("    mov eax, 1")      // tagged 0 (None) so `getenv(x) == 0` is true when unset
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
