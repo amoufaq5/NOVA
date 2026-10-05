@@ -261,6 +261,59 @@ fn test_runtime_strings() {
         println("FAIL: str_ends_with raw")
         exit(1)
     }
+
+    // Deferred-4 sweep: raw-pointer assertions for the four fns whose first
+    // slot was previously deferred because the body feeds memcpy_raw /
+    // str_new on tagged-dst + tagged-count. See Crossengin
+    // docs/UPSTREAM_NOVA_BUGS.md §2 and the deferred-4 sweep commit.
+    let cat = str_concat("ab", "cd")
+    if str_len(cat) != 4 {
+        println("FAIL: str_concat raw len")
+        exit(1)
+    }
+    if str_char_at(cat, 0) != 97 {
+        println("FAIL: str_concat raw first")
+        exit(1)
+    }
+    if str_char_at(cat, 3) != 100 {
+        println("FAIL: str_concat raw last")
+        exit(1)
+    }
+
+    let slr = str_slice("hello", 1, 4)
+    if str_len(slr) != 3 {
+        println("FAIL: str_slice raw len")
+        exit(1)
+    }
+    if str_char_at(slr, 0) != 101 {
+        println("FAIL: str_slice raw first")
+        exit(1)
+    }
+    if str_char_at(slr, 2) != 108 {
+        println("FAIL: str_slice raw last")
+        exit(1)
+    }
+
+    let tr = rt_str_trim("  hi  ")
+    if str_len(tr) != 2 {
+        println("FAIL: rt_str_trim raw len")
+        exit(1)
+    }
+    if str_char_at(tr, 0) != 104 {
+        println("FAIL: rt_str_trim raw[0]")
+        exit(1)
+    }
+    if str_char_at(tr, 1) != 105 {
+        println("FAIL: rt_str_trim raw[1]")
+        exit(1)
+    }
+
+    let sp = str_split("a,b,c", ",")
+    if len(sp) != 3 {
+        println("FAIL: str_split raw list len")
+        exit(1)
+    }
+
     println("PASS")
 }
 

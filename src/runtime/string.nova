@@ -71,17 +71,58 @@ fn str_char_at(s, index) {
 }
 
 fn str_concat(a, b) {
+    // Normalize both handles raw -> tagged. load8/store8 below untag, and the
+    // byte-copy loop replaces the previous memcpy_raw calls (which required
+    // RAW addresses on both sides; see codegen.nova:_nova_memcpy_raw). See
+    // NOVA commit b66644b, 41058d2 and Crossengin docs/UPSTREAM_NOVA_BUGS.md
+    // §2 (deferred-4 sweep).
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
+    asm {
+        "mov rax, [rbp - 16]"
+        "test rax, 1"
+        "jnz 2f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 16], rax"
+        "2:"
+    }
     let len_a = str_len(a)
     let len_b = str_len(b)
     let total = len_a + len_b
     let s = alloc(total + 1)
-    memcpy_raw(s, a, len_a)
-    memcpy_raw(s + len_a, b, len_b)
+    let i = 0
+    while i < len_a {
+        store8(s + i, load8(a + i))
+        i = i + 1
+    }
+    let j = 0
+    while j < len_b {
+        store8(s + len_a + j, load8(b + j))
+        j = j + 1
+    }
     store8(s + total, 0)
     return s
 }
 
 fn str_slice(s, start, end) {
+    // Normalize s raw -> tagged. The inline byte-copy below replaces
+    // str_new(s+start, len), which internally called memcpy_raw on a tagged
+    // alloc dst + tagged length (needs RAW on both). See NOVA commit b66644b,
+    // 41058d2 and Crossengin docs/UPSTREAM_NOVA_BUGS.md §2 (deferred-4 sweep).
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
     let length = str_len(s)
     if start < 0 {
         start = length + start
@@ -92,10 +133,19 @@ fn str_slice(s, start, end) {
     if start < 0 { start = 0 }
     if end > length { end = length }
     if start >= end {
-        return str_new(0, 0)
+        let empty = alloc(1)
+        store8(empty, 0)
+        return empty
     }
     let slice_len = end - start
-    return str_new(s + start, slice_len)
+    let dst = alloc(slice_len + 1)
+    let i = 0
+    while i < slice_len {
+        store8(dst + i, load8(s + start + i))
+        i = i + 1
+    }
+    store8(dst + slice_len, 0)
+    return dst
 }
 
 fn rt_str_eq(a, b) {
@@ -282,10 +332,19 @@ fn str_ends_with(s, suffix) {
 }
 
 fn str_split(s, delim) {
-    // Normalize delim raw -> tagged ([rbp-16] only). The first `s` slot is
-    // DEFERRED (feeds str_slice which still expects raw) pending the
-    // _nova_memcpy_raw audit. See NOVA commit b66644b and Crossengin
-    // docs/UPSTREAM_NOVA_BUGS.md §2.
+    // Normalize both handles raw -> tagged. The s slot was DEFERRED in the
+    // 7-fn sweep because the body feeds str_slice (which still expected raw
+    // through memcpy_raw); str_slice is now fixed, so we normalize s here
+    // too. See NOVA commit b66644b, 41058d2 and Crossengin
+    // docs/UPSTREAM_NOVA_BUGS.md §2 (deferred-4 sweep).
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
     asm {
         "mov rax, [rbp - 16]"
         "test rax, 1"
@@ -323,17 +382,28 @@ fn str_split(s, delim) {
 }
 
 fn rt_str_trim(s) {
+    // Normalize s raw -> tagged. load8 and str_slice (now also fixed) below
+    // both need tagged. See NOVA commit b66644b, 41058d2 and Crossengin
+    // docs/UPSTREAM_NOVA_BUGS.md §2 (deferred-4 sweep).
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
     let length = str_len(s)
     let start = 0
     while start < length {
         let c = load8(s + start)
-        if c == 32 | c == 9 | c == 10 | c == 13 {
+        if c == 32 || c == 9 || c == 10 || c == 13 {
             start = start + 1
         } else {
             let end = length
             while end > start {
                 let c2 = load8(s + end - 1)
-                if c2 == 32 | c2 == 9 | c2 == 10 | c2 == 13 {
+                if c2 == 32 || c2 == 9 || c2 == 10 || c2 == 13 {
                     end = end - 1
                 } else {
                     return str_slice(s, start, end)
