@@ -5705,7 +5705,7 @@ fn gen_expr(nd) {
                 let mtp_id = mpat[1]
                 out("    mov rdi, [rsp]")
                 out("    call _nova_type_of")
-                out("    cmp rax, " + int_to_str(mtp_id))
+                out("    cmp rax, " + int_to_str((mtp_id << 1) | 1))
                 out("    jne " + mnxt_t)
                 if mhas_guard == 1 {
                     gen_expr(marm[3])
@@ -6420,7 +6420,7 @@ fn gen_stmt(nd) {
                 let tp_id = pattern[1]
                 out("    mov rdi, [rsp]")
                 out("    call _nova_type_of")
-                out("    cmp rax, " + int_to_str(tp_id))
+                out("    cmp rax, " + int_to_str((tp_id << 1) | 1))
                 out("    jne " + next_arm_t)
                 if has_guard == 1 {
                     gen_expr(arm[3])
@@ -13015,7 +13015,7 @@ fn wasm_gen_rt_extra() {
     wi(")")
     wi("")
 
-    // type_of
+    // type_of (returns tagged NOVA ints: (N<<1)|1, so int=3, str=5, list=7, map=9)
     wi("(func $type_of (param $v i64) (result i64)")
     wasm_indent = wasm_indent + 1
     wi("local.get $v")
@@ -13023,7 +13023,7 @@ fn wasm_gen_rt_extra() {
     wi("i64.lt_s")
     wi("if (result i64)")
     wasm_indent = wasm_indent + 1
-    wi("i64.const 1")
+    wi("i64.const 3")
     wasm_indent = wasm_indent - 1
     wi("else")
     wasm_indent = wasm_indent + 1
@@ -13033,7 +13033,7 @@ fn wasm_gen_rt_extra() {
     wi("i64.const -1")
     wi("i64.eq")
     wi("if (result i64)")
-    wi("  i64.const 3")
+    wi("  i64.const 7")
     wi("else")
     wi("  local.get $v")
     wi("  i32.wrap_i64")
@@ -13041,9 +13041,9 @@ fn wasm_gen_rt_extra() {
     wi("  i64.const -2")
     wi("  i64.eq")
     wi("  if (result i64)")
-    wi("    i64.const 4")
+    wi("    i64.const 9")
     wi("  else")
-    wi("    i64.const 2")
+    wi("    i64.const 5")
     wi("  end")
     wi("end")
     wasm_indent = wasm_indent - 1
@@ -18733,6 +18733,7 @@ fn gen_runtime() {
     out("    ret")
 
     // --- type_of(value) -> int (0=null, 1=int, 2=string, 3=list, 4=map) ---
+    // Returns are tagged NOVA ints: (N<<1)|1, so null=1, int=3, str=5, list=7, map=9.
     out("")
     out_label("_nova_type_of")
     out("    test rdi, rdi")
@@ -18743,19 +18744,19 @@ fn gen_runtime() {
     out("    je .to_list")
     out("    cmp qword ptr [rdi], -2")
     out("    je .to_map")
-    out("    mov eax, 2")
+    out("    mov eax, 5")
     out("    ret")
     out(".to_null:")
-    out("    xor eax, eax")
-    out("    ret")
-    out(".to_int:")
     out("    mov eax, 1")
     out("    ret")
-    out(".to_list:")
+    out(".to_int:")
     out("    mov eax, 3")
     out("    ret")
+    out(".to_list:")
+    out("    mov eax, 7")
+    out("    ret")
     out(".to_map:")
-    out("    mov eax, 4")
+    out("    mov eax, 9")
     out("    ret")
 
     // --- type_name(value) -> string ---
