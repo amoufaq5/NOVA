@@ -219,6 +219,48 @@ fn test_runtime_strings() {
         println("FAIL: str_to_int on substr")
         exit(1)
     }
+
+    // Sweep: raw-pointer assertions for 7 normalized string fns.
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §2 and the 8-fn sweep
+    // commit. str_split's end-to-end raw case is deferred because its
+    // first-slot feeds str_slice (DEFER queue; needs _nova_memcpy_raw
+    // audit); its delim slot IS normalized this round.
+    if str_len("hi") != 2 {
+        println("FAIL: str_len raw literal")
+        exit(1)
+    }
+    if str_char_at("hi", 1) != 105 {
+        println("FAIL: str_char_at raw literal")
+        exit(1)
+    }
+    if rt_str_eq("hi", "hi") != 1 {
+        println("FAIL: rt_str_eq raw eq")
+        exit(1)
+    }
+    if rt_str_eq("hi", "ho") != 0 {
+        println("FAIL: rt_str_eq raw ne")
+        exit(1)
+    }
+    if str_cmp("ab", "ac") != -1 {
+        println("FAIL: str_cmp raw lt")
+        exit(1)
+    }
+    if str_cmp("ab", "ab") != 0 {
+        println("FAIL: str_cmp raw eq")
+        exit(1)
+    }
+    if rt_str_find("abcabc", "bc") != 1 {
+        println("FAIL: rt_str_find raw")
+        exit(1)
+    }
+    if str_starts_with("hello", "he") != 1 {
+        println("FAIL: str_starts_with raw")
+        exit(1)
+    }
+    if str_ends_with("hello", "lo") != 1 {
+        println("FAIL: str_ends_with raw")
+        exit(1)
+    }
     println("PASS")
 }
 

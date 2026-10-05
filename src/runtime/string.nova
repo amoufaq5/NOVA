@@ -24,6 +24,16 @@ fn str_new(data_ptr, length) {
 }
 
 fn str_len(s) {
+    // Normalize raw -> tagged. See NOVA commit b66644b and
+    // Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
     if s == 0 { return 0 }
     let i = 0
     while load8(s + i) != 0 {
@@ -37,6 +47,16 @@ fn str_data(s) {
 }
 
 fn str_char_at(s, index) {
+    // Normalize raw -> tagged. See NOVA commit b66644b and
+    // Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
     let length = str_len(s)
     if index < 0 {
         index = length + index
@@ -79,6 +99,24 @@ fn str_slice(s, start, end) {
 }
 
 fn rt_str_eq(a, b) {
+    // Normalize raw -> tagged (both params). See NOVA commit b66644b and
+    // Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
+    asm {
+        "mov rax, [rbp - 16]"
+        "test rax, 1"
+        "jnz 2f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 16], rax"
+        "2:"
+    }
     let len_a = str_len(a)
     let len_b = str_len(b)
     if len_a != len_b {
@@ -95,6 +133,24 @@ fn rt_str_eq(a, b) {
 }
 
 fn str_cmp(a, b) {
+    // Normalize raw -> tagged (both params). See NOVA commit b66644b and
+    // Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
+    asm {
+        "mov rax, [rbp - 16]"
+        "test rax, 1"
+        "jnz 2f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 16], rax"
+        "2:"
+    }
     let len_a = str_len(a)
     let len_b = str_len(b)
     let min_len = len_a
@@ -113,6 +169,24 @@ fn str_cmp(a, b) {
 }
 
 fn rt_str_find(haystack, needle) {
+    // Normalize raw -> tagged (both params). See NOVA commit b66644b and
+    // Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
+    asm {
+        "mov rax, [rbp - 16]"
+        "test rax, 1"
+        "jnz 2f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 16], rax"
+        "2:"
+    }
     let h_len = str_len(haystack)
     let n_len = str_len(needle)
     if n_len == 0 { return 0 }
@@ -143,6 +217,24 @@ fn str_contains(haystack, needle) {
 }
 
 fn str_starts_with(s, prefix) {
+    // Normalize raw -> tagged (both params). See NOVA commit b66644b and
+    // Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
+    asm {
+        "mov rax, [rbp - 16]"
+        "test rax, 1"
+        "jnz 2f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 16], rax"
+        "2:"
+    }
     let s_len = str_len(s)
     let p_len = str_len(prefix)
     if p_len > s_len { return 0 }
@@ -157,6 +249,24 @@ fn str_starts_with(s, prefix) {
 }
 
 fn str_ends_with(s, suffix) {
+    // Normalize raw -> tagged (both params). See NOVA commit b66644b and
+    // Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
+    asm {
+        "mov rax, [rbp - 16]"
+        "test rax, 1"
+        "jnz 2f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 16], rax"
+        "2:"
+    }
     let s_len = str_len(s)
     let sf_len = str_len(suffix)
     if sf_len > s_len { return 0 }
@@ -172,6 +282,18 @@ fn str_ends_with(s, suffix) {
 }
 
 fn str_split(s, delim) {
+    // Normalize delim raw -> tagged ([rbp-16] only). The first `s` slot is
+    // DEFERRED (feeds str_slice which still expects raw) pending the
+    // _nova_memcpy_raw audit. See NOVA commit b66644b and Crossengin
+    // docs/UPSTREAM_NOVA_BUGS.md §2.
+    asm {
+        "mov rax, [rbp - 16]"
+        "test rax, 1"
+        "jnz 2f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 16], rax"
+        "2:"
+    }
     let parts = list_new()
     let s_len = str_len(s)
     let d_len = str_len(delim)
