@@ -204,6 +204,21 @@ fn test_runtime_strings() {
         println("FAIL: str_to_int")
         exit(1)
     }
+
+    // Regression: rt_str_to_int on a string LITERAL (raw pointer path).
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    let v_lit = rt_str_to_int("42")
+    if v_lit != 42 {
+        println("FAIL: str_to_int on literal")
+        exit(1)
+    }
+
+    // Regression: rt_str_to_int on substr output (raw pointer path).
+    let v_sub = rt_str_to_int(substr("abc123def", 3, 3))
+    if v_sub != 123 {
+        println("FAIL: str_to_int on substr")
+        exit(1)
+    }
     println("PASS")
 }
 

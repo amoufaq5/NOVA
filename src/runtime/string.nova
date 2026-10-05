@@ -224,6 +224,22 @@ fn rt_str_trim(s) {
 }
 
 fn rt_str_to_int(s) {
+    // Normalize string handle to tagged: literals and _nova_substr return
+    // raw pointers while str_new / rt_int_to_str return tagged. load8 below
+    // (via str_len and this body) expects tagged (sar rdi, 1). NOVA's smart
+    // + / * operators dispatch to str_concat / str_repeat for raw-pointer
+    // operands (see _nova_add / _nova_mul in codegen.nova), so we normalize
+    // in inline asm against the raw machine word at [rbp-8]. See Crossengin
+    // docs/UPSTREAM_NOVA_BUGS.md section 2 and
+    // docs/adr/0103-memcpy-raw-tagged-ptr-workarounds.md.
+    asm {
+        "mov rax, [rbp - 8]"
+        "test rax, 1"
+        "jnz 1f"
+        "lea rax, [rax + rax + 1]"
+        "mov [rbp - 8], rax"
+        "1:"
+    }
     let length = str_len(s)
     let result = 0
     let negative = 0
