@@ -1,0 +1,63 @@
+// Regression test for Crossengin UPSTREAM §7 (NOVA Bug #7).
+
+import "std/syscall"
+import "std/alloc"
+import "std/string"
+import "std/io"
+
+//
+// Pre-fix: nanotime() ended on a tail call to _raw_imul_add, whose
+// asm block leaves raw rax (no tag bit) in the return register. The
+// caller then saw a RAW int, and any downstream smart-op dispatch
+// (& mask / * / int_to_str / == N) could misclassify it as a pointer
+// and SEGV.
+//
+// Post-fix: nanotime() tags its rax via a trailing asm block
+// (`lea rax, [rax + rax + 1]`) before the implicit return.
+//
+// This test exercises the three failure paths listed in Crossengin
+// docs/UPSTREAM_NOVA_BUGS.md §7:
+//   1. `t & 0xFF`  (bitwise AND, dispatched through _nova_and)
+//   2. `m * 2`     (smart-op mul; raw m would route via _nova_mul to
+//                   str_repeat and SEGV)
+//   3. `int_to_str(m)` (SEGVs when handed a raw int looking like a ptr)
+
+fn main() {
+    let t = nanotime()
+
+    let m = t & 0xFF
+    // type_of == 1 means tagged int (post Crossengin UPSTREAM §3 fix,
+    // NOVA commit 651a507).
+    if type_of(m) != 1 {
+        print("FAIL: type_of(m) expected 1, got ")
+        print_int(type_of(m))
+        println("")
+        exit(1)
+    }
+
+    // Pre-fix: raw m, m * 2 would dispatch to _nova_mul → str_repeat → SEGV.
+    let dbl = m * 2
+    if type_of(dbl) != 1 {
+        println("FAIL: type_of(m*2) expected 1")
+        exit(1)
+    }
+
+    // Pre-fix: raw m, int_to_str would SEGV on an int that looks like
+    // a pointer.
+    let s = int_to_str(m)
+    if type_of(s) != 2 {
+        println("FAIL: int_to_str(m) did not return a string")
+        exit(1)
+    }
+
+    // Equality check against a tagged literal must also succeed.
+    let same = (m == m)
+    if same != 1 {
+        println("FAIL: m == m")
+        exit(1)
+    }
+
+    println("PASS: nanotime tagged correctly")
+}
+
+main()

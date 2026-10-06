@@ -254,5 +254,16 @@ fn nanotime() {
     _sys_clock_gettime_monotonic(ts)
     let sec = load64(ts)
     let nsec = load64(ts + 8)
-    return _raw_imul_add(sec, 1000000000, nsec)
+    let r = _raw_imul_add(sec, 1000000000, nsec)
+    // _raw_imul_add returns a RAW rax (its asm block bypasses the
+    // tagging-return convention so sec*1e9+nsec can exceed the pointer
+    // threshold without dispatching to str_repeat). Tag it here before
+    // the implicit return hands rax back to the caller. See Crossengin
+    // docs/UPSTREAM_NOVA_BUGS.md §7. Slot layout: ts=-8, sec=-16,
+    // nsec=-24, r=-32 (linear local assignment, mirrors
+    // ffi_syscall.nova:ffi_syscall_call2).
+    asm {
+        "mov rax, [rbp - 32]"
+        "lea rax, [rax + rax + 1]"
+    }
 }
