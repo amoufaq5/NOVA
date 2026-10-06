@@ -1,0 +1,30 @@
+// Empirical probe for Bug #4 (sentinel equality on two-large-operand `==`).
+//
+// Phase-1 inspection of codegen.nova confirmed _nova_eq is now a flat
+// `cmp rdi, rsi; je .eq_true` -- no deref, no type-dispatch. Equality on
+// two negative sentinels of equal value should therefore hit the eq_true
+// path and return tagged true, with no SEGV.
+//
+// This probe exercises `v == DP_REFUSED` where DP_REFUSED is the
+// Crossengin sentinel `0 - 2147483647` (-2^31 + 1), end-to-end. A PASS
+// transitively closes Bug #4 via the Bug #3 fix at 651a507, and lets
+// Crossengin retire the magnitude-probe workaround in
+// src/safety/differential_privacy.nova:545-553.
+
+import "std/syscall"
+import "std/alloc"
+import "std/string"
+import "std/io"
+
+fn main() {
+    let DP_REFUSED = 0 - 2147483647
+    let v = DP_REFUSED
+    if v == DP_REFUSED {
+        println("PASS: Bug #4 transitively closed by Bug #3 fix")
+        return 0
+    }
+    println("FAIL: v == DP_REFUSED returned false")
+    return 1
+}
+
+main()
