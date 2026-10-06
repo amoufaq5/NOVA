@@ -1,0 +1,39 @@
+// Regression test for Crossengin UPSTREAM §5 (NOVA Bug #5).
+//
+// Pre-fix: io_println fed `str_len(s)` (a TAGGED (len<<1)|1) into
+// sys_write's rdx, so the kernel wrote ~2*len+1 bytes starting at the
+// raw literal address. For any string longer than ~128 bytes the
+// kernel ran past the rodata page and the process SEGV'd.
+//
+// Post-fix (src/runtime/io.nova):
+//   - io_print  / io_println   delegate to the print/println builtins
+//     (NUL-scan + raw syscall write).
+//   - io_eprint / io_eprintln  normalize str_data + str_len from
+//     tagged → raw via inline asm before calling sys_write.
+
+import "std/syscall"
+import "std/alloc"
+import "std/string"
+import "std/io"
+
+fn main() {
+    // Short literal baseline (would have succeeded even pre-fix).
+    io_println("short line")
+
+    // Long literal (> 128 bytes) to trigger pre-fix SEGV.
+    let long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    io_println(long)
+
+    // Concat path returns a fresh string handle; exercise it too.
+    let a = "foo"
+    let b = "bar"
+    io_println(a + b)
+
+    // Stderr pair with asm-normalized tagged length. Long literal to
+    // catch any lingering overrun on the stderr path.
+    io_eprintln("stderr long: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+    println("PASS: io_println long + concat")
+}
+
+main()
