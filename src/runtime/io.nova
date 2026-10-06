@@ -268,11 +268,16 @@ fn io_input() {
 
 // Monotonic nanosecond clock via clock_gettime(CLOCK_MONOTONIC, &ts)
 // timespec layout: [int64 tv_sec, int64 tv_nsec] (16 bytes)
+// `ts` arrives TAGGED (`alloc` returns `(ptr<<1)|1`); the kernel needs the
+// RAW buffer address, so untag rsi before the syscall. Without this, every
+// clock_gettime returns -EFAULT and the timespec stays zero, making
+// nanotime() a constant -- see Crossengin docs/UPSTREAM_NOVA_BUGS.md §11.
 fn _sys_clock_gettime_monotonic(ts) {
     asm {
         "mov rax, 228"
         "mov rdi, 1"
         "mov rsi, [rbp-8]"
+        "sar rsi, 1"
         "syscall"
     }
 }
