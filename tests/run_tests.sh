@@ -296,8 +296,37 @@ for test_file in tests/test_*.nova; do
     esac
 
     # Compile (with timeout to prevent hangs)
-    timeout 60 $NOVA "$INPUT" -o /tmp/nova_test.s 2>/tmp/nova_test_err.txt
-    if [ $? -ne 0 ]; then
+    timeout 60 $NOVA "$INPUT" -o /tmp/nova_test.s >/tmp/nova_test_out.txt 2>/tmp/nova_test_err.txt
+    COMPILE_RC=$?
+
+    # Crossengin UPSTREAM §8 — `test_fails_*` fixtures assert that
+    # compilation ITSELF exits non-zero AND prints the expected error
+    # substring to stdout+stderr. Short-circuit the normal
+    # assemble/link/run flow.
+    case "$test_name" in
+        test_fails_*)
+            if [ $COMPILE_RC -eq 0 ]; then
+                echo "  FAIL  $test_name (expected compile error, got exit 0)"
+                FAIL=$((FAIL + 1))
+            else
+                EXPECT="undeclared callee"
+                case "$test_name" in
+                    test_fails_unresolved_call) EXPECT="undeclared callee" ;;
+                esac
+                if grep -q "$EXPECT" /tmp/nova_test_out.txt /tmp/nova_test_err.txt 2>/dev/null; then
+                    echo "  PASS  $test_name (compile fail as expected: $EXPECT)"
+                    PASS=$((PASS + 1))
+                else
+                    echo "  FAIL  $test_name (compile failed but missing '$EXPECT')"
+                    cat /tmp/nova_test_out.txt /tmp/nova_test_err.txt
+                    FAIL=$((FAIL + 1))
+                fi
+            fi
+            continue
+            ;;
+    esac
+
+    if [ $COMPILE_RC -ne 0 ]; then
         echo "  FAIL  $test_name (compile error)"
         cat /tmp/nova_test_err.txt
         FAIL=$((FAIL + 1))

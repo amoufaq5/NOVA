@@ -2784,6 +2784,35 @@ fn is_known_function(name) {
     return 0
 }
 
+// Crossengin UPSTREAM §8 — predicate for whether `name` is bound to a
+// function parameter in the enclosing fn frame. Mirrors has_local, but
+// walks cg_params (populated by gen_function before any body walking).
+fn is_param(name) {
+    let i = 0
+    while i < cg_param_count {
+        if cg_params[i] == name {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Crossengin UPSTREAM §8 — emit a compile error and abort codegen.
+// Pre-fix behavior for an undeclared callee was a null-deref SEGV at
+// `[rbp-slot]` because local_offset() silently created a fresh frame
+// slot for the missing name. This routes the diagnostic through
+// stdout + exit(1), matching other codegen fatal patterns in this
+// file (see e.g. :3962 and :4452). "ERROR:" prefix is intentional so
+// the test harness can match on it.
+fn cg_fail(msg) {
+    print("ERROR: ")
+    print(msg)
+    print("\n")
+    exit(1)
+    return 0
+}
+
 fn fn_module(name) {
     let m = _cg_ht_get(cg_fn_modules, name)
     if m == 0 { return "" }
@@ -5031,6 +5060,24 @@ fn gen_expr(nd) {
             }
             if is_known_function(callee_name) == 1 {
                 is_direct = 1
+            }
+            // Crossengin UPSTREAM §8 — pre-fix: an undeclared callee
+            // flowed through local_offset(), which silently created a
+            // fresh frame slot and emitted mov rax,[rbp-slot] +
+            // cmp qword [rax],-1, SEGVing on the null deref. All
+            // registry sweeps (methods :10620, extern :10637, fn_decl
+            // :10651, lambdas :10660) run earlier in gen_program before
+            // we reach here, so a miss here is a real undeclared name.
+            if is_direct == 0 {
+                if is_struct_name(callee_name) == 0 {
+                    if is_global(callee_name) == 0 {
+                        if has_local(callee_name) == 0 {
+                            if is_param(callee_name) == 0 {
+                                cg_fail("undeclared callee: " + callee_name)
+                            }
+                        }
+                    }
+                }
             }
         }
         if ast_tag(callee) == AST_FIELD_ACCESS {
@@ -11545,6 +11592,25 @@ fn wasm_gen_expr(nd) {
         }
         if ast_tag(callee) == AST_FIELD_ACCESS {
             callee_name = callee[1][1] + "_" + callee[2]
+        }
+        // Crossengin UPSTREAM §8 — mirror of the x86 AST_CALL check.
+        // The WASM path previously deferred to wat2wasm, producing an
+        // opaque downstream error. Fail fast with the same diagnostic
+        // the native backend emits so test_fails_* fixtures behave
+        // uniformly across targets. Registry sweep at :15434 runs
+        // earlier in wasm_gen_program before we reach here.
+        if ast_tag(callee) == AST_IDENT {
+            if is_known_function(callee_name) == 0 {
+                if is_struct_name(callee_name) == 0 {
+                    if is_global(callee_name) == 0 {
+                        if has_local(callee_name) == 0 {
+                            if is_param(callee_name) == 0 {
+                                cg_fail("undeclared callee: " + callee_name)
+                            }
+                        }
+                    }
+                }
+            }
         }
         let i = 0
         while i < len(args) {

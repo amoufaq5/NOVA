@@ -1,0 +1,9 @@
+// Crossengin UPSTREAM §8 — compile-failure fixture.
+// Expectation: NOVA exits non-zero with "undeclared callee: foo" on stdout.
+// Pre-fix behavior: codegen silently created a frame slot for `foo` and
+// emitted a null-deref SEGV. Post-fix: a clean compile diagnostic that
+// names the identifier.
+fn main() {
+    foo(1, 2)
+    return 0
+}
