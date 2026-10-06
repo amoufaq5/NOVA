@@ -1,0 +1,42 @@
+// Regression test for Crossengin UPSTREAM §1 (NOVA Bug #1).
+//
+// Pre-fix: _nova_memcpy_raw at codegen.nova did `push rdi; mov rcx,rdx;
+// rep movsb; pop rax; ret` without untagging rdi/rsi/rdx. When any of
+// dst/src/n arrived tagged (low-bit = 1), the raw byte-copy executed
+// at an odd address and either SEGV'd (odd src/dst crossing a page
+// boundary) or copied ~2x the requested bytes (tagged len (n<<1)|1).
+//
+// Post-fix: three test/jz/sar entry blocks untag rdi, rsi, rdx when
+// their low bit is set, so callers may pass tagged OR raw operands.
+//
+// This test exercises the common path: alloc(16) returns a tagged
+// pointer; `i` and `65 + i` are tagged ints; `10` is a tagged literal.
+// Every operand to memcpy_raw is therefore tagged, which pre-fix would
+// crash.
+
+import "std/syscall"
+import "std/alloc"
+import "std/string"
+import "std/io"
+
+fn main() {
+    let src = alloc(16)
+    let dst = alloc(16)
+    let i = 0
+    while i < 10 {
+        store8(src + i, 65 + i)  // 'A'..'J'
+        i = i + 1
+    }
+    memcpy_raw(dst, src, 10)
+    let j = 0
+    while j < 10 {
+        if load8(dst + j) != 65 + j {
+            println("FAIL: byte mismatch")
+            exit(1)
+        }
+        j = j + 1
+    }
+    println("PASS: memcpy_raw tag-polymorphism works")
+}
+
+main()
