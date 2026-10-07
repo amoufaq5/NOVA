@@ -22,12 +22,25 @@ fn sys_write(fd, buf, count) {
     }
 }
 
+// Bug #12 R11-a: untag flags + mode so the kernel sees raw bitmasks.
+// `O_WRONLY|O_CREAT|O_TRUNC = 0x241` was arriving tagged as `0x483 =
+// (0x241<<1)|1`, which the kernel decoded as `O_ACCMODE|O_EXCL|O_APPEND`
+// (no O_CREAT) -> ENOENT and silent snap_write failures. See Crossengin
+// docs/UPSTREAM_NOVA_BUGS.md §12. `path` is tag-polymorphic (handles
+// raw string literals + tagged alloc buffers). Return left raw: all
+// callers use `fd < 0` which works for both raw fd and raw -errno.
 fn sys_open(path, flags, mode) {
     asm {
         "mov rax, 2"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .so_u"
+        "sar rdi, 1"
+        ".so_u:"
         "mov rsi, [rbp-16]"
+        "sar rsi, 1"
         "mov rdx, [rbp-24]"
+        "sar rdx, 1"
         "syscall"
     }
 }
@@ -131,12 +144,29 @@ fn sys_fsync(fd) {
     }
 }
 
+// Bug #12 R11-c: untag path args + sign-aware return tag so callers'
+// `if rr != 0` compares vs tagged literal 0 (in-memory 1) correctly
+// detect kernel success (raw 0 -> tagged 1 match) vs failure (raw
+// -errno stays raw negative, caller's < 0 branch catches it). Single
+// CE caller is snap_write_durable (snapshot_disk.nova:2745).
 fn sys_rename(oldpath, newpath) {
     asm {
         "mov rax, 82"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .srn_u1"
+        "sar rdi, 1"
+        ".srn_u1:"
         "mov rsi, [rbp-16]"
+        "test rsi, 1"
+        "jz .srn_u2"
+        "sar rsi, 1"
+        ".srn_u2:"
         "syscall"
+        "test rax, rax"
+        "js .srn_ret"
+        "lea rax, [rax + rax + 1]"
+        ".srn_ret:"
     }
 }
 
