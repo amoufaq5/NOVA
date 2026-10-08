@@ -16345,7 +16345,13 @@ fn gen_runtime() {
     out("    mov rcx, rax")
     out("    add rcx, rbx")
     out("    cmp rcx, [rip + _heap_end]")
-    out("    jle .alloc_ok")
+    // Bug #13: use UNSIGNED compare -- addresses with bit 47 set
+    // (`0x80000000_0000+`, e.g. post-brk-expansion heap after certain
+    // layouts) are below `_heap_end` numerically but SIGNED compare
+    // treats them as negative, misclassifying them as "fits". The
+    // resulting pointer is non-canonical and SEGVs on deref later.
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §13.
+    out("    jbe .alloc_ok")
     if cg_target == 3 {
         out("    xor ecx, ecx")
         out("    mov edx, 1048576")
