@@ -20941,9 +20941,15 @@ fn gen_runtime() {
     out("    mov [rsp], rcx")
     out("    jmp .sr_loop")
     out(".sr_nomatch:")
-    // Append one char
+    // Append one char. Bug #14: `_nova_chr` expects a TAGGED NOVA int
+    // (it does `sar rcx, 1` internally); every user-visible caller
+    // reaches it via the `chr` trampoline which guarantees tagging.
+    // Here we read a RAW byte from the source string, so we must tag
+    // it before the call -- otherwise sar halves every emitted char.
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §14.
     out("    mov rcx, [rsp]")
     out("    movzx edi, byte ptr [r12 + rcx]")
+    out("    lea rdi, [rdi + rdi + 1]")
     out("    call _nova_chr")
     out("    mov rsi, rax")
     out("    mov rdi, [rsp + 8]")
