@@ -16382,6 +16382,17 @@ fn gen_runtime() {
     }
     out("    mov rcx, rax")
     out("    add rcx, rbx")
+    // R13-followup: post-expansion sanity check. A failing
+    // brk/mmap/VirtualAlloc may leave _heap_end unchanged (brk)
+    // or trashed (mmap -> -1, VirtualAlloc -> 0 + 1 MiB offset).
+    // The pre-R13 code silently returned a pointer past the arena;
+    // after R13's `jbe` + this re-check, we fail loud via exit(1)
+    // rather than SEGV many frames deeper on first deref.
+    out("    cmp rcx, [rip + _heap_end]")
+    out("    jbe .alloc_ok")
+    out("    mov edi, 1")
+    out("    mov eax, 60")
+    out("    syscall")
     out(".alloc_ok:")
     out("    mov [rip + _heap_ptr], rcx")
     out("    pop rbx")
