@@ -16394,9 +16394,25 @@ fn gen_runtime() {
     out("    mov eax, 60")
     out("    syscall")
     out(".alloc_ok:")
+    // Bug #15 defensive: ensure the returned range [rax, rcx) is
+    // canonical. On x86_64 user-space addresses with bit 47+ set are
+    // non-canonical and SEGV on first deref. Under ASLR-OFF or certain
+    // brk layouts _heap_end can land above 2^47; the fast-path check
+    // (`cmp rcx, [rip + _heap_end]` + `jbe`) still passes because both
+    // operands are high, and we would silently hand back a doomed
+    // pointer. Fail loud with exit(1) instead -- caller sees a clear
+    // non-zero exit rather than a SEGV many frames later.
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §15.
+    out("    mov rdx, rcx")
+    out("    shr rdx, 47")
+    out("    jnz .alloc_bad_heap")
     out("    mov [rip + _heap_ptr], rcx")
     out("    pop rbx")
     out("    ret")
+    out(".alloc_bad_heap:")
+    out("    mov edi, 1")
+    out("    mov eax, 60")
+    out("    syscall")
 
     // --- strlen ---
     out("")
