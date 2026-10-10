@@ -17603,7 +17603,19 @@ fn gen_runtime() {
         out("    mov rsp, rbp")
         out("    pop rbp")
     } else {
+        // Bug #16 (R23): untag incoming NOVA-tagged args before syscall,
+        // then tag the raw rax return so callers can compare against
+        // tagged NOVA literals. Without this, `socket(2, 1, 0)` reaches
+        // the kernel as `socket(AF_APPLETALK=5, SOCK_RAW=3, 1)` and the
+        // raw-rax return never matches a tagged literal 0 in `fd == 0`
+        // / `fd < 0` compares (fd < 0 happens to coincide for small
+        // negatives but fd == N breaks). See Crossengin
+        // docs/UPSTREAM_NOVA_BUGS.md §16.
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
+        out("    sar rdx, 1")
         emit_syscall(41)
+        out("    lea rax, [rax + rax + 1]")
     }
     out("    ret")
 
@@ -18186,10 +18198,22 @@ fn gen_runtime() {
         out("    mov rsp, rbp")
         out("    pop rbp")
     } else {
-        // Linux x86-64: rdi=fd already correct from caller.
+        // Bug #16 (R23): tag-polymorphic rdi + tag raw rax return.
+        // The previous "rdi=fd already correct from caller" comment
+        // assumed raw-fd chains (sys_socket_udp returns raw rax). After
+        // the socket() fix tags its return, call chains starting with
+        // socket() produce tagged fds. The tagged-poly check works for
+        // both: tagged -> untag; raw -> pass through. Tag the return so
+        // caller's `rc == 0` tagged-literal compare works. See
+        // Crossengin docs/UPSTREAM_NOVA_BUGS.md §16.
+        out("    test rdi, 1")
+        out("    jz .sfcntl_rdi_raw")
+        out("    sar rdi, 1")
+        out(".sfcntl_rdi_raw:")
         out("    mov rsi, 4")                       // F_SETFL
         out("    mov rdx, 2048")                    // O_NONBLOCK
         emit_syscall(72)
+        out("    lea rax, [rax + rax + 1]")
     }
     out("    ret")
 
@@ -18241,9 +18265,15 @@ fn gen_runtime() {
         out("    sub rsp, 16")
         out("    mov dword ptr [rbp - 8], 0")     // optval out = 0
         out("    mov dword ptr [rbp - 12], 4")    // optlen = 4
+        // Bug #16 (R23): tag-polymorphic rdi + tag raw rax return so
+        // caller's `so == 0` tagged-literal compare works. See
+        // sys_fcntl_setfl_nonblock above for the full rationale.
+        out("    test rdi, 1")
+        out("    jz .sgso_rdi_raw")
+        out("    sar rdi, 1")
+        out(".sgso_rdi_raw:")
         // getsockopt(fd, SOL_SOCKET=1, SO_ERROR=4, &val, &vlen).
         // x86-64 syscall ABI: rdi, rsi, rdx, r10, r8.
-        // rdi=fd already.
         out("    mov rsi, 1")                       // SOL_SOCKET (POSIX)
         out("    mov rdx, 4")                       // SO_ERROR (POSIX)
         out("    lea r10, [rbp - 8]")              // &optval
@@ -18252,6 +18282,7 @@ fn gen_runtime() {
         out("    test rax, rax")
         out("    js .sgso_nx_fail")
         out("    mov eax, dword ptr [rbp - 8]")   // return SO_ERROR value
+        out("    lea rax, [rax + rax + 1]")       // tag the value
         out("    mov rsp, rbp")
         out("    pop rbp")
         out("    ret")
