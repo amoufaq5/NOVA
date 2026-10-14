@@ -9757,6 +9757,11 @@ fn warm_emit_runtime() {
     warm_out("")
     warm_out(".p2align 2")
     warm_label("_nova_warm_len")
+    // Tag-polymorphic prolog (aarch64): mirror the x86-64
+    // _nova_len fix. See UPSTREAM_NOVA_BUGS.md §17 (R43/R44).
+    warm_out("    tbz x0, #0, .Lwarm_len_untag")
+    warm_out("    asr x0, x0, #1")
+    warm_label(".Lwarm_len_untag")
     warm_out("    cbz x0, .Lwarm_len_zero")
     warm_out("    ldr x1, [x0]")
     warm_out("    cmn x1, #1")
@@ -16608,6 +16613,13 @@ fn gen_runtime() {
     // --- len(list_or_str) -> count ---
     out("")
     out_label("_nova_len")
+    // Tag-polymorphic prolog: untag rdi if it carries the NOVA
+    // tag bit so a tagged alloc()'d buffer dereferences at its
+    // real heap address. See UPSTREAM_NOVA_BUGS.md §17 (R43/R44).
+    out("    test rdi, 1")
+    out("    jz   .nlen_raw")
+    out("    sar  rdi, 1")
+    out(".nlen_raw:")
     out("    test rdi, rdi")
     out("    jz .len_zero")
     out("    cmp qword ptr [rdi], -1")
@@ -16889,6 +16901,15 @@ fn gen_runtime() {
     out("    mov rbp, rsp")
     out("    push r12")
     out("    push r13")
+    // Tag-polymorphic rdi prolog: untag the source-string base
+    // if it carries the NOVA tag bit (e.g. an alloc()'d buffer)
+    // so [rdi + rsi] lands at the real heap address. rsi/rdx
+    // keep their existing untag-unconditional handling.
+    // See UPSTREAM_NOVA_BUGS.md §17 (R43/R44).
+    out("    test rdi, 1")
+    out("    jz   .nsub_raw")
+    out("    sar  rdi, 1")
+    out(".nsub_raw:")
     out("    sar rsi, 1")                 // untag start
     out("    sar rdx, 1")                 // untag len
     out("    lea r12, [rdi + rsi]")
