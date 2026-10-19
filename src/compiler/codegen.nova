@@ -6274,11 +6274,22 @@ fn gen_stmt(nd) {
                 push(cg_lbl_continues, cont_lbl)
                 cg_lbl_count = cg_lbl_count + 1
             }
-            // Convert strings to char code lists for iteration
+            // Convert strings to char code lists for iteration.
+            // R51: normalize iterable to raw once so the subsequent
+            // magic-check deref, the _nova_str_to_chars call, and
+            // the list-iteration path below (which does direct
+            // [rdi+8] / [rdi+24] / [rdi+rcx*8] derefs) are all
+            // tag-safe. See UPSTREAM_NOVA_BUGS.md §17.
+            let fe_raw_lbl = new_label()
             out("    mov rdi, [rsp+8]")
+            out("    test rdi, 1")
+            out("    jz " + fe_raw_lbl)
+            out("    sar rdi, 1")
+            out("    mov [rsp+8], rdi")
+            out_label(fe_raw_lbl)
             out("    cmp qword ptr [rdi], -1")
             out("    je " + loop_lbl)
-            out("    mov rdi, [rsp+8]")
+            // rdi already raw after the normalize step above.
             out("    call _nova_str_to_chars")
             out("    mov [rsp+8], rax")
             // List iteration
