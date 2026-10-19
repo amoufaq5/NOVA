@@ -16889,6 +16889,14 @@ fn gen_runtime() {
     // --- char_at(str, idx) -> char code ---
     out("")
     out_label("_nova_char_at")
+    // R46 tag-poly prolog on rdi (string base). No internal
+    // callers — only user code calls char_at via the public
+    // shim — so halving a true-raw literal is unreachable here.
+    // See UPSTREAM_NOVA_BUGS.md §17 (R43/R44/R46).
+    out("    test rdi, 1")
+    out("    jz   .cat_rdi_raw")
+    out("    sar  rdi, 1")
+    out(".cat_rdi_raw:")
     out("    sar rsi, 1")                  // untag index
     out("    movzx eax, byte ptr [rdi + rsi]")
     out("    lea rax, [rax + rax + 1]")    // tag char-code result
@@ -16931,6 +16939,13 @@ fn gen_runtime() {
     // --- str_to_int(str) -> int ---
     out("")
     out_label("_nova_str_to_int")
+    // R46 tag-poly prolog: untag rdi for alloc'd string callers
+    // (face_recognize parser's _face_rec_extract_int path).
+    // See UPSTREAM_NOVA_BUGS.md §17 (R43/R44/R46).
+    out("    test rdi, 1")
+    out("    jz   .sti_rdi_raw")
+    out("    sar  rdi, 1")
+    out(".sti_rdi_raw:")
     out("    xor eax, eax")
     out("    xor ecx, ecx")
     out("    cmp byte ptr [rdi], 45")
