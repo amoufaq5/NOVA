@@ -22095,21 +22095,83 @@ fn gen_runtime() {
     out_label("__arg")
     out("    jmp _nova___arg")
     out_label("str_eq")
-    out("    jmp _nova_str_eq")
+    // R50: tag-poly rdi + rsi at the public API boundary so the
+    // internal _nova_str_eq (and the many compiler-internal paths
+    // that call it with stack / mid-string pointers) stays raw.
+    // _nova_str_eq returns a RAW 0/1; tag it on return so user
+    // code sees a NOVA int (matches _nova_eq's post-call tag at
+    // L15993). See UPSTREAM_NOVA_BUGS.md §17.
+    out("    test rdi, 1")
+    out("    jz   .se_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".se_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .se_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".se_sh_rsi:")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_str_eq")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("pop")
     out("    jmp _nova_pop")
     out_label("list_set")
     out("    jmp _nova_list_set")
     out_label("contains")
+    // R50: tag-poly rdi only (collection ptr). rsi is a value
+    // that may be a tagged int for list-membership comparison,
+    // which internal _nova_contains compares with tagged list
+    // elements — untagging rsi here would break that.
+    out("    test rdi, 1")
+    out("    jz   .co_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".co_sh_rdi:")
     out("    jmp _nova_contains")
     out_label("list_remove")
     out("    jmp _nova_list_remove")
     out_label("starts_with")
+    // R50: tag-poly rdi + rsi (str + prefix).
+    out("    test rdi, 1")
+    out("    jz   .sw_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".sw_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .sw_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".sw_sh_rsi:")
     out("    jmp _nova_starts_with")
     out_label("ends_with")
+    // R50: tag-poly rdi + rsi (str + suffix).
+    out("    test rdi, 1")
+    out("    jz   .ew_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".ew_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .ew_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".ew_sh_rsi:")
     out("    jmp _nova_ends_with")
     out_label("str_find")
-    out("    jmp _nova_str_find")
+    // R50: tag-poly rdi + rsi (haystack + needle). _nova_str_find
+    // returns a RAW index or -1; tag the result so arithmetic in
+    // user code is NOVA-consistent. tagged(-1) = -1 after shift,
+    // so sentinel semantics are preserved.
+    out("    test rdi, 1")
+    out("    jz   .sf_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".sf_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .sf_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".sf_sh_rsi:")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_str_find")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("abs")
     out("    jmp _nova_abs")
     out_label("min")
@@ -22241,6 +22303,18 @@ fn gen_runtime() {
     out_label("join")
     out("    jmp _nova_join")
     out_label("split")
+    // R50: tag-poly rdi + rsi. rsi is either a tagged int (char
+    // code) or a 1-char str ptr. _nova_split's cmp r13, 256 then
+    // decides; untagging a tagged int (c<<1)|1 -> c is exactly
+    // the char code the internal path wants.
+    out("    test rdi, 1")
+    out("    jz   .sp_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".sp_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .sp_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".sp_sh_rsi:")
     out("    jmp _nova_split")
     out_label("reverse")
     out("    jmp _nova_reverse")
@@ -22314,6 +22388,11 @@ fn gen_runtime() {
     out_label("str_lower")
     out("    jmp _nova_str_lower")
     out_label("str_trim")
+    // R50: tag-poly rdi.
+    out("    test rdi, 1")
+    out("    jz   .tr_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".tr_sh_rdi:")
     out("    jmp _nova_str_trim")
     out_label("strcmp")
     out("    jmp _nova_strcmp")
