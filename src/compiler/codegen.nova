@@ -22212,40 +22212,172 @@ fn gen_runtime() {
     out("    jmp _nova_unlink")
     out_label("file_size")
     out("    jmp _nova_file_size")
+    // R52: two-tier tag-poly contract on the socket API. Public
+    // shims gate tag transitions; internal _nova_* fn bodies stay
+    // raw-only. The R41 bind ambiguity (raw-fd=3 and tagged NOVA
+    // 1 both have bit0=1) is resolved by putting tag-handling at
+    // the shim boundary rather than inside _nova_bind.
+    // See UPSTREAM_NOVA_BUGS.md §17.
+    //
+    // _nova_socket / _nova_sys_fcntl_setfl_nonblock /
+    // _nova_sys_getsockopt_so_error are tag-fixed internally by
+    // R23 and keep plain-jmp shims.
     out_label("socket")
     out("    jmp _nova_socket")
     out_label("bind_socket")
-    out("    jmp _nova_bind")
+    // rdi=fd (tagged int), rsi=sockaddr ptr (raw heap from
+    // make_sockaddr_in — stays raw), rdx=addrlen (tagged int).
+    out("    sar rdi, 1")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_bind")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("listen_socket")
-    out("    jmp _nova_listen")
+    // rdi=fd, rsi=backlog (both tagged ints).
+    out("    sar rdi, 1")
+    out("    sar rsi, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_listen")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("accept_conn")
-    out("    jmp _nova_accept")
+    // rdi=fd (tagged); addr/addrlen args stay raw.
+    out("    sar rdi, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_accept")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("connect_socket")
-    out("    jmp _nova_connect")
+    // rdi=fd, rdx=addrlen (both tagged ints); rsi=addr ptr raw.
+    out("    sar rdi, 1")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_connect")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("send_data")
-    out("    jmp _nova_send_data")
+    // rdi=fd (tagged), rsi=buf (tag-poly — may be alloc'd tagged
+    // or raw concat/literal), rdx=len (tagged).
+    out("    sar rdi, 1")
+    out("    test rsi, 1")
+    out("    jz   .snd_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".snd_sh_rsi:")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_send_data")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("recv_data")
-    out("    jmp _nova_recv_data")
+    // rdi=fd, rdx=len (both tagged); rsi=buf tag-poly.
+    out("    sar rdi, 1")
+    out("    test rsi, 1")
+    out("    jz   .rcv_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".rcv_sh_rsi:")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_recv_data")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("close_fd")
-    out("    jmp _nova_close_fd")
+    // rdi=fd (tagged).
+    out("    sar rdi, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_close_fd")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("make_sockaddr_in")
+    // rdi=port, rsi=ip (both tagged ints). Return is a raw heap
+    // ptr (consumed only by bind/connect/sendto which take raw
+    // addr pointers through their shims).
+    out("    sar rdi, 1")
+    out("    sar rsi, 1")
     out("    jmp _nova_make_sockaddr_in")
     // R28C: UDP syscalls for NAT hole-punching (R23E.2 unblock).
+    // R52: sys_socket_udp return-tag paired with bind/close/sendto
+    // shim untags so nat_traversal's raw-udp-fd chain joins the
+    // tagged-fd convention. Must land in the same commit as the
+    // shim untags above (nat_udp_open regresses otherwise).
     out_label("sys_socket_udp")
-    out("    jmp _nova_sys_socket_udp")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_sys_socket_udp")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("sys_sendto")
-    out("    jmp _nova_sys_sendto")
+    // rdi=fd, rdx=len, rcx=ip, r8=port (all tagged ints);
+    // rsi=buf tag-poly.
+    out("    sar rdi, 1")
+    out("    test rsi, 1")
+    out("    jz   .sto_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".sto_sh_rsi:")
+    out("    sar rdx, 1")
+    out("    sar rcx, 1")
+    out("    sar r8, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_sys_sendto")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("sys_recvfrom")
+    // rdi=fd, rdx=buflen, rcx=timeout_ms (all tagged); rsi=buf
+    // tag-poly. Return is a NOVA list handle (raw from
+    // _nova_list_new); no re-tag.
+    out("    sar rdi, 1")
+    out("    test rsi, 1")
+    out("    jz   .rfr_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".rfr_sh_rsi:")
+    out("    sar rdx, 1")
+    out("    sar rcx, 1")
     out("    jmp _nova_sys_recvfrom")
     out_label("sys_setsockopt_so_reuseaddr")
-    out("    jmp _nova_sys_setsockopt_so_reuseaddr")
+    // rdi=fd (tagged).
+    out("    sar rdi, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_sys_setsockopt_so_reuseaddr")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     // R29A: multi-FD wait. Shared shim — Linux/macOS issue poll(2)
     // directly, Windows hops through WSAPoll, ARM64 / WASM handled by
     // their own backend dispatchers below.
     out_label("sys_poll")
-    out("    jmp _nova_sys_poll")
+    // rdi=fds-buf ptr tag-poly, rsi=nfds, rdx=timeout_ms (tagged).
+    out("    test rdi, 1")
+    out("    jz   .pol_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".pol_sh_rdi:")
+    out("    sar rsi, 1")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_sys_poll")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     // R31A: non-blocking I/O helpers for parallel dial. Same dispatch
-    // pattern as sys_poll above.
+    // pattern as sys_poll above. (R23-fixed internally — plain jmp.)
     out_label("sys_fcntl_setfl_nonblock")
     out("    jmp _nova_sys_fcntl_setfl_nonblock")
     out_label("sys_getsockopt_so_error")
