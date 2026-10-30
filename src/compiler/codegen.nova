@@ -18017,17 +18017,23 @@ fn gen_runtime() {
         out("    mov [rbp - 96], rax")             // list handle
         out("    mov rdi, rax")
         out("    mov rsi, [rbp - 88]")
+        // R53: tag numeric list element so NOVA callers see a tagged int.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         // Extract ip (offset +4 of sockaddr_in, network byte order int).
         // We return as host-order int (callers know it's wire-format).
         out("    mov rdi, [rbp - 96]")
         out("    mov esi, dword ptr [rbp - 12]")
+        // R53: tag ip list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         // Extract port (offset +2, big-endian u16). ntohs via xchg.
         out("    mov rdi, [rbp - 96]")
         out("    movzx eax, word ptr [rbp - 14]")
         out("    xchg al, ah")
         out("    mov rsi, rax")
+        // R53: tag port list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         out("    mov rax, [rbp - 96]")
         out("    mov rsp, rbp")
@@ -18037,16 +18043,20 @@ fn gen_runtime() {
         out(".srf_win_fail:")
         // Return [-1, 0, 0] so callers see a 3-element list with a
         // sentinel first element. Cheaper than a separate None marker.
+        // R53: tagged -1 == -1 on 2's-complement, so the sentinel push
+        // of raw -1 is accidentally tagged. The two 0 pushes become
+        // tagged 1 (= NOVA tagged 0) for consistency with the success
+        // path's tagged elements.
         out("    call _nova_list_new")
         out("    mov [rbp - 96], rax")
         out("    mov rdi, rax")
         out("    mov rsi, -1")
         out("    call _nova_push")
         out("    mov rdi, [rbp - 96]")
-        out("    xor rsi, rsi")
+        out("    mov rsi, 1")                 // tagged 0
         out("    call _nova_push")
         out("    mov rdi, [rbp - 96]")
-        out("    xor rsi, rsi")
+        out("    mov rsi, 1")                 // tagged 0
         out("    call _nova_push")
         out("    mov rax, [rbp - 96]")
         out("    mov rsp, rbp")
@@ -18094,14 +18104,20 @@ fn gen_runtime() {
         out("    mov [rbp - 88], rax")
         out("    mov rdi, rax")
         out("    mov rsi, [rbp - 80]")
+        // R53: tag bytes_read list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         out("    mov rdi, [rbp - 88]")
         out("    mov esi, dword ptr [rbp - 12]")
+        // R53: tag sender_ip list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         out("    mov rdi, [rbp - 88]")
         out("    movzx eax, word ptr [rbp - 14]")
         out("    xchg al, ah")
         out("    mov rsi, rax")
+        // R53: tag sender_port list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         out("    mov rax, [rbp - 88]")
         out("    mov rsp, rbp")
@@ -18109,16 +18125,20 @@ fn gen_runtime() {
         out("    ret")
         out(".srf_nx_timeout:")
         out(".srf_nx_fail:")
+        // R53: match the success-path tagging convention. -1 as a
+        // tagged NOVA int is still -1 on 2's-complement, so the
+        // sentinel push stays `mov rsi, -1`. The two 0 slots become
+        // tagged 1 (= NOVA tagged 0).
         out("    call _nova_list_new")
         out("    mov [rbp - 88], rax")
         out("    mov rdi, rax")
         out("    mov rsi, -1")
         out("    call _nova_push")
         out("    mov rdi, [rbp - 88]")
-        out("    xor rsi, rsi")
+        out("    mov rsi, 1")                 // tagged 0
         out("    call _nova_push")
         out("    mov rdi, [rbp - 88]")
-        out("    xor rsi, rsi")
+        out("    mov rsi, 1")                 // tagged 0
         out("    call _nova_push")
         out("    mov rax, [rbp - 88]")
         out("    mov rsp, rbp")
