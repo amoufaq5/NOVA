@@ -19245,8 +19245,19 @@ fn gen_runtime() {
     out(".ge_check_eq:")
     out("    cmp byte ptr [rsi + r13], 61")
     out("    jne .ge_next")
-    out("    lea rax, [rsi + r13 + 1]")
-    out("    pop rdi")
+    // R55: raw envp[i] value ptr lives at a kernel-pushed address
+    // that may be odd-aligned, which trips R44's tag-poly _nova_len
+    // (sar rdi, 1 halves the raw ptr -> bogus addr -> SEGV). Copy
+    // into a bit0=0 heap buffer via _nova_concat("", env_val) --
+    // same pattern as _nova___arg at L16997. Observable fault was
+    // test_p256_keypair_load SEGV on `len(getenv("HOME"))` in the
+    // _base() helper (and the same latent crash in every test that
+    // calls len() on a getenv-returned string when the kernel lays
+    // envp at an odd address).
+    out("    pop rax")                        // drop saved envp iter
+    out("    lea rdi, [rsi + r13 + 1]")       // raw env value ptr
+    out("    lea rsi, [rip + _empty_str]")
+    out("    call _nova_concat")               // aligned heap copy (bit0=0)
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
