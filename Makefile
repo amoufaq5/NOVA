@@ -17,9 +17,31 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf smoke-simd-wasm-v128 bench-simd bench-simd-sad bench-simd-wasm bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf smoke-simd-wasm-v128 bench-simd bench-simd-sad bench-simd-wasm bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all bootstrap-setarch stage1-setarch stage2-setarch bin-nova-setarch self-host-setarch
 
 all: bin/nova
+
+# Phase Q R1 workaround for pre-tagging-rework bootstrap crash.
+# The stage-1 compiler segfaults when ASLR maps the heap above the old
+# magnitude classifier threshold (`cmp rdi, 0x100000` in boot/nova_boot.s'
+# _nova_add helper) and a tagged integer `(n<<1)|1` with n >= 0x1000001
+# gets misclassified as a pointer. setarch -R disables ASLR, pinning the
+# heap below the threshold deterministically. See docs/PTR_TAGGING_PLAN.md:150
+# and Crossengin-demo/docs/adr/0100-nova-bootstrap-setarch-workaround.md.
+# These wrappers do NOT alter the existing targets -- they only call them
+# under setarch -R. The underlying bug remains; drop these wrappers once
+# the runtime tagging rework lands.
+bootstrap-setarch:
+	@setarch -R $(MAKE) bootstrap
+
+stage1-setarch:
+	@setarch -R $(MAKE) /tmp/nova_stage1
+
+stage2-setarch bin-nova-setarch:
+	@setarch -R $(MAKE) bin/nova
+
+self-host-setarch:
+	@setarch -R $(MAKE) self-host
 
 # Step 1: Build the assembly bootstrap
 bootstrap: $(BOOT)

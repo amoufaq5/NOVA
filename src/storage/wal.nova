@@ -1,0 +1,274 @@
+// Nova storage: write-ahead log (WAL)  --  ADR NOVA-0007, increment 1.
+//
+// A durable, append-only log of opaque byte records. This is the first brick of
+// the storage engine: the LSM/index layers (NOVA-0007) build on top of it later.
+// No libc, no GC -- raw syscalls (src/runtime/syscall.nova) and byte buffers.
+//
+// On-disk record format (all integers little-endian):
+//
+//     offset  size  field
+//     0       4     magic   = WAL_MAGIC  (framing / record-start marker)
+//     4       8     seq     monotonic sequence number (assigned by wal_append)
+//     12      4     len     payload length in bytes
+//     16      4     crc     CRC-32 (IEEE, reflected) over seq||len||payload
+//     20      len   payload opaque caller bytes
+//
+// Durability: wal_append writes a whole record with one write(); wal_sync calls
+// fdatasync so committed records survive a crash. Recovery (the wal_read_* loop)
+// replays records from the start and STOPS at the first record that is torn (a
+// short read at a record boundary) or corrupt (bad magic or CRC mismatch). The
+// valid prefix is exactly the set of records that were durably committed before
+// the crash; the torn trailing bytes are ignored (and can be dropped with
+// wal_truncate_to). This is the standard WAL crash-safety guarantee.
+//
+// Honest scope (v1): records are capped at WAL_MAX_REC bytes; seq is effectively
+// 32-bit under Nova's tagged-integer width (high word kept for forward compat but
+// not exercised). Compaction, checkpoints, and the LSM index are future work.
+
+let WAL_MAGIC    = 1463633457   // 0x57414C31 ("WAL1"), little-endian framing
+let WAL_HDR      = 20           // magic(4)+seq(8)+len(4)+crc(4)
+let WAL_MAX_REC  = 4096         // payload size cap (v1)
+let WAL_CRC_INIT = 4294967295   // 0xFFFFFFFF
+let WAL_CRC_POLY = 3988292384   // 0xEDB88320 (reflected IEEE polynomial)
+let WAL_MASK32   = 4294967295   // 0xFFFFFFFF
+
+// writer-handle field offsets (raw alloc'd struct, like src/runtime/io.nova)
+let W_FD  = 0   // open file descriptor (O_RDWR|O_CREAT|O_APPEND)
+let W_SEQ = 8   // next sequence number to assign
+
+// reader-handle field offsets
+let WR_FD  = 0  // open file descriptor (O_RDONLY)
+let WR_SEQ = 8  // sequence number of the most recently returned record
+
+// read-result sentinels (wal_read_next)
+let WAL_EOF  = -1   // clean end of log at a record boundary
+let WAL_TORN = -2   // torn or corrupt trailing record -- recovery stops here
+
+// ---- little-endian byte (de)serialization -------------------------------
+
+fn wal_put_u32(buf, off, v) {
+    store8(buf + off,     v & 255)
+    store8(buf + off + 1, (v >> 8) & 255)
+    store8(buf + off + 2, (v >> 16) & 255)
+    store8(buf + off + 3, (v >> 24) & 255)
+}
+
+fn wal_get_u32(buf, off) {
+    let b0 = load8(buf + off)
+    let b1 = load8(buf + off + 1)
+    let b2 = load8(buf + off + 2)
+    let b3 = load8(buf + off + 3)
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+fn wal_put_u64(buf, off, v) {
+    wal_put_u32(buf, off, v & WAL_MASK32)
+    wal_put_u32(buf, off + 4, (v >> 32) & WAL_MASK32)
+}
+
+fn wal_get_u64(buf, off) {
+    let lo = wal_get_u32(buf, off)
+    let hi = wal_get_u32(buf, off + 4)
+    return lo | (hi << 32)
+}
+
+// Pointer-safe equality for full 32-bit values. Nova's `==`/`!=` perform a
+// STRUCTURAL comparison: when two operands differ and both exceed the pointer
+// threshold (0x100000), they are dereferenced as addresses -- so comparing two
+// unequal ~4e9 values (magic words, CRCs) faults. Subtracting first (int_sub is
+// raw/pointer-safe) and testing the small result against 0 avoids that. Same
+// idiom as runtime/crypto.nova's int_eq. Returns 1 if equal, 0 otherwise.
+fn wal_u32_eq(a, b) {
+    if int_sub(a, b) == 0 { return 1 }
+    return 0
+}
+
+// ---- CRC-32 (IEEE 802.3, reflected) -------------------------------------
+
+fn wal_crc_update(crc, buf, off, n) {
+    let i = 0
+    while i < n {
+        crc = crc ^ load8(buf + off + i)
+        let k = 0
+        while k < 8 {
+            if (crc & 1) == 1 {
+                crc = (crc >> 1) ^ WAL_CRC_POLY
+            } else {
+                crc = crc >> 1
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return crc
+}
+
+// CRC over the record's checksummed content: header bytes [4..16) (seq+len) of
+// `hdr`, followed by `plen` payload bytes at `payload`.
+fn wal_record_crc(hdr, payload, plen) {
+    let crc = WAL_CRC_INIT
+    crc = wal_crc_update(crc, hdr, 4, 12)
+    crc = wal_crc_update(crc, payload, 0, plen)
+    return (crc ^ WAL_CRC_INIT) & WAL_MASK32
+}
+
+// ---- writer -------------------------------------------------------------
+
+// Open (creating if needed) a WAL for appending. Recovers next_seq by scanning
+// existing valid records. Returns a writer handle, or 0 on failure.
+fn wal_open(path) {
+    let fd = sys_open(path, O_RDWR | O_CREAT | O_APPEND, 420)
+    if fd < 0 { return 0 }
+    let h = alloc(16)
+    store64(h + W_FD, fd)
+    store64(h + W_SEQ, wal_recover_next_seq(path))
+    return h
+}
+
+// Append one record carrying `plen` bytes from `payload`. Returns the assigned
+// sequence number on success, or -1 on a short/failed write. Call wal_sync to
+// make the append durable.
+fn wal_append(h, payload, plen) {
+    if plen > WAL_MAX_REC { return -1 }
+    let fd = load64(h + W_FD)
+    let seq = load64(h + W_SEQ)
+    let total = WAL_HDR + plen
+    let buf = alloc(total)
+    wal_put_u32(buf, 0, WAL_MAGIC)
+    wal_put_u64(buf, 4, seq)
+    wal_put_u32(buf, 12, plen)
+    let i = 0
+    while i < plen {
+        store8(buf + WAL_HDR + i, load8(payload + i))
+        i = i + 1
+    }
+    let crc = wal_record_crc(buf, buf + WAL_HDR, plen)
+    wal_put_u32(buf, 16, crc)
+    let w = sys_write(fd, buf, total)
+    if w != total { return -1 }
+    store64(h + W_SEQ, int_add(seq, 1))
+    return seq
+}
+
+// Flush committed records to stable storage (fdatasync). Returns 0 on success.
+fn wal_sync(h) {
+    return sys_fdatasync(load64(h + W_FD))
+}
+
+fn wal_next_seq(h) { return load64(h + W_SEQ) }
+
+fn wal_close(h) {
+    sys_close(load64(h + W_FD))
+}
+
+// ---- reader / recovery --------------------------------------------------
+
+// Open a WAL for sequential replay. Returns a reader handle, or 0 on failure.
+fn wal_read_open(path) {
+    let fd = sys_open(path, O_RDONLY, 0)
+    if fd < 0 { return 0 }
+    let r = alloc(16)
+    store64(r + WR_FD, fd)
+    store64(r + WR_SEQ, 0)
+    return r
+}
+
+// Read the next record's payload into out_buf (capacity out_max). Returns the
+// payload length (>= 0) on a valid record, WAL_EOF at a clean boundary, or
+// WAL_TORN at the first torn/corrupt record (recovery must stop). On a valid
+// record, the record's seq is available via wal_read_seq.
+// Structured with a single exit (one `return`) and a running `result` for
+// clarity. The magic and CRC comparisons go through wal_u32_eq, not `==`,
+// because those are full 32-bit values (see wal_u32_eq for why raw `==` faults).
+fn wal_read_next(r, out_buf, out_max) {
+    let fd = load64(r + WR_FD)
+    let hdr = alloc(WAL_HDR)
+    let got = sys_read(fd, hdr, WAL_HDR)
+    let result = WAL_TORN
+    if got == 0 {
+        result = WAL_EOF
+    } else {
+        if got == WAL_HDR {
+            let magic = wal_get_u32(hdr, 0)
+            let len = wal_get_u32(hdr, 12)
+            let crc_stored = wal_get_u32(hdr, 16)
+            let ok = 1
+            if wal_u32_eq(magic, WAL_MAGIC) == 0 { ok = 0 }
+            if len > WAL_MAX_REC { ok = 0 }
+            if len > out_max { ok = 0 }
+            if ok == 1 {
+                let pgot = sys_read(fd, out_buf, len)
+                if pgot == len {
+                    let crc_calc = wal_record_crc(hdr, out_buf, len)
+                    if wal_u32_eq(crc_calc, crc_stored) == 1 {
+                        store64(r + WR_SEQ, wal_get_u64(hdr, 4))
+                        result = len
+                    }
+                }
+            }
+        }
+    }
+    return result
+}
+
+fn wal_read_seq(r) { return load64(r + WR_SEQ) }
+
+fn wal_read_close(r) {
+    sys_close(load64(r + WR_FD))
+}
+
+// Scan a (possibly torn) WAL and return the sequence number to assign next:
+// one past the highest valid seq, or 1 if the log is empty/absent.
+fn wal_recover_next_seq(path) {
+    let r = wal_read_open(path)
+    if r == 0 { return 1 }
+    let scratch = alloc(WAL_MAX_REC)
+    let last = -1
+    let rc = wal_read_next(r, scratch, WAL_MAX_REC)
+    while rc >= 0 {
+        last = wal_read_seq(r)
+        rc = wal_read_next(r, scratch, WAL_MAX_REC)
+    }
+    wal_read_close(r)
+    return int_add(last, 1)
+}
+
+// Count the valid records at the head of a WAL (stops at the first torn record).
+fn wal_recover_count(path) {
+    let r = wal_read_open(path)
+    if r == 0 { return 0 }
+    let scratch = alloc(WAL_MAX_REC)
+    let n = 0
+    let rc = wal_read_next(r, scratch, WAL_MAX_REC)
+    while rc >= 0 {
+        n = n + 1
+        rc = wal_read_next(r, scratch, WAL_MAX_REC)
+    }
+    wal_read_close(r)
+    return n
+}
+
+// Drop everything after the first `keep` valid records, physically truncating a
+// torn tail so the file is clean for future appends. Returns 0 on success.
+fn wal_truncate_to(path, keep) {
+    let r = wal_read_open(path)
+    if r == 0 { return -1 }
+    let scratch = alloc(WAL_MAX_REC)
+    let n = 0
+    let bytes = 0
+    let rc = wal_read_next(r, scratch, WAL_MAX_REC)
+    while rc >= 0 {
+        if n < keep {
+            bytes = int_add(int_add(bytes, WAL_HDR), rc)
+            n = n + 1
+        }
+        rc = wal_read_next(r, scratch, WAL_MAX_REC)
+    }
+    wal_read_close(r)
+    let fd = sys_open(path, O_RDWR, 0)
+    if fd < 0 { return -1 }
+    let t = sys_ftruncate(fd, bytes)
+    sys_fsync(fd)
+    sys_close(fd)
+    return t
+}

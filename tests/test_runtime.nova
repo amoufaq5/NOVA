@@ -204,6 +204,116 @@ fn test_runtime_strings() {
         println("FAIL: str_to_int")
         exit(1)
     }
+
+    // Regression: rt_str_to_int on a string LITERAL (raw pointer path).
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §2.
+    let v_lit = rt_str_to_int("42")
+    if v_lit != 42 {
+        println("FAIL: str_to_int on literal")
+        exit(1)
+    }
+
+    // Regression: rt_str_to_int on substr output (raw pointer path).
+    let v_sub = rt_str_to_int(substr("abc123def", 3, 3))
+    if v_sub != 123 {
+        println("FAIL: str_to_int on substr")
+        exit(1)
+    }
+
+    // Sweep: raw-pointer assertions for 7 normalized string fns.
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §2 and the 8-fn sweep
+    // commit. str_split's end-to-end raw case is deferred because its
+    // first-slot feeds str_slice (DEFER queue; needs _nova_memcpy_raw
+    // audit); its delim slot IS normalized this round.
+    if str_len("hi") != 2 {
+        println("FAIL: str_len raw literal")
+        exit(1)
+    }
+    if str_char_at("hi", 1) != 105 {
+        println("FAIL: str_char_at raw literal")
+        exit(1)
+    }
+    if rt_str_eq("hi", "hi") != 1 {
+        println("FAIL: rt_str_eq raw eq")
+        exit(1)
+    }
+    if rt_str_eq("hi", "ho") != 0 {
+        println("FAIL: rt_str_eq raw ne")
+        exit(1)
+    }
+    if str_cmp("ab", "ac") != -1 {
+        println("FAIL: str_cmp raw lt")
+        exit(1)
+    }
+    if str_cmp("ab", "ab") != 0 {
+        println("FAIL: str_cmp raw eq")
+        exit(1)
+    }
+    if rt_str_find("abcabc", "bc") != 1 {
+        println("FAIL: rt_str_find raw")
+        exit(1)
+    }
+    if str_starts_with("hello", "he") != 1 {
+        println("FAIL: str_starts_with raw")
+        exit(1)
+    }
+    if str_ends_with("hello", "lo") != 1 {
+        println("FAIL: str_ends_with raw")
+        exit(1)
+    }
+
+    // Deferred-4 sweep: raw-pointer assertions for the four fns whose first
+    // slot was previously deferred because the body feeds memcpy_raw /
+    // str_new on tagged-dst + tagged-count. See Crossengin
+    // docs/UPSTREAM_NOVA_BUGS.md §2 and the deferred-4 sweep commit.
+    let cat = str_concat("ab", "cd")
+    if str_len(cat) != 4 {
+        println("FAIL: str_concat raw len")
+        exit(1)
+    }
+    if str_char_at(cat, 0) != 97 {
+        println("FAIL: str_concat raw first")
+        exit(1)
+    }
+    if str_char_at(cat, 3) != 100 {
+        println("FAIL: str_concat raw last")
+        exit(1)
+    }
+
+    let slr = str_slice("hello", 1, 4)
+    if str_len(slr) != 3 {
+        println("FAIL: str_slice raw len")
+        exit(1)
+    }
+    if str_char_at(slr, 0) != 101 {
+        println("FAIL: str_slice raw first")
+        exit(1)
+    }
+    if str_char_at(slr, 2) != 108 {
+        println("FAIL: str_slice raw last")
+        exit(1)
+    }
+
+    let tr = rt_str_trim("  hi  ")
+    if str_len(tr) != 2 {
+        println("FAIL: rt_str_trim raw len")
+        exit(1)
+    }
+    if str_char_at(tr, 0) != 104 {
+        println("FAIL: rt_str_trim raw[0]")
+        exit(1)
+    }
+    if str_char_at(tr, 1) != 105 {
+        println("FAIL: rt_str_trim raw[1]")
+        exit(1)
+    }
+
+    let sp = str_split("a,b,c", ",")
+    if len(sp) != 3 {
+        println("FAIL: str_split raw list len")
+        exit(1)
+    }
+
     println("PASS")
 }
 

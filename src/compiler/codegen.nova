@@ -2784,6 +2784,35 @@ fn is_known_function(name) {
     return 0
 }
 
+// Crossengin UPSTREAM §8 — predicate for whether `name` is bound to a
+// function parameter in the enclosing fn frame. Mirrors has_local, but
+// walks cg_params (populated by gen_function before any body walking).
+fn is_param(name) {
+    let i = 0
+    while i < cg_param_count {
+        if cg_params[i] == name {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Crossengin UPSTREAM §8 — emit a compile error and abort codegen.
+// Pre-fix behavior for an undeclared callee was a null-deref SEGV at
+// `[rbp-slot]` because local_offset() silently created a fresh frame
+// slot for the missing name. This routes the diagnostic through
+// stdout + exit(1), matching other codegen fatal patterns in this
+// file (see e.g. :3962 and :4452). "ERROR:" prefix is intentional so
+// the test harness can match on it.
+fn cg_fail(msg) {
+    print("ERROR: ")
+    print(msg)
+    print("\n")
+    exit(1)
+    return 0
+}
+
 fn fn_module(name) {
     let m = _cg_ht_get(cg_fn_modules, name)
     if m == 0 { return "" }
@@ -4594,7 +4623,7 @@ fn gen_expr(nd) {
 
     if tag == AST_INT_LIT {
         // value tagging: integer n is represented as (n<<1)|1
-        out("    mov rax, " + int_to_str(nd[1] * 2 + 1))
+        out("    mov rax, " + int_to_str((nd[1] << 1) | 1))
         return 0
     }
 
@@ -4610,7 +4639,7 @@ fn gen_expr(nd) {
 
     if tag == AST_BOOL_LIT {
         // booleans are tagged ints: false->1, true->3
-        out("    mov rax, " + int_to_str(nd[1] * 2 + 1))
+        out("    mov rax, " + int_to_str((nd[1] << 1) | 1))
         return 0
     }
 
@@ -4725,7 +4754,7 @@ fn gen_expr(nd) {
                 if op == ">=" {
                     if left_val >= right_val { result = 1 } else { result = 0 }
                 }
-                out("    mov rax, " + int_to_str(result * 2 + 1))   // tag folded constant
+                out("    mov rax, " + int_to_str((result << 1) | 1))   // tag folded constant
                 return 0
             }
         }
@@ -5031,6 +5060,24 @@ fn gen_expr(nd) {
             }
             if is_known_function(callee_name) == 1 {
                 is_direct = 1
+            }
+            // Crossengin UPSTREAM §8 — pre-fix: an undeclared callee
+            // flowed through local_offset(), which silently created a
+            // fresh frame slot and emitted mov rax,[rbp-slot] +
+            // cmp qword [rax],-1, SEGVing on the null deref. All
+            // registry sweeps (methods :10620, extern :10637, fn_decl
+            // :10651, lambdas :10660) run earlier in gen_program before
+            // we reach here, so a miss here is a real undeclared name.
+            if is_direct == 0 {
+                if is_struct_name(callee_name) == 0 {
+                    if is_global(callee_name) == 0 {
+                        if has_local(callee_name) == 0 {
+                            if is_param(callee_name) == 0 {
+                                cg_fail("undeclared callee: " + callee_name)
+                            }
+                        }
+                    }
+                }
             }
         }
         if ast_tag(callee) == AST_FIELD_ACCESS {
@@ -5705,7 +5752,7 @@ fn gen_expr(nd) {
                 let mtp_id = mpat[1]
                 out("    mov rdi, [rsp]")
                 out("    call _nova_type_of")
-                out("    cmp rax, " + int_to_str(mtp_id))
+                out("    cmp rax, " + int_to_str((mtp_id << 1) | 1))
                 out("    jne " + mnxt_t)
                 if mhas_guard == 1 {
                     gen_expr(marm[3])
@@ -6227,11 +6274,22 @@ fn gen_stmt(nd) {
                 push(cg_lbl_continues, cont_lbl)
                 cg_lbl_count = cg_lbl_count + 1
             }
-            // Convert strings to char code lists for iteration
+            // Convert strings to char code lists for iteration.
+            // R51: normalize iterable to raw once so the subsequent
+            // magic-check deref, the _nova_str_to_chars call, and
+            // the list-iteration path below (which does direct
+            // [rdi+8] / [rdi+24] / [rdi+rcx*8] derefs) are all
+            // tag-safe. See UPSTREAM_NOVA_BUGS.md §17.
+            let fe_raw_lbl = new_label()
             out("    mov rdi, [rsp+8]")
+            out("    test rdi, 1")
+            out("    jz " + fe_raw_lbl)
+            out("    sar rdi, 1")
+            out("    mov [rsp+8], rdi")
+            out_label(fe_raw_lbl)
             out("    cmp qword ptr [rdi], -1")
             out("    je " + loop_lbl)
-            out("    mov rdi, [rsp+8]")
+            // rdi already raw after the normalize step above.
             out("    call _nova_str_to_chars")
             out("    mov [rsp+8], rax")
             // List iteration
@@ -6420,7 +6478,7 @@ fn gen_stmt(nd) {
                 let tp_id = pattern[1]
                 out("    mov rdi, [rsp]")
                 out("    call _nova_type_of")
-                out("    cmp rax, " + int_to_str(tp_id))
+                out("    cmp rax, " + int_to_str((tp_id << 1) | 1))
                 out("    jne " + next_arm_t)
                 if has_guard == 1 {
                     gen_expr(arm[3])
@@ -9710,6 +9768,11 @@ fn warm_emit_runtime() {
     warm_out("")
     warm_out(".p2align 2")
     warm_label("_nova_warm_len")
+    // Tag-polymorphic prolog (aarch64): mirror the x86-64
+    // _nova_len fix. See UPSTREAM_NOVA_BUGS.md §17 (R43/R44).
+    warm_out("    tbz x0, #0, .Lwarm_len_untag")
+    warm_out("    asr x0, x0, #1")
+    warm_label(".Lwarm_len_untag")
     warm_out("    cbz x0, .Lwarm_len_zero")
     warm_out("    ldr x1, [x0]")
     warm_out("    cmn x1, #1")
@@ -11546,6 +11609,25 @@ fn wasm_gen_expr(nd) {
         if ast_tag(callee) == AST_FIELD_ACCESS {
             callee_name = callee[1][1] + "_" + callee[2]
         }
+        // Crossengin UPSTREAM §8 — mirror of the x86 AST_CALL check.
+        // The WASM path previously deferred to wat2wasm, producing an
+        // opaque downstream error. Fail fast with the same diagnostic
+        // the native backend emits so test_fails_* fixtures behave
+        // uniformly across targets. Registry sweep at :15434 runs
+        // earlier in wasm_gen_program before we reach here.
+        if ast_tag(callee) == AST_IDENT {
+            if is_known_function(callee_name) == 0 {
+                if is_struct_name(callee_name) == 0 {
+                    if is_global(callee_name) == 0 {
+                        if has_local(callee_name) == 0 {
+                            if is_param(callee_name) == 0 {
+                                cg_fail("undeclared callee: " + callee_name)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let i = 0
         while i < len(args) {
             wasm_gen_expr(args[i])
@@ -13015,7 +13097,7 @@ fn wasm_gen_rt_extra() {
     wi(")")
     wi("")
 
-    // type_of
+    // type_of (returns tagged NOVA ints: (N<<1)|1, so int=3, str=5, list=7, map=9)
     wi("(func $type_of (param $v i64) (result i64)")
     wasm_indent = wasm_indent + 1
     wi("local.get $v")
@@ -13023,7 +13105,7 @@ fn wasm_gen_rt_extra() {
     wi("i64.lt_s")
     wi("if (result i64)")
     wasm_indent = wasm_indent + 1
-    wi("i64.const 1")
+    wi("i64.const 3")
     wasm_indent = wasm_indent - 1
     wi("else")
     wasm_indent = wasm_indent + 1
@@ -13033,7 +13115,7 @@ fn wasm_gen_rt_extra() {
     wi("i64.const -1")
     wi("i64.eq")
     wi("if (result i64)")
-    wi("  i64.const 3")
+    wi("  i64.const 7")
     wi("else")
     wi("  local.get $v")
     wi("  i32.wrap_i64")
@@ -13041,9 +13123,9 @@ fn wasm_gen_rt_extra() {
     wi("  i64.const -2")
     wi("  i64.eq")
     wi("  if (result i64)")
-    wi("    i64.const 4")
+    wi("    i64.const 9")
     wi("  else")
-    wi("    i64.const 2")
+    wi("    i64.const 5")
     wi("  end")
     wi("end")
     wasm_indent = wasm_indent - 1
@@ -14556,11 +14638,46 @@ fn wasm_gen_rt_simd() {
     wi("")
 
     // memcpy_raw(dst, src, n): byte copy.
+    // Untag each operand (dst/src/n) when low-bit is set, mirroring the x86
+    // backend's test/jz/sar entry blocks. See Crossengin UPSTREAM §1.
     wi("(func $memcpy_raw (param $dst i64) (param $src i64) (param $n i64) (result i64)")
     wasm_indent = wasm_indent + 1
     wi("(local $d i32)")
     wi("(local $s i32)")
     wi("(local $rem i32)")
+    wi("local.get $dst")
+    wi("i64.const 1")
+    wi("i64.and")
+    wi("i64.const 0")
+    wi("i64.ne")
+    wi("if")
+    wi("local.get $dst")
+    wi("i64.const 1")
+    wi("i64.shr_s")
+    wi("local.set $dst")
+    wi("end")
+    wi("local.get $src")
+    wi("i64.const 1")
+    wi("i64.and")
+    wi("i64.const 0")
+    wi("i64.ne")
+    wi("if")
+    wi("local.get $src")
+    wi("i64.const 1")
+    wi("i64.shr_s")
+    wi("local.set $src")
+    wi("end")
+    wi("local.get $n")
+    wi("i64.const 1")
+    wi("i64.and")
+    wi("i64.const 0")
+    wi("i64.ne")
+    wi("if")
+    wi("local.get $n")
+    wi("i64.const 1")
+    wi("i64.shr_s")
+    wi("local.set $n")
+    wi("end")
     wi("local.get $dst")
     wi("i32.wrap_i64")
     wi("local.set $d")
@@ -16244,7 +16361,13 @@ fn gen_runtime() {
     out("    mov rcx, rax")
     out("    add rcx, rbx")
     out("    cmp rcx, [rip + _heap_end]")
-    out("    jle .alloc_ok")
+    // Bug #13: use UNSIGNED compare -- addresses with bit 47 set
+    // (`0x80000000_0000+`, e.g. post-brk-expansion heap after certain
+    // layouts) are below `_heap_end` numerically but SIGNED compare
+    // treats them as negative, misclassifying them as "fits". The
+    // resulting pointer is non-canonical and SEGVs on deref later.
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §13.
+    out("    jbe .alloc_ok")
     if cg_target == 3 {
         out("    xor ecx, ecx")
         out("    mov edx, 1048576")
@@ -16275,10 +16398,37 @@ fn gen_runtime() {
     }
     out("    mov rcx, rax")
     out("    add rcx, rbx")
+    // R13-followup: post-expansion sanity check. A failing
+    // brk/mmap/VirtualAlloc may leave _heap_end unchanged (brk)
+    // or trashed (mmap -> -1, VirtualAlloc -> 0 + 1 MiB offset).
+    // The pre-R13 code silently returned a pointer past the arena;
+    // after R13's `jbe` + this re-check, we fail loud via exit(1)
+    // rather than SEGV many frames deeper on first deref.
+    out("    cmp rcx, [rip + _heap_end]")
+    out("    jbe .alloc_ok")
+    out("    mov edi, 1")
+    out("    mov eax, 60")
+    out("    syscall")
     out(".alloc_ok:")
+    // Bug #15 defensive: ensure the returned range [rax, rcx) is
+    // canonical. On x86_64 user-space addresses with bit 47+ set are
+    // non-canonical and SEGV on first deref. Under ASLR-OFF or certain
+    // brk layouts _heap_end can land above 2^47; the fast-path check
+    // (`cmp rcx, [rip + _heap_end]` + `jbe`) still passes because both
+    // operands are high, and we would silently hand back a doomed
+    // pointer. Fail loud with exit(1) instead -- caller sees a clear
+    // non-zero exit rather than a SEGV many frames later.
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §15.
+    out("    mov rdx, rcx")
+    out("    shr rdx, 47")
+    out("    jnz .alloc_bad_heap")
     out("    mov [rip + _heap_ptr], rcx")
     out("    pop rbx")
     out("    ret")
+    out(".alloc_bad_heap:")
+    out("    mov edi, 1")
+    out("    mov eax, 60")
+    out("    syscall")
 
     // --- strlen ---
     out("")
@@ -16474,6 +16624,13 @@ fn gen_runtime() {
     // --- len(list_or_str) -> count ---
     out("")
     out_label("_nova_len")
+    // Tag-polymorphic prolog: untag rdi if it carries the NOVA
+    // tag bit so a tagged alloc()'d buffer dereferences at its
+    // real heap address. See UPSTREAM_NOVA_BUGS.md §17 (R43/R44).
+    out("    test rdi, 1")
+    out("    jz   .nlen_raw")
+    out("    sar  rdi, 1")
+    out(".nlen_raw:")
     out("    test rdi, rdi")
     out("    jz .len_zero")
     out("    cmp qword ptr [rdi], -1")
@@ -16743,6 +16900,14 @@ fn gen_runtime() {
     // --- char_at(str, idx) -> char code ---
     out("")
     out_label("_nova_char_at")
+    // R46 tag-poly prolog on rdi (string base). No internal
+    // callers — only user code calls char_at via the public
+    // shim — so halving a true-raw literal is unreachable here.
+    // See UPSTREAM_NOVA_BUGS.md §17 (R43/R44/R46).
+    out("    test rdi, 1")
+    out("    jz   .cat_rdi_raw")
+    out("    sar  rdi, 1")
+    out(".cat_rdi_raw:")
     out("    sar rsi, 1")                  // untag index
     out("    movzx eax, byte ptr [rdi + rsi]")
     out("    lea rax, [rax + rax + 1]")    // tag char-code result
@@ -16755,6 +16920,15 @@ fn gen_runtime() {
     out("    mov rbp, rsp")
     out("    push r12")
     out("    push r13")
+    // Tag-polymorphic rdi prolog: untag the source-string base
+    // if it carries the NOVA tag bit (e.g. an alloc()'d buffer)
+    // so [rdi + rsi] lands at the real heap address. rsi/rdx
+    // keep their existing untag-unconditional handling.
+    // See UPSTREAM_NOVA_BUGS.md §17 (R43/R44).
+    out("    test rdi, 1")
+    out("    jz   .nsub_raw")
+    out("    sar  rdi, 1")
+    out(".nsub_raw:")
     out("    sar rsi, 1")                 // untag start
     out("    sar rdx, 1")                 // untag len
     out("    lea r12, [rdi + rsi]")
@@ -16776,6 +16950,13 @@ fn gen_runtime() {
     // --- str_to_int(str) -> int ---
     out("")
     out_label("_nova_str_to_int")
+    // R46 tag-poly prolog: untag rdi for alloc'd string callers
+    // (face_recognize parser's _face_rec_extract_int path).
+    // See UPSTREAM_NOVA_BUGS.md §17 (R43/R44/R46).
+    out("    test rdi, 1")
+    out("    jz   .sti_rdi_raw")
+    out("    sar  rdi, 1")
+    out(".sti_rdi_raw:")
     out("    xor eax, eax")
     out("    xor ecx, ecx")
     out("    cmp byte ptr [rdi], 45")
@@ -17469,7 +17650,19 @@ fn gen_runtime() {
         out("    mov rsp, rbp")
         out("    pop rbp")
     } else {
+        // Bug #16 (R23): untag incoming NOVA-tagged args before syscall,
+        // then tag the raw rax return so callers can compare against
+        // tagged NOVA literals. Without this, `socket(2, 1, 0)` reaches
+        // the kernel as `socket(AF_APPLETALK=5, SOCK_RAW=3, 1)` and the
+        // raw-rax return never matches a tagged literal 0 in `fd == 0`
+        // / `fd < 0` compares (fd < 0 happens to coincide for small
+        // negatives but fd == N breaks). See Crossengin
+        // docs/UPSTREAM_NOVA_BUGS.md §16.
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
+        out("    sar rdx, 1")
         emit_syscall(41)
+        out("    lea rax, [rax + rax + 1]")
     }
     out("    ret")
 
@@ -17824,17 +18017,23 @@ fn gen_runtime() {
         out("    mov [rbp - 96], rax")             // list handle
         out("    mov rdi, rax")
         out("    mov rsi, [rbp - 88]")
+        // R53: tag numeric list element so NOVA callers see a tagged int.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         // Extract ip (offset +4 of sockaddr_in, network byte order int).
         // We return as host-order int (callers know it's wire-format).
         out("    mov rdi, [rbp - 96]")
         out("    mov esi, dword ptr [rbp - 12]")
+        // R53: tag ip list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         // Extract port (offset +2, big-endian u16). ntohs via xchg.
         out("    mov rdi, [rbp - 96]")
         out("    movzx eax, word ptr [rbp - 14]")
         out("    xchg al, ah")
         out("    mov rsi, rax")
+        // R53: tag port list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         out("    mov rax, [rbp - 96]")
         out("    mov rsp, rbp")
@@ -17844,16 +18043,20 @@ fn gen_runtime() {
         out(".srf_win_fail:")
         // Return [-1, 0, 0] so callers see a 3-element list with a
         // sentinel first element. Cheaper than a separate None marker.
+        // R53: tagged -1 == -1 on 2's-complement, so the sentinel push
+        // of raw -1 is accidentally tagged. The two 0 pushes become
+        // tagged 1 (= NOVA tagged 0) for consistency with the success
+        // path's tagged elements.
         out("    call _nova_list_new")
         out("    mov [rbp - 96], rax")
         out("    mov rdi, rax")
         out("    mov rsi, -1")
         out("    call _nova_push")
         out("    mov rdi, [rbp - 96]")
-        out("    xor rsi, rsi")
+        out("    mov rsi, 1")                 // tagged 0
         out("    call _nova_push")
         out("    mov rdi, [rbp - 96]")
-        out("    xor rsi, rsi")
+        out("    mov rsi, 1")                 // tagged 0
         out("    call _nova_push")
         out("    mov rax, [rbp - 96]")
         out("    mov rsp, rbp")
@@ -17901,14 +18104,20 @@ fn gen_runtime() {
         out("    mov [rbp - 88], rax")
         out("    mov rdi, rax")
         out("    mov rsi, [rbp - 80]")
+        // R53: tag bytes_read list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         out("    mov rdi, [rbp - 88]")
         out("    mov esi, dword ptr [rbp - 12]")
+        // R53: tag sender_ip list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         out("    mov rdi, [rbp - 88]")
         out("    movzx eax, word ptr [rbp - 14]")
         out("    xchg al, ah")
         out("    mov rsi, rax")
+        // R53: tag sender_port list element.
+        out("    lea rsi, [rsi + rsi + 1]")
         out("    call _nova_push")
         out("    mov rax, [rbp - 88]")
         out("    mov rsp, rbp")
@@ -17916,16 +18125,20 @@ fn gen_runtime() {
         out("    ret")
         out(".srf_nx_timeout:")
         out(".srf_nx_fail:")
+        // R53: match the success-path tagging convention. -1 as a
+        // tagged NOVA int is still -1 on 2's-complement, so the
+        // sentinel push stays `mov rsi, -1`. The two 0 slots become
+        // tagged 1 (= NOVA tagged 0).
         out("    call _nova_list_new")
         out("    mov [rbp - 88], rax")
         out("    mov rdi, rax")
         out("    mov rsi, -1")
         out("    call _nova_push")
         out("    mov rdi, [rbp - 88]")
-        out("    xor rsi, rsi")
+        out("    mov rsi, 1")                 // tagged 0
         out("    call _nova_push")
         out("    mov rdi, [rbp - 88]")
-        out("    xor rsi, rsi")
+        out("    mov rsi, 1")                 // tagged 0
         out("    call _nova_push")
         out("    mov rax, [rbp - 88]")
         out("    mov rsp, rbp")
@@ -18052,10 +18265,22 @@ fn gen_runtime() {
         out("    mov rsp, rbp")
         out("    pop rbp")
     } else {
-        // Linux x86-64: rdi=fd already correct from caller.
+        // Bug #16 (R23): tag-polymorphic rdi + tag raw rax return.
+        // The previous "rdi=fd already correct from caller" comment
+        // assumed raw-fd chains (sys_socket_udp returns raw rax). After
+        // the socket() fix tags its return, call chains starting with
+        // socket() produce tagged fds. The tagged-poly check works for
+        // both: tagged -> untag; raw -> pass through. Tag the return so
+        // caller's `rc == 0` tagged-literal compare works. See
+        // Crossengin docs/UPSTREAM_NOVA_BUGS.md §16.
+        out("    test rdi, 1")
+        out("    jz .sfcntl_rdi_raw")
+        out("    sar rdi, 1")
+        out(".sfcntl_rdi_raw:")
         out("    mov rsi, 4")                       // F_SETFL
         out("    mov rdx, 2048")                    // O_NONBLOCK
         emit_syscall(72)
+        out("    lea rax, [rax + rax + 1]")
     }
     out("    ret")
 
@@ -18107,9 +18332,15 @@ fn gen_runtime() {
         out("    sub rsp, 16")
         out("    mov dword ptr [rbp - 8], 0")     // optval out = 0
         out("    mov dword ptr [rbp - 12], 4")    // optlen = 4
+        // Bug #16 (R23): tag-polymorphic rdi + tag raw rax return so
+        // caller's `so == 0` tagged-literal compare works. See
+        // sys_fcntl_setfl_nonblock above for the full rationale.
+        out("    test rdi, 1")
+        out("    jz .sgso_rdi_raw")
+        out("    sar rdi, 1")
+        out(".sgso_rdi_raw:")
         // getsockopt(fd, SOL_SOCKET=1, SO_ERROR=4, &val, &vlen).
         // x86-64 syscall ABI: rdi, rsi, rdx, r10, r8.
-        // rdi=fd already.
         out("    mov rsi, 1")                       // SOL_SOCKET (POSIX)
         out("    mov rdx, 4")                       // SO_ERROR (POSIX)
         out("    lea r10, [rbp - 8]")              // &optval
@@ -18118,6 +18349,7 @@ fn gen_runtime() {
         out("    test rax, rax")
         out("    js .sgso_nx_fail")
         out("    mov eax, dword ptr [rbp - 8]")   // return SO_ERROR value
+        out("    lea rax, [rax + rax + 1]")       // tag the value
         out("    mov rsp, rbp")
         out("    pop rbp")
         out("    ret")
@@ -18733,6 +18965,7 @@ fn gen_runtime() {
     out("    ret")
 
     // --- type_of(value) -> int (0=null, 1=int, 2=string, 3=list, 4=map) ---
+    // Returns are tagged NOVA ints: (N<<1)|1, so null=1, int=3, str=5, list=7, map=9.
     out("")
     out_label("_nova_type_of")
     out("    test rdi, rdi")
@@ -18743,19 +18976,19 @@ fn gen_runtime() {
     out("    je .to_list")
     out("    cmp qword ptr [rdi], -2")
     out("    je .to_map")
-    out("    mov eax, 2")
+    out("    mov eax, 5")
     out("    ret")
     out(".to_null:")
-    out("    xor eax, eax")
-    out("    ret")
-    out(".to_int:")
     out("    mov eax, 1")
     out("    ret")
-    out(".to_list:")
+    out(".to_int:")
     out("    mov eax, 3")
     out("    ret")
+    out(".to_list:")
+    out("    mov eax, 7")
+    out("    ret")
     out(".to_map:")
-    out("    mov eax, 4")
+    out("    mov eax, 9")
     out("    ret")
 
     // --- type_name(value) -> string ---
@@ -19012,8 +19245,19 @@ fn gen_runtime() {
     out(".ge_check_eq:")
     out("    cmp byte ptr [rsi + r13], 61")
     out("    jne .ge_next")
-    out("    lea rax, [rsi + r13 + 1]")
-    out("    pop rdi")
+    // R55: raw envp[i] value ptr lives at a kernel-pushed address
+    // that may be odd-aligned, which trips R44's tag-poly _nova_len
+    // (sar rdi, 1 halves the raw ptr -> bogus addr -> SEGV). Copy
+    // into a bit0=0 heap buffer via _nova_concat("", env_val) --
+    // same pattern as _nova___arg at L16997. Observable fault was
+    // test_p256_keypair_load SEGV on `len(getenv("HOME"))` in the
+    // _base() helper (and the same latent crash in every test that
+    // calls len() on a getenv-returned string when the kernel lays
+    // envp at an odd address).
+    out("    pop rax")                        // drop saved envp iter
+    out("    lea rdi, [rsi + r13 + 1]")       // raw env value ptr
+    out("    lea rsi, [rip + _empty_str]")
+    out("    call _nova_concat")               // aligned heap copy (bit0=0)
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
@@ -20822,9 +21066,15 @@ fn gen_runtime() {
     out("    mov [rsp], rcx")
     out("    jmp .sr_loop")
     out(".sr_nomatch:")
-    // Append one char
+    // Append one char. Bug #14: `_nova_chr` expects a TAGGED NOVA int
+    // (it does `sar rcx, 1` internally); every user-visible caller
+    // reaches it via the `chr` trampoline which guarantees tagging.
+    // Here we read a RAW byte from the source string, so we must tag
+    // it before the call -- otherwise sar halves every emitted char.
+    // See Crossengin docs/UPSTREAM_NOVA_BUGS.md §14.
     out("    mov rcx, [rsp]")
     out("    movzx edi, byte ptr [r12 + rcx]")
+    out("    lea rdi, [rdi + rdi + 1]")
     out("    call _nova_chr")
     out("    mov rsi, rax")
     out("    mov rdi, [rsp + 8]")
@@ -21887,21 +22137,83 @@ fn gen_runtime() {
     out_label("__arg")
     out("    jmp _nova___arg")
     out_label("str_eq")
-    out("    jmp _nova_str_eq")
+    // R50: tag-poly rdi + rsi at the public API boundary so the
+    // internal _nova_str_eq (and the many compiler-internal paths
+    // that call it with stack / mid-string pointers) stays raw.
+    // _nova_str_eq returns a RAW 0/1; tag it on return so user
+    // code sees a NOVA int (matches _nova_eq's post-call tag at
+    // L15993). See UPSTREAM_NOVA_BUGS.md §17.
+    out("    test rdi, 1")
+    out("    jz   .se_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".se_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .se_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".se_sh_rsi:")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_str_eq")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("pop")
     out("    jmp _nova_pop")
     out_label("list_set")
     out("    jmp _nova_list_set")
     out_label("contains")
+    // R50: tag-poly rdi only (collection ptr). rsi is a value
+    // that may be a tagged int for list-membership comparison,
+    // which internal _nova_contains compares with tagged list
+    // elements — untagging rsi here would break that.
+    out("    test rdi, 1")
+    out("    jz   .co_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".co_sh_rdi:")
     out("    jmp _nova_contains")
     out_label("list_remove")
     out("    jmp _nova_list_remove")
     out_label("starts_with")
+    // R50: tag-poly rdi + rsi (str + prefix).
+    out("    test rdi, 1")
+    out("    jz   .sw_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".sw_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .sw_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".sw_sh_rsi:")
     out("    jmp _nova_starts_with")
     out_label("ends_with")
+    // R50: tag-poly rdi + rsi (str + suffix).
+    out("    test rdi, 1")
+    out("    jz   .ew_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".ew_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .ew_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".ew_sh_rsi:")
     out("    jmp _nova_ends_with")
     out_label("str_find")
-    out("    jmp _nova_str_find")
+    // R50: tag-poly rdi + rsi (haystack + needle). _nova_str_find
+    // returns a RAW index or -1; tag the result so arithmetic in
+    // user code is NOVA-consistent. tagged(-1) = -1 after shift,
+    // so sentinel semantics are preserved.
+    out("    test rdi, 1")
+    out("    jz   .sf_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".sf_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .sf_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".sf_sh_rsi:")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_str_find")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("abs")
     out("    jmp _nova_abs")
     out_label("min")
@@ -21931,40 +22243,172 @@ fn gen_runtime() {
     out("    jmp _nova_unlink")
     out_label("file_size")
     out("    jmp _nova_file_size")
+    // R52: two-tier tag-poly contract on the socket API. Public
+    // shims gate tag transitions; internal _nova_* fn bodies stay
+    // raw-only. The R41 bind ambiguity (raw-fd=3 and tagged NOVA
+    // 1 both have bit0=1) is resolved by putting tag-handling at
+    // the shim boundary rather than inside _nova_bind.
+    // See UPSTREAM_NOVA_BUGS.md §17.
+    //
+    // _nova_socket / _nova_sys_fcntl_setfl_nonblock /
+    // _nova_sys_getsockopt_so_error are tag-fixed internally by
+    // R23 and keep plain-jmp shims.
     out_label("socket")
     out("    jmp _nova_socket")
     out_label("bind_socket")
-    out("    jmp _nova_bind")
+    // rdi=fd (tagged int), rsi=sockaddr ptr (raw heap from
+    // make_sockaddr_in — stays raw), rdx=addrlen (tagged int).
+    out("    sar rdi, 1")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_bind")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("listen_socket")
-    out("    jmp _nova_listen")
+    // rdi=fd, rsi=backlog (both tagged ints).
+    out("    sar rdi, 1")
+    out("    sar rsi, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_listen")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("accept_conn")
-    out("    jmp _nova_accept")
+    // rdi=fd (tagged); addr/addrlen args stay raw.
+    out("    sar rdi, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_accept")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("connect_socket")
-    out("    jmp _nova_connect")
+    // rdi=fd, rdx=addrlen (both tagged ints); rsi=addr ptr raw.
+    out("    sar rdi, 1")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_connect")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("send_data")
-    out("    jmp _nova_send_data")
+    // rdi=fd (tagged), rsi=buf (tag-poly — may be alloc'd tagged
+    // or raw concat/literal), rdx=len (tagged).
+    out("    sar rdi, 1")
+    out("    test rsi, 1")
+    out("    jz   .snd_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".snd_sh_rsi:")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_send_data")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("recv_data")
-    out("    jmp _nova_recv_data")
+    // rdi=fd, rdx=len (both tagged); rsi=buf tag-poly.
+    out("    sar rdi, 1")
+    out("    test rsi, 1")
+    out("    jz   .rcv_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".rcv_sh_rsi:")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_recv_data")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("close_fd")
-    out("    jmp _nova_close_fd")
+    // rdi=fd (tagged).
+    out("    sar rdi, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_close_fd")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("make_sockaddr_in")
+    // rdi=port, rsi=ip (both tagged ints). Return is a raw heap
+    // ptr (consumed only by bind/connect/sendto which take raw
+    // addr pointers through their shims).
+    out("    sar rdi, 1")
+    out("    sar rsi, 1")
     out("    jmp _nova_make_sockaddr_in")
     // R28C: UDP syscalls for NAT hole-punching (R23E.2 unblock).
+    // R52: sys_socket_udp return-tag paired with bind/close/sendto
+    // shim untags so nat_traversal's raw-udp-fd chain joins the
+    // tagged-fd convention. Must land in the same commit as the
+    // shim untags above (nat_udp_open regresses otherwise).
     out_label("sys_socket_udp")
-    out("    jmp _nova_sys_socket_udp")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_sys_socket_udp")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("sys_sendto")
-    out("    jmp _nova_sys_sendto")
+    // rdi=fd, rdx=len, rcx=ip, r8=port (all tagged ints);
+    // rsi=buf tag-poly.
+    out("    sar rdi, 1")
+    out("    test rsi, 1")
+    out("    jz   .sto_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".sto_sh_rsi:")
+    out("    sar rdx, 1")
+    out("    sar rcx, 1")
+    out("    sar r8, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_sys_sendto")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     out_label("sys_recvfrom")
+    // rdi=fd, rdx=buflen, rcx=timeout_ms (all tagged); rsi=buf
+    // tag-poly. Return is a NOVA list handle (raw from
+    // _nova_list_new); no re-tag.
+    out("    sar rdi, 1")
+    out("    test rsi, 1")
+    out("    jz   .rfr_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".rfr_sh_rsi:")
+    out("    sar rdx, 1")
+    out("    sar rcx, 1")
     out("    jmp _nova_sys_recvfrom")
     out_label("sys_setsockopt_so_reuseaddr")
-    out("    jmp _nova_sys_setsockopt_so_reuseaddr")
+    // rdi=fd (tagged).
+    out("    sar rdi, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_sys_setsockopt_so_reuseaddr")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     // R29A: multi-FD wait. Shared shim — Linux/macOS issue poll(2)
     // directly, Windows hops through WSAPoll, ARM64 / WASM handled by
     // their own backend dispatchers below.
     out_label("sys_poll")
-    out("    jmp _nova_sys_poll")
+    // rdi=fds-buf ptr tag-poly, rsi=nfds, rdx=timeout_ms (tagged).
+    out("    test rdi, 1")
+    out("    jz   .pol_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".pol_sh_rdi:")
+    out("    sar rsi, 1")
+    out("    sar rdx, 1")
+    out("    push rbp")
+    out("    mov rbp, rsp")
+    out("    call _nova_sys_poll")
+    out("    lea rax, [rax + rax + 1]")
+    out("    pop rbp")
+    out("    ret")
     // R31A: non-blocking I/O helpers for parallel dial. Same dispatch
-    // pattern as sys_poll above.
+    // pattern as sys_poll above. (R23-fixed internally — plain jmp.)
     out_label("sys_fcntl_setfl_nonblock")
     out("    jmp _nova_sys_fcntl_setfl_nonblock")
     out_label("sys_getsockopt_so_error")
@@ -22033,6 +22477,18 @@ fn gen_runtime() {
     out_label("join")
     out("    jmp _nova_join")
     out_label("split")
+    // R50: tag-poly rdi + rsi. rsi is either a tagged int (char
+    // code) or a 1-char str ptr. _nova_split's cmp r13, 256 then
+    // decides; untagging a tagged int (c<<1)|1 -> c is exactly
+    // the char code the internal path wants.
+    out("    test rdi, 1")
+    out("    jz   .sp_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".sp_sh_rdi:")
+    out("    test rsi, 1")
+    out("    jz   .sp_sh_rsi")
+    out("    sar  rsi, 1")
+    out(".sp_sh_rsi:")
     out("    jmp _nova_split")
     out_label("reverse")
     out("    jmp _nova_reverse")
@@ -22106,6 +22562,11 @@ fn gen_runtime() {
     out_label("str_lower")
     out("    jmp _nova_str_lower")
     out_label("str_trim")
+    // R50: tag-poly rdi.
+    out("    test rdi, 1")
+    out("    jz   .tr_sh_rdi")
+    out("    sar  rdi, 1")
+    out(".tr_sh_rdi:")
     out("    jmp _nova_str_trim")
     out_label("strcmp")
     out("    jmp _nova_strcmp")
@@ -22246,11 +22707,23 @@ fn gen_runtime() {
     out("    lea rax, [rax + rax + 1]")    // tag byte result
     out("    ret")
     out_label("memcpy_raw")
+    out("    test rdi, 1")
+    out("    jz   .mcr_dst_raw")
+    out("    sar  rdi, 1")
+    out(".mcr_dst_raw:")
+    out("    test rsi, 1")
+    out("    jz   .mcr_src_raw")
+    out("    sar  rsi, 1")
+    out(".mcr_src_raw:")
+    out("    test rdx, 1")
+    out("    jz   .mcr_len_raw")
+    out("    sar  rdx, 1")
+    out(".mcr_len_raw:")
     out("    push rdi")
-    out("    mov rcx, rdx")
+    out("    mov  rcx, rdx")
     out("    cld")
-    out("    rep movsb")
-    out("    pop rax")
+    out("    rep  movsb")
+    out("    pop  rax")
     out("    ret")
 
     // --- __intrinsic_dot_i32(a, b, n) -> int (AVX2; Linux x86-64) ---

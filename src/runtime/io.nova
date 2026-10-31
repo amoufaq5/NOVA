@@ -195,22 +195,61 @@ fn io_write_file(path, content) {
     return 1
 }
 
-fn io_print(s) {
-    sys_write(STDOUT, str_data(s), str_len(s))
-}
+// Delegate stdout to the `print`/`println` builtins (codegen emits
+// NUL-scan + raw syscall write). The old body passed `str_len(s)` —
+// which returns tagged `(len<<1)|1` — into sys_write's rdx, so the
+// kernel wrote ~2*len+1 bytes starting at the raw literal address and
+// overran the rodata page (SEGV on anything over ~128 bytes). See
+// Crossengin docs/UPSTREAM_NOVA_BUGS.md §5.
+fn io_print(s) { print(s) }
+fn io_println(s) { println(s) }
 
-fn io_println(s) {
-    io_print(s)
-    sys_write(STDOUT, "\n", 1)
-}
-
+// No `eprintln` builtin exists, so emit the stderr write(2) syscall
+// inline. We can't delegate to the sys_write wrapper because it
+// never untags its register inputs, and three of the involved values
+// are tagged in NOVA:
+//   - the STDERR global is stored as 5 (tagged int 2);
+//   - `str_len` returns tagged `(len<<1)|1` — this is the overrun
+//     that triggered the SEGV on the stdout path (NOVA Bug #5);
+//   - the integer literal `1` for the newline count is tagged 3.
+// Frame layout for io_eprint(s): params are pushed into cg_locals
+// before body-locals (codegen.nova:6890-6895), so s=[rbp-8],
+// data=[rbp-16], n=[rbp-24]. See Crossengin
+// docs/UPSTREAM_NOVA_BUGS.md §5.
 fn io_eprint(s) {
-    sys_write(STDERR, str_data(s), str_len(s))
+    let data = str_data(s)
+    let n = str_len(s)
+    asm {
+        "mov rsi, [rbp - 16]"
+        "test rsi, 1"
+        "jz 1f"
+        "sar rsi, 1"
+        "1:"
+        "mov rdx, [rbp - 24]"
+        "test rdx, 1"
+        "jz 2f"
+        "sar rdx, 1"
+        "2:"
+        "mov rax, 1"
+        "mov rdi, 2"
+        "syscall"
+    }
 }
 
 fn io_eprintln(s) {
     io_eprint(s)
-    sys_write(STDERR, "\n", 1)
+    // write(STDERR_FILENO, "\n", 1) via inline asm. Stage the newline
+    // byte on the stack so no .rodata symbol is needed.
+    asm {
+        "mov rax, 10"
+        "push rax"
+        "mov rax, 1"
+        "mov rdi, 2"
+        "mov rsi, rsp"
+        "mov rdx, 1"
+        "syscall"
+        "pop rax"
+    }
 }
 
 fn io_input() {
@@ -229,11 +268,16 @@ fn io_input() {
 
 // Monotonic nanosecond clock via clock_gettime(CLOCK_MONOTONIC, &ts)
 // timespec layout: [int64 tv_sec, int64 tv_nsec] (16 bytes)
+// `ts` arrives TAGGED (`alloc` returns `(ptr<<1)|1`); the kernel needs the
+// RAW buffer address, so untag rsi before the syscall. Without this, every
+// clock_gettime returns -EFAULT and the timespec stays zero, making
+// nanotime() a constant -- see Crossengin docs/UPSTREAM_NOVA_BUGS.md §11.
 fn _sys_clock_gettime_monotonic(ts) {
     asm {
         "mov rax, 228"
         "mov rdi, 1"
         "mov rsi, [rbp-8]"
+        "sar rsi, 1"
         "syscall"
     }
 }
@@ -254,5 +298,16 @@ fn nanotime() {
     _sys_clock_gettime_monotonic(ts)
     let sec = load64(ts)
     let nsec = load64(ts + 8)
-    return _raw_imul_add(sec, 1000000000, nsec)
+    let r = _raw_imul_add(sec, 1000000000, nsec)
+    // _raw_imul_add returns a RAW rax (its asm block bypasses the
+    // tagging-return convention so sec*1e9+nsec can exceed the pointer
+    // threshold without dispatching to str_repeat). Tag it here before
+    // the implicit return hands rax back to the caller. See Crossengin
+    // docs/UPSTREAM_NOVA_BUGS.md §7. Slot layout: ts=-8, sec=-16,
+    // nsec=-24, r=-32 (linear local assignment, mirrors
+    // ffi_syscall.nova:ffi_syscall_call2).
+    asm {
+        "mov rax, [rbp - 32]"
+        "lea rax, [rax + rax + 1]"
+    }
 }

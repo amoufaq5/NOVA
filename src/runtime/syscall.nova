@@ -22,12 +22,25 @@ fn sys_write(fd, buf, count) {
     }
 }
 
+// Bug #12 R11-a: untag flags + mode so the kernel sees raw bitmasks.
+// `O_WRONLY|O_CREAT|O_TRUNC = 0x241` was arriving tagged as `0x483 =
+// (0x241<<1)|1`, which the kernel decoded as `O_ACCMODE|O_EXCL|O_APPEND`
+// (no O_CREAT) -> ENOENT and silent snap_write failures. See Crossengin
+// docs/UPSTREAM_NOVA_BUGS.md §12. `path` is tag-polymorphic (handles
+// raw string literals + tagged alloc buffers). Return left raw: all
+// callers use `fd < 0` which works for both raw fd and raw -errno.
 fn sys_open(path, flags, mode) {
     asm {
         "mov rax, 2"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .so_u"
+        "sar rdi, 1"
+        ".so_u:"
         "mov rsi, [rbp-16]"
+        "sar rsi, 1"
         "mov rdx, [rbp-24]"
+        "sar rdx, 1"
         "syscall"
     }
 }
@@ -131,9 +144,75 @@ fn sys_fsync(fd) {
     }
 }
 
+// Bug #12 R11-c: untag path args + sign-aware return tag so callers'
+// `if rr != 0` compares vs tagged literal 0 (in-memory 1) correctly
+// detect kernel success (raw 0 -> tagged 1 match) vs failure (raw
+// -errno stays raw negative, caller's < 0 branch catches it). Single
+// CE caller is snap_write_durable (snapshot_disk.nova:2745).
 fn sys_rename(oldpath, newpath) {
     asm {
         "mov rax, 82"
+        "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .srn_u1"
+        "sar rdi, 1"
+        ".srn_u1:"
+        "mov rsi, [rbp-16]"
+        "test rsi, 1"
+        "jz .srn_u2"
+        "sar rsi, 1"
+        ".srn_u2:"
+        "syscall"
+        "test rax, rax"
+        "js .srn_ret"
+        "lea rax, [rax + rax + 1]"
+        ".srn_ret:"
+    }
+}
+
+// Positioned read: pread(fd, buf, count, offset) -- read at an absolute file
+// offset without moving the file's read/write cursor (syscall 17). The 4th
+// syscall argument is passed in r10, not rcx. Returns bytes read, or < 0.
+fn sys_pread(fd, buf, count, offset) {
+    asm {
+        "mov rax, 17"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "mov r10, [rbp-32]"
+        "syscall"
+    }
+}
+
+// Positioned write: pwrite(fd, buf, count, offset) -- write at an absolute file
+// offset without moving the cursor (syscall 18). Returns bytes written, or < 0.
+fn sys_pwrite(fd, buf, count, offset) {
+    asm {
+        "mov rax, 18"
+        "mov rdi, [rbp-8]"
+        "mov rsi, [rbp-16]"
+        "mov rdx, [rbp-24]"
+        "mov r10, [rbp-32]"
+        "syscall"
+    }
+}
+
+// fdatasync(fd) -- flush file DATA to stable storage, skipping non-essential
+// metadata (syscall 75). Cheaper than fsync for the append-only WAL hot path,
+// while still guaranteeing the written bytes survive a crash. Returns 0, or < 0.
+fn sys_fdatasync(fd) {
+    asm {
+        "mov rax, 75"
+        "mov rdi, [rbp-8]"
+        "syscall"
+    }
+}
+
+// ftruncate(fd, length) -- set the file size to `length` (syscall 77). Used by
+// recovery to drop a torn trailing record. Returns 0, or < 0.
+fn sys_ftruncate(fd, length) {
+    asm {
+        "mov rax, 77"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
         "syscall"
