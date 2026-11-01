@@ -779,6 +779,14 @@ fn main() {
         exit(1)
     }
 
+    // Register the root file in the imported-files tracker BEFORE walking
+    // its imports. Without this, a cycle like `A imports ./B` and
+    // `B imports ./A` causes A to be emitted twice when A is the compile
+    // root: already_imported(A) returns 0 when B's import of A is resolved,
+    // so A is read again and its symbols duplicate. Normalizing matches
+    // how resolve_import keys imp_full, so the cycle breaks cleanly.
+    push(imported_files, normalize_path(input_file))
+
     let base_dir = extract_dir(input_file)
     source = preprocess_imports(source, base_dir)
 
