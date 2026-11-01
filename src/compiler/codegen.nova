@@ -19267,7 +19267,13 @@ fn gen_runtime() {
     out("    add rdi, 8")
     out("    jmp .ge_loop")
     out(".ge_not_found:")
-    out("    xor eax, eax")
+    // Return TAGGED 0 (register value 1), not raw 0. NOVA source
+    // literal `0` is tagged by codegen to register value 1, so a
+    // comparison like `if e != 0 { str_to_int(e) }` must see register
+    // value 1 for not-found; otherwise `0 != 1` is TRUE and the branch
+    // fires on a NULL pointer, crashing in str_to_int / len / etc.
+    // on the first dereference. See UPSTREAM §20.
+    out("    mov eax, 1")
     out("    pop r13")
     out("    pop r12")
     out("    pop rbp")
