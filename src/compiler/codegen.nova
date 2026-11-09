@@ -22743,12 +22743,30 @@ fn gen_runtime() {
     out_label("coro_state")
     out("    jmp _nova_coro_state")
     out_label("store64")
-    out("    sar rdi, 1")                 // untag address (value stored as-is for round-trip)
+    out("    sar rdi, 1")                 // untag address
+    // nova#8: the integer literal `0` compiles to tagged `(0<<1)|1 = raw 1`.
+    // Previously store64 wrote the raw bit-pattern as-is, so storing a
+    // NOVA 0 left raw 1 in memory — argv/envp terminators and other
+    // kernel-interpreted NULLs reached the syscall as bogus pointers
+    // (EFAULT). Map tagged-0 (raw 1) to raw 0 on store; load64 maps raw 0
+    // back to tagged-0 (raw 1) so the round-trip for a NOVA integer 0
+    // stays intact. Every other tagged value still round-trips unchanged
+    // (`(N<<1)|1 == 1` only when N == 0).
+    out("    cmp rsi, 1")
+    out("    jne .s64_nz")
+    out("    xor rsi, rsi")
+    out(".s64_nz:")
     out("    mov [rdi], rsi")
     out("    ret")
     out_label("load64")
     out("    sar rdi, 1")                 // untag address
     out("    mov rax, [rdi]")
+    // nova#8: raw 0 in memory round-trips to tagged-0 (raw 1) so NOVA
+    // callers see the integer they originally stored.
+    out("    test rax, rax")
+    out("    jnz .l64_nz")
+    out("    mov rax, 1")
+    out(".l64_nz:")
     out("    ret")
     out_label("store8")
     out("    sar rdi, 1")                 // untag address

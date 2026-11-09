@@ -1,0 +1,37 @@
+// nova#8 regression: store64(ptr, 0) must write a raw 0 to memory so
+// argv terminators, null handles and other kernel-interpreted NULLs
+// reach syscalls without EFAULT.
+//
+// Before the fix: NOVA literal `0` = tagged `(0<<1)|1 = raw 1`.
+// store64 wrote rsi as-is, so memory held raw 1 — a bogus pointer.
+//
+// The fix makes store64/load64 symmetric: tagged-0 on store → raw 0
+// in memory → tagged-0 on load. Round-trip of a NOVA integer 0 is
+// preserved; and the raw 0 is what the kernel wants to see when it
+// walks argv looking for a terminator.
+
+fn main() {
+    let buf = alloc(16)
+    store64(buf, 0)
+
+    // Raw check: load8 gives us the first byte of memory. Before the
+    // fix every byte of a tagged 1 is zero except the LSB (byte 0 =
+    // 0x01). After the fix the whole 8-byte slot is raw 0, so byte 0
+    // is 0x00.
+    let b0 = load8(buf)
+    assert(b0 == 0)
+
+    // Round-trip: NOVA integer 0 stored via store64 must load back as 0.
+    let v = load64(buf)
+    assert(v == 0)
+
+    // Non-zero values still round-trip exactly.
+    store64(buf, 42)
+    assert(load64(buf) == 42)
+    store64(buf, -1)
+    assert(load64(buf) == -1)
+
+    println("PASS test_nova8_store64_zero")
+}
+
+main()
