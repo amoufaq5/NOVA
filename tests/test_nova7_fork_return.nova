@@ -1,0 +1,24 @@
+// nova#7 regression: fork_process() must return a tagged pid so that
+// NOVA callers can distinguish parent from child via `pid == 0`.
+//
+// Before the fix, fork returned the raw kernel pid. The literal `0`
+// compiles to tagged `(0<<1)|1 = raw 1`, so the child's raw-0 compared
+// against raw-1 was never equal — both parent and child executed the
+// "parent" branch. This test exits non-zero on the unfixed stage-1
+// compiler (child falls through, prints "P" then exits, parent then
+// waits for it and prints "P" too — stdout is "PP" not "CP") and passes
+// once fork's return is tag-wrapped with `lea rax, [rax + rax + 1]`.
+
+fn main() {
+    let pid = fork_process()
+    if pid == 0 {
+        // Child branch should fire only here.
+        println("C")
+        exit(0)
+    }
+    // Parent waits for child and then prints P.
+    waitpid(pid)
+    println("P")
+}
+
+main()
