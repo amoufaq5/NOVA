@@ -11035,11 +11035,27 @@ fn gen_program(program) {
     out("    .quad 0")
     out_label("_g___envp")
     out("    .quad 0")
+    // nova#11: dedup `_g_<name>` emissions. When the same module is pulled in
+    // via two legitimate import paths (e.g. relative + canonical) the compiler
+    // path-dedup misses it and `cg_globals` carries the same name twice. Scan
+    // earlier entries for each index; emit only on first occurrence.
     i = 0
     while i < cg_global_count {
-        out("    .align 8")
-        out_label("_g_" + cg_globals[i])
-        out("    .quad 0")
+        let gi_name = cg_globals[i]
+        let gi_dup = 0
+        let gj = 0
+        while gj < i {
+            if cg_globals[gj] == gi_name {
+                gi_dup = 1
+                gj = i
+            }
+            gj = gj + 1
+        }
+        if gi_dup == 0 {
+            out("    .align 8")
+            out_label("_g_" + gi_name)
+            out("    .quad 0")
+        }
         i = i + 1
     }
 
@@ -15608,9 +15624,22 @@ fn wasm_gen_program(program) {
     // R20A: scratch for the AST_TRY_PROPAGATE inner value while we tag
     // check + decide Ok-unwrap vs Err-return.
     out("  (global $g__wasm_q_tmp (mut i64) (i64.const 0))")
+    // nova#11: dedup wasm global emissions (mirrors the x86-64 fix above).
     i = 0
     while i < cg_global_count {
-        out("  (global $g_" + cg_globals[i] + " (mut i64) (i64.const 0))")
+        let wgi_name = cg_globals[i]
+        let wgi_dup = 0
+        let wgj = 0
+        while wgj < i {
+            if cg_globals[wgj] == wgi_name {
+                wgi_dup = 1
+                wgj = i
+            }
+            wgj = wgj + 1
+        }
+        if wgi_dup == 0 {
+            out("  (global $g_" + wgi_name + " (mut i64) (i64.const 0))")
+        }
         i = i + 1
     }
     out("")
