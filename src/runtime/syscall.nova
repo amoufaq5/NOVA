@@ -2,22 +2,45 @@
 // Each function uses inline assembly to execute the syscall instruction.
 // Parameters are at [rbp-8], [rbp-16], [rbp-24], [rbp-32], [rbp-40], [rbp-48].
 
+// nova#10: `buf` is tag-polymorphic — a NOVA `alloc()` buffer arrives
+// tagged (`(raw<<1)|1`), a raw-pointer caller passes raw. Test the LSB
+// and untag only when set. `count` from a literal is tagged, so always
+// `sar rdx, 1`. `fd` is passed through to the kernel as-is (sys_open
+// returns raw fd — preserving that convention avoids a cascading
+// retag of sys_close / sys_lseek / sys_fstat / sys_fsync / sys_pread /
+// sys_pwrite / sys_fdatasync / sys_ftruncate). Return left raw:
+// callers check `n < 0`, which works for both raw byte count and raw
+// -errno. Mirrors the Bug #12 R11-a `sys_open` fix for buf/count.
 fn sys_read(fd, buf, count) {
     asm {
         "mov rax, 0"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
+        "test rsi, 1"
+        "jz .sr_ub"
+        "sar rsi, 1"
+        ".sr_ub:"
         "mov rdx, [rbp-24]"
+        "sar rdx, 1"
         "syscall"
     }
 }
 
+// nova#10: same untag discipline for sys_write — tagged `buf` from
+// alloc walks to a bogus address and short-writes; tagged `count`
+// writes 2*n+1 bytes starting at a raw literal address (NOVA Bug #5
+// documented in io.nova's io_eprint comment).
 fn sys_write(fd, buf, count) {
     asm {
         "mov rax, 1"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
+        "test rsi, 1"
+        "jz .sw_ub"
+        "sar rsi, 1"
+        ".sw_ub:"
         "mov rdx, [rbp-24]"
+        "sar rdx, 1"
         "syscall"
     }
 }
