@@ -18641,6 +18641,36 @@ fn gen_runtime() {
         // execve. Shells and most POSIX programs expect to find PATH etc.
         // in their environment — `#!/usr/bin/env bash` fails with no PATH.
         out("    mov rdx, [rip + _g___envp]")
+        // nova#12: `path` (rdi), `argv` (rsi), and each `argv[i]` are
+        // tag-polymorphic. String LITERALS compile to raw addresses
+        // (`lea rax, [rip + _str_N]`); NOVA-variable strings and
+        // alloc'd buffers arrive tagged (`(raw<<1)|1`). execve needs raw
+        // for all of them. Test the LSB; untag only when set.
+        //
+        // Destructive mutation of argv is safe: execve either replaces
+        // the process (success) or the caller's NOVA frame returns -1
+        // and drops out of scope (failure) — no caller re-reads argv.
+        out("    test rdi, 1")
+        out("    jz .exec_path_ok")
+        out("    sar rdi, 1")
+        out(".exec_path_ok:")
+        out("    test rsi, 1")
+        out("    jz .exec_argv_ok")
+        out("    sar rsi, 1")
+        out(".exec_argv_ok:")
+        out("    mov r8, rsi")
+        out(".exec_argv_untag:")
+        out("    mov r9, [r8]")
+        out("    test r9, r9")
+        out("    jz .exec_argv_done")
+        out("    test r9, 1")
+        out("    jz .exec_argvi_ok")
+        out("    sar r9, 1")
+        out("    mov [r8], r9")
+        out(".exec_argvi_ok:")
+        out("    add r8, 8")
+        out("    jmp .exec_argv_untag")
+        out(".exec_argv_done:")
         emit_syscall(59)
         out("    ret")
     }

@@ -1,0 +1,36 @@
+// nova#12 regression: _nova_exec's Linux branch must untag the path
+// pointer (rdi), the argv pointer (rsi), and every argv[i] string
+// pointer before calling execve.
+//
+// Before the fix: NOVA callers pass tagged pointers for all three;
+// execve walks to bogus addresses and returns EFAULT. After nova#9
+// envp was already fixed, but the exec'd program still never
+// started because the path+argv untag was missing.
+//
+// Test strategy: exec /bin/sh -c 'test -n "$PATH"' from main. If
+// path/argv untag + envp inheritance all work, sh runs with the
+// inherited environment:
+//   * PATH set -> `test -n "$PATH"` succeeds -> sh exits 0.
+//   * PATH empty (envp=NULL regression) -> sh exits 1.
+//   * exec itself fails (path/argv tag regression) -> we fall
+//     through to exit(99).
+
+fn build_argv(items) {
+    let n = len(items)
+    let argv = alloc((n + 1) * 8)
+    let i = 0
+    while i < n {
+        store64(argv + i * 8, items[i])
+        i = i + 1
+    }
+    store64(argv + n * 8, 0)
+    return argv
+}
+
+fn main() {
+    let argv = build_argv(["/bin/sh", "-c", "test -n \"$PATH\""])
+    exec_program("/bin/sh", argv)
+    exit(99)
+}
+
+main()
