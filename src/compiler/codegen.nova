@@ -18458,6 +18458,13 @@ fn gen_runtime() {
         out("    pop rbp")
     } else {
         emit_syscall(57)
+        // nova#7: tag-wrap the raw kernel return before handing to NOVA.
+        // Without this, `if pid == 0` (tagged 0 = raw 1) mis-fires: the
+        // child's raw 0 != raw 1 so both branches run parent code.
+        // Precedent: _nova_sys_getsockopt_so_error above uses the same
+        // lea-shift to tag. (-1<<1)|1 == -1 so error-path `pid < 0` still
+        // works.
+        out("    lea rax, [rax + rax + 1]")
     }
     out("    ret")
 
@@ -18496,6 +18503,9 @@ fn gen_runtime() {
         out("    push rbp")
         out("    mov rbp, rsp")
         out("    sub rsp, 16")
+        // nova#7: _nova_fork now returns a tagged pid, so callers of
+        // waitpid pass tagged. Untag rdi before the syscall needs it raw.
+        out("    sar rdi, 1")
         out("    lea rsi, [rbp - 8]")
         out("    xor edx, edx")
         out("    xor r10d, r10d")
@@ -18503,6 +18513,9 @@ fn gen_runtime() {
         out("    mov eax, [rbp - 8]")
         out("    shr eax, 8")
         out("    and eax, 255")
+        // Tag the exit-status return so NOVA callers can compare it with
+        // tagged literals (e.g. `status == 0`).
+        out("    lea rax, [rax + rax + 1]")
         out("    mov rsp, rbp")
         out("    pop rbp")
         out("    ret")
@@ -18748,7 +18761,13 @@ fn gen_runtime() {
         out("    pop rdi")
         out("    pop rbp")
     } else {
+        // nova#7: fork returns tagged pid; untag before syscall. sig is
+        // also passed as a tagged literal (e.g. `kill_proc(pid, 9)`).
+        out("    sar rdi, 1")
+        out("    sar rsi, 1")
         emit_syscall(62)
+        // Tag the 0 / -1 return so NOVA callers see a tagged int.
+        out("    lea rax, [rax + rax + 1]")
     }
     out("    ret")
 
