@@ -1,0 +1,50 @@
+// nova#10 regression: sys_read / sys_write must accept a tagged `buf`
+// (as returned by `alloc`) and untag it before the syscall needs a raw
+// pointer. Before the fix, `buf` reached rsi still tagged
+// (`(raw<<1)|1`), so the kernel walked to a bogus address and either
+// short-read into nothing or returned EFAULT. The fix adds the same
+// tag-polymorphic prolog `sys_open` already carries (Bug #12 R11-a).
+//
+// Test: create a file via sys_open+O_CREAT|O_WRONLY, sys_write a known
+// string from an alloc buffer, close, reopen read-only, sys_read into
+// a fresh alloc buffer, check byte-for-byte match.
+
+fn main() {
+    let path = "/tmp/nova10_rw.dat"
+
+    // O_WRONLY | O_CREAT | O_TRUNC = 0x241. Mode 0644 = 420.
+    let wfd = sys_open(path, 577, 420)
+    assert(wfd >= 0)
+
+    let payload = "nova-syscall-roundtrip"
+    let n_payload = str_len(payload)
+    let wbuf = alloc(n_payload + 1)
+    let i = 0
+    while i < n_payload {
+        store8(wbuf + i, char_at(payload, i))
+        i = i + 1
+    }
+    let wn = sys_write(wfd, wbuf, n_payload)
+    assert(wn == n_payload)
+    sys_close(wfd)
+
+    // Reopen read-only, read into a fresh tagged buffer.
+    let rfd = sys_open(path, 0, 0)
+    assert(rfd >= 0)
+    let rbuf = alloc(64)
+    let rn = sys_read(rfd, rbuf, 63)
+    sys_close(rfd)
+    assert(rn == n_payload)
+
+    i = 0
+    while i < n_payload {
+        let b = load8(rbuf + i)
+        assert(b == char_at(payload, i))
+        i = i + 1
+    }
+
+    sys_unlink(path)
+    println("PASS test_nova10_sys_read_untag")
+}
+
+main()
