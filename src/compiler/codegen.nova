@@ -18635,7 +18635,12 @@ fn gen_runtime() {
         out("    pop rbp")
         out("    ret")
     } else {
-        out("    mov rdx, 0")
+        // nova#9: inherit the parent envp by default rather than passing
+        // envp=NULL. _start saves the parent's envp into _g___envp at
+        // startup (see codegen.nova:10916), so we thread that through to
+        // execve. Shells and most POSIX programs expect to find PATH etc.
+        // in their environment — `#!/usr/bin/env bash` fails with no PATH.
+        out("    mov rdx, [rip + _g___envp]")
         emit_syscall(59)
         out("    ret")
     }
