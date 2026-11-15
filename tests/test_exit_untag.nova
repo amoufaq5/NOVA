@@ -1,0 +1,33 @@
+// exit(N) must exit with status N. The shim used to pass the tagged value
+// straight through, so exit(7) reported 15 and exit(0) reported 1.
+//
+// Forks two children that exit(7) and exit(0); waitpid returns their
+// exit status (tagged since #14), so the parent compares directly.
+
+fn child_status(code) {
+    let pid = fork_process()
+    if pid == 0 {
+        exit(code)
+    }
+    return waitpid(pid)
+}
+
+fn main() {
+    let s7 = child_status(7)
+    if s7 != 7 {
+        print("exit(7) reported ")
+        print_int(s7)
+        println("")
+        exit(1)
+    }
+    let s0 = child_status(0)
+    if s0 != 0 {
+        print("exit(0) reported ")
+        print_int(s0)
+        println("")
+        exit(1)
+    }
+    println("PASS test_exit_untag")
+}
+
+main()

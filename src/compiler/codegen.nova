@@ -22216,6 +22216,10 @@ fn gen_runtime() {
     out_label("write_file")
     out("    jmp _nova_write_file")
     out_label("exit")
+    // User exit(N) passes a tagged int; untag so the process exits N, not
+    // 2N+1. _nova_exit stays raw: the runtime's own error paths call it
+    // directly with `mov rdi, 1`.
+    out("    sar rdi, 1")
     out("    jmp _nova_exit")
     out_label("chr")
     out("    jmp _nova_chr")
