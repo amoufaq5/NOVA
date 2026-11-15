@@ -1,0 +1,34 @@
+// accept_conn(fd, 0, 0) must accept the connection. The tagged literal 0
+// used to reach the kernel as addr=1 / addrlen=1, so accept returned
+// EFAULT (-14) and dropped the connection.
+//
+// Listens on 127.0.0.1:47123, forks a child that connects and sends "hi",
+// and the parent accepts and reads the two bytes.
+
+fn main() {
+    let ip = int_add(127, int_mul(1, 16777216))
+    let fd = socket(2, 1, 0)
+    if fd < 0 { exit(2) }
+    sys_setsockopt_so_reuseaddr(fd)
+    if bind_socket(fd, make_sockaddr_in(47123, ip), 16) < 0 { exit(3) }
+    if listen_socket(fd, 4) < 0 { exit(4) }
+    let pid = fork_process()
+    if pid == 0 {
+        let c = socket(2, 1, 0)
+        connect_socket(c, make_sockaddr_in(47123, ip), 16)
+        send_data(c, "hi", 2)
+        close_fd(c)
+        exit(0)
+    }
+    let conn = accept_conn(fd, 0, 0)
+    waitpid(pid)
+    if conn < 0 { exit(1) }
+    let buf = alloc(16)
+    let n = recv_data(conn, buf, 16)
+    close_fd(conn)
+    close_fd(fd)
+    if n != 2 { exit(5) }
+    println("PASS test_accept_null_addr")
+}
+
+main()
