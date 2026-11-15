@@ -22366,8 +22366,20 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
     out_label("accept_conn")
-    // rdi=fd (tagged); addr/addrlen args stay raw.
+    // rdi=fd (tagged); addr/addrlen args stay raw pointers. Every caller
+    // writes `accept_conn(fd, 0, 0)` meaning "don't report the peer", but
+    // the literal 0 is tagged (raw 1), so the kernel got addr=1 /
+    // addrlen=1, failed the peer-address copy-out with EFAULT, and dropped
+    // the accepted connection. Map tagged-0 to NULL, as store64 does.
     out("    sar rdi, 1")
+    out("    cmp rsi, 1")
+    out("    jne .acc_addr_ok")
+    out("    xor esi, esi")
+    out(".acc_addr_ok:")
+    out("    cmp rdx, 1")
+    out("    jne .acc_len_ok")
+    out("    xor edx, edx")
+    out(".acc_len_ok:")
     out("    push rbp")
     out("    mov rbp, rsp")
     out("    call _nova_accept")
