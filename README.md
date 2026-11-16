@@ -35,17 +35,18 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 
 | | |
 |---|---|
-| **Status** | Self-hosting verified (`stage2.s == stage3.s`) |
-| **Version** | 4.2.0 |
+| **Status** | Self-hosting verified (`stage2.s == stage3.s`), checked in CI (`.github/workflows/test.yml`) |
+| **Version** | 0.1.0 (`VERSION`); no tagged releases yet. `src/version.nova` and the launcher report other numbers (0.2.0, 0.9.0) -- to be unified |
 | **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) |
-| **Compiler** | 16,467 lines of Nova (lexer, parser, AST, IR, register allocator, x86-64 lowering, codegen) |
+| **Compiler** | Lexer, parser, AST and an AST-walking codegen. `ir.nova`, `regalloc.nova` and `lower_x64.nova` are compiled in but not called |
 | **Core Types** | 5,306 lines (moment, signal, node, channel, path, similarity, soul, system, belief, goal, safety, imagination, concept) |
 | **Mind Systems** | 2,800 lines (academic, experiential, emotion, memory, reasoning) |
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
 | **Tests** | 197 in `tests/run_tests.sh`: 136 pass, 54 fail, 7 skip (failures listed in `tests/known_failures.txt`) |
-| **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64-Linux, Windows ARM64 (PE32+ AArch64) |
+| **Targets** | Linux x86-64 (tested). macOS x86-64, Windows x86-64 and Windows ARM64 assemble but are not run in CI; WebAssembly runs hello-world but miscompiles string `+`; ARM64-Linux stubs unsupported AST nodes to 0 |
+| **Known issues** | Type annotations are parsed and erased (no type checking); no bounds checks; several documented features miscompile (enum values, `let [a,b]` destructuring, maps past 16 keys). See `tests/known_failures.txt` |
 
 ---
 
@@ -53,7 +54,7 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 
 Nova is a compiled programming language designed for building AGI systems through **Moment-Signal Computing** -- a paradigm where cognition emerges from signals flowing through specialized processing nodes. Nova compiles to native x86-64 machine code via direct Linux and Windows syscalls with no C library, no garbage collector, and no runtime interpreter.
 
-The language is **fully self-hosting**: the Nova compiler is written in Nova, bootstrapped from handwritten x86-64 assembly. The resulting native binary compiles its own source code to produce byte-identical output -- a verified fixed point.
+The language is **fully self-hosting**: the Nova compiler is written in Nova and compiles its own source to byte-identical output -- a verified fixed point. The original bootstrap was hand-written x86-64 assembly (about 7,400 lines); since 23 May the committed seed `boot/nova_boot.s` is compiler-generated output (about 106,000 lines) and lags the current compiler.
 
 **New in v4.0:** SSE2-vectorized SIMD operations, tiled matrix multiplication for cache efficiency, OpenBLAS FFI for large matrices, a cognitive LLM pipeline with confidence annotation and episodic memory, BM25-scored n-gram embeddings for competitive RAG, and a unified embedding interface with cognitive dimensions.
 
