@@ -31,7 +31,6 @@ test_map_comp
 test_match_expression
 test_method_calls
 test_mind
-test_nova10_sys_read_untag
 test_path
 test_persistent_alloc
 test_pkg
