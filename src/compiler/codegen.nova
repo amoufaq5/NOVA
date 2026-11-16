@@ -22549,7 +22549,22 @@ fn gen_runtime() {
     out_label("random_seed")
     out("    jmp _nova_random_seed")
     out_label("secure_random")
-    out("    jmp _nova_secure_random")
+    // User secure_random(buf, n): buf is an alloc() pointer (tagged, or raw
+    // from a computed address) and n is a tagged int. Untag both before the
+    // raw runtime body, then tag the byte count it returns so callers can
+    // compare it with an int literal. Without this, getrandom saw an odd
+    // pointer and a doubled length and returned EFAULT on every call.
+    // -1 tags to -1, so the error value is unchanged.
+    out("    test rdi, 1")
+    out("    jz .sr_buf_raw")
+    out("    sar rdi, 1")
+    out(".sr_buf_raw:")
+    out("    sar rsi, 1")
+    out("    sub rsp, 8")
+    out("    call _nova_secure_random")
+    out("    add rsp, 8")
+    out("    lea rax, [rax + rax + 1]")
+    out("    ret")
     // R8A: low-level WASI primitives. Native (Linux x86-64) maps to
     // POSIX syscalls; WASM target wraps wasi_snapshot_preview1 imports.
     // Non-Linux native targets reach these labels too -- the runtime

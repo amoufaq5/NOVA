@@ -1,0 +1,37 @@
+// secure_random(buf, n) must fill n bytes and return n. The shim used to
+// pass buf and n tagged to getrandom, so the kernel saw a misaligned
+// pointer and a doubled length and returned EFAULT on every call.
+//
+// Checks via exit codes (not assert) so the test can fail on its own.
+
+fn main() {
+    let a = alloc(33)
+    let got = secure_random(a, 32)
+    if got != 32 {
+        print("secure_random(a, 32) returned ")
+        print_int(got)
+        println("")
+        exit(1)
+    }
+    let b = alloc(33)
+    if secure_random(b, 32) != 32 { exit(2) }
+    let differ = 0
+    let nonzero = 0
+    let i = 0
+    while i < 32 {
+        if load8(a + i) != load8(b + i) { differ = 1 }
+        if load8(a + i) != 0 { nonzero = 1 }
+        i = i + 1
+    }
+    if differ == 0 { println("two fills identical") exit(3) }
+    if nonzero == 0 { println("fill left buffer zero") exit(4) }
+    // The guard byte past the requested length must stay untouched
+    // (a doubled length would overwrite it).
+    let c = alloc(64)
+    store8(c + 16, 77)
+    if secure_random(c, 16) != 16 { exit(5) }
+    if load8(c + 16) != 77 { println("wrote past n bytes") exit(6) }
+    println("PASS test_secure_random_untag")
+}
+
+main()
