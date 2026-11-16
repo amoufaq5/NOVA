@@ -1,28 +1,41 @@
 // Nova Runtime: Linux x86-64 syscall wrappers
+//
+// Tagging convention (ADR 0010: shims untag, the kernel sees raw values):
+//   - fd arguments are passed through raw: sys_open returns a raw fd and
+//     every caller threads it straight back in.
+//   - path / buffer arguments are tag-polymorphic: a string literal arrives
+//     raw, a NOVA string variable or alloc() buffer arrives tagged; untag
+//     only when the low bit is set.
+//   - integer arguments (count, mode, offset, whence, size, length) are
+//     always tagged NOVA ints and are untagged unconditionally.
+//   - results of read / write / lseek / pread / pwrite / getcwd / mkdir /
+//     unlink / fstat / ftruncate are tagged when >= 0 (so `n == len(x)`,
+//     `n == 0` and arithmetic work) and left raw when negative (-errno),
+//     which keeps `n < 0` checks working. sys_open / sys_close stay raw.
+// Before this, sys_read / sys_write returned raw byte counts (22 read as
+// 11), and mkdir / unlink / lseek / pread / pwrite / ftruncate / getcwd /
+// fstat passed tagged arguments straight to the kernel.
 // Each function uses inline assembly to execute the syscall instruction.
 // Parameters are at [rbp-8], [rbp-16], [rbp-24], [rbp-32], [rbp-40], [rbp-48].
 
-// nova#10: `buf` is tag-polymorphic — a NOVA `alloc()` buffer arrives
-// tagged (`(raw<<1)|1`), a raw-pointer caller passes raw. Test the LSB
-// and untag only when set. `count` from a literal is tagged, so always
-// `sar rdx, 1`. `fd` is passed through to the kernel as-is (sys_open
-// returns raw fd — preserving that convention avoids a cascading
-// retag of sys_close / sys_lseek / sys_fstat / sys_fsync / sys_pread /
-// sys_pwrite / sys_fdatasync / sys_ftruncate). Return left raw:
-// callers check `n < 0`, which works for both raw byte count and raw
-// -errno. Mirrors the Bug #12 R11-a `sys_open` fix for buf/count.
+// nova#10: `buf` is tag-polymorphic and `count` is untagged (see the
+// convention at the top). The byte count returned is tagged when >= 0.
 fn sys_read(fd, buf, count) {
     asm {
         "mov rax, 0"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
         "test rsi, 1"
-        "jz .sr_ub"
+        "jz .ntr_u1"
         "sar rsi, 1"
-        ".sr_ub:"
+        ".ntr_u1:"
         "mov rdx, [rbp-24]"
         "sar rdx, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntr_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntr_ret:"
     }
 }
 
@@ -36,12 +49,16 @@ fn sys_write(fd, buf, count) {
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
         "test rsi, 1"
-        "jz .sw_ub"
+        "jz .ntw_u1"
         "sar rsi, 1"
-        ".sw_ub:"
+        ".ntw_u1:"
         "mov rdx, [rbp-24]"
         "sar rdx, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntw_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntw_ret:"
     }
 }
 
@@ -81,8 +98,14 @@ fn sys_lseek(fd, offset, whence) {
         "mov rax, 8"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
+        "sar rsi, 1"
         "mov rdx, [rbp-24]"
+        "sar rdx, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntl_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntl_ret:"
     }
 }
 
@@ -128,8 +151,17 @@ fn sys_getcwd(buf, size) {
     asm {
         "mov rax, 79"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .ntg_u0"
+        "sar rdi, 1"
+        ".ntg_u0:"
         "mov rsi, [rbp-16]"
+        "sar rsi, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntg_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntg_ret:"
     }
 }
 
@@ -137,8 +169,17 @@ fn sys_mkdir(path, mode) {
     asm {
         "mov rax, 83"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .ntm_u0"
+        "sar rdi, 1"
+        ".ntm_u0:"
         "mov rsi, [rbp-16]"
+        "sar rsi, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntm_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntm_ret:"
     }
 }
 
@@ -146,7 +187,15 @@ fn sys_unlink(path) {
     asm {
         "mov rax, 87"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .ntu_u0"
+        "sar rdi, 1"
+        ".ntu_u0:"
         "syscall"
+        "test rax, rax"
+        "js .ntu_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntu_ret:"
     }
 }
 
@@ -155,7 +204,15 @@ fn sys_fstat(fd, statbuf) {
         "mov rax, 5"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
+        "test rsi, 1"
+        "jz .ntf_u1"
+        "sar rsi, 1"
+        ".ntf_u1:"
         "syscall"
+        "test rax, rax"
+        "js .ntf_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntf_ret:"
     }
 }
 
@@ -201,9 +258,19 @@ fn sys_pread(fd, buf, count, offset) {
         "mov rax, 17"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
+        "test rsi, 1"
+        "jz .ntpr_u1"
+        "sar rsi, 1"
+        ".ntpr_u1:"
         "mov rdx, [rbp-24]"
+        "sar rdx, 1"
         "mov r10, [rbp-32]"
+        "sar r10, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntpr_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntpr_ret:"
     }
 }
 
@@ -214,9 +281,19 @@ fn sys_pwrite(fd, buf, count, offset) {
         "mov rax, 18"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
+        "test rsi, 1"
+        "jz .ntpw_u1"
+        "sar rsi, 1"
+        ".ntpw_u1:"
         "mov rdx, [rbp-24]"
+        "sar rdx, 1"
         "mov r10, [rbp-32]"
+        "sar r10, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntpw_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntpw_ret:"
     }
 }
 
@@ -238,7 +315,12 @@ fn sys_ftruncate(fd, length) {
         "mov rax, 77"
         "mov rdi, [rbp-8]"
         "mov rsi, [rbp-16]"
+        "sar rsi, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntt_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntt_ret:"
     }
 }
 

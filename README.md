@@ -44,7 +44,7 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 197 in `tests/run_tests.sh`: 136 pass, 54 fail, 7 skip (failures listed in `tests/known_failures.txt`) |
+| **Tests** | 198 in `tests/run_tests.sh`: 138 pass, 53 fail, 7 skip (failures listed in `tests/known_failures.txt`) |
 | **Targets** | Linux x86-64 (tested). macOS x86-64, Windows x86-64 and Windows ARM64 assemble but are not run in CI; WebAssembly runs hello-world but miscompiles string `+`; ARM64-Linux stubs unsupported AST nodes to 0 |
 | **Known issues** | Type annotations are parsed and erased (no type checking); no bounds checks; several documented features miscompile (enum values, `let [a,b]` destructuring, maps past 16 keys). See `tests/known_failures.txt` |
 
