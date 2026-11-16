@@ -1,0 +1,23 @@
+// assert(cond, msg) must stop the program when cond is false.
+// It used to test the raw register against 0, but tagged false is raw 1,
+// so a failing assert was a no-op and every assert in the suite was inert.
+//
+// The parent forks a child that runs assert(1 == 2, ...) and expects the
+// child to exit non-zero; a passing assert in the parent must not stop it.
+
+fn main() {
+    assert(1 == 1, "true assert must not fire")
+    let pid = fork_process()
+    if pid == 0 {
+        assert(1 == 2, "expected failure from test_assert_fires child")
+        exit(0)
+    }
+    let st = waitpid(pid)
+    if st == 0 {
+        println("false assert did not stop the child")
+        exit(1)
+    }
+    println("PASS test_assert_fires")
+}
+
+main()

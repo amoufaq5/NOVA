@@ -5149,6 +5149,12 @@ fn gen_expr(nd) {
             if argc > 3 { out("    pop rcx") }
             if argc > 4 { out("    pop r8") }
             if argc > 5 { out("    pop r9") }
+            // assert(cond) without a message: pass a null message so a
+            // failing assert prints a default instead of dereferencing
+            // whatever was left in rsi.
+            if callee_name == "assert" {
+                if argc == 1 { out("    xor esi, esi") }
+            }
             // R13A: inline SIMD intrinsic call sites on Linux x86-64.
             // Eliminates the call/ret + push rbp/pop rbp overhead that
             // dominated wallclock at small lane counts (~49 lanes per
@@ -19035,8 +19041,16 @@ fn gen_runtime() {
     // --- assert(condition, message) ---
     out("")
     out_label("_nova_assert")
-    out("    test rdi, rdi")
-    out("    jnz .assert_ok")
+    // Same truthiness as `if`: raw 0 (null) and tagged false/0 (raw 1) are
+    // falsy, so fail when rdi < 2 unsigned. The old `test rdi, rdi` only
+    // caught raw 0, so assert(1 == 2, ...) never fired.
+    out("    cmp rdi, 2")
+    out("    jae .assert_ok")
+    // assert(cond) with no message: the call site passes rsi = 0.
+    out("    test rsi, rsi")
+    out("    jnz .assert_has_msg")
+    out("    lea rsi, [rip + _err_assert_nomsg]")
+    out(".assert_has_msg:")
     out("    push rsi")
     out("    lea rdi, [rip + _err_assert_prefix]")
     out("    call _nova_print_str")
@@ -23741,6 +23755,9 @@ fn gen_runtime() {
     out("    .align 2")
     out_label("_err_assert_prefix")
     out("    .asciz " + DQ + "Assertion failed: " + DQ)
+    out("    .align 2")
+    out_label("_err_assert_nomsg")
+    out("    .asciz " + DQ + "(no message)" + DQ)
     out("    .align 2")
     out_label("_err_uncaught")
     out("    .asciz " + DQ + "Uncaught exception" + DQ)
