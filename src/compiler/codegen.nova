@@ -22341,7 +22341,15 @@ fn gen_runtime() {
     out("    lea rax, [rax + rax + 1]")    // tag returned address (raw buffers are tagged addresses)
     out("    ret")
     out_label("time")
-    out("    jmp _nova_time")
+    // time() returns epoch seconds as a tagged NOVA int. The runtime body
+    // returns the raw count, which NOVA read as half (now ~= 1998), so any
+    // comparison with a real timestamp (certificate validity, deadlines)
+    // was wrong. Differences between two time() calls were only scaled.
+    out("    sub rsp, 8")
+    out("    call _nova_time")
+    out("    add rsp, 8")
+    out("    lea rax, [rax + rax + 1]")
+    out("    ret")
     out_label("sleep_ms")
     out("    jmp _nova_sleep_ms")
     out_label("mkdir")

@@ -1,0 +1,22 @@
+// time() must return epoch seconds as a NOVA int. It used to return the raw
+// count, which NOVA read as half, so time() looked like a date in 1998.
+// 1700000000 is 2023-11-14; anything after that is a sane "now".
+
+fn main() {
+    let t = time()
+    if t < 1700000000 {
+        print("time() returned ")
+        print_int(t)
+        println(" (too small)")
+        exit(1)
+    }
+    if t > 4102444800 {          // 2100-01-01
+        println("time() too large")
+        exit(2)
+    }
+    let t2 = time()
+    if t2 < t { exit(3) }
+    println("PASS test_time_epoch")
+}
+
+main()
