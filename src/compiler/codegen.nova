@@ -19920,10 +19920,15 @@ fn gen_runtime() {
     out("    inc rdi")
     out("    jmp .hk_str_loop")
     out(".hk_int:")
+    // Mix the int (multiply by 2^64/phi, fold the high half down): the
+    // table index is hash mod a power-of-two capacity, so an identity hash
+    // put keys that are multiples of 2^k into one probe cluster.
     out("    mov rax, rdi")
-    out("    test rax, rax")
-    out("    jns .hk_done")
-    out("    neg rax")
+    out("    mov rcx, 0x9E3779B97F4A7C15")
+    out("    imul rax, rcx")
+    out("    mov rcx, rax")
+    out("    shr rcx, 32")
+    out("    xor rax, rcx")
     out(".hk_done:")
     out("    ret")
 
@@ -19987,7 +19992,8 @@ fn gen_runtime() {
     out("    pop rbp")
     out("    ret")
 
-    // --- _nova_map_grow(map): double capacity and rehash live entries ---
+    // --- _nova_map_grow(map): rehash live entries, doubling capacity when
+    //     the live count needs it ---
     out("")
     out_label("_nova_map_grow")
     out("    push rbp")
@@ -20001,7 +20007,17 @@ fn gen_runtime() {
     out("    mov r12, rdi")
     out("    mov r13, [r12 + 24]")
     out("    mov r14, [r12 + 16]")
-    out("    lea rdi, [r14 + r14]")
+    // Double only if live entries alone would pass half the table;
+    // otherwise the load is mostly tombstones and a same-size rehash
+    // clears them (set/remove churn must not grow the table forever).
+    out("    mov rdi, r14")
+    out("    mov rax, [r12 + 8]")
+    out("    inc rax")
+    out("    shl rax, 1")
+    out("    cmp rax, r14")
+    out("    jle .mgr_same")
+    out("    shl rdi, 1")
+    out(".mgr_same:")
     out("    mov [r12 + 16], rdi")
     out("    imul rdi, rdi, 24")
     out("    mov [rsp], rdi")

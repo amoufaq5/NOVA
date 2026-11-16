@@ -1,0 +1,20 @@
+// nanotime() must not depend on its own local slots: a program-level
+// global named like one of them (here `ts`) turned the local into a global
+// access and nanotime() segfaulted.
+import "std/syscall"
+import "std/alloc"
+import "std/string"
+import "std/io"
+
+let ts = 5
+
+fn _n2g_main() {
+    let a = nanotime()
+    let b = nanotime()
+    assert(a > 0, "nanotime positive")
+    assert(b >= a, "nanotime monotonic")
+    assert(ts == 5, "global untouched")
+    println("PASS")
+}
+
+_n2g_main()

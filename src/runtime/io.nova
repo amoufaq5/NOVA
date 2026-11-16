@@ -294,17 +294,20 @@ fn _raw_imul_add(a, b, c) {
 }
 
 fn nanotime() {
-    let ts = alloc(16)
-    _sys_clock_gettime_monotonic(ts)
-    // sec * 1e9 + nsec computed on raw words in asm (load64 hands back
-    // raw words and a NOVA literal 1000000000 would be tagged), then
-    // tagged for the implicit return. Slot layout: ts = [rbp-8].
+    // clock_gettime(CLOCK_MONOTONIC) into a 16-byte stack buffer, then
+    // sec * 1e9 + nsec on raw words and tag the result for the implicit
+    // return. No NOVA locals: a program-level global with the same name
+    // as a local here would turn the local into a global access.
     asm {
-        "mov rcx, [rbp - 8]"
-        "sar rcx, 1"
-        "mov rax, [rcx]"
+        "sub rsp, 16"
+        "mov rax, 228"
+        "mov edi, 1"
+        "mov rsi, rsp"
+        "syscall"
+        "mov rax, [rsp]"
         "imul rax, rax, 1000000000"
-        "add rax, [rcx + 8]"
+        "add rax, [rsp + 8]"
+        "add rsp, 16"
         "lea rax, [rax + rax + 1]"
     }
 }
