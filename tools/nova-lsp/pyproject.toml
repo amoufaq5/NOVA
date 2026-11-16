@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Language Server Protocol implementation for the Nova programming language."
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "Nova Language Authors" }]
 keywords = ["nova", "lsp", "language-server"]
 classifiers = [

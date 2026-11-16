@@ -1236,10 +1236,7 @@ Lexer (src/compiler/lexer.nova)        -- characters to tokens
 Parser (src/compiler/parser.nova)      -- tokens to AST
     |
     v
-IR (src/compiler/ir.nova)             -- AST to intermediate representation
-    |
-    v
-Codegen (src/compiler/codegen.nova)    -- IR to x86-64 assembly
+Codegen (src/compiler/codegen.nova)    -- AST to x86-64 / ARM64 / WASM assembly
     |
     v
 Assembler + Linker (as, ld)           -- assembly to ELF binary
@@ -1551,34 +1548,10 @@ fn main() {
 main()
 ```
 
-### OpenBLAS for Large Matrices
+### OpenBLAS for Large Matrices (removed)
 
-```nova
-import "std/blas"
-import "std/tensor"
-
-fn main() {
-    blas_init()
-    if blas_available() == 1 {
-        println("OpenBLAS detected -- using cblas_dgemm")
-        let a = tensor_new(100, 100)
-        let b = tensor_new(100, 100)
-        // Fill matrices...
-        let c = blas_matmul(a, b)  // calls cblas_dgemm via FFI
-        println("100x100 matmul complete")
-    } else {
-        println("No BLAS found -- using Nova's tiled matmul")
-        let a = tensor_new(100, 100)
-        let b = tensor_new(100, 100)
-        let c = tensor_matmul(a, b)  // uses 32x32 tiled multiply
-        println("100x100 matmul complete (tiled)")
-    }
-}
-
-main()
-```
-
----
+The OpenBLAS bridge (`std/blas`) was never wired into the compiler and has been
+removed (audit F-33). `tensor_matmul` uses the built-in tiled implementation.
 
 ## 14. Foreign Function Interface
 
@@ -1606,21 +1579,10 @@ fn main() {
 main()
 ```
 
-### Python Interop
+### Python Interop (removed)
 
-```nova
-import "std/python"
-
-fn main() {
-    py_init()
-    py_exec("import json")
-    py_exec("data = json.dumps({'name': 'Nova', 'version': '4.1'})")
-    let result = py_eval("data")
-    println("From Python: " + result)
-}
-
-main()
-```
+The Python bridge (`std/python`) was removed with the other unused bridges
+(audit F-33). Call external programs with `exec_program` instead.
 
 ## 15. IEEE 754 Float Utilities (v4.2)
 

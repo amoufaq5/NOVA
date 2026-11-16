@@ -54,8 +54,8 @@ output compiles its own source again to byte-identical assembly).
                   │             (R23A + R24A)                │
                   │                  │                       │
                   │                  ▼                       │
-                  │   codegen (AST walker; per-target paths   │
-                  │   for x86-64, ARM64, WASM inside it)      │
+                  │   codegen (AST walker; x86-64, ARM64     │
+                  │   and WASM paths all live inside it)     │
                   └───┬────────────┬───────────────┬─────────┘
                       │            │               │
        ┌──────────────┴──┐    ┌────┴─────┐    ┌────┴──────┐
@@ -70,8 +70,8 @@ output compiles its own source again to byte-identical assembly).
                   ┌────────────────────────────────────────┐
                   │             src/runtime/                 │
                   │  alloc · string · math · simd · tensor   │
-                  │  json · http · scheduler · io · syscall  │
-                  │  ffi · gpu · llm · embedding · ...       │
+                  │  json · scheduler · io · syscall · ffi   │
+                  │  embedding · confidence · ...            │
                   └────────────────────────────────────────┘
                               │
                               ▼
@@ -133,7 +133,7 @@ src/
 │   ├── codegen.nova  20,064 lines  — x86-64 codegen (the big one)
 │   └── compiler.nova    808 lines  — top-level driver
 ├── runtime/           Built-in runtime modules (~7,700 lines NOVA)
-│   └── 40 modules (alloc, simd, tensor, json, http, ...)
+│   └── 34 modules (alloc, simd, tensor, json, ffi, ...)
 ├── core/              Cognitive primitives (moments, signals, ...)
 │   └── 20 modules (moment, signal, node, soul, system, belief, ...)
 ├── mind/              Whole-mind orchestrations

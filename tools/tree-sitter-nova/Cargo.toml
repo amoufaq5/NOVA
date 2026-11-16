@@ -2,7 +2,7 @@
 name = "tree-sitter-nova"
 description = "tree-sitter grammar for the NOVA programming language"
 version = "0.1.0"
-license = "MIT"
+license = "Apache-2.0"
 readme = "README.md"
 keywords = ["incremental", "parsing", "tree-sitter", "nova"]
 categories = ["parsing", "text-editors"]

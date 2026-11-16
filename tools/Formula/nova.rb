@@ -26,7 +26,7 @@
 class Nova < Formula
   desc "Self-hosting Nova programming language compiler"
   homepage "https://github.com/nova-lang/nova"
-  license "MIT"
+  license "Apache-2.0"
   version "0.1.0"
 
   # Per-platform tarball URLs. Each block ships the same canonical

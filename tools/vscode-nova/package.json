@@ -4,7 +4,7 @@
   "description": "NOVA programming language support for Visual Studio Code: syntax highlighting, LSP client (nova-lsp), and DAP debugger (nova-dap), bundled into a single installable extension.",
   "version": "0.1.0",
   "publisher": "crossengin",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.85.0"
   },

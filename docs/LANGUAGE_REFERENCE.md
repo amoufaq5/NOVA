@@ -1189,10 +1189,6 @@ memory via `alloc`. Tensors are 4-element lists: `[rows, cols, cols, data_ptr]`.
 - **ML ops**: `tensor_relu`, `tensor_softmax`, `tensor_cosine_sim`, `tensor_transpose`
 - **Matrix multiply dispatch**: tiled (32x32 blocks) for >= 64 cols, transpose+dot for smaller
 
-### `src/runtime/blas.nova`
-OpenBLAS FFI wrapper for high-performance matrix multiplication on large matrices.
-Auto-detects `libopenblas.so` or `libblas.so` at runtime.
-`blas_init`, `blas_available`, `blas_matmul`
 
 ### `src/runtime/embedding.nova`
 Three-tier embedding system for competitive RAG:
@@ -1209,20 +1205,12 @@ Confidence-annotated values for uncertainty-aware computation:
 Foreign function interface for calling C shared libraries at runtime:
 `ffi_open(path)`, `ffi_sym(lib, name)`, `ffi_call(fn, arg)`, `ffi_call2(fn, a, b)`, `ffi_call3(fn, a, b, c)`, `ffi_close(lib)`
 
-### `src/runtime/python.nova`
-Bidirectional Python bridge via libpython FFI:
-`py_init`, `py_exec(code)`, `py_eval(expr)`, `py_import(module)`, `py_call(fn, args)`, `py_getattr(obj, name)`, `py_list_len(list)`, `py_list_get(list, idx)`
 
-### `src/runtime/llm.nova`
-LLM model loading and text generation via C bridge to llama.cpp:
-`llm_load_model(path)`, `llm_new_context(model, n_ctx)`, `llm_generate(ctx, prompt, max_tokens)`, `llm_tokenize(ctx, text)`, `llm_embedding_dim(model)`, `llm_get_embeddings(ctx, buf, size)`, `llm_free_context(ctx)`, `llm_free_model(model)`
 
 ### `src/runtime/mem.nova`
 IEEE 754 double-precision memory operations:
 `mem_read_f64(addr)`, `mem_write_f64(addr, val)`, `float_add`, `float_sub`, `float_mul`, `float_div`, `float_cmp`, `fsqrt`
 
-### `src/runtime/gpu.nova`
-GPU compute interface for offloading tensor operations.
 
 ### `src/agent/cognitive_llm.nova`
 Cognitive LLM pipeline integrating LLM generation with Nova's cognitive architecture:

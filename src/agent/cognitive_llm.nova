@@ -2,11 +2,11 @@
 // LLM generation with symbolic reasoning, confidence annotation,
 // and episodic memory integration.
 //
-// This is Nova's differentiator: not just wrapping llama.cpp, but
-// routing LLM output through Nova's cognitive architecture.
+// Text is routed through confidence annotation and an episodic history.
+// There is no model backend: the llama.cpp bridge (std/llm) was never
+// wired up and was removed (audit F-33).
 //
 // Requires: import "std/confidence"
-// Optional: import "std/llm" (for actual LLM generation)
 
 let _cllm_history = 0
 let _cllm_history_count = 0

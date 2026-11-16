@@ -81,8 +81,8 @@ The seven operators are `~>` (forward), `<~` (backward), `=>>`
 
 | Path           | What it holds                                                        |
 |----------------|---------------------------------------------------------------------|
-| `src/compiler` | The NOVA compiler in NOVA: lexer, parser, AST, IR, regalloc, x86-64 lowering, codegen. |
-| `src/runtime`  | Runtime: syscalls, arena allocator, strings, I/O, scheduler, SIMD, tensor/BLAS, FFI.   |
+| `src/compiler` | The NOVA compiler in NOVA: lexer, parser, AST, codegen (x86-64 / ARM64 / WASM). |
+| `src/runtime`  | Runtime: syscalls, arena allocator, strings, I/O, scheduler, SIMD, tensor, FFI.        |
 | `src/core`     | Core cognitive types: moment, signal, node, channel, path, soul, system, belief, goal. |
 | `src/mind`     | Mind systems: academic/experiential learning, emotion, memory, reasoning.              |
 | `src/agent`    | Cognitive agent, multi-loop pipeline, RAG, LLM preprocessing.                          |

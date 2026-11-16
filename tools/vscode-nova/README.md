@@ -237,4 +237,4 @@ What this v0.1.0 extension explicitly does NOT do, and what's planned:
 
 ## License
 
-MIT. See the root `LICENSE` file in the NOVA repository.
+Apache-2.0. See the root `LICENSE` file in the NOVA repository.
