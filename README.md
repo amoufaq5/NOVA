@@ -44,7 +44,7 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
-| **Tests** | 182 tests (176 pass, 6 skip) |
+| **Tests** | 197 in `tests/run_tests.sh`: 136 pass, 54 fail, 7 skip (failures listed in `tests/known_failures.txt`) |
 | **Targets** | Linux x86-64, macOS x86-64, WebAssembly (WASI), Windows x86-64, ARM64-Linux, Windows ARM64 (PE32+ AArch64) |
 
 ---
