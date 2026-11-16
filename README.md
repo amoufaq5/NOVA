@@ -38,10 +38,10 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 | **Status** | Self-hosting verified (`stage2.s == stage3.s`), checked in CI (`.github/workflows/test.yml`) |
 | **Version** | 0.1.0 (`VERSION`); no tagged releases yet. `src/version.nova` and the launcher report other numbers (0.2.0, 0.9.0) -- to be unified |
 | **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) |
-| **Compiler** | Lexer, parser, AST and an AST-walking codegen. `ir.nova`, `regalloc.nova` and `lower_x64.nova` are compiled in but not called |
+| **Compiler** | Lexer, parser, AST and an AST-walking codegen (the unused `ir`/`regalloc`/`lower_*` files were removed, audit F-33) |
 | **Core Types** | 5,306 lines (moment, signal, node, channel, path, similarity, soul, system, belief, goal, safety, imagination, concept) |
 | **Mind Systems** | 2,800 lines (academic, experiential, emotion, memory, reasoning) |
-| **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
+| **Runtime** | `src/runtime/` (syscall, alloc, string, io, scheduler, SIMD, tensor, embedding, FFI, etc.) |
 | **Agent** | 2,151 lines (cognitive agent, cognitive LLM pipeline, RAG, preprocessing) |
 | **Total Nova** | ~68,000 lines across compiler, runtime, core, mind, agent, and package manager |
 | **Tests** | 199 in `tests/run_tests.sh`: 139 pass, 53 fail, 7 skip (failures listed in `tests/known_failures.txt`) |
@@ -56,7 +56,7 @@ Nova is a compiled programming language designed for building AGI systems throug
 
 The language is **fully self-hosting**: the Nova compiler is written in Nova and compiles its own source to byte-identical output -- a verified fixed point. The original bootstrap was hand-written x86-64 assembly (about 7,400 lines); since 23 May the committed seed `boot/nova_boot.s` is compiler-generated output (about 106,000 lines) and lags the current compiler.
 
-**New in v4.0:** SSE2-vectorized SIMD operations, tiled matrix multiplication for cache efficiency, OpenBLAS FFI for large matrices, a cognitive LLM pipeline with confidence annotation and episodic memory, BM25-scored n-gram embeddings for competitive RAG, and a unified embedding interface with cognitive dimensions.
+**New in v4.0:** SSE2-vectorized SIMD operations, tiled matrix multiplication for cache efficiency, a cognitive LLM pipeline with confidence annotation and episodic memory, BM25-scored n-gram embeddings for competitive RAG, and a unified embedding interface with cognitive dimensions.
 
 **New in v4.2:** IEEE 754 double-precision float utilities (classification, rounding, formatting, parsing, statistics), syscall-based FFI without libc (ELF parser, SYSV hash lookup, raw socket wrappers), ARM64/AArch64 code generation pass (register mapping, NEON SIMD, syscall translation), file-backed persistent allocator (mmap MAP_SHARED, checksummed header, survives arena resets), hash-accelerated O(1) function lookup in codegen, and tensor performance benchmarks.
 
@@ -80,10 +80,10 @@ What sets Nova apart is its first-class support for cognitive computing. Where o
 - **Safety/audit layer** with three permission tiers (observe, respond, full), reversibility classification, circular-buffer decision logging, one-shot override mechanism, content filtering, and rate limiting.
 - **Imagination subsystem** with a world model (entities, relations, causal patterns), forward simulation, consequence prediction, counterfactual reasoning, dream recombination, and scenario planning.
 - **Security primitives** include SHA-256 hashing, input validation, secure memory allocation, and rate limiting.
-- **SIMD-accelerated tensor math** provides SSE2-vectorized dot product, element-wise operations, and tiled matrix multiplication with automatic OpenBLAS dispatch for large matrices.
-- **Cognitive LLM pipeline** routes LLM output through confidence estimation, episodic memory, and symbolic reasoning -- not just wrapping llama.cpp, but integrating it into Nova's cognitive architecture.
+- **SIMD-accelerated tensor math** provides SSE2-vectorized dot product, element-wise operations, and tiled matrix multiplication.
+- **Cognitive LLM pipeline** (`src/agent/cognitive_llm.nova`) annotates text with confidence and keeps an episodic history; it has no model backend (the llama.cpp bridge was removed, audit F-33).
 - **Competitive RAG embeddings** use BM25-scored character n-grams with cognitive dimensions (emotion, recency, reasoning depth) for retrieval that captures subword similarity and episodic context.
-- **Foreign Function Interface** enables calling into shared libraries (`.so`/`.dylib`) with full ABI support, including a Python bridge for bidirectional interop.
+- **Foreign Function Interface** enables calling into shared libraries (`.so`/`.dylib`) with full ABI support.
 
 The result is a language where you can write a TCP server with raw syscalls on one line and declare a reasoning pipeline with memory enrichment on the next -- all compiling to the same native binary. Nova targets Linux, macOS, WebAssembly (WASI), and Windows.
 
@@ -177,7 +177,6 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - **SSE2-vectorized operations** -- `simd_dot_f64` (4 doubles/iteration, 2x unrolled), `simd_add_f64`, `simd_mul_f64`, `simd_sub_f64`, `simd_div_f64`, `simd_fma_f64`, `simd_relu_f64`, `simd_max_f64`, `simd_scale_f64`, `simd_sum_f64`, `simd_norm_f64`
 - **Tensor library** -- `tensor_new`, `tensor_matmul` (auto-dispatches: tiled for 64+ cols, transpose+dot for small), `tensor_add`, `tensor_sub`, `tensor_scale`, `tensor_relu`, `tensor_softmax`, `tensor_cosine_sim`, `tensor_transpose`
 - **Tiled matrix multiplication** -- 32x32 block tiling for L1 cache efficiency on matrices >= 64 columns
-- **OpenBLAS FFI** -- `blas_matmul` auto-detects and calls `cblas_dgemm` for large matrices via runtime FFI
 
 ### Embeddings & RAG
 
@@ -208,8 +207,6 @@ There is no implicit entry point. Execution begins at the first top-level statem
 - **Syscall-based FFI** -- `ffi_syscall_init`, `ffi_load`, `ffi_lookup` for loading ELF shared libraries without libc, using direct syscalls and SYSV hash lookup
 - **Raw sockets** -- `sys_socket`, `sys_bind`, `sys_listen`, `sys_accept`, `sys_connect`, `sys_send`, `sys_recv` via direct Linux syscalls
 - **Network utilities** -- `make_sockaddr_in_raw`, `ip_to_int` for constructing socket addresses
-- **Python bridge** -- `py_init`, `py_exec`, `py_eval`, `py_import`, `py_call` for bidirectional Python interop
-- **LLM bridge** -- C bridge to llama.cpp for model loading, text generation, tokenization, and embedding extraction
 
 ### Knowledge & Persistence
 
@@ -696,9 +693,6 @@ src/compiler/              Self-hosting compiler in Nova            16,467 lines
   lexer.nova                 Tokenizer                                867 lines
   parser.nova                Recursive descent parser               2,305 lines
   ast.nova                   AST node definitions                     582 lines
-  ir.nova                    Intermediate representation              486 lines
-  regalloc.nova              Register allocator                       197 lines
-  lower_x64.nova             x86-64 lowering                          684 lines
   codegen.nova               Code generation + runtime stubs       10,799 lines
   compiler.nova              Entry point, CLI, import resolution      547 lines
 src/core/                  Cognitive architecture types              5,306 lines
@@ -745,15 +739,10 @@ src/runtime/               Runtime library                          7,717 lines
   stream.nova                Streaming signals and pipe composition
   simd.nova                  SSE2-vectorized SIMD operations (v4.0)
   tensor.nova                Tensor math with tiled matmul (v4.0)
-  blas.nova                  OpenBLAS FFI wrapper (v4.0)
   embedding.nova             BM25 + n-gram + cognitive embeddings (v4.0)
   mem.nova                   IEEE 754 double memory operations
   confidence.nova            Confidence-annotated values
   ffi.nova                   Foreign function interface
-  gpu.nova                   GPU compute interface
-  llm.nova                   LLM model loading and generation
-  llm_bridge.c               C bridge to llama.cpp
-  python.nova                Bidirectional Python interop
   csv.nova                   CSV parsing
 src/agent/                 Agent systems                             2,151 lines
   agent.nova                 Multi-loop cognitive agent (v4.1)         952 lines
@@ -805,7 +794,6 @@ boot/nova_boot.s  ───────────>  compiler.nova  ───�
 - **Direct syscalls** -- no C library overhead; the binary talks to the kernel directly
 - **SSE2 SIMD** -- vectorized dot product (4 doubles/iteration with 2x unrolling), element-wise add/sub/mul/div/fma/relu/max, broadcast scale, horizontal sum; all with scalar tail handling for arbitrary lengths
 - **Tiled matrix multiplication** -- 32x32 block tiling fits L1 cache (8KB per tile), 3-5x speedup for matrices >= 64 columns vs. naive transpose+dot
-- **OpenBLAS dispatch** -- automatic FFI call to `cblas_dgemm` for large matrices, matching NumPy/SciPy performance via the same BLAS backend
 - **BM25 scoring** -- term frequency saturation and document length normalization for embedding quality competitive with dedicated IR systems
 - **Signal batching** -- the scheduler groups signals by destination node for cache-friendly dispatch
 - **Strength reduction** -- compiler optimizations for common arithmetic patterns
@@ -1125,9 +1113,6 @@ pattern vs scalar oracle).
 ### Tensor
 `tensor_new` `tensor_set` `tensor_get` `tensor_matmul` `tensor_add` `tensor_sub` `tensor_scale` `tensor_relu` `tensor_softmax` `tensor_transpose` `tensor_cosine_sim` `tensor_print`
 
-### BLAS
-`blas_init` `blas_available` `blas_matmul`
-
 ### Embedding (v4.0)
 `embedding_init` `embedding_encode` `embedding_similarity` `embedding_add_document` `embedding_cognitive` `embedding_vocab_size` `embedding_doc_count`
 
@@ -1136,12 +1121,6 @@ pattern vs scalar oracle).
 
 ### FFI
 `ffi_open` `ffi_sym` `ffi_call` `ffi_call2` `ffi_call3` `ffi_close`
-
-### Python Bridge
-`py_init` `py_exec` `py_eval` `py_import` `py_call` `py_getattr` `py_list_len` `py_list_get`
-
-### LLM Bridge
-`llm_load_model` `llm_new_context` `llm_generate` `llm_tokenize` `llm_free_context` `llm_free_model` `llm_embedding_dim` `llm_get_embeddings`
 
 ### Confidence
 `conf_new` `conf_value` `conf_level` `conf_is_uncertain` `conf_is_confident`
@@ -1203,4 +1182,4 @@ The cognitive architecture lives in `src/core/` (types, soul, system) and `src/m
 
 ## License
 
-See LICENSE.
+NOVA is licensed under the [Apache License, Version 2.0](LICENSE); see also [NOTICE](NOTICE).

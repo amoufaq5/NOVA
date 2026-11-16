@@ -7077,10 +7077,9 @@ fn gen_function(nd) {
 //   svc #0 with x8=syscall_num, args in x0-x5
 //   write = 64, exit = 93
 //
-// NOTE: this path is intentionally INDEPENDENT of `lower_arm64.nova`
-// (the IR-based la_* pass). That module is shipped as an importable
-// package but is NOT in COMPILER_SRC, so calling la_init/la_out from
-// here used to segfault on any input. The codegen below walks the AST
+// NOTE: this is the only ARM64 path. The IR-based `lower_arm64.nova`
+// (la_* pass) was never in COMPILER_SRC -- calling it from here used to
+// segfault -- and was removed (audit F-33). The codegen below walks the AST
 // directly and emits enough ARM64 assembly to build the mobile smoke
 // programs (hello_arm64.nova) via:
 //   clang -target aarch64-linux-android30 -c <output.s>
@@ -18738,8 +18737,8 @@ fn gen_runtime() {
 
     // --- setsid() -> session id, or -1 ---
     // Linux x64: syscall #112. Linux ARM64: same number (also #157 via libc
-    // historical mapping; we use the x64 path since cg_target==4 only emits
-    // ARM64 via the lower_arm64 backend and is not exercised here). macOS:
+    // historical mapping; cg_target==4 emits ARM64 from the inline ARM64
+    // path, which does not reach this x64 emitter). macOS:
     // BSD syscall 147. Windows: returns -1 — no session concept exists.
     out("")
     out_label("_nova_setsid")
@@ -19444,7 +19443,7 @@ fn gen_runtime() {
     // Windows: BCryptGenRandom(NULL, buf, n,
     //   BCRYPT_USE_SYSTEM_PREFERRED_RNG=0x00000002) from bcrypt.dll.
     //   Returns NTSTATUS; 0 = STATUS_SUCCESS.
-    // ARM64: served by lower_arm64 / arm64 path (syscall #278).
+    // ARM64: served by the inline ARM64 path (syscall #278).
     out("")
     out_label("_nova_secure_random")
     if cg_target == 3 {

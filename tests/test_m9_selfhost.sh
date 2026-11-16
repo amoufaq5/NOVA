@@ -23,9 +23,6 @@ echo "Step 1: Bundling compiler source..."
 cat src/compiler/ast.nova \
     src/compiler/lexer.nova \
     src/compiler/parser.nova \
-    src/compiler/ir.nova \
-    src/compiler/regalloc.nova \
-    src/compiler/lower_x64.nova \
     src/compiler/codegen.nova \
     src/pkg/pkg.nova \
     src/compiler/compiler.nova \

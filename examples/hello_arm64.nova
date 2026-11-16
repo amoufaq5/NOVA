@@ -1,6 +1,6 @@
 // Smoke test for the ARM64 codegen path (cg_target == 4).
 //
-// Compile (when la_lower_function is fully wired):
+// Compile:
 //     bin/nova examples/hello_arm64.nova --target=arm64 -o /tmp/hello_arm64.s
 //
 // Assemble for Android NDK (ARM64 ELF object):

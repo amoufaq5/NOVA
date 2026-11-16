@@ -121,7 +121,7 @@ Layout installed by the .deb:
 | `/usr/share/doc/nova/README.md`       | Project README         |
 | `/usr/share/doc/nova/INSTALL.md`      | This file              |
 | `/usr/share/doc/nova/examples/*.nova` | Curated example programs |
-| `/usr/share/doc/nova/copyright`       | MIT license text       |
+| `/usr/share/doc/nova/copyright`       | Apache-2.0 licence     |
 | `/usr/share/doc/nova/changelog.Debian.gz` | Per-release notes  |
 
 To uninstall: `sudo apt remove nova` (or `sudo dpkg -r nova`).

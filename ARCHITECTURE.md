@@ -54,14 +54,8 @@ output compiles its own source again to byte-identical assembly).
                   │             (R23A + R24A)                │
                   │                  │                       │
                   │                  ▼                       │
-                  │                 IR                       │
-                  │                  │                       │
-                  │                  ▼                       │
-                  │             regalloc                     │
-                  │                  │                       │
-                  │   ┌──────────────┼───────────────┐       │
-                  │   ▼              ▼               ▼       │
-                  │ codegen      lower_x64       lower_arm64 │
+                  │   codegen (AST walker; x86-64, ARM64     │
+                  │   and WASM paths all live inside it)     │
                   └───┬────────────┬───────────────┬─────────┘
                       │            │               │
        ┌──────────────┴──┐    ┌────┴─────┐    ┌────┴──────┐
@@ -76,8 +70,8 @@ output compiles its own source again to byte-identical assembly).
                   ┌────────────────────────────────────────┐
                   │             src/runtime/                 │
                   │  alloc · string · math · simd · tensor   │
-                  │  json · http · scheduler · io · syscall  │
-                  │  ffi · gpu · llm · embedding · ...       │
+                  │  json · scheduler · io · syscall · ffi   │
+                  │  embedding · confidence · ...            │
                   └────────────────────────────────────────┘
                               │
                               ▼
@@ -136,14 +130,10 @@ src/
 │   ├── lexer.nova       880 lines  — UTF-8 tokenizer
 │   ├── parser.nova    3,349 lines  — recursive-descent parser
 │   ├── ast.nova         633 lines  — AST node definitions
-│   ├── ir.nova          486 lines  — intermediate representation
 │   ├── codegen.nova  20,064 lines  — x86-64 codegen (the big one)
-│   ├── lower_x64.nova   684 lines  — x86-64 instruction lowering
-│   ├── lower_arm64.nova 772 lines  — ARM64 instruction lowering
-│   ├── regalloc.nova    197 lines  — register allocator
 │   └── compiler.nova    808 lines  — top-level driver
 ├── runtime/           Built-in runtime modules (~7,700 lines NOVA)
-│   └── 40 modules (alloc, simd, tensor, json, http, ...)
+│   └── 34 modules (alloc, simd, tensor, json, ffi, ...)
 ├── core/              Cognitive primitives (moments, signals, ...)
 │   └── 20 modules (moment, signal, node, soul, system, belief, ...)
 ├── mind/              Whole-mind orchestrations
@@ -178,27 +168,11 @@ src/
                                        └──────┬─────┘
                                               │ typed AST
                                               ▼
-                                       ┌────────────┐
-                                       │   ir.nova  │
-                                       │ optional   │
-                                       │ IR form    │
-                                       └──────┬─────┘
-                                              │
                                               ▼
-                                       ┌────────────┐
-                                       │  regalloc  │
-                                       │ (197 lines)│
-                                       └──────┬─────┘
-                                              │
-                                              ▼
-                  ┌───────────────────────────┴───────────────────────────┐
-                  │                                                       │
-                  ▼                                                       ▼
-           ┌────────────┐                                          ┌────────────┐
-           │ codegen.nova│                                          │lower_x64 / │
-           │ AST-walker  │  ───────────────► .s asm ───────────►   │lower_arm64 │
-           │ (20k lines) │                                          │            │
-           └────────────┘                                          └────────────┘
+                                       ┌─────────────┐
+                                       │ codegen.nova│
+                                       │ AST-walker  │ ───► .s asm
+                                       └─────────────┘
                   │
                   ▼
             stage2.s == stage3.s ?  (self-host check)
@@ -256,17 +230,10 @@ const, expression statements, control flow (if / while / for / do /
 match), patterns (literal / variable / variant / list / map / rest),
 and the full expression algebra.
 
-### 4.4 `ir.nova` (~486 lines)
+### 4.4-4.5 (removed)
 
-A light intermediate representation. Codegen is primarily an AST
-walker, but IR is used as a staging form for specific passes (constant
-folding, dead-code elimination — see commit `022586d`).
-
-### 4.5 `regalloc.nova` (~197 lines)
-
-The register allocator. Linear-scan-flavoured; tracks live ranges
-across basic blocks, spills to stack frame slots, supports cross-call
-register saves per target ABI.
+`ir.nova` and `regalloc.nova` were never called by the compiler; they were removed
+(audit F-33). Codegen is a direct AST walker.
 
 ### 4.6 `codegen.nova` (~20,064 lines)
 
@@ -287,17 +254,10 @@ The big one. AST → x86-64 assembly. Includes:
   on locals + params, `3d5393a` for `.debug_line` MVP) — see
   [`DWARF_AUDIT.md`](./DWARF_AUDIT.md).
 
-### 4.7 `lower_x64.nova` (~684 lines) and `lower_arm64.nova` (~772 lines)
+### 4.7 (removed)
 
-Per-target instruction lowering. These are not full backends — they
-share IR/regalloc with `codegen.nova` but emit per-target instruction
-encodings:
-
-- `lower_x64.nova` — SIB byte addressing, REX prefix, AVX2 encoding
-  for SIMD intrinsics, x86-64 calling convention (SysV + Win64).
-- `lower_arm64.nova` (commit `a108b79`) — AArch64 NEON SIMD encoding,
-  PCS (Procedure Call Standard) calling convention, syscall translation
-  for Linux ARM64 + iOS-style.
+`lower_x64.nova` and `lower_arm64.nova` were never called (the x86-64, ARM64 and
+WASM paths live inside `codegen.nova`); removed with the IR files (audit F-33).
 
 ### 4.8 `compiler.nova` (~808 lines)
 
@@ -383,14 +343,10 @@ NOVA targets **six** native targets:
 | Windows ARM64 | Same AArch64 encoding; PE32+ wrapping + Win64-style call frame |
 | WASM | `local.get $a` → `local.get $b` → `i32.add` → `local.set $sum` |
 
-### 5.3 GPU compute (`src/runtime/gpu.nova`)
+### 5.3 GPU compute (removed)
 
-The GPU backend is the seventh target lineage, but it is **runtime-
-dispatched** rather than a separate codegen path. The
-`src/runtime/gpu.nova` runtime ships `wgpu_dispatch` invocation
-machinery and a WGSL shader for `gpu_vector_add`. The audit document
-is [`GPU_AUDIT.md`](./GPU_AUDIT.md); the working example is
-`examples/gpu_vector_add.nova`.
+The unused `src/runtime/gpu.nova` bridge was removed (audit F-33);
+`examples/gpu_vector_add.nova` does not depend on it.
 
 ## 6. Language features by round
 
@@ -488,7 +444,6 @@ Audit: [`SIMD_AUDIT.md`](./SIMD_AUDIT.md).
 | `scheduler.nova` | Task/coroutine scheduler. |
 | `taskpool.nova` | Worker-pool runtime for parallel work. |
 | `chan.nova` | Buffered/unbuffered channels (CSP-style). |
-| `effects.nova` | Effect-tracking primitives. |
 | `confidence.nova` | Confidence annotation type. |
 
 ### 8.2 Strings + IO + paths
@@ -507,7 +462,6 @@ Audit: [`SIMD_AUDIT.md`](./SIMD_AUDIT.md).
 | `float.nova` | IEEE 754 double-precision utils (R-NOVA v4.2). |
 | `simd.nova` | SIMD primitives wrapper. |
 | `tensor.nova` | Tensor math + tiled matmul. |
-| `blas.nova` | BLAS-equivalent operations + OpenBLAS FFI dispatch. |
 
 ### 8.4 Data structures
 
@@ -524,8 +478,6 @@ Audit: [`SIMD_AUDIT.md`](./SIMD_AUDIT.md).
 |---|---|
 | `embedding.nova` | Unified embedding interface (BM25 + cognitive dims). |
 | `embed.nova` | Embedding storage helpers. |
-| `llm.nova` | The LLM-bridge integration point (calls `llm_bridge.c`). |
-| `llm_bridge.c` | The thin C bridge for llama.cpp. |
 
 ### 8.6 IO + parsing + network
 
@@ -533,7 +485,6 @@ Audit: [`SIMD_AUDIT.md`](./SIMD_AUDIT.md).
 |---|---|
 | `json.nova` | JSON parser + serializer. |
 | `csv.nova` | CSV parser + serializer. |
-| `http.nova` | HTTP client. |
 | `db.nova` | DB connection seam. |
 | `validate.nova` | Input validation helpers. |
 | `audio.nova` | Audio buffer + format helpers. |
@@ -544,9 +495,7 @@ Audit: [`SIMD_AUDIT.md`](./SIMD_AUDIT.md).
 |---|---|
 | `ffi.nova` | The generic FFI layer (.so / .dylib). |
 | `ffi_syscall.nova` | Syscall-based FFI without libc (ELF parser + SYSV hash lookup). |
-| `python.nova` | Bidirectional Python bridge. |
 | `crypto.nova` | The crypto-runtime entry points. |
-| `gpu.nova` | The GPU compute layer (wgpu/WGSL dispatch). |
 | `federation.nova` | Federation primitives at runtime. |
 
 ## 9. Cognitive layer (`src/core/`, `src/mind/`, `src/cognitive/`)
@@ -836,11 +785,7 @@ This document is the **index**. The deep-dives are:
 | `src/compiler/lexer.nova` | original bootstrap | `91cf5b9` |
 | `src/compiler/parser.nova` | original bootstrap | `91cf5b9` |
 | `src/compiler/ast.nova` | original bootstrap | `91cf5b9` |
-| `src/compiler/ir.nova` | original bootstrap | `91cf5b9` |
 | `src/compiler/codegen.nova` | original bootstrap | `91cf5b9` |
-| `src/compiler/lower_x64.nova` | original bootstrap | `91cf5b9` |
-| `src/compiler/lower_arm64.nova` | NOVA v4.2 | `a108b79` |
-| `src/compiler/regalloc.nova` | original bootstrap | `91cf5b9` |
 | `src/compiler/compiler.nova` | original bootstrap | `91cf5b9` |
 
 ### 15.2 Runtime
@@ -865,26 +810,19 @@ This document is the **index**. The deep-dives are:
 | `src/runtime/crypto.nova` | foundational | original |
 | `src/runtime/json.nova` | `91cf5b9` JSON | `91cf5b9` |
 | `src/runtime/csv.nova` | NOVA v3.0 productivity | `d52470d` |
-| `src/runtime/http.nova` | foundational | original |
 | `src/runtime/db.nova` | NOVA v3.0 productivity | `d52470d` |
 | `src/runtime/validate.nova` | Phase 4 | `d97150e` |
 | `src/runtime/audio.nova` | foundational | original |
 | `src/runtime/simd.nova` | Phases 7-9 | `52f339e` |
 | `src/runtime/tensor.nova` | NOVA v3.0 | `d52470d` |
-| `src/runtime/blas.nova` | NOVA v4.0 | `438e798` |
 | `src/runtime/embedding.nova` | NOVA v4.0 | `438e798` |
 | `src/runtime/embed.nova` | NOVA v4.0 | `438e798` |
-| `src/runtime/llm.nova` | NOVA v3.0 | `d52470d` |
-| `src/runtime/llm_bridge.c` | NOVA v4.0 | `438e798` |
 | `src/runtime/ffi.nova` | Phases 7-9 | `52f339e` |
 | `src/runtime/ffi_syscall.nova` | NOVA v4.2 | `a108b79` |
-| `src/runtime/gpu.nova` | Phases 7-9 | `52f339e` |
-| `src/runtime/python.nova` | Phases 7-9 | `52f339e` |
 | `src/runtime/float.nova` | NOVA v4.2 | `a108b79` |
 | `src/runtime/persistent_alloc.nova` | NOVA v4.2 | `a108b79` |
 | `src/runtime/node_pool.nova` | Phase 2 (CE-relevant) | `5ced087` |
 | `src/runtime/timeseries.nova` | foundational | original |
-| `src/runtime/effects.nova` | foundational | original |
 | `src/runtime/confidence.nova` | foundational | original |
 | `src/runtime/federation.nova` | foundational | original |
 

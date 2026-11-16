@@ -1,7 +1,7 @@
 // Nova Standard Library: Unified Embedding Interface
 // Three-tier embedding system for competitive RAG:
 //   Tier 1: BM25 + character n-grams (pure Nova, no dependencies)
-//   Tier 2: Neural embeddings via Python bridge (requires std/python)
+//   Tier 2: (neural embeddings via a Python bridge -- removed, audit F-33)
 //   Tier 3: Cognitive embeddings with emotion/episodic/reasoning dimensions
 //
 // Requires: import "std/tensor"
