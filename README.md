@@ -38,7 +38,7 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 | **Status** | Self-hosting verified (`stage2.s == stage3.s`), checked in CI (`.github/workflows/test.yml`) |
 | **Version** | 0.1.0 (`VERSION`); no tagged releases yet. `src/version.nova` and the launcher report other numbers (0.2.0, 0.9.0) -- to be unified |
 | **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) |
-| **Compiler** | Lexer, parser, AST and an AST-walking codegen. `ir.nova`, `regalloc.nova` and `lower_x64.nova` are compiled in but not called |
+| **Compiler** | Lexer, parser, AST and an AST-walking codegen (the unused `ir`/`regalloc`/`lower_*` files were removed, audit F-33) |
 | **Core Types** | 5,306 lines (moment, signal, node, channel, path, similarity, soul, system, belief, goal, safety, imagination, concept) |
 | **Mind Systems** | 2,800 lines (academic, experiential, emotion, memory, reasoning) |
 | **Runtime** | 7,717 lines (syscall, alloc, string, io, scheduler, SIMD, tensor, BLAS, embedding, LLM, FFI, Python bridge, etc.) |
@@ -696,9 +696,6 @@ src/compiler/              Self-hosting compiler in Nova            16,467 lines
   lexer.nova                 Tokenizer                                867 lines
   parser.nova                Recursive descent parser               2,305 lines
   ast.nova                   AST node definitions                     582 lines
-  ir.nova                    Intermediate representation              486 lines
-  regalloc.nova              Register allocator                       197 lines
-  lower_x64.nova             x86-64 lowering                          684 lines
   codegen.nova               Code generation + runtime stubs       10,799 lines
   compiler.nova              Entry point, CLI, import resolution      547 lines
 src/core/                  Cognitive architecture types              5,306 lines
@@ -745,15 +742,10 @@ src/runtime/               Runtime library                          7,717 lines
   stream.nova                Streaming signals and pipe composition
   simd.nova                  SSE2-vectorized SIMD operations (v4.0)
   tensor.nova                Tensor math with tiled matmul (v4.0)
-  blas.nova                  OpenBLAS FFI wrapper (v4.0)
   embedding.nova             BM25 + n-gram + cognitive embeddings (v4.0)
   mem.nova                   IEEE 754 double memory operations
   confidence.nova            Confidence-annotated values
   ffi.nova                   Foreign function interface
-  gpu.nova                   GPU compute interface
-  llm.nova                   LLM model loading and generation
-  llm_bridge.c               C bridge to llama.cpp
-  python.nova                Bidirectional Python interop
   csv.nova                   CSV parsing
 src/agent/                 Agent systems                             2,151 lines
   agent.nova                 Multi-loop cognitive agent (v4.1)         952 lines
@@ -1203,4 +1195,4 @@ The cognitive architecture lives in `src/core/` (types, soul, system) and `src/m
 
 ## License
 
-See LICENSE.
+NOVA is licensed under the [Apache License, Version 2.0](LICENSE); see also [NOTICE](NOTICE).
