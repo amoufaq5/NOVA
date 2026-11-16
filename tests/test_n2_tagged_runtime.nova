@@ -1,0 +1,143 @@
+// N2 regression tests: runtime helpers and constant folding that
+// handed back raw (untagged) values or miscompiled.
+//   * x / 2^k truncates toward zero for negative x (was floor).
+//   * maps grow past 16 entries (17th insert used to spin forever),
+//     map_remove leaves a tombstone so later keys in the same probe
+//     chain stay reachable, map_get on a missing key is tagged 0.
+//   * map_count / len(map) are tagged counts.
+//   * float_cmp returns tagged -1 / 0 / 1.
+//   * nanotime() is sec*1e9+nsec (was scaled by the tagged literal).
+//   * sleep_ms(n) sleeps ~n ms (the shim passed 2n+1).
+//   * let [a, b] = xs binds xs[0], xs[1].
+
+import "std/syscall"
+import "std/alloc"
+import "std/string"
+import "std/io"
+
+fn _n2_div() {
+    let a = 0 - 7
+    assert(a / 2 == 0 - 3, "-7/2 == -3")
+    assert(a / 4 == 0 - 1, "-7/4 == -1")
+    let b = 0 - 8
+    assert(b / 8 == 0 - 1, "-8/8 == -1")
+    assert(b / 16 == 0, "-8/16 == 0")
+    assert(7 / 2 == 3, "7/2 == 3")
+    let c = 0 - 1
+    assert(c / 1024 == 0, "-1/1024 == 0")
+}
+
+fn _n2_map() {
+    let m = map_new()
+    let i = 0
+    while i < 200 {
+        map_set(m, i, i * 10)
+        i = i + 1
+    }
+    assert(map_count(m) == 200, "map_count after 200 inserts")
+    assert(len(m) == 200, "len(map)")
+    assert(map_get(m, 150) == 1500, "map_get after growth")
+    assert(map_get(m, 999) == 0, "missing key reads tagged 0")
+    assert(map_has(m, 999) == false, "missing key not present")
+    // remove every even key; odd keys (often later in the same probe
+    // chains) must remain reachable.
+    i = 0
+    while i < 200 {
+        map_remove(m, i)
+        i = i + 2
+    }
+    assert(map_count(m) == 100, "map_count after removes")
+    assert(map_has(m, 4) == false, "removed key gone")
+    assert(map_get(m, 151) == 1510, "odd key survives removals")
+    let ok = 1
+    i = 1
+    while i < 200 {
+        if map_get(m, i) != i * 10 { ok = 0 }
+        i = i + 2
+    }
+    assert(ok == 1, "all odd keys reachable past tombstones")
+    // re-insert into tombstones, then churn to force tombstone rehash
+    i = 0
+    while i < 2000 {
+        map_set(m, 5000 + i, i)
+        map_remove(m, 5000 + i)
+        i = i + 1
+    }
+    assert(map_count(m) == 100, "count stable after churn")
+    assert(map_get(m, 199) == 1990, "survivor after churn")
+    let ks = keys(m)
+    assert(len(ks) == 100, "keys() skips tombstones")
+    let sm = map_new()
+    map_set(sm, "alpha", 1)
+    map_set(sm, "beta", 2)
+    map_remove(sm, "alpha")
+    map_set(sm, "beta", 3)
+    assert(map_get(sm, "beta") == 3, "string key update")
+    assert(map_count(sm) == 1, "string map count")
+}
+
+// Set/remove churn on a map with few live keys must not keep doubling the
+// table, and keys that are multiples of a large power of two must not all
+// land in one probe cluster (both made these loops crawl).
+fn _n2_map_perf() {
+    let m = map_new()
+    map_set(m, "live", 1)
+    let i = 0
+    while i < 600000 {
+        let k = "key" + int_to_str(i)
+        map_set(m, k, i)
+        map_remove(m, k)
+        i = i + 1
+    }
+    assert(map_count(m) == 1, "churn count")
+    let t0 = nanotime()
+    let r = 0
+    while r < 200 {
+        let ks = keys(m)
+        r = r + 1
+    }
+    assert(nanotime() - t0 < 20000000, "keys() on a churned 1-entry map stays cheap")
+    let a = map_new()
+    t0 = nanotime()
+    i = 0
+    while i < 20000 {
+        map_set(a, i * 1048576, i)
+        i = i + 1
+    }
+    assert(nanotime() - t0 < 300000000, "20000 aligned int keys insert quickly")
+    assert(map_get(a, 19999 * 1048576) == 19999, "aligned key lookup")
+}
+
+fn _n2_float() {
+    let x = to_float(1)
+    let y = to_float(2)
+    assert(float_cmp(x, y) == 0 - 1, "1.0 < 2.0")
+    assert(float_cmp(y, x) == 1, "2.0 > 1.0")
+    assert(float_cmp(x, x) == 0, "1.0 == 1.0")
+}
+
+fn _n2_time() {
+    let t0 = nanotime()
+    // 1.1 s crosses a second boundary, so a mis-scaled sec term shows
+    // up; a shim passing 2n+1 would sleep ~2.2 s.
+    sleep_ms(1100)
+    let dt = nanotime() - t0
+    assert(dt >= 1050000000, "sleep_ms(1100) slept >= 1.05s")
+    assert(dt < 1700000000, "sleep_ms(1100) slept < 1.7s")
+}
+
+fn _n2_destructure() {
+    let xs = [100, 200, 300]
+    let [p, q, r] = xs
+    assert(p == 100, "p")
+    assert(q == 200, "q")
+    assert(r == 300, "r")
+}
+
+_n2_div()
+_n2_map()
+_n2_map_perf()
+_n2_float()
+_n2_time()
+_n2_destructure()
+println("PASS")

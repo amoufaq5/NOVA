@@ -30,6 +30,11 @@ fn main() {
     print_int(y)
     println("")
 
+    assert(a == 10, "a")
+    assert(b == 20, "b")
+    assert(c == 30, "c")
+    assert(x == 100, "x")
+    assert(y == 200, "y")
     println("All destructure tests passed!")
 }
 
