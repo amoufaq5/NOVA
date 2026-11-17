@@ -2,9 +2,12 @@
 
 The compiler prints parse errors as ``error[line N]: msg``, semantic errors
 as ``ERROR: msg`` / ``Error: msg`` and warnings as ``warning: msg``. The old
-regex only knew ``file:line:col: level: msg`` and matched none of them, and a
-clean ``--check`` (syntax only) returned no diagnostics for programs that
-then failed to compile.
+regex only knew ``file:line:col: level: msg`` and matched none of them.
+
+The check is syntax-only on a copy with ``import`` lines blanked: the compiler
+expands imports textually, so its line numbers would count the merged program,
+and a full compile flags valid library modules (built by concatenation) with
+"undeclared callee".
 
 Unit checks run everywhere; the end-to-end checks run ``bin/nova`` from the
 repository root and are skipped when it has not been built.
@@ -63,6 +66,14 @@ def test_parse_semantic_error_and_warning() -> None:
     assert_("undeclared callee" in d[0]["message"], "ERROR message")
 
 
+def test_caret_block_is_not_parsed() -> None:
+    # After error[line N] the compiler echoes the rest of the source; numeric
+    # source lines must not become diagnostics.
+    out = "error[line 3]: unexpected }\n  | }\n10,\n20\nfoo: 7\n"
+    d = parse_compiler_output(out, _doc())
+    assert_(len(d) == 1, "only the error line, not the echoed source")
+
+
 def test_parse_generic_format_still_works() -> None:
     d = parse_compiler_output("x.nova:5:7: warning: thing", _doc())
     assert_(len(d) == 1 and d[0]["range"]["start"]["line"] == 4, "file:line:col form")
@@ -84,21 +95,38 @@ def test_real_compiler() -> None:
         path = os.path.join(td, "t.nova")
         bad_syntax = "fn main() {\n    let x = \n}\n"
         d = run_compiler_check(st, Document(uri=path_to_uri(path), text=bad_syntax))
-        assert_(len(d) >= 1, "syntax error reported")
+        assert_(len(d) == 1, "syntax error reported once")
         assert_(d[0]["range"]["start"]["line"] == 2, "syntax error on line 3")
-        undeclared = "fn main() {\n    let x = 1\n    nope_fn(x)\n}\nmain()\n"
-        d = run_compiler_check(st, Document(uri=path_to_uri(path), text=undeclared))
-        assert_(any("nope_fn" in x["message"] for x in d), "undeclared callee reported after a clean --check")
-        clean = 'fn main() {\n    println("hi")\n}\nmain()\n'
+        # A file that imports a 7-line library: the error must land on the
+        # importing file's own line, not the merged-program line.
+        with open(os.path.join(td, "lib.nova"), "w") as f:
+            f.write("fn _lib_a() {\n    return 1\n}\n\nfn _lib_b() {\n    return 2\n}\n")
+        imported = 'import "lib.nova"\nfn main() {\n    let x = \n}\nmain()\n'
+        d = run_compiler_check(st, Document(uri=path_to_uri(path), text=imported))
+        assert_(len(d) == 1 and d[0]["range"]["start"]["line"] == 3, "line number not shifted by imports")
+        # A broken imported file is not reported in the importer.
+        with open(os.path.join(td, "broken.nova"), "w") as f:
+            f.write("fn {\n")
+        importer = 'import "broken.nova"\nfn main() {\n    println("ok")\n}\nmain()\n'
+        d = run_compiler_check(st, Document(uri=path_to_uri(path), text=importer))
+        assert_(d == [], "errors in an imported file are not blamed on the importer")
+        clean = 'import "std/string"\nfn main() {\n    println("hi")\n}\nmain()\n'
         d = run_compiler_check(st, Document(uri=path_to_uri(path), text=clean))
-        assert_(d == [], "clean program has no diagnostics")
-        leftovers = [f for f in os.listdir(td) if f.startswith(".nova-lsp-")]
-        assert_(leftovers == [], "temp files removed")
+        assert_(d == [], "clean program (with a std import) has no diagnostics")
+        assert_([f for f in os.listdir(td) if f.startswith(".nova-lsp-")] == [], "nothing written next to the file")
+    # A library module built by concatenation (calls siblings it does not
+    # import) is valid and must not be flagged.
+    cg = os.path.join(_REPO, "src", "compiler", "codegen.nova")
+    if os.path.exists(cg):
+        with open(cg, encoding="utf-8") as f:
+            d = run_compiler_check(st, Document(uri=path_to_uri(cg), text=f.read()))
+        assert_(d == [], "src/compiler/codegen.nova has no diagnostics")
 
 
 def main() -> int:
     test_parse_line_error()
     test_parse_semantic_error_and_warning()
+    test_caret_block_is_not_parsed()
     test_parse_generic_format_still_works()
     test_real_compiler()
     print(f"test_compiler_diagnostics: OK ({_assertions} assertions)")

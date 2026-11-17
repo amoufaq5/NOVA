@@ -8,45 +8,15 @@ languages. Claims below were checked against the source tree, `Makefile`,
 
 ---
 
-## Known inconsistency: which version is NOVA?
+## Version (resolved)
 
-There are **two different version numbers** in this repository, and they
-disagree:
-
-| Source | Value | Role |
-|---|---|---|
-| `README.md` (status table, "New in v4.2", codegen targets "v4.2") | **4.2.0** | Marketing / feature-history version |
-| `VERSION` file (single source consumed by all packaging) | **0.1.0** | Release / packaging version |
-
-**Why they differ.** The README's `4.x` numbering is a *feature-history*
-narrative — it counts cumulative capability waves ("New in v4.0 / v4.1 / v4.2").
-The `VERSION` file is the *release* number: it is the single source of truth for
-every piece of build and distribution tooling.
-
-**What consumes `VERSION` (verified):**
-
-- `tools/release-dry-run.sh` reads `VERSION` and forms `TAG="v${VERSION}"` -> `v0.1.0`
-- `scripts/build-deb.sh`, `scripts/build-pkg.sh`, `scripts/build-msi.sh`,
-  `packaging/windows/build-msi.bat`, `packaging/homebrew/bump-formula.sh` all
-  read `VERSION` to name their artifacts
-- `tools/install.sh` defaults `LATEST_VERSION="v0.1.0"`
-- `packaging/debian/changelog` hard-codes `nova (0.1.0-1)`
-- `.github/workflows/release.yml` `workflow_dispatch` default tag is `v0.1.0`
-- `INSTALL.md` states the release pipeline fires on a **`v0.1.0`** tag push and
-  that `nova --version` should print `nova 0.1.0`
-
-**Decision: leave `VERSION` at `0.1.0`.** Flipping it to `4.2.0` would
-desynchronise the entire release pipeline — the dry-run and CI would build a
-`v4.2.0` tarball while `install.sh`, the Debian changelog, the release-workflow
-default, and the install docs all still expect `v0.1.0`. The `0.1.0` number
-also honestly reflects maturity: this is a first, unpublished release.
-
-**Recommendation.** Treat `0.1.0` as the canonical product version and reword
-the README so its `4.x` labels read as *feature milestones* ("Capability wave
-4.2") rather than a competing version string. Reconcile to a single number only
-in tandem with a deliberate release-tooling bump, never as a silent edit.
-
----
+NOVA has one version: **0.1.0**, in `VERSION`. `nova version` (launcher) reads
+that file, the compiler's `--version` prints the same number compiled in
+(`scripts/check_version.sh`, run by `make test` and CI, keeps the two in sync),
+and the packaging tools read `VERSION`. The README's former "v4.0 / v4.1 /
+v4.2" labels were development milestones, not releases; they are now worded as
+earlier milestones. The unused `src/version.nova` (which said 0.2.0) and the
+launcher's hard-coded 0.9.0 are gone.
 
 ## 1. Project analysis
 

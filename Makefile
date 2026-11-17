@@ -583,6 +583,7 @@ smoke-mobile-ios: bin/nova examples/hello_arm64_ios_reference.s
 # on any failure not listed there, and on listed tests that now pass. It used
 # to run five hand-picked tests and print "All tests passed" regardless.
 test: bin/nova
+	@bash scripts/check_version.sh
 	@bash scripts/check_test_baseline.sh
 
 # Run all tests using test runner

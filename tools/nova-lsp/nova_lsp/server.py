@@ -442,6 +442,9 @@ NOVA_LINE_RE = re.compile(
 NOVA_NOLINE_RE = re.compile(
     r"^(?P<level>ERROR|Error|error|warning):\s*(?P<msg>.+)$",
 )
+# `import "..."` lines, blanked before the syntax check (see
+# run_compiler_check). MULTILINE so each line is matched on its own.
+IMPORT_LINE_RE = re.compile(r"^[ \t]*import[ \t][^\n]*$", re.MULTILINE)
 
 
 def uri_to_path(uri: str) -> Optional[str]:
@@ -461,54 +464,38 @@ def run_compiler_check(state: ServerState, doc: Document) -> List[Dict[str, Any]
     style lines and emit LSP Diagnostic objects."""
     if not state.nova_compiler:
         return []
-    # Write the buffer next to the real file when we can, so relative
-    # imports resolve the same way they do for the user's build.
-    tmp_dir = None
-    src_path = uri_to_path(doc.uri) if getattr(doc, "uri", None) else None
-    if src_path:
-        d = os.path.dirname(src_path)
-        if d and os.path.isdir(d) and os.access(d, os.W_OK):
-            tmp_dir = d
+    # Syntax check only (`nova --check`). The compiler expands `import`
+    # textually, so its line numbers count the merged program and an error
+    # inside an imported file would be reported in this one; and a full
+    # compile treats the buffer as a whole program, flagging valid library
+    # modules (built by concatenation) with "undeclared callee". So the
+    # import lines are blanked (keeping the line numbering) and only this
+    # file is checked. Semantic errors such as an undeclared callee are not
+    # reported; they need the whole program.
+    text = IMPORT_LINE_RE.sub("", doc.text)
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".nova", prefix=".nova-lsp-", dir=tmp_dir,
-        delete=False, encoding="utf-8",
+        mode="w", suffix=".nova", delete=False, encoding="utf-8"
     ) as tmp:
-        tmp.write(doc.text)
+        tmp.write(text)
         tmp_path = tmp.name
-    out_path = tmp_path + ".s"
     try:
-        # `--check` is a syntax check; it passes programs that then fail to
-        # compile (e.g. an undeclared callee), so a clean --check is followed
-        # by a full compile. Warnings are reported even when it succeeds.
-        for argv in (
-            [state.nova_compiler, "--check", tmp_path],
-            [state.nova_compiler, tmp_path, "-o", out_path],
-        ):
-            try:
-                proc = subprocess.run(
-                    argv,
-                    capture_output=True,
-                    timeout=10,
-                    check=False,
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-                _log(f"compiler invocation failed for {argv[0]}: {e}")
-                return []
-            stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
-            stdout = (proc.stdout or b"").decode("utf-8", errors="replace")
-            diags = parse_compiler_output(stderr + "\n" + stdout, doc)
-            if diags:
-                return diags
-            if proc.returncode != 0 and "--check" not in argv:
-                return []  # failed without a parseable message
-        return []
+        argv = [state.nova_compiler, "--check", tmp_path]
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            _log(f"compiler invocation failed for {argv[0]}: {e}")
+            return []
+        stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
+        stdout = (proc.stdout or b"").decode("utf-8", errors="replace")
+        return parse_compiler_output(stderr + "\n" + stdout, doc)
     finally:
         try:
             os.unlink(tmp_path)
-        except OSError:
-            pass
-        try:
-            os.unlink(out_path)
         except OSError:
             pass
 
@@ -521,8 +508,13 @@ def parse_compiler_output(text: str, doc: Document) -> List[Dict[str, Any]]:
             continue
         col = None
         m = NOVA_LINE_RE.match(line)
+        stop = False
         if m:
             line_no = max(0, int(m.group("line")) - 1)
+            # The parser stops at its first error and then echoes the rest of
+            # the source (a `  | ` caret line, then raw lines); none of that
+            # is a diagnostic.
+            stop = True
         else:
             m = DIAG_LINE_RE.match(line)
             if m:
@@ -555,6 +547,8 @@ def parse_compiler_output(text: str, doc: Document) -> List[Dict[str, Any]]:
                 "message": msg,
             }
         )
+        if stop:
+            break
     return diags
 
 
