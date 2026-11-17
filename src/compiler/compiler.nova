@@ -2,8 +2,8 @@
 // Reads a .nova source file, compiles it to x86-64 assembly,
 // and writes the output to a .s file.
 //
-// Usage: nova_boot src/compiler/compiler.nova <input.nova> -o <output.s>
-// Or when self-compiled: ./nova <input.nova> -o <output.s>
+// Usage: nova <input.nova> -o <output.s>   (boot/nova_boot, the committed
+// seed, is a build of this compiler and takes the same arguments)
 
 // The compiler's version, compiled in. It used to read ./VERSION from the
 // current directory, so running `nova --version` inside any other project
@@ -767,7 +767,9 @@ fn main() {
 
     let asm_code = compile(source)
 
-    let ok = write_file(output_file, asm_code)
+    // End the file with a newline (gas warned "end of file not at end of a
+    // line" on every assemble).
+    let ok = write_file(output_file, asm_code + "\n")
     if ok == 0 {
         println(concat("Error: cannot write file: ", output_file))
         exit(1)

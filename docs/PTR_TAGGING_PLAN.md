@@ -77,6 +77,7 @@ special handling (the compiler is just another tagged program).
 ## 3. Bootstrap procedure (the only safe path)
 
 `boot/nova_boot` is a **stable static ELF interpreter** (untagged) — the anchor.
+(Historical: since N6, 2026-11, the seed is a build of the tagged compiler.)
 
 1. Edit `codegen.nova` (this branch) so it EMITS tagged code everywhere (§2).
 2. `boot/nova_boot` interprets the combined source (untagged semantics — it only
@@ -139,11 +140,17 @@ Implemented (commits Phase 1–3):
   `_nova_range_list/_step`), string-literal `.align 2`, `_start` argc tag,
   `__arg` (untag + aligned copy), `_nova_write_file` tagged return
 
-**Bootstrap procedure (transitional).** Run the pre-tagging stages under
+**Bootstrap procedure (transitional -- ended).** Run the pre-tagging stages under
 `setarch -R` (ASLR off): the *old* range-based classifier in `boot`/stage1 has
 an ASLR-dependent misclassification on large inputs (e.g. compiling
 `codegen.nova`). Tagging removes that classifier in stage2+, so it is a
 transitional concern only.
+
+> **Update (2026-11, batch 3 N6).** The seed was regenerated from the tagged
+> compiler's stage 2 (`scripts/reseed.sh`), so `boot` itself uses bit-0
+> dispatch and the bootstrap is plain `make bin/nova` -- no `setarch`. Five
+> clean bootstraps with ASLR on (randomize_va_space=2) all reached the
+> stage2 == stage3 fixpoint. The procedure below is kept for history.
 
 ```
 setarch -R boot/nova_boot c.nova c.nova -o stage1.s   # stage1 (untagged, emits tagged)
@@ -202,9 +209,10 @@ belief, hdc, mind, …). **`bin/nova` must NOT be replaced until these pass** �
 installing now would regress 71 tests. The bug fix is proven and self-hosting
 on this branch, but not yet shippable.
 
-**Transitional build note:** run `boot` and `stage1` under `setarch -R` (ASLR
-off) to dodge the *old* range-classifier heisenbug; stage2+ (tagged) need no
-such workaround.
+**Transitional build note (ended, N6 2026-11):** run `boot` and `stage1` under
+`setarch -R` (ASLR off) to dodge the *old* range-classifier heisenbug; stage2+
+(tagged) need no such workaround. The seed is now a tagged stage-2 build, so
+no stage needs `setarch` any more.
 
 ---
 

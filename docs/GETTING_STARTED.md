@@ -70,7 +70,7 @@ make
 ```
 
 This runs the three-stage bootstrap:
-  - stage1: handwritten x86-64 assembly seed (106,045 lines).
+  - stage1: the committed seed `boot/nova_boot.s` (the compiler's own stage-2 output, ~239,000 lines; `scripts/reseed.sh` regenerates it).
   - stage2: stage1 compiles `compiler/main.nova` to `stage2.s`.
   - stage3: stage2 compiles `compiler/main.nova` to `stage3.s`.
 

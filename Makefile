@@ -14,33 +14,14 @@ COMPILER_SRC = src/compiler/ast.nova \
                src/pkg/pkg.nova \
                src/compiler/compiler.nova
 
-.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf smoke-simd-wasm-v128 bench-simd bench-simd-sad bench-simd-wasm bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all bootstrap-setarch stage1-setarch stage2-setarch bin-nova-setarch self-host-setarch
+.PHONY: all clean test bootstrap stage1 self-host test-all examples cross-macos cross-windows cross-winarm64 smoke-windows smoke-winarm64 smoke-macos smoke-wasm smoke-wasm-file smoke-wasi-preopens smoke-gpu smoke-dwarf smoke-simd-wasm-v128 bench-simd bench-simd-sad bench-simd-wasm bench-int-safe hello hello-windows hello-windows-arm64 hello-macos hello-wasm hello-arm64-linux install package-deb package-pkg package-msi package-all
 
 all: bin/nova
 
-# Phase Q R1 workaround for pre-tagging-rework bootstrap crash.
-# The stage-1 compiler segfaults when ASLR maps the heap above the old
-# magnitude classifier threshold (`cmp rdi, 0x100000` in boot/nova_boot.s'
-# _nova_add helper) and a tagged integer `(n<<1)|1` with n >= 0x1000001
-# gets misclassified as a pointer. setarch -R disables ASLR, pinning the
-# heap below the threshold deterministically. See docs/PTR_TAGGING_PLAN.md:150
-# and Crossengin-demo/docs/adr/0100-nova-bootstrap-setarch-workaround.md.
-# These wrappers do NOT alter the existing targets -- they only call them
-# under setarch -R. The underlying bug remains; drop these wrappers once
-# the runtime tagging rework lands.
-bootstrap-setarch:
-	@setarch -R $(MAKE) bootstrap
-
-stage1-setarch:
-	@setarch -R $(MAKE) /tmp/nova_stage1
-
-stage2-setarch bin-nova-setarch:
-	@setarch -R $(MAKE) bin/nova
-
-self-host-setarch:
-	@setarch -R $(MAKE) self-host
-
-# Step 1: Build the assembly bootstrap
+# The committed seed (boot/nova_boot.s) is the stage-2 output of the tagged
+# compiler, so the bootstrap no longer needs `setarch -R` (the old seed's
+# magnitude-based pointer classifier made it ASLR-dependent).
+# scripts/reseed.sh regenerates the seed from the current source.
 bootstrap: $(BOOT)
 
 $(BOOT): boot/nova_boot.s
@@ -49,18 +30,15 @@ $(BOOT): boot/nova_boot.s
 
 # Step 2: Use bootstrap to compile Nova compiler.
 #
-# We rebuild twice: once via the bootstrap (stage 1, OLD runtime
-# appended by boot/nova_boot.s) and a second time via that stage-1 binary
-# (stage 2, NEW runtime emitted by the current src/compiler/codegen.nova
-# gen_runtime). bin/nova IS the stage-2 binary so its INTERNAL smart-op
-# helpers (_nova_check_rdi/_rsi etc.) reflect the current source — this
-# matters for compiling tests that lex large hex literals like
-# test_ptr_threshold_fix.nova, which would crash inside the bootstrap's
-# old `cmp rdi, 0x100000; jge .mul_ptr` heuristic.
+# We rebuild twice: once via the seed (stage 1: the current source compiled
+# by the seed's runtime) and again via that stage-1 binary (stage 2: the
+# runtime emitted by the current src/compiler/codegen.nova gen_runtime).
+# bin/nova IS the stage-2 binary, so its own runtime helpers always reflect
+# the current source even when the seed lags it.
 bin/nova: $(BOOT) $(COMPILER_SRC)
 	@mkdir -p bin
 	cat $(COMPILER_SRC) > /tmp/nova_combined.nova
-	$(BOOT) /tmp/nova_combined.nova /tmp/nova_combined.nova -o /tmp/nova_stage1.s
+	$(BOOT) /tmp/nova_combined.nova -o /tmp/nova_stage1.s
 	$(AS) -o /tmp/nova_stage1.o /tmp/nova_stage1.s
 	$(LD) -o /tmp/nova_stage1 /tmp/nova_stage1.o
 	/tmp/nova_stage1 /tmp/nova_combined.nova -o /tmp/nova_stage2.s

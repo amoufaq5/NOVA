@@ -37,7 +37,7 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 |---|---|
 | **Status** | Self-hosting verified (`stage2.s == stage3.s`), checked in CI (`.github/workflows/test.yml`) |
 | **Version** | 0.1.0 (`VERSION`, also what `nova version` prints); no tagged releases yet. Earlier docs used "v4.x" labels for development milestones; there was no 4.x release. |
-| **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) |
+| **Bootstrap** | `boot/nova_boot.s`: the compiler's own stage-2 output (about 239,000 lines of x86-64 assembly), regenerated with `scripts/reseed.sh` |
 | **Compiler** | Lexer, parser, AST and an AST-walking codegen (the unused `ir`/`regalloc`/`lower_*` files were removed, audit F-33) |
 | **Core Types** | 5,306 lines (moment, signal, node, channel, path, similarity, soul, system, belief, goal, safety, imagination, concept) |
 | **Mind Systems** | 2,800 lines (academic, experiential, emotion, memory, reasoning) |
@@ -54,7 +54,7 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 
 Nova is a compiled programming language designed for building AGI systems through **Moment-Signal Computing** -- a paradigm where cognition emerges from signals flowing through specialized processing nodes. Nova compiles to native x86-64 machine code via direct Linux and Windows syscalls with no C library, no garbage collector, and no runtime interpreter.
 
-The language is **fully self-hosting**: the Nova compiler is written in Nova and compiles its own source to byte-identical output -- a verified fixed point. The original bootstrap was hand-written x86-64 assembly (about 7,400 lines); since 23 May the committed seed `boot/nova_boot.s` is compiler-generated output (about 106,000 lines) and lags the current compiler.
+The language is **fully self-hosting**: the Nova compiler is written in Nova and compiles its own source to byte-identical output -- a verified fixed point. The original bootstrap was hand-written x86-64 assembly (about 7,400 lines); the committed seed `boot/nova_boot.s` is now the current compiler's own stage-2 output (about 239,000 lines), regenerated with `scripts/reseed.sh`.
 
 **Added in an earlier milestone (formerly labelled "v4.0"):** SSE2-vectorized SIMD operations, tiled matrix multiplication for cache efficiency, a cognitive LLM pipeline with confidence annotation and episodic memory, BM25-scored n-gram embeddings for competitive RAG, and a unified embedding interface with cognitive dimensions.
 
@@ -688,7 +688,7 @@ fn sieve(limit) {
 ## Architecture
 
 ```
-boot/nova_boot.s           Self-compiled x86-64 assembly bootstrap 106,045 lines
+boot/nova_boot.s           Self-compiled x86-64 assembly seed (stage-2 output, ~239,000 lines)
 src/compiler/              Self-hosting compiler in Nova            16,467 lines
   lexer.nova                 Tokenizer                                867 lines
   parser.nova                Recursive descent parser               2,305 lines
@@ -754,13 +754,13 @@ examples/                  31 example programs                       3,125 lines
 tests/                     164 test programs                        10,416 lines
 ```
 
-**Total: ~68,000 lines of Nova + 106,045 lines of bootstrap assembly.**
+**Total: ~68,000 lines of Nova + ~239,000 lines of generated seed assembly.**
 
 ## How It Works
 
 Nova achieves self-hosting through a multi-stage bootstrap process:
 
-1. **Bootstrap** (`boot/nova_boot.s`) -- an x86-64 assembly program (originally 7,379 lines handwritten, now 106,045 lines self-compiled) that interprets Nova source code. It makes raw Linux syscalls directly; no libc is linked.
+1. **Bootstrap** (`boot/nova_boot.s`) -- an x86-64 assembly program (originally 7,379 lines handwritten; now the compiler's own stage-2 output, ~239,000 lines) that compiles the Nova compiler source. It makes raw Linux syscalls directly; no libc is linked.
 2. **Stage 1** -- the bootstrap interprets the Nova compiler source (`src/compiler/*.nova`) and emits x86-64 assembly for the compiler itself.
 3. **Native binary** -- GNU `as` and `ld` assemble and link the Stage 1 output into `bin/nova`, a native executable.
 4. **Stage 2** -- `bin/nova` compiles its own source code, producing `stage2.s`.
