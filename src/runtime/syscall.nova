@@ -9,9 +9,11 @@
 //   - integer arguments (count, mode, offset, whence, size, length) are
 //     always tagged NOVA ints and are untagged unconditionally.
 //   - results of read / write / lseek / pread / pwrite / getcwd / mkdir /
-//     unlink / fstat / ftruncate are tagged when >= 0 (so `n == len(x)`,
+//     unlink / fstat / ftruncate / munmap are tagged when >= 0 (so `n == len(x)`,
 //     `n == 0` and arithmetic work) and left raw when negative (-errno),
 //     which keeps `n < 0` checks working. sys_open / sys_close stay raw.
+//   - sys_mmap and sys_brk return TAGGED pointers (like alloc()), so the
+//     memory works with load64/store64 and NOVA + / - arithmetic.
 // Before this, sys_read / sys_write returned raw byte counts (22 read as
 // 11), and mkdir / unlink / lseek / pread / pwrite / ftruncate / getcwd /
 // fstat passed tagged arguments straight to the kernel.
@@ -109,33 +111,69 @@ fn sys_lseek(fd, offset, whence) {
     }
 }
 
+// addr is tag-polymorphic (0 arrives tagged as 1); length / prot / flags /
+// offset are NOVA ints; fd is raw. The mapping comes back as a TAGGED
+// pointer (like alloc()), so load64/store64 and NOVA + / - work on it;
+// failure is raw -errno (< 0). Before, every argument reached the kernel
+// tagged: PROT_READ|PROT_WRITE (3) became 7 (RWX), MAP_PRIVATE|MAP_ANON
+// (34) became 69 (adding MAP_32BIT) and the length doubled.
 fn sys_mmap(addr, length, prot, flags, fd, offset) {
     asm {
         "mov rax, 9"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .ntmmap_a"
+        "sar rdi, 1"
+        ".ntmmap_a:"
         "mov rsi, [rbp-16]"
+        "sar rsi, 1"
         "mov rdx, [rbp-24]"
+        "sar rdx, 1"
         "mov r10, [rbp-32]"
+        "sar r10, 1"
         "mov r8, [rbp-40]"
         "mov r9, [rbp-48]"
+        "sar r9, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntmmap_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntmmap_ret:"
     }
 }
 
+// addr tag-polymorphic (a tagged sys_mmap result), length a NOVA int.
+// Returns tagged 0 / raw -errno.
 fn sys_munmap(addr, length) {
     asm {
         "mov rax, 11"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .ntmunmap_a"
+        "sar rdi, 1"
+        ".ntmunmap_a:"
         "mov rsi, [rbp-16]"
+        "sar rsi, 1"
         "syscall"
+        "test rax, rax"
+        "js .ntmunmap_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntmunmap_ret:"
     }
 }
 
+// addr tag-polymorphic (sys_brk(0) queries the break). Returns the new
+// break as a TAGGED pointer, like sys_mmap.
 fn sys_brk(addr) {
     asm {
         "mov rax, 12"
         "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .ntbrk_a"
+        "sar rdi, 1"
+        ".ntbrk_a:"
         "syscall"
+        "lea rax, [rax + rax + 1]"
     }
 }
 

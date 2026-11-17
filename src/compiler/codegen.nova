@@ -20367,9 +20367,10 @@ fn gen_runtime() {
     out("    jmp .split_loop")
     out(".split_found:")
     out("    mov rdi, r12")
-    out("    mov rsi, r15")
+    out("    lea rsi, [r15 + r15 + 1]")    // _nova_substr takes tagged start
     out("    mov rdx, rbx")
     out("    sub rdx, r15")
+    out("    lea rdx, [rdx + rdx + 1]")    // ...and tagged length
     out("    call _nova_substr")
     out("    mov rdi, r14")
     out("    mov rsi, rax")
@@ -20379,9 +20380,10 @@ fn gen_runtime() {
     out("    jmp .split_loop")
     out(".split_last:")
     out("    mov rdi, r12")
-    out("    mov rsi, r15")
+    out("    lea rsi, [r15 + r15 + 1]")    // tagged start
     out("    mov rdx, rbx")
     out("    sub rdx, r15")
+    out("    lea rdx, [rdx + rdx + 1]")    // tagged length
     out("    call _nova_substr")
     out("    mov rdi, r14")
     out("    mov rsi, rax")

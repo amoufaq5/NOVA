@@ -579,23 +579,11 @@ smoke-mobile-ios: bin/nova examples/hello_arm64_ios_reference.s
 	@echo "(this .o links into an Xcode .app bundle via bridging headers; see MOBILE_AUDIT.md)"
 
 # Run individual tests
+# The full suite, gated on tests/known_failures.txt (same check as CI): fails
+# on any failure not listed there, and on listed tests that now pass. It used
+# to run five hand-picked tests and print "All tests passed" regardless.
 test: bin/nova
-	@echo "--- test_add ---"
-	@bin/nova tests/test_add.nova -o /tmp/t.s && $(AS) -o /tmp/t.o /tmp/t.s && $(LD) -o /tmp/t /tmp/t.o && /tmp/t
-	@echo ""
-	@echo "--- test_complex ---"
-	@bin/nova tests/test_complex.nova -o /tmp/t.s && $(AS) -o /tmp/t.o /tmp/t.s && $(LD) -o /tmp/t /tmp/t.o && /tmp/t
-	@echo ""
-	@echo "--- test_while ---"
-	@bin/nova tests/test_while.nova -o /tmp/t.s && $(AS) -o /tmp/t.o /tmp/t.s && $(LD) -o /tmp/t /tmp/t.o && /tmp/t
-	@echo ""
-	@echo "--- test_smart_ops ---"
-	@bin/nova tests/test_smart_ops.nova -o /tmp/t.s && $(AS) -o /tmp/t.o /tmp/t.s && $(LD) -o /tmp/t /tmp/t.o && /tmp/t
-	@echo ""
-	@echo "--- test_runtime ---"
-	@bin/nova tests/test_runtime.nova -o /tmp/t.s && $(AS) -o /tmp/t.o /tmp/t.s && $(LD) -o /tmp/t /tmp/t.o && /tmp/t
-	@echo ""
-	@echo "--- All tests passed ---"
+	@bash scripts/check_test_baseline.sh
 
 # Run all tests using test runner
 test-all: bin/nova
@@ -616,13 +604,15 @@ examples: bin/nova
 
 # Run the cognitive agent
 agent: bin/nova
-	@cat src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
+	@cat src/runtime/scheduler.nova src/runtime/db.nova \
+		src/core/safety.nova src/core/goal.nova src/core/imagination.nova \
+		src/core/moment.nova src/core/signal.nova src/core/similarity.nova \
 		src/core/node.nova src/core/channel.nova src/core/path.nova \
 		src/core/soul.nova \
 		src/mind/academic.nova src/mind/experiential.nova src/mind/emotion.nova \
 		src/mind/memory.nova src/mind/reasoning.nova \
 		src/agent/agent.nova > /tmp/nova_agent.nova
-	@bin/nova /tmp/nova_agent.nova -o /tmp/nova_agent.s 2>/dev/null && \
+	@bin/nova /tmp/nova_agent.nova -o /tmp/nova_agent.s && \
 	$(AS) -o /tmp/nova_agent.o /tmp/nova_agent.s && \
 	$(LD) -o /tmp/nova_agent /tmp/nova_agent.o && \
 	/tmp/nova_agent

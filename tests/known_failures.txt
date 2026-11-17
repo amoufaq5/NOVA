@@ -18,17 +18,12 @@ test_flow_ops
 test_imagination
 test_is_operator
 test_kg_visualizer
-test_knowledge
 test_lambda
 test_m8_mind
 test_m9_fullsystem
 test_match_expression
-test_method_calls
 test_mind
-test_path
-test_persistent_alloc
 test_ptr_threshold_fix
-test_runtime
 test_scheduler
 test_simd_intrinsics
 test_simd_intrinsics_inlined
