@@ -34,5 +34,8 @@ jobs:
       - name: Self-host fixpoint (stage2 == stage3)
         run: setarch -R make self-host
 
+      - name: Compiled-in version matches VERSION
+        run: bash scripts/check_version.sh
+
       - name: Test suite against known failures
         run: bash scripts/check_test_baseline.sh

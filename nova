@@ -6,7 +6,12 @@
 
 set -e
 
-NOVA_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# Resolve symlinks (e.g. ~/bin/nova -> <repo>/nova) so NOVA_ROOT is the repo.
+_nova_self="$0"
+if command -v readlink >/dev/null 2>&1; then
+    _nova_self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+fi
+NOVA_ROOT="$(cd "$(dirname "$_nova_self")" && pwd)"
 NOVA_COMPILER="$NOVA_ROOT/bin/nova"
 AS=as
 LD=ld
@@ -70,7 +75,7 @@ case "$1" in
         make self-host
         ;;
     version)
-        echo "Nova Programming Language v0.9.0"
+        echo "Nova Programming Language v$(cat "$NOVA_ROOT/VERSION" 2>/dev/null || echo unknown)"
         echo "Self-hosting compiler for x86-64 Linux"
         echo "Binary: $NOVA_COMPILER"
         ;;

@@ -5,33 +5,15 @@
 // Usage: nova_boot src/compiler/compiler.nova <input.nova> -o <output.s>
 // Or when self-compiled: ./nova <input.nova> -o <output.s>
 
-// Fallback version string used if VERSION can't be located via read_file
-// (e.g. nova installed to ~/.local/bin/ with no VERSION alongside it).
-// Kept in sync with the VERSION file at the repo root by tools/RELEASE.md.
+// The compiler's version, compiled in. It used to read ./VERSION from the
+// current directory, so running `nova --version` inside any other project
+// with a VERSION file printed that project's version. `make test`
+// (scripts/check_version.sh) fails if this and the repo's VERSION file
+// disagree.
 let NOVA_VERSION_FALLBACK = "0.1.0"
 
 fn _read_version_file() {
-    let raw = read_file("VERSION")
-    if raw == 0 { return NOVA_VERSION_FALLBACK }
-    let n = len(raw)
-    if n == 0 { return NOVA_VERSION_FALLBACK }
-    let end = n
-    let trimming = 1
-    while trimming == 1 {
-        if end <= 0 { trimming = 0 }
-        if trimming == 1 {
-            let c = char_at(raw, end - 1)
-            let is_ws = 0
-            if c == 10 { is_ws = 1 }
-            if c == 13 { is_ws = 1 }
-            if c == 32 { is_ws = 1 }
-            if c == 9 { is_ws = 1 }
-            if is_ws == 1 { end = end - 1 }
-            if is_ws == 0 { trimming = 0 }
-        }
-    }
-    if end <= 0 { return NOVA_VERSION_FALLBACK }
-    return substr(raw, 0, end)
+    return NOVA_VERSION_FALLBACK
 }
 
 fn _print_usage() {
