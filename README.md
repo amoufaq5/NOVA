@@ -27,7 +27,7 @@ Compiles to native x86-64 machine code. Zero dependencies. No libc. Direct Linux
 | DAP (Python over gdb-mi) | R17F .. R35E | source / function / exception (R33F) / instruction (R17F+R35E) breakpoints; conditional + hit-count (R29E); reverse debug (R31E); profiler (R28F); disassembly (R34F). |
 | Tree-sitter grammar | R34E | match + nested patterns + let destructure + if-let + arm guards; **closure literals (R35C) deferred**. |
 | VS Code extension | R37D | single VSIX bundles TextMate grammar + LSP client (`python -m nova_lsp`) + DAP client (`python -m nova_dap`) + snippets. Build via `tools/vscode-nova/scripts/build-vsix.sh`; install via `code --install-extension nova-language-0.1.0.vsix`. Marketplace publish TBD. |
-| Codegen targets | v4.2 | Linux x86-64, Windows x86-64 PE32+, macOS x86-64, WASM (WASI), Linux ARM64, Windows ARM64. |
+| Codegen targets | (pre-R36) | Linux x86-64, Windows x86-64 PE32+, macOS x86-64, WASM (WASI), Linux ARM64, Windows ARM64. |
 
 See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 
@@ -36,7 +36,7 @@ See [`NEXT_SESSION.md`](NEXT_SESSION.md) for per-round detail.
 | | |
 |---|---|
 | **Status** | Self-hosting verified (`stage2.s == stage3.s`), checked in CI (`.github/workflows/test.yml`) |
-| **Version** | 0.1.0 (`VERSION`); no tagged releases yet. `src/version.nova` and the launcher report other numbers (0.2.0, 0.9.0) -- to be unified |
+| **Version** | 0.1.0 (`VERSION`, also what `nova version` prints); no tagged releases yet. Earlier docs used "v4.x" labels for development milestones; there was no 4.x release. |
 | **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) |
 | **Compiler** | Lexer, parser, AST and an AST-walking codegen (the unused `ir`/`regalloc`/`lower_*` files were removed, audit F-33) |
 | **Core Types** | 5,306 lines (moment, signal, node, channel, path, similarity, soul, system, belief, goal, safety, imagination, concept) |
@@ -56,11 +56,11 @@ Nova is a compiled programming language designed for building AGI systems throug
 
 The language is **fully self-hosting**: the Nova compiler is written in Nova and compiles its own source to byte-identical output -- a verified fixed point. The original bootstrap was hand-written x86-64 assembly (about 7,400 lines); since 23 May the committed seed `boot/nova_boot.s` is compiler-generated output (about 106,000 lines) and lags the current compiler.
 
-**New in v4.0:** SSE2-vectorized SIMD operations, tiled matrix multiplication for cache efficiency, a cognitive LLM pipeline with confidence annotation and episodic memory, BM25-scored n-gram embeddings for competitive RAG, and a unified embedding interface with cognitive dimensions.
+**Added in an earlier milestone (formerly labelled "v4.0"):** SSE2-vectorized SIMD operations, tiled matrix multiplication for cache efficiency, a cognitive LLM pipeline with confidence annotation and episodic memory, BM25-scored n-gram embeddings for competitive RAG, and a unified embedding interface with cognitive dimensions.
 
-**New in v4.2:** IEEE 754 double-precision float utilities (classification, rounding, formatting, parsing, statistics), syscall-based FFI without libc (ELF parser, SYSV hash lookup, raw socket wrappers), ARM64/AArch64 code generation pass (register mapping, NEON SIMD, syscall translation), file-backed persistent allocator (mmap MAP_SHARED, checksummed header, survives arena resets), hash-accelerated O(1) function lookup in codegen, and tensor performance benchmarks.
+**Added in an earlier milestone (formerly labelled "v4.2"):** IEEE 754 double-precision float utilities (classification, rounding, formatting, parsing, statistics), syscall-based FFI without libc (ELF parser, SYSV hash lookup, raw socket wrappers), ARM64/AArch64 code generation pass (register mapping, NEON SIMD, syscall translation), file-backed persistent allocator (mmap MAP_SHARED, checksummed header, survives arena resets), hash-accelerated O(1) function lookup in codegen, and tensor performance benchmarks.
 
-**New in v4.1:** Bayesian belief system (Beta distribution replacing flat 0-100 confidence), goal engine with four drive generators (curiosity, social, task, homeostasis), safety/audit layer with permission tiers and reversibility classification, imagination subsystem (world model, forward simulation, counterfactual reasoning, dream recombination), concept hierarchy with property inheritance and taxonomic similarity, schema system for entity type validation, multi-vector embeddings for rich semantic representation, OCEAN personality vectors and constitutional rules in the soul, multi-loop agent architecture replacing the sequential pipeline, and structural analogy via Jaccard similarity replacing substring matching.
+**Added in an earlier milestone (formerly labelled "v4.1"):** Bayesian belief system (Beta distribution replacing flat 0-100 confidence), goal engine with four drive generators (curiosity, social, task, homeostasis), safety/audit layer with permission tiers and reversibility classification, imagination subsystem (world model, forward simulation, counterfactual reasoning, dream recombination), concept hierarchy with property inheritance and taxonomic similarity, schema system for entity type validation, multi-vector embeddings for rich semantic representation, OCEAN personality vectors and constitutional rules in the soul, multi-loop agent architecture replacing the sequential pipeline, and structural analogy via Jaccard similarity replacing substring matching.
 
 At its foundation, Nova is a practical systems language with structs, enums, lambdas, coroutines, pattern matching, try/catch/finally, 270+ built-in functions, and an arena allocator for deterministic memory management. You can write a TCP server with raw syscalls, parse JSON, manage processes, or do bitwise manipulation -- all without any external dependency.
 
@@ -460,7 +460,7 @@ soul Aurora {
 
 Soul values bias signal processing (`soul_bias`), drives modulate attention (`soul_drive_level`), and feelings evolve over time (`soul_tick`). The `soul_preprocess` function applies the soul's personality to incoming signals before they reach cognitive nodes.
 
-**New in v4.1:** Souls now support OCEAN personality vectors (`soul_set_personality` with openness, conscientiousness, extraversion, agreeableness, neuroticism dimensions), constitutional rules with severity levels (`soul_add_constitution` for warn/block/override_only enforcement), identity themes with reinforcement (`soul_add_theme`, `soul_reinforce_theme`), and a loyalty hierarchy (`soul_add_loyalty` with insertion-sorted priority levels).
+**Added in an earlier milestone (formerly labelled "v4.1"):** Souls now support OCEAN personality vectors (`soul_set_personality` with openness, conscientiousness, extraversion, agreeableness, neuroticism dimensions), constitutional rules with severity levels (`soul_add_constitution` for warn/block/override_only enforcement), identity themes with reinforcement (`soul_add_theme`, `soul_reinforce_theme`), and a loyalty hierarchy (`soul_add_loyalty` with insertion-sorted priority levels).
 
 ### System Declarations -- Multi-Mind Composition
 
@@ -704,11 +704,11 @@ src/core/                  Cognitive architecture types              5,306 lines
   similarity.nova            Similarity computation for matching
   soul.nova                  Identity, values, drives, feelings, personality, constitution
   system.nova                Multi-mind composition with bridges
-  belief.nova                Bayesian belief system (Beta distribution) (v4.1)
-  goal.nova                  Goal engine with drive generators (v4.1)
-  safety.nova                Safety/audit layer with permission tiers (v4.1)
-  imagination.nova           World model, forward sim, counterfactual, dreams (v4.1)
-  concept.nova               Concept hierarchy, schemas, multi-vector embeddings (v4.1)
+  belief.nova                Bayesian belief system (Beta distribution)
+  goal.nova                  Goal engine with drive generators
+  safety.nova                Safety/audit layer with permission tiers
+  imagination.nova           World model, forward sim, counterfactual, dreams
+  concept.nova               Concept hierarchy, schemas, multi-vector embeddings
 src/mind/                  Mind systems                              2,800 lines
   academic.nova              Knowledge from axioms and rules
   experiential.nova          Learning from lived moments
@@ -737,18 +737,18 @@ src/runtime/               Runtime library                          7,717 lines
   validate.nova              Input sanitization and range checking
   secure_mem.nova            Secure memory (zeroed on free)
   stream.nova                Streaming signals and pipe composition
-  simd.nova                  SSE2-vectorized SIMD operations (v4.0)
-  tensor.nova                Tensor math with tiled matmul (v4.0)
-  embedding.nova             BM25 + n-gram + cognitive embeddings (v4.0)
+  simd.nova                  SSE2-vectorized SIMD operations
+  tensor.nova                Tensor math with tiled matmul
+  embedding.nova             BM25 + n-gram + cognitive embeddings
   mem.nova                   IEEE 754 double memory operations
   confidence.nova            Confidence-annotated values
   ffi.nova                   Foreign function interface
   csv.nova                   CSV parsing
 src/agent/                 Agent systems                             2,151 lines
-  agent.nova                 Multi-loop cognitive agent (v4.1)         952 lines
-  cognitive_llm.nova         Cognitive LLM pipeline (v4.0)             331 lines
+  agent.nova                 Multi-loop cognitive agent         952 lines
+  cognitive_llm.nova         Cognitive LLM pipeline             331 lines
   rag.nova                   RAG retrieval pipeline                    589 lines
-  preprocess.nova            Corpus ingestion and canonicalization (v4.1)
+  preprocess.nova            Corpus ingestion and canonicalization
 src/pkg/pkg.nova           Package manager                            487 lines
 examples/                  31 example programs                       3,125 lines
 tests/                     164 test programs                        10,416 lines
@@ -1113,7 +1113,7 @@ pattern vs scalar oracle).
 ### Tensor
 `tensor_new` `tensor_set` `tensor_get` `tensor_matmul` `tensor_add` `tensor_sub` `tensor_scale` `tensor_relu` `tensor_softmax` `tensor_transpose` `tensor_cosine_sim` `tensor_print`
 
-### Embedding (v4.0)
+### Embedding
 `embedding_init` `embedding_encode` `embedding_similarity` `embedding_add_document` `embedding_cognitive` `embedding_vocab_size` `embedding_doc_count`
 
 ### Cognitive LLM

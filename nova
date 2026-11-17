@@ -70,7 +70,7 @@ case "$1" in
         make self-host
         ;;
     version)
-        echo "Nova Programming Language v0.9.0"
+        echo "Nova Programming Language v$(cat "$NOVA_ROOT/VERSION" 2>/dev/null || echo unknown)"
         echo "Self-hosting compiler for x86-64 Linux"
         echo "Binary: $NOVA_COMPILER"
         ;;

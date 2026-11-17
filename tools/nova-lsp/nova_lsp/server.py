@@ -430,6 +430,19 @@ DIAG_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# What the NOVA compiler actually prints (audit F-27): parse errors as
+# `error[line N]: msg` (followed by a `  | source` caret block), semantic
+# errors as `ERROR: msg` / `Error: msg` and warnings as `warning: msg`, the
+# last three without a line number. The generic regex above matched none of
+# them, so the editor showed no diagnostics at all.
+NOVA_LINE_RE = re.compile(
+    r"^(?P<level>error|warning)\[line (?P<line>\d+)\]:\s*(?P<msg>.+)$",
+    re.IGNORECASE,
+)
+NOVA_NOLINE_RE = re.compile(
+    r"^(?P<level>ERROR|Error|error|warning):\s*(?P<msg>.+)$",
+)
+
 
 def uri_to_path(uri: str) -> Optional[str]:
     if not uri.startswith("file://"):
@@ -448,15 +461,28 @@ def run_compiler_check(state: ServerState, doc: Document) -> List[Dict[str, Any]
     style lines and emit LSP Diagnostic objects."""
     if not state.nova_compiler:
         return []
+    # Write the buffer next to the real file when we can, so relative
+    # imports resolve the same way they do for the user's build.
+    tmp_dir = None
+    src_path = uri_to_path(doc.uri) if getattr(doc, "uri", None) else None
+    if src_path:
+        d = os.path.dirname(src_path)
+        if d and os.path.isdir(d) and os.access(d, os.W_OK):
+            tmp_dir = d
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".nova", delete=False, encoding="utf-8"
+        mode="w", suffix=".nova", prefix=".nova-lsp-", dir=tmp_dir,
+        delete=False, encoding="utf-8",
     ) as tmp:
         tmp.write(doc.text)
         tmp_path = tmp.name
+    out_path = tmp_path + ".s"
     try:
+        # `--check` is a syntax check; it passes programs that then fail to
+        # compile (e.g. an undeclared callee), so a clean --check is followed
+        # by a full compile. Warnings are reported even when it succeeds.
         for argv in (
             [state.nova_compiler, "--check", tmp_path],
-            [state.nova_compiler, tmp_path, "-o", os.devnull],
+            [state.nova_compiler, tmp_path, "-o", out_path],
         ):
             try:
                 proc = subprocess.run(
@@ -468,17 +494,21 @@ def run_compiler_check(state: ServerState, doc: Document) -> List[Dict[str, Any]
             except (FileNotFoundError, subprocess.TimeoutExpired) as e:
                 _log(f"compiler invocation failed for {argv[0]}: {e}")
                 return []
-            if proc.returncode == 0:
-                return []  # clean
             stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
             stdout = (proc.stdout or b"").decode("utf-8", errors="replace")
             diags = parse_compiler_output(stderr + "\n" + stdout, doc)
-            if diags or "--check" not in argv:
+            if diags:
                 return diags
+            if proc.returncode != 0 and "--check" not in argv:
+                return []  # failed without a parseable message
         return []
     finally:
         try:
             os.unlink(tmp_path)
+        except OSError:
+            pass
+        try:
+            os.unlink(out_path)
         except OSError:
             pass
 
@@ -489,14 +519,24 @@ def parse_compiler_output(text: str, doc: Document) -> List[Dict[str, Any]]:
         line = raw_line.strip()
         if not line:
             continue
-        m = DIAG_LINE_RE.match(line)
-        if not m:
-            continue
-        try:
+        col = None
+        m = NOVA_LINE_RE.match(line)
+        if m:
             line_no = max(0, int(m.group("line")) - 1)
-        except (ValueError, TypeError):
-            continue
-        col = m.group("col")
+        else:
+            m = DIAG_LINE_RE.match(line)
+            if m:
+                try:
+                    line_no = max(0, int(m.group("line")) - 1)
+                except (ValueError, TypeError):
+                    continue
+                col = m.group("col")
+            else:
+                m = NOVA_NOLINE_RE.match(line)
+                if not m:
+                    continue
+                line_no = 0  # the compiler gives no position: report at the top
+
         try:
             col_no = max(0, int(col) - 1) if col else 0
         except ValueError:

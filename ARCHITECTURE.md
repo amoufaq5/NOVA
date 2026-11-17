@@ -101,7 +101,6 @@ NOVA/
 ├── INSTALL.md               ← packaging + install layout
 ├── NOVA_BUG_THRESHOLD.md    ← PTR_THRESHOLD known-bug docs
 ├── Makefile                 ← `make / make self-host / make test-all`
-├── build_compiler.sh        ← bootstrap script
 ├── nova                     ← shell wrapper around bin/nova
 ├── boot/                    ← hand-written assembly bootstrap
 │   └── nova_boot.s          ← stage0 (~assembly)
@@ -125,7 +124,6 @@ NOVA/
 
 ```
 src/
-├── version.nova       Single line of truth for compiler version
 ├── compiler/          The compiler pipeline (~28k lines NOVA)
 │   ├── lexer.nova       880 lines  — UTF-8 tokenizer
 │   ├── parser.nova    3,349 lines  — recursive-descent parser
