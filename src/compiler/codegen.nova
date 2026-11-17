@@ -19330,7 +19330,8 @@ fn gen_runtime() {
     }
     out("    cmp rax, 0")
     out("    jg .rl_got")
-    out("    mov qword ptr [rip + _nova_stdin_eof], 1")   // EOF / read error
+    out("    jl .rl_done")                 // read error (EAGAIN, EINTR...): not EOF
+    out("    mov qword ptr [rip + _nova_stdin_eof], 1")   // read() == 0: end of input
     out("    jmp .rl_done")
     out(".rl_got:")
     out("    movzx eax, byte ptr [r12 + r13]")

@@ -146,6 +146,7 @@ fn rt_realloc(ptr, new_size) {
         return ptr
     }
     let new_ptr = rt_alloc(new_size)
+    if new_ptr == 0 { return 0 }          // allocation failed: ptr stays valid
     memcpy_raw(new_ptr, ptr, old_size)
     rt_free(ptr)
     return new_ptr
