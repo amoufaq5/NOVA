@@ -26,13 +26,24 @@ jobs:
           as --version | head -1
           ld --version | head -1
 
-      # setarch -R disables ASLR for the bootstrap; see the Makefile's
-      # *-setarch targets for why the seed needs it.
+      # No setarch: the seed is a tagged-compiler build, so the bootstrap is
+      # not ASLR-dependent any more.
       - name: Build compiler (seed -> stage1 -> stage2)
-        run: setarch -R make bin/nova
+        run: make bin/nova
 
       - name: Self-host fixpoint (stage2 == stage3)
-        run: setarch -R make self-host
+        run: make self-host
+
+      # The seed only has to be able to build the current compiler; it does
+      # not have to be the newest stage2. Report (do not fail) when it lags,
+      # so a reseed (scripts/reseed.sh) can be scheduled.
+      - name: Seed freshness (informational)
+        run: |
+          if cmp -s boot/nova_boot.s /tmp/nova_stage2.s; then
+            echo "seed == stage2"
+          else
+            echo "::warning::boot/nova_boot.s differs from the current stage2 output; run scripts/reseed.sh in a separate PR when convenient"
+          fi
 
       - name: Compiled-in version matches VERSION
         run: bash scripts/check_version.sh
