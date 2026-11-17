@@ -6,7 +6,10 @@
 // Header: magic(8) | version(8) | pool_size(8) | used(8) | free_list_off(8) | block_count(8) | checksum(8) | reserved(8)
 // Block:  size(8) | next_free_off(8) | data...
 //
-// Uses int_add/int_sub for all pointer arithmetic.
+// The pool base is a TAGGED pointer (sys_mmap returns tagged pointers, like
+// alloc()), so pointer arithmetic is plain + / - and load64/store64 take the
+// results directly. (int_add on a tagged base and a tagged offset was off by
+// one byte after load64's untag; on the old raw base it was garbage.)
 
 let PA_MAGIC = 1315468878  // "NOVA" as int
 let PA_VERSION = 1
@@ -30,11 +33,11 @@ let PA_OFF_BLOCK_COUNT = 40
 let PA_OFF_CHECKSUM = 48
 
 fn _pa_read64(offset) {
-    return load64(int_add(_pa_base, offset))
+    return load64((_pa_base + offset))
 }
 
 fn _pa_write64(offset, val) {
-    store64(int_add(_pa_base, offset), val)
+    store64((_pa_base + offset), val)
 }
 
 fn _pa_compute_checksum() {
@@ -59,16 +62,10 @@ fn _pa_verify_checksum() {
     return 0
 }
 
+// sys_ftruncate untags the length (it used to reach the kernel tagged, so
+// the file grew to 2n+1 bytes).
 fn _pa_ftruncate(fd, length) {
-    let result = 0
-    asm {
-        "mov rax, 77"
-        "mov rdi, [rbp - 8]"
-        "mov rsi, [rbp - 16]"
-        "syscall"
-        "mov [rbp - 24], rax"
-    }
-    return result
+    return sys_ftruncate(fd, length)
 }
 
 // Open or create a persistent memory pool backed by a file.
@@ -87,8 +84,34 @@ fn persistent_open(filepath, pool_size) {
         is_new = 1
     }
 
-    // Set file size via ftruncate
-    _pa_ftruncate(fd, aligned_size)
+    if is_new == 1 {
+        _pa_ftruncate(fd, aligned_size)
+    } else {
+        // Validate an existing file BEFORE changing it: a non-pool file is
+        // rejected untouched, and an existing pool keeps its stored size
+        // (it used to be truncated to the requested size first, destroying
+        // a rejected file or the tail of a larger pool).
+        let hdr = alloc(32)
+        if sys_pread(fd, hdr, 24, 0) != 24 {
+            sys_close(fd)
+            return 0
+        }
+        if load64(hdr) != PA_MAGIC {
+            sys_close(fd)
+            return 0
+        }
+        let stored = load64(hdr + PA_OFF_POOL_SIZE)
+        let file_size = sys_lseek(fd, 0, 2)   // SEEK_END
+        if stored < PA_HDR_SIZE {
+            sys_close(fd)
+            return 0
+        }
+        if file_size < stored {
+            sys_close(fd)
+            return 0
+        }
+        aligned_size = stored
+    }
 
     // mmap the file: PROT_READ|PROT_WRITE, MAP_SHARED
     let base = sys_mmap(0, aligned_size, 3, 1, fd, 0)  // MAP_SHARED=1
@@ -131,22 +154,22 @@ fn persistent_alloc(size) {
     if _pa_ready == 0 { return 0 }
     let aligned = (size + 7) & (~7)
     if aligned < PA_MIN_BLOCK { aligned = PA_MIN_BLOCK }
-    let total = int_add(aligned, PA_BLOCK_HDR)
+    let total = (aligned + PA_BLOCK_HDR)
 
     // Skip free list for now — just bump allocate
     let used = _pa_read64(PA_OFF_USED)
-    if int_add(used, total) > _pa_size { return 0 }
+    if (used + total) > _pa_size { return 0 }
 
-    let block_ptr = int_add(_pa_base, used)
+    let block_ptr = (_pa_base + used)
     store64(block_ptr, total)
-    store64(int_add(block_ptr, 8), 0)
+    store64((block_ptr + 8), 0)
 
-    _pa_write64(PA_OFF_USED, int_add(used, total))
+    _pa_write64(PA_OFF_USED, (used + total))
     let count = _pa_read64(PA_OFF_BLOCK_COUNT)
-    _pa_write64(PA_OFF_BLOCK_COUNT, int_add(count, 1))
+    _pa_write64(PA_OFF_BLOCK_COUNT, (count + 1))
     _pa_update_checksum()
 
-    return int_add(block_ptr, PA_BLOCK_HDR)
+    return (block_ptr + PA_BLOCK_HDR)
 }
 
 // Free a persistent allocation (adds to free list).
@@ -154,12 +177,12 @@ fn persistent_free(ptr) {
     if _pa_ready == 0 { return 0 }
     if ptr == 0 { return 0 }
 
-    let block_ptr = int_sub(ptr, PA_BLOCK_HDR)
-    let offset = int_sub(block_ptr, _pa_base)
+    let block_ptr = (ptr - PA_BLOCK_HDR)
+    let offset = (block_ptr - _pa_base)
 
     // Prepend to free list
     let old_head = _pa_read64(PA_OFF_FREE_LIST)
-    store64(int_add(block_ptr, 8), old_head)
+    store64((block_ptr + 8), old_head)
     _pa_write64(PA_OFF_FREE_LIST, offset)
     _pa_update_checksum()
     return 1
@@ -168,35 +191,15 @@ fn persistent_free(ptr) {
 // Sync the memory pool to disk (msync).
 fn persistent_sync() {
     if _pa_ready == 0 { return 0 }
-    // msync syscall: 26 on Linux
-    // MS_SYNC = 4
-    let result = 0
-    asm {
-        "mov rax, 26"
-        "mov rdi, [rbp - 8]"
-        "mov rsi, [rbp - 16]"
-        "mov rdx, 4"
-        "syscall"
-        "mov [rbp - 24], rax"
-    }
-    // Use _pa_base as rdi, _pa_size as rsi (need to load from globals)
-    // Simpler approach: direct syscall with our values
+    // msync(base, size, MS_SYNC) -- see _pa_msync.
     return _pa_msync()
 }
 
+// msync(base, size, MS_SYNC). The earlier inline asm read stack slots its
+// (unused, so never allocated) locals did not occupy: it issued
+// msync(NULL, <garbage>) and returned success without syncing anything.
 fn _pa_msync() {
-    let base = _pa_base
-    let size = _pa_size
-    let result = 0
-    asm {
-        "mov rax, 26"
-        "mov rdi, [rbp - 8]"
-        "mov rsi, [rbp - 16]"
-        "mov rdx, 4"
-        "syscall"
-        "mov [rbp - 24], rax"
-    }
-    return result
+    return sys_msync(_pa_base, _pa_size, 4)
 }
 
 // Close the persistent memory pool.
@@ -237,22 +240,22 @@ fn persistent_is_open() {
 
 // Store a 64-bit value at offset within a persistent allocation.
 fn persistent_store64(ptr, offset, val) {
-    store64(int_add(ptr, offset), val)
+    store64((ptr + offset), val)
 }
 
 // Load a 64-bit value from offset within a persistent allocation.
 fn persistent_load64(ptr, offset) {
-    return load64(int_add(ptr, offset))
+    return load64((ptr + offset))
 }
 
 // Store a byte at offset within a persistent allocation.
 fn persistent_store8(ptr, offset, val) {
-    store8(int_add(ptr, offset), val)
+    store8((ptr + offset), val)
 }
 
 // Load a byte from offset within a persistent allocation.
 fn persistent_load8(ptr, offset) {
-    return load8(int_add(ptr, offset))
+    return load8((ptr + offset))
 }
 
 // Write a string into persistent memory at ptr.
@@ -263,10 +266,10 @@ fn persistent_write_str(ptr, str_val) {
     while i < slen {
         let ch = substr(str_val, i, 1)
         let code = char_code(ch)
-        store8(int_add(ptr, i), code)
+        store8((ptr + i), code)
         i = i + 1
     }
-    store8(int_add(ptr, slen), 0)  // null-terminate
+    store8((ptr + slen), 0)  // null-terminate
     return slen + 1
 }
 
@@ -275,7 +278,7 @@ fn persistent_read_str(ptr, max_len) {
     let result = ""
     let i = 0
     while i < max_len {
-        let c = load8(int_add(ptr, i))
+        let c = load8((ptr + i))
         if c == 0 { return result }
         result = result + chr(c)
         i = i + 1
@@ -289,17 +292,17 @@ fn persistent_compact() {
     let merged = 0
     let curr_off = _pa_read64(PA_OFF_FREE_LIST)
     while curr_off != 0 {
-        let curr_ptr = int_add(_pa_base, curr_off)
+        let curr_ptr = (_pa_base + curr_off)
         let curr_size = load64(curr_ptr)
-        let next_off = load64(int_add(curr_ptr, 8))
+        let next_off = load64((curr_ptr + 8))
         // Check if next block is physically adjacent
         if next_off == curr_off + curr_size {
-            let next_ptr = int_add(_pa_base, next_off)
+            let next_ptr = (_pa_base + next_off)
             let next_size = load64(next_ptr)
-            let after_off = load64(int_add(next_ptr, 8))
+            let after_off = load64((next_ptr + 8))
             // Merge: extend current block, skip next
             store64(curr_ptr, curr_size + next_size)
-            store64(int_add(curr_ptr, 8), after_off)
+            store64((curr_ptr + 8), after_off)
             merged = merged + 1
         } else {
             curr_off = next_off

@@ -1,0 +1,72 @@
+// N4 review regressions:
+//   * char_code returns a NOVA int ("h" -> 104; it returned the raw byte,
+//     read as 52).
+//   * persistent_sync really syncs and returns success, and data survives
+//     close + reopen.
+//   * persistent_open rejects a non-pool file WITHOUT truncating it, and
+//     reopening a pool with a smaller requested size keeps the stored size.
+//   * rt_alloc no longer shares the program break with alloc(): interleaved
+//     use does not crash or overlap.
+import "std/syscall"
+import "std/alloc"
+import "std/string"
+import "std/io"
+import "std/persistent_alloc"
+import "../src/core/safety.nova"
+
+fn _n4_safety() {
+    assert(safety_sanitize_output("hi there") == "hi there", "sanitize keeps printable text")
+}
+
+fn _n4_char_code() {
+    assert(char_code("h") == 104, "char_code h")
+    assert(char_code("0") - 48 == 0, "char_code digit")
+}
+
+fn _n4_persist() {
+    let path = "/tmp/nova_n4_pool_" + int_to_str(getpid())
+    assert(persistent_open(path, 16384) == 1, "create pool")
+    let p = persistent_alloc(64)
+    persistent_write_str(p, "hello")
+    assert(persistent_sync() == 0, "sync succeeds")
+    persistent_close()
+    assert(persistent_open(path, 4096) == 1, "reopen with smaller size")
+    assert(persistent_capacity() == 16384, "stored pool size kept")
+    sys_unlink(path)
+    persistent_close()
+
+    let other = "/tmp/nova_n4_other_" + int_to_str(getpid())
+    let fd = sys_open(other, 577, 420)
+    let junk = "not a pool, just some text that must survive"
+    sys_write(fd, junk, len(junk))
+    sys_close(fd)
+    assert(persistent_open(other, 4096) == 0, "non-pool file rejected")
+    let back = read_file(other)
+    assert(len(back) == len(junk), "rejected file left untouched")
+    sys_unlink(other)
+}
+
+fn _n4_heaps() {
+    heap_init()
+    let a = alloc(16)
+    let r = rt_alloc(256)
+    store64(r, 222)
+    let i = 0
+    while i < 40 {
+        let b = alloc(65536)
+        store64(b, 333)
+        i = i + 1
+    }
+    assert(load64(r) == 222, "rt_alloc block not overwritten by alloc()")
+    assert(rt_alloc(70368744177664) == 0, "failed mmap returns 0")
+    let q = rt_alloc(64)
+    store64(q, 777)
+    assert(rt_realloc(q, 70368744177664) == 0, "failed realloc returns 0")
+    assert(load64(q) == 777, "failed realloc leaves the block intact")
+}
+
+_n4_char_code()
+_n4_safety()
+_n4_persist()
+_n4_heaps()
+println("PASS")

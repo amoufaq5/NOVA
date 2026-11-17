@@ -1,0 +1,41 @@
+// db_save / db_open must round-trip: values written and saved are there
+// after reopening the same file (string and int values). db_open parses the
+// file with split(), which returned every piece at half its length (it
+// passed raw start/length to substr, which untags them): "name=nova" came
+// back as "name", so nothing survived a reload.
+import "std/syscall"
+import "std/alloc"
+import "std/string"
+import "std/io"
+import "../src/runtime/db.nova"
+
+fn _dbr_split() {
+    let parts = split("name=nova,answer=42", ",")
+    assert(len(parts) == 2, "split count")
+    assert(parts[0] == "name=nova", "split piece 0 is whole")
+    assert(parts[1] == "answer=42", "split last piece is whole")
+    let words = split("a b c d", " ")
+    assert(words[3] == "d", "split single-char pieces")
+}
+
+fn _dbr_main() {
+    _dbr_split()
+    let path = "/tmp/nova_db_reload_" + int_to_str(getpid()) + ".db"
+    let d = db_open(path)
+    db_put(d, "name", "nova")
+    db_put_int(d, "answer", 42)
+    db_put(d, "gone", "x")
+    db_delete(d, "gone")
+    db_save(d)
+    db_close(d)
+
+    let e = db_open(path)
+    assert(db_get(e, "name") == "nova", "string value survives reload")
+    assert(db_get_int(e, "answer") == 42, "int value survives reload")
+    assert(db_has(e, "gone") == false, "deleted key stays deleted")
+    assert(db_count(e) == 2, "two keys after reload")
+    sys_unlink(path)
+    println("PASS")
+}
+
+_dbr_main()

@@ -221,7 +221,8 @@ fn safety_sanitize_output(text) {
     let i = 0
     let n = len(text)
     while i < n {
-        let c = text[i]
+        // text[i] is the byte as an int; char_code and + need the 1-char string.
+        let c = substr(text, i, 1)
         let code = char_code(c)
         // Allow printable ASCII (32-126), newline (10), tab (9)
         if code >= 32 {

@@ -58,6 +58,14 @@ fn _ffi_read_at(fd, offset, buf, count) {
     return sys_read(fd, buf, count)
 }
 
+// Raw machine address of a tagged pointer (sys_mmap / alloc result).
+fn _ffi_raw_addr(p) {
+    asm {
+        "mov rax, [rbp-8]"
+        "sar rax, 1"
+    }
+}
+
 // Read a 16-bit little-endian value from memory.
 fn _ffi_read16(ptr) {
     let b0 = load8(ptr)
@@ -224,6 +232,9 @@ fn ffi_load(lib_name) {
         sys_close(fd)
         return 0
     }
+    // This loader does raw-address arithmetic (int_add); sys_mmap returns a
+    // tagged pointer, so take the raw address.
+    base = _ffi_raw_addr(base)
 
     // Load each PT_LOAD segment
     pi = 0

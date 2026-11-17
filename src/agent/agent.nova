@@ -859,9 +859,14 @@ fn main() {
         print_prompt()
         let input = read_line()
 
-        // Skip empty input
+        // Skip empty input. read_line() returns "" both for an empty line
+        // and at end of input; stdin_eof() tells them apart, so a closed
+        // stdin stops the agent instead of printing the prompt forever.
         if len(input) == 0 {
-            // do nothing, loop again
+            if stdin_eof() == 1 {
+                println("")
+                agent_running = 0
+            }
         } else {
             if input == "/help" {
                 println("  Commands:")
