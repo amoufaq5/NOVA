@@ -30,14 +30,11 @@ $(BOOT): boot/nova_boot.s
 
 # Step 2: Use bootstrap to compile Nova compiler.
 #
-# We rebuild twice: once via the bootstrap (stage 1, OLD runtime
-# appended by boot/nova_boot.s) and a second time via that stage-1 binary
-# (stage 2, NEW runtime emitted by the current src/compiler/codegen.nova
-# gen_runtime). bin/nova IS the stage-2 binary so its INTERNAL smart-op
-# helpers (_nova_check_rdi/_rsi etc.) reflect the current source — this
-# matters for compiling tests that lex large hex literals like
-# test_ptr_threshold_fix.nova, which would crash inside the bootstrap's
-# old `cmp rdi, 0x100000; jge .mul_ptr` heuristic.
+# We rebuild twice: once via the seed (stage 1: the current source compiled
+# by the seed's runtime) and again via that stage-1 binary (stage 2: the
+# runtime emitted by the current src/compiler/codegen.nova gen_runtime).
+# bin/nova IS the stage-2 binary, so its own runtime helpers always reflect
+# the current source even when the seed lags it.
 bin/nova: $(BOOT) $(COMPILER_SRC)
 	@mkdir -p bin
 	cat $(COMPILER_SRC) > /tmp/nova_combined.nova

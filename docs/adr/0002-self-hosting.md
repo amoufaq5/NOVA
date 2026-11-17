@@ -116,3 +116,7 @@ A new contributor reading NOVA's `compiler/` for the first time can:
 
 This makes the codebase self-documenting in a way test coverage
 alone cannot. The compiler IS its own most thorough test case.
+
+> **Update (2026-11, NOVA N6).** The seed is no longer hand-written: `boot/nova_boot.s`
+> is the compiler's own stage-2 output (~239,000 lines), regenerated with
+> `scripts/reseed.sh`; the line counts above are historical.

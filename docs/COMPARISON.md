@@ -18,7 +18,7 @@ languages in systems programming and general-purpose development, respectively.
 | **Runtime dependencies** | Zero -- direct Linux syscalls, no libc | libc (glibc, musl, etc.) | CPython interpreter + libpython |
 | **Binary size** | Minimal static binary (no runtime) | Small static or dynamic binary | N/A (requires interpreter + stdlib) |
 | **Self-hosting** | Yes (~68,000 lines Nova + 106K lines asm) | Yes (GCC: ~15 million lines) | No (CPython is written in C) |
-| **Bootstrap** | 106,045 lines of x86-64 assembly (self-compiled) | Bootstrapped from earlier C compilers | N/A |
+| **Bootstrap** | ~239,000 lines of x86-64 assembly (the compiler's own stage-2 output) | Bootstrapped from earlier C compilers | N/A |
 | **Memory model** | Bump allocator, arena reset | Manual (malloc/free/calloc/realloc) | Automatic (GC managed) |
 | **Integers** | 64-bit signed | Platform-dependent (int, long, etc.) | Arbitrary precision |
 | **Strings** | Null-terminated, immutable | Null-terminated char arrays | Immutable unicode objects |

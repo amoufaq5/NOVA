@@ -77,6 +77,7 @@ special handling (the compiler is just another tagged program).
 ## 3. Bootstrap procedure (the only safe path)
 
 `boot/nova_boot` is a **stable static ELF interpreter** (untagged) — the anchor.
+(Historical: since N6, 2026-11, the seed is a build of the tagged compiler.)
 
 1. Edit `codegen.nova` (this branch) so it EMITS tagged code everywhere (§2).
 2. `boot/nova_boot` interprets the combined source (untagged semantics — it only
@@ -208,9 +209,10 @@ belief, hdc, mind, …). **`bin/nova` must NOT be replaced until these pass** �
 installing now would regress 71 tests. The bug fix is proven and self-hosting
 on this branch, but not yet shippable.
 
-**Transitional build note:** run `boot` and `stage1` under `setarch -R` (ASLR
-off) to dodge the *old* range-classifier heisenbug; stage2+ (tagged) need no
-such workaround.
+**Transitional build note (ended, N6 2026-11):** run `boot` and `stage1` under
+`setarch -R` (ASLR off) to dodge the *old* range-classifier heisenbug; stage2+
+(tagged) need no such workaround. The seed is now a tagged stage-2 build, so
+no stage needs `setarch` any more.
 
 ---
 

@@ -9,7 +9,7 @@
 // harness skips it (like test_fileio). Run it directly via the bootstrap:
 //   cat src/runtime/syscall.nova src/storage/wal.nova \
 //       <(grep -v '^import' tests/test_wal.nova) > /tmp/t.nova
-//   boot/nova_boot /tmp/t.nova /tmp/t.nova -o /tmp/t.s && as -o /tmp/t.o /tmp/t.s \
+//   bin/nova /tmp/t.nova -o /tmp/t.s && as -o /tmp/t.o /tmp/t.s \
 //       && ld -o /tmp/t /tmp/t.o && /tmp/t
 
 import "../src/runtime/syscall.nova"

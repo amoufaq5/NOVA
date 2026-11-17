@@ -131,3 +131,7 @@ Specifically:
     emit NOVA source.
   - **Add a GC.** Rejected outright: a substrate ticking at ~100Hz
     cannot afford unpredictable GC pauses.
+
+> **Update (2026-11, NOVA N6).** The seed is no longer hand-written: `boot/nova_boot.s`
+> is the compiler's own stage-2 output (~239,000 lines), regenerated with
+> `scripts/reseed.sh`; the line counts above are historical.

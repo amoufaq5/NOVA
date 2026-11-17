@@ -192348,8 +192348,14 @@ main:
     mov rdi, rax
     call compile
     mov [rbp - 72], rax
-    .loc 1 33210 0
+    .loc 1 33212 0
+    lea rax, [rip + _str_554]
+    push rax
     mov rax, [rbp - 72]
+    pop rcx
+    mov rdi, rax
+    mov rsi, rcx
+    call _nova_add
     push rax
     mov rax, [rbp - 16]
 
@@ -192357,7 +192363,7 @@ main:
     pop rsi
     call write_file
     mov [rbp - 80], rax
-    .loc 1 33211 0
+    .loc 1 33213 0
     mov rax, [rbp - 80]
     mov rcx, rax
     mov rax, 1
@@ -192367,7 +192373,7 @@ main:
     call _nova_eq
     cmp rax, 2
     jb .L8333
-    .loc 1 33212 0
+    .loc 1 33214 0
     mov rax, [rbp - 16]
     push rax
     lea rax, [rip + _str_4775]
@@ -192378,7 +192384,7 @@ main:
 
     mov rdi, rax
     call println
-    .loc 1 33213 0
+    .loc 1 33215 0
     mov rax, 3
 
     mov rdi, rax
@@ -192386,7 +192392,7 @@ main:
     jmp .L8334
 .L8333:
 .L8334:
-    .loc 1 33216 0
+    .loc 1 33218 0
     mov rax, [rbp - 16]
     push rax
     lea rax, [rip + _str_4776]
@@ -193390,16 +193396,16 @@ _start:
     .loc 1 33022 0
     mov rax, 1
     mov [rip + _g_cg_check_only], rax
-    .loc 1 33222 0
+    .loc 1 33224 0
     mov rax, 1
 
     mov rdi, rax
     call __arg
     mov [rip + _g__arg0], rax
-    .loc 1 33223 0
+    .loc 1 33225 0
     mov rax, 1
     mov [rip + _g__is_probe], rax
-    .loc 1 33224 0
+    .loc 1 33226 0
     lea rax, [rip + _str_4745]
     push rax
     mov rax, [rip + _g__arg0]
@@ -193414,7 +193420,7 @@ _start:
     jmp .L8336
 .L8335:
 .L8336:
-    .loc 1 33225 0
+    .loc 1 33227 0
     lea rax, [rip + _str_4747]
     push rax
     mov rax, [rip + _g__arg0]
@@ -193429,7 +193435,7 @@ _start:
     jmp .L8338
 .L8337:
 .L8338:
-    .loc 1 33226 0
+    .loc 1 33228 0
     lea rax, [rip + _str_4748]
     push rax
     mov rax, [rip + _g__arg0]
@@ -193444,7 +193450,7 @@ _start:
     jmp .L8340
 .L8339:
 .L8340:
-    .loc 1 33227 0
+    .loc 1 33229 0
     lea rax, [rip + _str_4749]
     push rax
     mov rax, [rip + _g__arg0]
@@ -193459,7 +193465,7 @@ _start:
     jmp .L8342
 .L8341:
 .L8342:
-    .loc 1 33228 0
+    .loc 1 33230 0
     mov rax, [rip + _g__is_probe]
     mov rcx, rax
     mov rax, 1
@@ -193469,7 +193475,7 @@ _start:
     call _nova_eq
     cmp rax, 2
     jb .L8343
-    .loc 1 33229 0
+    .loc 1 33231 0
     lea rax, [rip + _str_4780]
 
     mov rdi, rax
@@ -193477,7 +193483,7 @@ _start:
     jmp .L8344
 .L8343:
 .L8344:
-    .loc 1 33231 0
+    .loc 1 33233 0
     call main
     xor edi, edi
     mov rax, 60
