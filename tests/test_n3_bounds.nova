@@ -58,6 +58,15 @@ fn _n3_main() {
     assert(len(substr(s, 1, 0 - 2)) == 0, "substr negative length")
     assert(len(substr(s, 3, 100)) == 2, "substr stops at the end")
     assert(substr(s, 1, 3) == "ell", "substr in range")
+    // An alloc()'d buffer may hold NUL bytes: substr copies all `len` bytes.
+    let buf = alloc(4)
+    store8(buf, 97)
+    store8(buf + 1, 0)
+    store8(buf + 2, 98)
+    store8(buf + 3, 99)
+    let cp = substr(buf, 0, 4)
+    assert(char_at(cp, 2) == 98, "substr of a buffer copies past a NUL")
+    assert(char_at(cp, 3) == 99, "substr of a buffer copies all len bytes")
     println("PASS")
 }
 

@@ -16881,6 +16881,7 @@ fn gen_runtime() {
     out("")
     out_label("_nova_index")
     out("    sar rsi, 1")                 // untag NOVA index -> raw
+    out("    mov r8, rsi")                // as written, for the OOB message
     out("    test rdi, rdi")
     out("    jz .idx_null")
     out("    cmp qword ptr [rdi], -1")
@@ -16892,6 +16893,7 @@ fn gen_runtime() {
     out("    call _nova_strlen")
     out("    pop rsi")
     out("    pop rdi")
+    out("    mov r8, rsi")                // strlen may clobber r8
     out("    add rsi, rax")
     out("    test rsi, rsi")
     out("    jl .idx_oob")
@@ -16918,7 +16920,7 @@ fn gen_runtime() {
     out("    mov rdi, 1")
     out("    call _nova_exit")
     out(".idx_oob:")
-    out("    push rsi")
+    out("    push r8")                    // the index the program used
     out("    lea rdi, [rip + _err_index_oob]")
     out("    call _nova_print_str")
     out("    pop rdi")
@@ -16974,30 +16976,41 @@ fn gen_runtime() {
     // so [rdi + rsi] lands at the real heap address. rsi/rdx
     // keep their existing untag-unconditional handling.
     // See UPSTREAM_NOVA_BUGS.md §17 (R43/R44).
+    out("    xor r8d, r8d")               // 0: string (stop at NUL)
     out("    test rdi, 1")
     out("    jz   .nsub_raw")
     out("    sar  rdi, 1")
+    out("    mov r8d, 1")                 // 1: alloc'd buffer, copy len bytes
     out(".nsub_raw:")
     out("    sar rsi, 1")                 // untag start
     out("    sar rdx, 1")                 // untag len
     // A negative start or length used to drive rep movsb with a huge
-    // count; both now give "". The copy stops at the source's NUL, so
-    // a start/len past the end no longer reads beyond the string.
+    // count; both now give "". For a string the copy stops at its NUL, so
+    // a length past the end does not read beyond it; a start past the end
+    // is not detected (NOVA strings carry no length). An alloc()'d buffer
+    // (tagged pointer) may hold NUL bytes and is copied for `len` bytes.
     out("    test rsi, rsi")
     out("    js .nsub_empty")
     out("    test rdx, rdx")
     out("    jle .nsub_empty")
     out("    lea r12, [rdi + rsi]")
     out("    mov r13, rdx")
+    out("    push r8")
+    out("    push r8")                    // keep rsp 16-byte aligned
     out("    lea rdi, [rdx + 1]")
     out("    call _nova_alloc")
+    out("    pop r8")
+    out("    pop r8")
     out("    xor ecx, ecx")
     out(".nsub_copy:")
     out("    cmp rcx, r13")
     out("    jge .nsub_end")
     out("    movzx edx, byte ptr [r12 + rcx]")
+    out("    test r8, r8")
+    out("    jnz .nsub_store")
     out("    test dl, dl")
     out("    jz .nsub_end")
+    out(".nsub_store:")
     out("    mov [rax + rcx], dl")
     out("    inc rcx")
     out("    jmp .nsub_copy")
@@ -17107,6 +17120,7 @@ fn gen_runtime() {
     out("    cmp qword ptr [rdi], -1")
     out("    jne .ixs_bad")
     out("    sar rsi, 1")                  // untag index
+    out("    mov r8, rsi")                 // as written, for the OOB message
     out("    test rsi, rsi")
     out("    jns .ixs_pos")
     out("    add rsi, [rdi + 8]")
