@@ -84,8 +84,34 @@ fn persistent_open(filepath, pool_size) {
         is_new = 1
     }
 
-    // Set file size via ftruncate
-    _pa_ftruncate(fd, aligned_size)
+    if is_new == 1 {
+        _pa_ftruncate(fd, aligned_size)
+    } else {
+        // Validate an existing file BEFORE changing it: a non-pool file is
+        // rejected untouched, and an existing pool keeps its stored size
+        // (it used to be truncated to the requested size first, destroying
+        // a rejected file or the tail of a larger pool).
+        let hdr = alloc(32)
+        if sys_pread(fd, hdr, 24, 0) != 24 {
+            sys_close(fd)
+            return 0
+        }
+        if load64(hdr) != PA_MAGIC {
+            sys_close(fd)
+            return 0
+        }
+        let stored = load64(hdr + PA_OFF_POOL_SIZE)
+        let file_size = sys_lseek(fd, 0, 2)   // SEEK_END
+        if stored < PA_HDR_SIZE {
+            sys_close(fd)
+            return 0
+        }
+        if file_size < stored {
+            sys_close(fd)
+            return 0
+        }
+        aligned_size = stored
+    }
 
     // mmap the file: PROT_READ|PROT_WRITE, MAP_SHARED
     let base = sys_mmap(0, aligned_size, 3, 1, fd, 0)  // MAP_SHARED=1
@@ -169,21 +195,11 @@ fn persistent_sync() {
     return _pa_msync()
 }
 
+// msync(base, size, MS_SYNC). The earlier inline asm read stack slots its
+// (unused, so never allocated) locals did not occupy: it issued
+// msync(NULL, <garbage>) and returned success without syncing anything.
 fn _pa_msync() {
-    let base = _pa_base
-    let size = _pa_size
-    let result = 0
-    asm {
-        "mov rax, 26"
-        "mov rdi, [rbp - 8]"
-        "sar rdi, 1"
-        "mov rsi, [rbp - 16]"
-        "sar rsi, 1"
-        "mov rdx, 4"
-        "syscall"
-        "mov [rbp - 24], rax"
-    }
-    return result
+    return sys_msync(_pa_base, _pa_size, 4)
 }
 
 // Close the persistent memory pool.

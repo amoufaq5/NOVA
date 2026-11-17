@@ -13,6 +13,12 @@ let arena_size = 1048576
 
 fn arena_init() {
     arena_base = sys_mmap(0, arena_size, 3, 34, -1, 0)
+    if arena_base < 0 {
+        arena_base = 0
+        arena_ptr = 0
+        arena_end = 0
+        return 0
+    }
     arena_ptr = arena_base
     arena_end = (arena_base + arena_size)
 }
@@ -25,6 +31,7 @@ fn arena_alloc(size) {
             new_size = aligned
         }
         let chunk = sys_mmap(0, new_size, 3, 34, -1, 0)
+        if chunk < 0 { return 0 }
         arena_base = chunk
         arena_ptr = chunk
         arena_end = (chunk + new_size)
@@ -45,13 +52,16 @@ fn arena_used() {
 // --- General Allocator (persistent, longer-lived) ---
 let heap_start = 0
 let heap_end = 0
+let heap_lim = 0
+let HEAP_CHUNK = 1048576
 let free_list = 0
 let BLOCK_HDR_SIZE = 16
 let MMAP_THRESHOLD = 131072
 
 fn heap_init() {
-    heap_start = sys_brk(0)
-    heap_end = heap_start
+    heap_start = 0
+    heap_end = 0
+    heap_lim = 0
     free_list = 0
 }
 
@@ -64,6 +74,7 @@ fn rt_alloc(size) {
     if aligned >= MMAP_THRESHOLD {
         let total = aligned + BLOCK_HDR_SIZE
         let ptr = sys_mmap(0, total, 3, 34, -1, 0)
+        if ptr < 0 { return 0 }
         store64(ptr, total)
         store64(ptr + 8, 0)
         return ptr + BLOCK_HDR_SIZE
@@ -86,15 +97,20 @@ fn rt_alloc(size) {
         curr = load64(curr + 8)
     }
 
+    // Bump-allocate from mmap'd chunks. (This used brk, which the
+    // compiler's own alloc() also moves: either side could shrink the break
+    // under the other or hand out overlapping memory.)
     let total = aligned + BLOCK_HDR_SIZE
-    let block = heap_end
-    heap_end = sys_brk((heap_end + total))
-    if heap_end < (block + total) {
-        let ptr = sys_mmap(0, total, 3, 34, -1, 0)
-        store64(ptr, total)
-        store64(ptr + 8, 0)
-        return ptr + BLOCK_HDR_SIZE
+    if heap_end == 0 || heap_end + total > heap_lim {
+        let csize = HEAP_CHUNK
+        if total > csize { csize = total }
+        let c = sys_mmap(0, csize, 3, 34, -1, 0)
+        if c < 0 { return 0 }
+        heap_end = c
+        heap_lim = c + csize
     }
+    let block = heap_end
+    heap_end = heap_end + total
     store64(block, total)
     store64(block + 8, 0)
     return block + BLOCK_HDR_SIZE

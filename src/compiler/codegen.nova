@@ -2173,6 +2173,7 @@ fn is_builtin_fn(name) {
     if name == "str_replace" { return 1 }
     if name == "str_repeat" { return 1 }
     if name == "char_code" { return 1 }
+    if name == "stdin_eof" { return 1 }
     if name == "to_int" { return 1 }
     if name == "range_list" { return 1 }
     if name == "range_step" { return 1 }
@@ -19328,7 +19329,10 @@ fn gen_runtime() {
         emit_syscall(0)
     }
     out("    cmp rax, 0")
-    out("    jle .rl_done")
+    out("    jg .rl_got")
+    out("    mov qword ptr [rip + _nova_stdin_eof], 1")   // EOF / read error
+    out("    jmp .rl_done")
+    out(".rl_got:")
     out("    movzx eax, byte ptr [r12 + r13]")
     out("    cmp al, 10")
     out("    je .rl_done")
@@ -21447,7 +21451,15 @@ fn gen_runtime() {
     // --- char_code(str): return ASCII code of first char ---
     out("")
     out_label("_nova_char_code")
+    // First byte of a string as a NOVA int. It returned the raw byte, which
+    // NOVA code read as byte/2 ("h" -> 52; char_code(c) - 48 parsed digits
+    // wrongly). rdi is tag-polymorphic like the other string builtins.
+    out("    test rdi, 1")
+    out("    jz .ccode_raw")
+    out("    sar rdi, 1")
+    out(".ccode_raw:")
     out("    movzx eax, byte ptr [rdi]")
+    out("    lea rax, [rax + rax + 1]")
     out("    ret")
 
     // --- to_int(str): parse string to integer ---
@@ -22943,6 +22955,12 @@ fn gen_runtime() {
     out("    jmp _nova_str_repeat")
     out_label("char_code")
     out("    jmp _nova_char_code")
+    // stdin_eof() -> 1 once read_line() has hit end of input (read_line
+    // returns "" for both an empty line and EOF; this tells them apart).
+    out_label("stdin_eof")
+    out("    mov rax, [rip + _nova_stdin_eof]")
+    out("    lea rax, [rax + rax + 1]")
+    out("    ret")
     out_label("to_int")
     out("    jmp _nova_to_int")
     out_label("range_list")
@@ -24017,6 +24035,8 @@ fn gen_runtime() {
     out_label("_rand_state")
     out("    .quad 0")
     out_label("_nova_error_flag")
+    out("    .quad 0")
+    out_label("_nova_stdin_eof")          // set by read_line at end of input
     out("    .quad 0")
     out_label("_nova_error_value")
     out("    .quad 0")

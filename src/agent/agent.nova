@@ -854,24 +854,20 @@ fn main() {
     println("Nova> Hello! I'm Nova. Ask me anything or teach me something.")
     println("")
 
-    let empty_reads = 0
     while agent_running == 1 {
         print_status()
         print_prompt()
         let input = read_line()
 
         // Skip empty input. read_line() returns "" both for an empty line
-        // and at end of input, and at EOF it returns at once on every call,
-        // so a long run of empty reads means stdin is closed: stop instead
-        // of printing the prompt forever.
+        // and at end of input; stdin_eof() tells them apart, so a closed
+        // stdin stops the agent instead of printing the prompt forever.
         if len(input) == 0 {
-            empty_reads = empty_reads + 1
-            if empty_reads >= 100 {
+            if stdin_eof() == 1 {
                 println("")
                 agent_running = 0
             }
         } else {
-            empty_reads = 0
             if input == "/help" {
                 println("  Commands:")
                 println("    /status   - Show emotional state, memory, knowledge")

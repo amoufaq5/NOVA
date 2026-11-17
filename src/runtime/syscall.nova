@@ -164,6 +164,28 @@ fn sys_munmap(addr, length) {
 
 // addr tag-polymorphic (sys_brk(0) queries the break). Returns the new
 // break as a TAGGED pointer, like sys_mmap.
+// msync(2): addr tag-polymorphic, length / flags NOVA ints. Returns tagged
+// 0 / raw -errno.
+fn sys_msync(addr, length, flags) {
+    asm {
+        "mov rax, 26"
+        "mov rdi, [rbp-8]"
+        "test rdi, 1"
+        "jz .ntmsync_a"
+        "sar rdi, 1"
+        ".ntmsync_a:"
+        "mov rsi, [rbp-16]"
+        "sar rsi, 1"
+        "mov rdx, [rbp-24]"
+        "sar rdx, 1"
+        "syscall"
+        "test rax, rax"
+        "js .ntmsync_ret"
+        "lea rax, [rax + rax + 1]"
+        ".ntmsync_ret:"
+    }
+}
+
 fn sys_brk(addr) {
     asm {
         "mov rax, 12"

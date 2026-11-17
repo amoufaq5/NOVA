@@ -12,7 +12,6 @@ test_coroutine
 test_embedding
 test_exhaustiveness_warn
 test_federation
-test_ffi_syscall
 test_float_utils
 test_flow_ops
 test_imagination
